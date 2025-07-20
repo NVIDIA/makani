@@ -1,0 +1,136 @@
+[build-system]
+requires = ["setuptools", "setuptools-scm"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "makani"
+authors = [
+    { name="Thorsten Kurth", email = "tkurth@nvidia.com" },
+    { name="Boris Bonev", email = "bbonev@nvidia.com" },
+    { name="Ankur Mahesh", email = "amahesh@lbl.gov" },
+    { name="Animashree Anandkumar" },
+    { name="Kamyar Azizzadenesheli" },
+    { name="Noah Brenowitz" },
+    { name="Ashesh Chattopadhyay" },
+    { name="Yair Cohen" },
+    { name="Franziska Gerken", email = "fgerken@nvidia.com"},
+    { name="David Hall" },
+    { name="Peter Harrington" },
+    { name="Pedram Hassanzadeh" },
+    { name="Christian Hundt" },
+    { name="Alexey Kamenev"},
+    { name="Karthik Kashinath" },
+    { name="Jean Kossaifi", email = "jkossaifi@nvidia.com" },
+    { name="Zongyi Li" },
+    { name="Morteza Mardani" },
+    { name="Jaideep Pathak" },
+    { name="Mike Pritchard" },
+    { name="David Pruitt" },
+    { name="Sanjeev Raja" },
+    { name="Shashank Subramanian" },
+]
+
+maintainers = [
+    { name="Thorsten Kurth", email = "tkurth@nvidia.com" },
+    { name="Boris Bonev", email = "bbonev@nvidia.com" },
+]
+
+description = "Massively parallel training of machine-learning based weather and climate models"
+readme = "README.md"
+requires-python = ">=3.10"
+
+classifiers = [
+    "Development Status :: Alpha",
+    "Programming Language :: Python :: 3.10",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+]
+
+dynamic = ["version"]
+
+dependencies = [
+    "torch>=2.4.0",
+    "numpy>=1.22.4",
+    "h5py>=3.11.0",
+    "nvidia-physicsnemo>=0.5.0a0",
+    "torch-harmonics>=0.7.0",
+    "wandb>=0.13.7",
+    "numba",
+    "tqdm>=4.60.0",
+    "pynvml>=10.0.0",
+    "jsbeautifier"
+]
+
+[tool.setuptools.dynamic]
+version = {attr = "makani.__version__"}
+
+[tool.setuptools.packages.find]
+    include = ["makani*"]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=6.0.0",
+    "black>=22.10.0",
+    "coverage>=6.5.0",
+    "nvidia_dali_cuda110>=1.16.0",
+]
+
+vis = [
+    "matplotlib>=3.8.1",
+    "imageio>=2.28.1",
+    "moviepy>=1.0.3",
+]
+
+sirfshampoo = [
+    "sirfshampoo",
+]
+
+[tool.pytest.ini_options]
+minversion = "6.0"
+addopts = ""
+testpaths = [
+    "tests",
+    "makani",
+]
+
+[tool.black]
+line-length = 120
+include = '\.pyi?$'
+exclude = '''
+/(
+    \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | _build
+  | buck-out
+  | build
+  | dist
+)/
+'''
+
+[tool.coverage.run]
+omit = [
+    "makani/ensemble.py",
+    "makani/inference.py",
+    "makani/train.py",
+    "makani/train_autoencoder.py",
+    "makani/train_stochastic.py",
+    "makani/utils/argument_parser.py",
+]
+
+[project.entry-points."makani.models"]
+AFNO     = "makani.models.networks.afnonet:AdaptiveFourierNeuralOperatorNet"
+AFNOv2   = "makani.models.networks.afnonet_v2:AdaptiveFourierNeuralOperatorNet"
+FCN3     = "makani.models.networks.fourcastnet3:AtmoSphericNeuralOperatorNet"
+FNO      = "makani.models.networks.sfnonet:FourierNeuralOperatorNet"
+SFNO     = "makani.models.networks.sfnonet:SphericalFourierNeuralOperatorNet"
+SNO      = "makani.models.networks.snonet:SphericalNeuralOperatorNet"
+DebugNet = "makani.models.networks.debug:DebugNet"
+ViT      = "makani.models.networks.vit:VisionTransformer"
+Pangu    = "makani.models.networks.pangu:Pangu"
+
+[project.entry-points."physicsnemo.models"]
+SFNO     = "makani.models.networks.sfnonet:SFNO"
+FCN3     = "makani.models.networks.fourcastnet3:FCN3"

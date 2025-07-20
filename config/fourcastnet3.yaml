@@ -1,0 +1,355 @@
+base_config: &BASE_CONFIG
+
+    # metadata file for the dataset
+    metadata_json_path: "/metadata/data.json"
+
+    # data
+    train_data_path: "/train"
+    valid_data_path: "/test"
+    exp_dir: "/runs"
+    n_years: 1
+    img_shape_x: 721
+    img_shape_y: 1440
+
+    # files used for normalization of the data
+    min_path: "/stats/mins.npy"
+    max_path: "/stats/maxs.npy"
+    time_means_path:   "/stats/time_means.npy"
+    global_means_path: "/stats/global_means.npy"
+    global_stds_path:  "/stats/global_stds.npy"
+    time_diff_means_path: "/stats/time_diff_means.npy"
+    time_diff_stds_path: "/stats/time_diff_stds.npy"
+
+    # architecture related hyperparameters
+    nettype: "FCN3"
+    model_grid_type: "equiangular"
+    sht_grid_type: "legendre-gauss"
+    scale_factor: 2
+    atmo_embed_dim: 45
+    surf_embed_dim: 56
+    aux_embed_dim: 36
+    encoder_mlp: !!bool False
+    num_layers: 10
+    sfno_block_frequency: 5
+    filter_basis_type: "morlet"
+    kernel_shape: [3,3]
+    num_groups: 1
+    normalization_layer: "none"
+    hard_thresholding_fraction: 1.0
+    use_mlp: !!bool True
+    mlp_mode: "serial"
+    mlp_ratio: 2
+    activation_function: "gelu"
+    pos_embed: !!bool False
+    big_skip: !!bool False
+    bias: !!bool False
+
+    # learning dynamics
+    lr: 5E-4
+    max_epochs: 130
+    batch_size: 16
+    weight_decay: 0.0
+
+    # we make the "epochs" shorter so we have more reporting
+    n_train_samples_per_epoch: 53760
+    n_eval_samples: 512
+
+    # scheduler parameters
+    scheduler: "ReduceLROnPlateau" # "StepLR" or "CosineAnnealingLR"
+    scheduler_T_max: 120
+    scheduler_factor: 0.8
+    scheduler_patience: 5
+    scheduler_step_size: 40
+    scheduler_gamma: 0.5
+    lr_warmup_steps: 0
+
+    # general
+    verbose: !!bool False
+
+    # wireup stuff
+    wireup_info: "mpi"
+    wireup_store: "tcp"
+
+    num_data_workers: 2
+    num_visualization_workers: 2
+    dt: 6 # how many timesteps ahead the model will predict
+    n_history: 0 # how many previous timesteps to consider
+    prediction_type: "iterative"
+
+    # validation parameters
+    valid_autoreg_steps: 19 # number of autoregressive steps for validation, 20 steps in total
+    ics_type: "specify_number"
+    save_raw_forecasts: !!bool True
+    save_channel: !!bool False
+    masked_acc: !!bool False
+    maskpath: None
+    perturb: !!bool False
+    add_noise: !!bool False
+    noise_std: 0.
+
+    target: "default" # options default, residual
+    normalize_residual: false
+
+    # define channels to be read from data. sp has been removed here
+    channel_names: ["u10m", "v10m", "u100m", "v100m", "t2m", "msl", "tcwv", "u50", "u100", "u150", "u200", "u250", "u300", "u400", "u500", "u600", "u700", "u850", "u925", "u1000", "v50", "v100", "v150", "v200", "v250", "v300", "v400", "v500", "v600", "v700", "v850", "v925", "v1000", "z50", "z100", "z150", "z200", "z250", "z300", "z400", "z500", "z600", "z700", "z850", "z925", "z1000", "t50", "t100", "t150", "t200", "t250", "t300", "t400", "t500", "t600", "t700", "t850", "t925", "t1000", "q50", "q100", "q150", "q200", "q250", "q300", "q400", "q500", "q600", "q700", "q850", "q925", "q1000"]
+    # normalization mode zscore but for q
+    normalization: {"tcwv": "minmax", "q50": "minmax", "q100": "minmax", "q150": "minmax", "q200": "minmax", "q250": "minmax", "q300": "minmax", "q400": "minmax", "q500": "minmax", "q600": "minmax", "q700": "minmax", "q850": "minmax", "q925": "minmax", "q1000": "minmax"}
+
+    # cap water channels
+    clamp_water: !!bool True
+
+    # extra channels
+    add_grid: !!bool False
+    gridtype: "sinusoidal"
+    grid_num_frequencies: 0
+    add_zenith: !!bool True
+    # invariants
+    add_orography: !!bool True
+    orography_path: /invariants/orography.nc
+    add_landmask: !!bool True
+    landmask_path: /invariants/land_sea_mask.nc
+
+    pretrained: !!bool False
+
+    # logging options
+    log_to_screen: !!bool True
+    log_to_wandb: !!bool True
+    log_video: 0 # if > 0 will log every i-th epoch
+    save_checkpoint: "legacy"
+
+    # optimizer options
+    optimizer_type: "Adam"
+    optimizer_beta1: 0.9
+    optimizer_beta2: 0.95
+    optimizer_max_grad_norm: 32
+    crop_size_x: None
+    crop_size_y: None
+
+    # required for validation and scoring
+    inf_data_path: "/out_of_sample"
+
+    # Weights and biases configuration
+    wandb_name: None # If None, wandb will assign a random name, recommended
+    wandb_group: "fcn3" # If None, will be "era5_wind" + config, but you can override it here
+    wandb_project: "FourCastNet3"
+    wandb_entity: "yourwandb"
+
+    # hotfix for some broken checkpoints
+    load_loss: !!bool False
+
+    # write out last 4 checkpoints
+    checkpoint_num_versions: 6
+
+###########################################################################################################################
+# baseline loss functions
+###########################################################################################################################
+
+ensemble_base: &ENSEMBLE_BASE
+    <<: *BASE_CONFIG
+
+    # ensemble size
+    ensemble_size: 16
+
+    # loss function uses the standard CRPS definition which underestimates spread with smaller ensembles
+    losses:
+    -   type: "ensemble_crps"
+        channel_weights: "auto"
+        relative_weight: 1.0
+        temp_diff_normalization: !!bool True
+        parameters:
+            crps_type: "cdf"
+    -   type: "ensemble_spectral_crps"
+        channel_weights: "auto"
+        relative_weight: 0.1
+        temp_diff_normalization: !!bool True
+        parameters:
+            crps_type: "cdf"
+
+    # append additional noise
+    input_noise:
+        type: "diffusion"
+        mode: "concatenate"
+        centered: !!bool False
+        n_channels: 8
+        sigma: 1.0
+        kT: [3.0806E-5, 1.2322E-4, 4.9289E-4, 1.9716E-3, 7.8862E-3, 3.1545E-2, 1.2618E-1, 5.0472E-1]
+
+ensemble_finetune: &ENSEMBLE_FINETUNE
+    <<: *ENSEMBLE_BASE
+
+    # use 6 hourly dataset:
+    dt: 1
+
+    # loss function uses fair CRPS using the spread-skill kernel
+    losses:
+    -   type: "ensemble_crps"
+        channel_weights: "auto"
+        relative_weight: 1.0
+        temp_diff_normalization: !!bool True
+        parameters:
+            crps_type: "skillspread"
+    -   type: "ensemble_spectral_crps"
+        channel_weights: "auto"
+        relative_weight: 0.1
+        temp_diff_normalization: !!bool True
+        parameters:
+            crps_type: "skillspread"
+
+    # append additional noise
+    input_noise:
+        type: "diffusion"
+        mode: "concatenate"
+        centered: !!bool True
+        n_channels: 8
+        sigma: 1.0
+        kT: [3.0806E-5, 1.2322E-4, 4.9289E-4, 1.9716E-3, 7.8862E-3, 3.1545E-2, 1.2618E-1, 5.0472E-1]
+
+deterministic_base: &DETERMINISTIC_BASE
+    <<: *BASE_CONFIG
+
+    # loss function
+    losses:
+    -   type: "absolute squared geometric l2"
+        channel_weights: "auto"
+        temp_diff_normalization: !!bool True
+
+
+###########################################################################################################################
+# FourCastNet 3 model - pretraining
+###########################################################################################################################
+
+# FourCastNet 3 pretraining stage 1. On 80GB VRAM it requires a model-parallelism of h=2, w=2
+# Can accomodate up to 2 autoregressive training steps, but trained with a single step
+fcn3_sc2_edim45_layers10_pretrain1:
+    <<: *ENSEMBLE_BASE
+    wandb_group: "fcn3_sc2_edim45_layers10_pretrain1"
+
+    # main hyper parameters
+    ensemble_size: 16
+    batch_size: 16
+    lr: 5E-4
+
+    # artificial epochs with reduced size
+    n_train_samples_per_epoch: 26880
+    n_eval_samples: 256
+
+# second pretraining stage which switches to fair CRPS to get better calibration
+# also uses 4 step rollouts to get good autoregressive rollouts. This requires a
+# model-parallelism of h=2, w=4 to fit into memory on 80GB GPUs
+fcn3_sc2_edim45_layers10_pretrain2:
+    <<: *ENSEMBLE_FINETUNE
+    wandb_group: "fcn3_sc2_edim45_layers10_pretrain2"
+
+    # smaller ensemble size for fCRPS
+    ensemble_size: 2
+    batch_size: 32
+    lr: 4E-4
+    override_lr: !!bool True
+
+    # artificial epochs with reduced size
+    n_train_samples_per_epoch: 6720
+    n_eval_samples: 128
+
+    # restore from pretrained checkpoint
+    pretrained: !!bool True
+    pretrained_checkpoint_path: "/runs/fcn3_sc2_edim45_layers10_pretrain1/flexible/training_checkpoints/ckpt_mp0_v0.tar"
+
+    # restore optimizer but not the rest
+    # has to be manually changed if restarting the finetuning run
+    load_optimizer: !!bool False
+    load_scheduler: !!bool False
+    load_counters: !!bool False
+
+    scheduler: "StepLR"
+    max_epochs: 24
+    scheduler_T_max: 24
+    scheduler_gamma: 0.5
+    scheduler_step_size: 4
+
+    # use un-centered noise
+    input_noise:
+        type: "diffusion"
+        mode: "concatenate"
+        centered: !!bool False
+        n_channels: 8
+        sigma: 1.0
+        kT: [3.0806E-5, 1.2322E-4, 4.9289E-4, 1.9716E-3, 7.8862E-3, 3.1545E-2, 1.2618E-1, 5.0472E-1]
+
+###########################################################################################################################
+# FourCastNet 3 model - finetuning
+###########################################################################################################################
+
+fcn3_sc2_edim45_layers10_finetune:
+    <<: *ENSEMBLE_FINETUNE
+    wandb_group: "fcn3_sc2_edim45_layers10_finetune"
+
+    # use small batch size and larger ensemble size
+    ensemble_size: 4
+    batch_size: 4
+    lr: 4.0E-6
+
+    n_train_samples_per_epoch: 2920
+    n_eval_samples: 32
+
+    # constrain number of samples to the last 4 years
+    n_train_samples: 5840
+
+    # restore from pretrained checkpoint
+    pretrained: !!bool True
+    pretrained_checkpoint_path: "/runs/fcn3_sc2_edim45_layers10_pretrain2/flexible/training_checkpoints/ckpt_mp0_v0.tar"
+
+    # restore optimizer but not the rest
+    # has to be manually changed if restarting the finetuning run
+    load_optimizer: !!bool False
+    load_scheduler: !!bool False
+    load_counters: !!bool False
+
+    # LR scheduler
+    scheduler: "StepLR"
+    max_epochs: 4
+    scheduler_T_max: 24
+    scheduler_gamma: 0.5
+    scheduler_step_size: 4
+
+###########################################################################################################################
+# Smaller FCN3 and Spherical Neural Operator Probabilistic models used for experimentation
+###########################################################################################################################
+
+sno_sc3_edim384_layers10:
+    <<: *ENSEMBLE_BASE
+    wandb_group: "sno_sc3_edim384_layers10"
+
+    nettype: "SNO"
+    embed_dim: 384
+
+    big_skip: True
+
+fcn3_sc3_edim25_layers10:
+    <<: *ENSEMBLE_BASE
+    wandb_group: "fcn3_sc3_edim25_layers10"
+
+    scale_factor: 3
+
+    atmo_embed_dim: 25
+    surf_embed_dim: 35
+    aux_embed_dim: 12
+
+###########################################################################################################################
+# Deterministic models
+###########################################################################################################################
+
+det_sfno2_sc3_edim384_layers10:
+    <<: *DETERMINISTIC_BASE
+    wandb_group: "det_sfno2_sc3_edim384_layers10"
+
+    nettype: "SNO"
+    embed_dim: 384
+
+det_fcn3_sc3_edim25_layers10:
+    <<: *DETERMINISTIC_BASE
+    wandb_group: "det_fcn3_sc3_edim25_layers10"
+    wandb_project: "FourCastNet3-deterministic"
+
+    atmo_embed_dim: 25
+    surf_embed_dim: 35
+    aux_embed_dim: 12
