@@ -193,7 +193,7 @@ While this is a research project, we aim to have functional unit tests with dece
 <img src="https://www.nvidia.com/content/dam/en-zz/Solutions/about-nvidia/logo-and-brand/01-nvidia-logo-horiz-500x200-2c50-d@2x.png"  height="120px">
 <img src="https://www.nersc.gov/assets/Logos/NERSClogocolor.png"  height="120px">
 
-The code was developed by Thorsten Kurth, Boris Bonev, Ankur Mahesh, Dallas Foster, Jean Kossaifi, Animashree Anandkumar, Kamyar Azizzadenesheli, Noah Brenowitz, Ashesh Chattopadhyay, Yair Cohen, William D. Collins, David Hall, Peter Harrington, Pedram Hassanzadeh, Christian Hundt, Karthik Kashinath, Zongyi Li, Morteza Mardani, Jaideep Pathak, Mike Pritchard, David Pruitt, Sanjeev Raja, Shashank Subramanian.
+The code was developed by Thorsten Kurth, Boris Bonev, Ankur Mahesh, Dallas Foster, Jean Kossaifi, Animashree Anandkumar, Kamyar Azizzadenesheli, Noah Brenowitz, Ashesh Chattopadhyay, Yair Cohen, William D. Collins, Franziska Gerken, David Hall, Peter Harrington, Pedram Hassanzadeh, Christian Hundt, Karthik Kashinath, Zongyi Li, Morteza Mardani, Jaideep Pathak, Stefanos Pertigkiozoglou, Mike Pritchard, David Pruitt, Sanjeev Raja, Shashank Subramanian.
 
 
 ## References

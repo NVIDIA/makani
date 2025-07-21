@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from dataclasses import dataclass
 import math
 import torch
 import torch.nn as nn
@@ -45,6 +44,7 @@ from physicsnemo.distributed.mappings import scatter_to_parallel_region, gather_
 from makani.mpu.layer_norm import DistributedInstanceNorm2d, DistributedLayerNorm, DistributedGeometricInstanceNormS2
 
 # for annotation of models
+from dataclasses import dataclass
 import physicsnemo
 from physicsnemo.models.meta import ModelMetaData
 
