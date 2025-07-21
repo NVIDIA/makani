@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import importlib.util
 import sys
 import os
 import json
@@ -27,9 +28,6 @@ import torch
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
-from data_process.annotate_dataset import annotate
-from data_process.concatenate_dataset import concatenate
-from data_process.get_stats import welford_combine, get_file_stats
 from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature
 from testutils import init_dataset, H5_PATH, NUM_CHANNELS, IMG_SIZE_H, IMG_SIZE_W
 
@@ -56,6 +54,9 @@ class TestAnnotateDataset(unittest.TestCase):
         cls.tmpdir.cleanup()
 
     def test_annotate_dataset(self):
+        # import necessary modules
+        from data_process.annotate_dataset import annotate
+        
         # Load metadata
         with open(os.path.join(self.metadata_path, "data.json"), "r") as f:
             metadata = json.load(f)
@@ -120,6 +121,9 @@ class TestConcatenateDataset(unittest.TestCase):
         skip_on_empty=False,
     )
     def test_concatenate_dataset(self, dhoursrel):
+        # import necessary modules
+        from data_process.concatenate_dataset import concatenate
+        
         # Load metadata
         with open(os.path.join(self.metadata_path, "data.json"), "r") as f:
             metadata = json.load(f)
@@ -196,7 +200,11 @@ class TestGetStats(unittest.TestCase):
         cls.tmpdir.cleanup()
 
     @parameterized.expand([8, 16], skip_on_empty=False)
+    @unittest.skipUnless(importlib.util.find_spec("mpi4py") is not None)
     def test_get_stats(self, batch_size):
+        # import necessary modules
+        from data_process.get_stats import welford_combine, get_file_stats
+        
         # Load metadata
         with open(os.path.join(self.metadata_path, "data.json"), "r") as f:
             metadata = json.load(f)
