@@ -79,7 +79,7 @@ class HydrostaticBalanceLoss(GeometricBaseLoss):
             self.q_prefact = const.Q_CORRECTION_MOIST_AIR
 
         # we need to interpolate in p:
-        ptens = torch.tensor(self.pressures, dtype=torch.float32)
+        ptens = torch.as_tensor(self.pressures, dtype=torch.float32)
         ptens = ptens.reshape(1, -1, 1, 1)
         self.register_buffer("p", ptens, persistent=False)
 
@@ -100,15 +100,15 @@ class HydrostaticBalanceLoss(GeometricBaseLoss):
             # t_idx:
             row_indices.append(idx)
             col_indices.append(self.t_idx[idx])
-            values.append(0.5 * np.log(ptens[0, idx + 1, 0, 0] / ptens[0, idx, 0, 0]))
+            values.append(0.5 * torch.log(ptens[0, idx + 1, 0, 0] / ptens[0, idx, 0, 0]))
             # t_idx+1:
             row_indices.append(idx)
             col_indices.append(self.t_idx[idx + 1])
-            values.append(0.5 * np.log(ptens[0, idx + 1, 0, 0] / ptens[0, idx, 0, 0]))
+            values.append(0.5 * torch.log(ptens[0, idx + 1, 0, 0] / ptens[0, idx, 0, 0]))
 
         # get sparse tensor
-        indices = torch.tensor([row_indices, col_indices], dtype=torch.long)
-        values = torch.tensor(values, dtype=torch.float32)
+        indices = torch.as_tensor([row_indices, col_indices], dtype=torch.long)
+        values = torch.as_tensor(values, dtype=torch.float32)
         cmat = torch.sparse_coo_tensor(indices, values, size=(len(self.t_idx) - 1, len(channel_names))).coalesce().to_dense()
 
         # register buffer
