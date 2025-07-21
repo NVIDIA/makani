@@ -28,12 +28,11 @@ pip install -e .
 
 ### Training:
 
-Deterministic training is launched by calling `train.py` and passing it the necessary CLI arguments to specify the configuration file `--yaml_config` and he configuration target `--config`:
+Makani supports ensemble and deterministic training. Ensemble training is launched by calling `ensemble.py`, whereas deterministic training is launched by calling `train.py`. Both scripts expect the CLI arguments to specify the configuration file `--yaml_config` and he configuration target `--config`, which is contained in the configuration file:
 
 ```bash
-mpirun -np 8 --allow-run-as-root python -u train.py --yaml_config="config/sfnonet.yaml" --config="sfno_linear_73chq"
+mpirun -np 8 --allow-run-as-root python -u train.py --yaml_config="config/fourcastnet3.yaml" --config="fcn3_sc2_edim45_layers10_pretrain1"
 ```
-Similarly, ensemble training is launched by calling `ensemble.py` with the appropriate CLI arguments alongside the configuration target.
 
 Makani supports various optimization to fit large models ino GPU memory and enable computationally efficient training. An overview of these features and corresponding CLI arguments is provided in the following table:
 
@@ -60,7 +59,7 @@ Here we train the model on 256 GPUs, split horizontally across 4 ranks with a ba
 
 ### Inference:
 
-In a similar fashion to training, inference can be called from the CLI by calling `inference.py` and handled by `inferencer.py`. To launch inference on the out-of-sample dataset, we can call:
+Makani supports scalable and flexible on-line inference aimed at minimizing data movement and disk I/O, which is well suited to the low inference costs of ML weather models and modern HPC infrastructure. In a similar fashion to training, inference can be called from the CLI by calling `inference.py` and handled by `inferencer.py`. To launch inference on the out-of-sample dataset, we can call:
 
 ```bash
 mpirun -np 256 --allow-run-as-root python -u makani.inference --run_num="ngpu256_sp4" --yaml_config="config/sfnonet.yaml" --config="sfno_linear_73chq_sc3_layers8_edim384_asgl2" --batch_size=64
@@ -73,7 +72,11 @@ By default, the inference script will perform inference on the out-of-sample dat
 | Start date                | `--start_date`                                | 2018-01-01+UTC00:00:00       |
 | End date                  | `--end_date`                                  | 2018-12-31+UTC24:00:00       |
 | Date step (in hours)      | `--date_step`                                 | 1,2,...                      |
-
+| Output file               | `--output_file`                               | file path for field outputs  |
+| Output channels           | `--output_channels`                           | channels to write out        |
+| Metrics file              | `--metrics_file`                              | file path for metrics output |
+| Bias file                 | `--bias_file`                                 | file path for bias output    |
+| Spectrum file             | `--spectrum_file`                             | file path for spectra output |
 
 ## More about Makani
 
