@@ -56,7 +56,7 @@ class TestAnnotateDataset(unittest.TestCase):
     def test_annotate_dataset(self):
         # import necessary modules
         from data_process.annotate_dataset import annotate
-        
+
         # Load metadata
         with open(os.path.join(self.metadata_path, "data.json"), "r") as f:
             metadata = json.load(f)
@@ -123,7 +123,7 @@ class TestConcatenateDataset(unittest.TestCase):
     def test_concatenate_dataset(self, dhoursrel):
         # import necessary modules
         from data_process.concatenate_dataset import concatenate
-        
+
         # Load metadata
         with open(os.path.join(self.metadata_path, "data.json"), "r") as f:
             metadata = json.load(f)
@@ -204,7 +204,7 @@ class TestGetStats(unittest.TestCase):
     def test_get_stats(self, batch_size):
         # import necessary modules
         from data_process.get_stats import welford_combine, get_file_stats
-        
+
         # Load metadata
         with open(os.path.join(self.metadata_path, "data.json"), "r") as f:
             metadata = json.load(f)
