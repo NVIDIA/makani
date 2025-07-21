@@ -4,12 +4,12 @@
 
 [![tests](https://github.com/NVIDIA/makani/actions/workflows/tests.yml/badge.svg)](https://github.com/NVIDIA/makani/actions/workflows/tests.yml)
 
-Makani (the Hawaiian word for wind 🍃🌺) is a library designed to enable the research and development of the next generation of machine-learning (ML) based weather and climate models in PyTorch. Makani was used to train the [FourCastNet3](https://research.nvidia.com/publication/2025-07_fourcastnet-3-geometric-approach-probabilistic-machine-learning-weather) model.
+Makani (the Hawaiian word for wind 🍃🌺) is a library designed to enable the research and development of the next generation of machine-learning (ML) based weather and climate models in PyTorch. Makani was used to train [FourCastNet3](https://arxiv.org/abs/2507.12144v2) [1], [Spherical Fourier Neural Operators (SFNO)](https://arxiv.org/abs/2306.03838) [2] for weather (FourCastNet2), [Huge ensemble of SFNO (HENS-SFNO)](https://arxiv.org/abs/2408.03100) [3,4], and [FourCastNet1](https://arxiv.org/abs/2202.11214) [5].
 
 Makani is aimed at researchers working on ML based weather prediction. Stable features are frequently ported to the [earth2studio](https://github.com/NVIDIA/earth2studio) and the [NVIDIA PhysicsNeMo](https://developer.nvidia.com/physicsnemo) framework. For commercial and production purposes, we recommend checking out these packages.
 
 <div align="center">
-<img src="https://github.com/NVIDIA/makani/blob/main/images/sfno_rollout.gif"  height="388px">
+<img src="https://github.com/NVIDIA/makani/blob/main/images/fcn3_ens3_720p"  height="388px">
 </div>
 
 ## Overview
@@ -182,11 +182,13 @@ While this is a research project, we aim to have functional unit tests with dece
 
 ## Further reading
 
+- [FourCastNet 3 paper](https://arxiv.org/abs/2507.12144v2)
+- [NVIDIA Research FCN3 site](https://research.nvidia.com/publication/2025-07_fourcastnet-3-geometric-approach-probabilistic-machine-learning-weather) on FourCastNet 3
 - [NVIDIA blog article](https://developer.nvidia.com/blog/modeling-earths-atmosphere-with-spherical-fourier-neural-operators/) on Spherical Fourier Neural Operators for ML-based weather prediction
 - [torch-harmonics](https://github.com/NVIDIA/torch-harmonics), a library for differentiable Spherical Harmonics in PyTorch
-- [Dali](https://developer.nvidia.com/dali), NVIDIA data loading library
 - [earth2studio](https://github.com/NVIDIA/earth2studio), a library for intercomparing DL based weather models
 - [PhysicsNeMo](https://developer.nvidia.com/physicsnemo), NVIDIA's library for physics-ML
+- [Dali](https://developer.nvidia.com/dali), NVIDIA data loading library
 
 ## Authors
 
@@ -198,12 +200,27 @@ The code was developed by Thorsten Kurth, Boris Bonev, Ankur Mahesh, Dallas Fost
 
 ## References
 
-<a id="#sfno_paper">[1]</a>
+<a id="#fcn3_paper">[1]</a>
+Bonev B., Kurth T., Mahesh A., Bisson, M., Kossaifi J., Kashinath K., Anandkumar A. Collins W.D., Pritchard M., Keller A.;
+FourCastNet 3: A geometric approach to probabilistic machine-learning weather forecasting at scale;
+arXiv 2507.12144, 2025.
+
+<a id="#sfno_paper">[2]</a>
 Bonev B., Kurth T., Hundt C., Pathak, J., Baust M., Kashinath K., Anandkumar A.;
 Spherical Fourier Neural Operators: Learning Stable Dynamics on the Sphere;
 arXiv 2306.0383, 2023.
 
-<a id="1">[2]</a>
+<a id="#hens1_paper">[3]</a>
+Mahesh A., Collins W.D., Bonev B., Brenowitz N., Cohen Y., Elms J., Harrington P., Kashinath K., Kurth T., North J., OBrian T., Pritchard M., Pruitt D., Risser M., Subramanian S., Willard J.
+Huge Ensembles Part I: Design of Ensemble Weather Forecasts using Spherical Fourier Neural Operators;
+arXiv 2408.03100, 2025.
+
+<a id="#hens1_paper">[4]</a>
+Mahesh A., Collins W.D., Bonev B., Brenowitz N., Cohen Y., Elms J., Harrington P., Kashinath K., Kurth T., North J., OBrian T., Pritchard M., Pruitt D., Risser M., Subramanian S., Willard J.
+Huge Ensembles Part II: Properties of a Huge Ensemble of Hindcasts Generated with Spherical Fourier Neural Operators;
+arXiv 2408.01581, 2025.
+
+<a id="1">[5]</a>
 Pathak J., Subramanian S., Harrington P., Raja S., Chattopadhyay A., Mardani M., Kurth T., Hall D., Li Z., Azizzadenesheli K., Hassanzadeh P., Kashinath K., Anandkumar A.;
 FourCastNet: A Global Data-driven High-resolution Weather Model using Adaptive Fourier Neural Operators;
 arXiv 2202.11214, 2022.
@@ -213,15 +230,13 @@ arXiv 2202.11214, 2022.
 If you use this package, please cite
 
 ```bibtex
-@InProceedings{bonev2023sfno,
-    title={Spherical {F}ourier Neural Operators: Learning Stable Dynamics on the Sphere},
-    author={Bonev, Boris and Kurth, Thorsten and Hundt, Christian and Pathak, Jaideep and Baust, Maximilian and Kashinath, Karthik and Anandkumar, Anima},
-    booktitle={Proceedings of the 40th International Conference on Machine Learning},
-    pages={2806--2823},
-    year={2023},
-    volume={202},
-    series={Proceedings of Machine Learning Research},
-    month={23--29 Jul},
-    publisher={PMLR},
+@misc{bonev2025fourcastnet3,
+      title={FourCastNet 3: A geometric approach to probabilistic machine-learning weather forecasting at scale},
+      author={Boris Bonev and Thorsten Kurth and Ankur Mahesh and Mauro Bisson and Jean Kossaifi and Karthik Kashinath and Anima Anandkumar and William D. Collins and Michael S. Pritchard and Alexander Keller},
+      year={2025},
+      eprint={2507.12144},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2507.12144},
 }
 ```
