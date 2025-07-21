@@ -1,3 +1,9 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: BSD-3-Clause
+#
+# This file contains code from the climt project (https://github.com/CliMT/climt)
+# which is licensed under BSD-3-Clause. The original copyright notice is preserved below.
+
 """
 climt/LICENSE
 @mcgibbon
