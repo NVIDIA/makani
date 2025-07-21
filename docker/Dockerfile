@@ -30,8 +30,8 @@ RUN SETUPTOOLS_USE_DISTUTILS=local pip install mpi4py
 RUN pip install onnx onnxruntime onnxruntime-gpu
 
 # hdf5 and h5py
-ENV HDF5_VERSION=1.14.5
-RUN cd /tmp && wget https://support.hdfgroup.org/releases/hdf5/v1_14/v1_14_5/downloads/hdf5-${HDF5_VERSION}.tar.gz && \
+ENV HDF5_VERSION=1.14.6
+RUN cd /tmp && wget https://support.hdfgroup.org/releases/hdf5/v1_14/v1_14_6/downloads/hdf5-${HDF5_VERSION}.tar.gz && \
     gzip -cd hdf5-${HDF5_VERSION}.tar.gz | tar xvf - && \
     mkdir hdf5-${HDF5_VERSION}/build && cd hdf5-${HDF5_VERSION}/build && \
     cmake -DCMAKE_INSTALL_PREFIX=/opt/hdf5 \
@@ -44,7 +44,7 @@ RUN cd /tmp && wget https://support.hdfgroup.org/releases/hdf5/v1_14/v1_14_5/dow
     -DHDF5_TEST_PARALLEL=ON \
     .. && \
     make -j 8 && make install
-RUN CC="mpicc" HDF5_MPI=ON H5PY_ROS3=1 H5PY_DIRECT_VFD=1 HDF5_DIR=/opt/hdf5 pip install --no-binary=h5py h5py
+RUN CC="mpicc" HDF5_MPI=ON H5PY_ROS3=1 H5PY_DIRECT_VFD=1 HDF5_DIR=/opt/hdf5 pip install --no-build-isolation --no-binary=h5py h5py==3.13.0
 ENV PATH=/opt/hdf5/bin:${PATH}
 
 # install cdsapi for downloading the dataset
@@ -75,21 +75,13 @@ RUN pip install --ignore-installed "git+https://github.com/NVIDIA/mlperf-common.
 # torch-harmonics
 ENV FORCE_CUDA_EXTENSION 1
 ENV TORCH_CUDA_ARCH_LIST "8.0 8.6 9.0 10.0 12.0+PTX"
-ENV HARMONICS_VERSION 0.7.6
+ENV HARMONICS_VERSION 0.8.0
 RUN cd /opt && git clone https://github.com/NVIDIA/torch-harmonics.git && \
     cd torch-harmonics && \
     pip install --no-build-isolation -e .
 
 # physicsnemo
-RUN cd /opt && git clone https://github.com/NVIDIA/physicsnemo.git && \
-    cd physicsnemo && \
-    pip install -e .
-
-# Get sirfshampoo from main branch
-RUN pip install git+https://github.com/f-dangel/sirfshampoo.git@main
-
-# Get sirfshampoo from main branch
-RUN pip install netCDF4
+RUN pip install git+https://github.com/NVIDIA/physicsnemo.git@v1.1.1
 
 # copy source code
 RUN mkdir -p /opt/makani
