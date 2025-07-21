@@ -195,8 +195,7 @@ While this is a research project, we aim to have functional unit tests with dece
 
 ## Authors
 
-<img src="https://upload.wikimedia.org/wikipedia/commons/a/a4/NVIDIA_logo.svg" width="300px" style="vertical-align: middle;">
-<img src="https://www.nersc.gov/_resources/themes/nersc/images/NERSC_logo_no_spacing.svg" height="100px" style="vertical-align: middle;">
+<img src="https://upload.wikimedia.org/wikipedia/commons/a/a4/NVIDIA_logo.svg" width="300px" style="vertical-align: middle;"><img src="https://www.nersc.gov/_resources/themes/nersc/images/NERSC_logo_no_spacing.svg" height="100px" style="vertical-align: middle;">
 
 The code was developed by Thorsten Kurth, Boris Bonev, Ankur Mahesh, Dallas Foster, Jean Kossaifi, Animashree Anandkumar, Kamyar Azizzadenesheli, Noah Brenowitz, Ashesh Chattopadhyay, Yair Cohen, William D. Collins, Franziska Gerken, David Hall, Peter Harrington, Pedram Hassanzadeh, Christian Hundt, Karthik Kashinath, Zongyi Li, Morteza Mardani, Jaideep Pathak, Stefanos Pertigkiozoglou, Mike Pritchard, David Pruitt, Sanjeev Raja, Shashank Subramanian.
 
