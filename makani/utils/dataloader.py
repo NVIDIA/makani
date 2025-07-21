@@ -77,13 +77,8 @@ def get_dataloader(params, files_pattern, device, mode="train"):
             import nvidia.dali
         except:
             raise ImportError("Setting multifiles to False requires nvidia-dali, but module was not found.")
-    
-    if params.get("data_type", "not zarr") == "zarr":
-        from makani.utils.dataloaders import zarr_helper as zarr
 
-        return zarr.get_data_loader(params, files_pattern, (mode == "train"))
-
-    elif params.get("multifiles", False):
+    if params.get("multifiles", False):
         from makani.utils.dataloaders.data_loader_multifiles import MultifilesDataset as MultifilesDataset2D
         from torch.utils.data.distributed import DistributedSampler
 
