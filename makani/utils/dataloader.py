@@ -72,7 +72,7 @@ def get_dataloader(params, files_pattern, device, mode="train"):
     bias, scale = get_data_normalization(params)
 
     # sanity check
-    if (not params.get("multifiles", False)) and (params.get("data_type", "not zarr") != "zarr"):
+    if not params.get("multifiles", False):
         try:
             import nvidia.dali
         except:
