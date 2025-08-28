@@ -22,6 +22,7 @@ surface_variables = {
     "u10m" : "10m_u_component_of_wind",
     "v10m" : "10m_v_component_of_wind",
     "t2m" : "2m_temperature",
+    "d2": "2m_dewpoint_temperature",
     "u100m" : "100m_u_component_of_wind",
     "v100m" : "100m_v_component_of_wind",
     "tp" : "total_precipitation_6hr",
