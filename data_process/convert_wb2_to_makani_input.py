@@ -238,7 +238,6 @@ def convert(input_file: str, output_dir: str, metadata_file: str, years: List[in
             update_distributed_counter(pbar_win, pbar_counts)
             if comm_rank == 0:
                 num_entries_current = get_distributed_counter(pbar_win, pbar_counts)
-                print(f"Rank {comm_rank}: get pbar_counts buffer: {num_entries_current}")
                 pbar.update(num_entries_current)
 
         # we need to wait here
