@@ -108,7 +108,7 @@ def get_channel_groups(channel_names, aux_channel_names=[]):
     # parse channel names and group variables by pressure level/surface variables
     for idx, chn in enumerate(channel_names):
         # check if pattern matches an atmospheric variable
-        if re.search("[a-z]{1,3}[0-9]{1,4}$", chn) is not None:
+        if (re.search("[a-z]{1,3}[0-9]{1,4}$", chn) is not None) and (chn != "d2"):
             pressure_level = int(re.search("[0-9]{1,4}$", chn).group())
             if pressure_level not in atmo_groups.keys():
                 atmo_groups[pressure_level] = []
