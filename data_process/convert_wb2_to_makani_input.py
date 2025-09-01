@@ -35,21 +35,7 @@ from mpi4py.util import dtlib
 from makani.utils.features import get_channel_groups
 from makani.utils.dataloaders.data_helpers import get_date_from_timestamp
 
-from wb2_helpers import surface_variables, atmospheric_variables, split_convert_channel_names
-
-def update_distributed_counter(win, buff):
-    win.Lock(rank=0)
-    win.Accumulate(buff, target_rank=0)
-    win.Flush_local(rank=0)
-    win.Unlock(rank=0)
-    return
-
-def get_distributed_counter(win, buff):
-    win.Lock(rank=0, lock_type=MPI.LOCK_SHARED)
-    win.Get(buff, target_rank=0)
-    win.Flush(rank=0)
-    win.Unlock(rank=0)
-    return int(buff[0])
+from wb2_helpers import surface_variables, atmospheric_variables, split_convert_channel_names, DistributedProgressBar
 
 
 def convert(input_file: str, output_dir: str, metadata_file: str, years: List[int],
@@ -130,16 +116,7 @@ def convert(input_file: str, output_dir: str, metadata_file: str, years: List[in
         num_entries_total += len(times)
 
     # set up distributed progressbar
-    datatype = MPI.INT64_T
-    np_dtype = dtlib.to_numpy_dtype(datatype)
-    itemsize = datatype.Get_size()
-    pbar_win = MPI.Win.Allocate(itemsize, comm=comm)
-    pbar_counts = np.zeros([1], dtype=np_dtype)
-    comm.Barrier()
-    if comm_rank == 0:
-        # set up pbar
-        pbar = progressbar.ProgressBar(maxval=num_entries_total)
-        pbar.update(0)
+    pbar = DistributedProgressBar(num_entries_total, comm)
 
     # do loop over years
     skipped_channels = set()
@@ -234,11 +211,8 @@ def convert(input_file: str, output_dir: str, metadata_file: str, years: List[in
                     f[entry_key][tstart:tend, cidx, ...] = data[...]
 
             # update progressbar
-            pbar_counts[0] = len(timebatch)
-            update_distributed_counter(pbar_win, pbar_counts)
-            if comm_rank == 0:
-                num_entries_current = get_distributed_counter(pbar_win, pbar_counts)
-                pbar.update(num_entries_current)
+            pbar.update_counter(len(timebatch))
+            pbar.update_progress()
 
         # we need to wait here
         if verbose:
@@ -250,20 +224,16 @@ def convert(input_file: str, output_dir: str, metadata_file: str, years: List[in
 
     # do a final pbar update
     comm.Barrier()
-    if comm_rank == 0:
-        num_entries_current = get_distributed_counter(pbar_win, pbar_counts)
-        pbar.update(num_entries_current)
+    pbar.update_progress()
 
     # end time
     end_time = time.perf_counter()
     run_time = str(dt.timedelta(seconds=end_time-start_time))
 
     if comm_rank == 0:
-        pbar.finish()
         print(f"All done. Run time {run_time}. Skipped channels: {list(skipped_channels)}")
 
     comm.Barrier()
-    pbar_win.Free()
 
     return
 

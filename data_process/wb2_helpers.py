@@ -14,6 +14,10 @@
 # limitations under the License.
 
 import re
+import mpi4py
+from mpi4py.util import dtlib
+import progressbar
+import numpy as np
 
 from makani.utils.features import get_channel_groups
 
@@ -60,3 +64,53 @@ def split_convert_channel_names(makani_channel_names):
     atmospheric_levels = sorted(list(atmospheric_levels))
 
     return atmospheric_channel_names, atmospheric_channel_names_wb2, surface_channel_names, surface_channel_names_wb2, atmospheric_levels
+
+
+class DistributedProgressBar(object):
+
+    def __init__(self, num_entries: int, comm: mpi4py.MPI.Comm):
+        # store comm
+        self.comm = comm
+
+        # set up progressbar
+        datatype = mpi4py.MPI.INT64_T
+        np_dtype = dtlib.to_numpy_dtype(datatype)
+        itemsize = datatype.Get_size()
+        self.win = mpi4py.MPI.Win.Allocate(itemsize, comm=comm)
+        self.counts = np.zeros([1], dtype=np_dtype)
+        self.comm.Barrier()
+
+        if self.comm.Get_rank() == 0:
+            # set up pbar
+            self.pbar = progressbar.ProgressBar(maxval=num_entries)
+        self.reset()
+
+    def __del__(self):
+        self.comm.Barrier()
+        self.win.Free()
+        if self.comm.Get_rank() == 0:
+            self.pbar.finish()
+
+    def reset(self):
+        if self.comm.Get_rank() == 0:
+            self.pbar.update(0)
+
+    def update_counter(self, count: int):
+        self.counts[0] = count
+        self.win.Lock(rank=0)
+        self.win.Accumulate(self.counts, target_rank=0)
+        self.win.Flush_local(rank=0)
+        self.win.Unlock(rank=0)
+        return
+
+    def get_counter(self)-> int:
+        self.win.Lock(rank=0, lock_type=mpi4py.MPI.LOCK_SHARED)
+        self.win.Get(self.counts, target_rank=0)
+        self.win.Flush(rank=0)
+        self.win.Unlock(rank=0)
+        return int(self.counts[0])
+
+    def update_progress(self):
+        if self.comm.Get_rank() == 0:
+            count = self.get_counter()
+            self.pbar.update(count)
