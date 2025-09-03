@@ -77,14 +77,17 @@ class BaseNoiseS2(nn.Module):
         self.mmax = self.isht.mmax
 
         # generator objects:
+        self.set_rng(seed=seed)
+
+        # store the noise state: initialize to None
+        self.register_buffer("state", torch.zeros((batch_size, self.num_time_steps, self.num_channels, self.lmax_local, self.mmax_local, 2), dtype=torch.float32), persistent=False)
+
+    def set_rng(self, seed=333):
         self.rng_cpu = torch.Generator(device=torch.device("cpu"))
         self.rng_cpu.manual_seed(seed)
         if torch.cuda.is_available():
             self.rng_gpu = torch.Generator(device=torch.device(f"cuda:{comm.get_local_rank()}"))
             self.rng_gpu.manual_seed(seed)
-
-        # store the noise state: initialize to None
-        self.register_buffer("state", torch.zeros((batch_size, self.num_time_steps, self.num_channels, self.lmax_local, self.mmax_local, 2), dtype=torch.float32), persistent=False)
 
     # Resets the internal state. Can be used to change the batch size if required.
     def reset(self, batch_size=None):
@@ -99,23 +102,24 @@ class BaseNoiseS2(nn.Module):
     # this routine generates a noise sample for a single time step and updates the state accordingly, by appending the last time step
     def update(self, replace_state=False, batch_size=None):
 
-        # create single occurence
-        with torch.no_grad():
-            if batch_size is None:
-                batch_size = self.state.shape[0]
-            newstate = torch.empty((batch_size, self.num_time_steps, self.num_channels, self.lmax_local, self.mmax_local, 2), dtype=self.state.dtype, device=self.state.device)
-            if self.state.is_cuda:
-                newstate.normal_(mean=0.0, std=1.0, generator=self.rng_gpu)
-            else:
-                newstate.normal_(mean=0.0, std=1.0, generator=self.rng_cpu)
+         if replace_state:
+            # create single occurence
+            with torch.no_grad():
+                if batch_size is None:
+                    batch_size = self.state.shape[0]
+                newstate = torch.empty((batch_size, self.num_time_steps, self.num_channels, self.lmax_local, self.mmax_local, 2), dtype=self.state.dtype, device=self.state.device)
+                if self.state.is_cuda:
+                    newstate.normal_(mean=0.0, std=1.0, generator=self.rng_gpu)
+                else:
+                    newstate.normal_(mean=0.0, std=1.0, generator=self.rng_cpu)
 
-            if self.reflect:
-                newstate = -newstate
+                if self.reflect:
+                    newstate = -newstate
 
-            if newstate.shape == self.state.shape:
-                self.state.copy_(newstate)
-            else:
-                self.state = newstate
+                if newstate.shape == self.state.shape:
+                    self.state.copy_(newstate)
+                else:
+                    self.state = newstate
 
         return
 

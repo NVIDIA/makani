@@ -427,6 +427,13 @@ class Preprocessor2D(nn.Module):
                 return self.input_noise.rng_cpu
         else:
             return None
+    
+    def set_rng(self, reset = True, seed=333):
+        if hasattr(self, "input_noise"):
+            self.input_noise.set_rng(reset, seed)
+            if reset:
+                self.input_noise.reset()
+        return
 
     def get_internal_state(self, tensor=False):
         if hasattr(self, "input_noise"):
