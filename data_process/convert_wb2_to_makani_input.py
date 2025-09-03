@@ -30,11 +30,12 @@ import xarray as xr
 
 # MPI
 from mpi4py import MPI
+from mpi4py.util import dtlib
 
 from makani.utils.features import get_channel_groups
 from makani.utils.dataloaders.data_helpers import get_date_from_timestamp
 
-from wb2_helpers import surface_variables, atmospheric_variables, split_convert_channel_names
+from wb2_helpers import surface_variables, atmospheric_variables, split_convert_channel_names, DistributedProgressBar
 
 
 def convert(input_file: str, output_dir: str, metadata_file: str, years: List[int],
@@ -114,10 +115,8 @@ def convert(input_file: str, output_dir: str, metadata_file: str, years: List[in
         timelist.append(times)
         num_entries_total += len(times)
 
-    # set up progressbar
-    if comm_rank == 0:
-        pbar = progressbar.ProgressBar(maxval=num_entries_total)
-        pbar.update(0)
+    # set up distributed progressbar
+    pbar = DistributedProgressBar(num_entries_total, comm)
 
     # do loop over years
     skipped_channels = set()
@@ -132,95 +131,106 @@ def convert(input_file: str, output_dir: str, metadata_file: str, years: List[in
         end_dates = min(start_dates + num_dates_local, len(times))
         times_local = times[start_dates:end_dates]
 
+        if verbose:
+            print(f"Rank {comm_rank}: number of local timestamps: {len(times_local)}")
+
         # helper arrays:
         timestamps = np.array([t.timestamp() for t in times], dtype=np.float64)
 
-        with h5.File(os.path.join(output_dir, f"{year}.h5"), "w", driver="mpio", comm=comm) as f:
-            f.create_dataset(entry_key, dataset_shape, dtype=np.float32)
+        ofile = os.path.join(output_dir, f"{year}.h5")
+        f = h5.File(ofile, "w", driver="mpio", comm=comm)
+        f.create_dataset(entry_key, dataset_shape, dtype=np.float32)
 
-            # create dimension scales
-            # datasets
-            f.create_dataset("timestamp", data=timestamps)
-            f.create_dataset("channel", len(channel_names), dtype=h5.string_dtype(length=chanlen))
-            f["channel"][...] = channel_names
-            f.create_dataset("lat", data=lat)
-            f.create_dataset("lon", data=lon)
-            # scales
-            f["timestamp"].make_scale("timestamp")
-            f["channel"].make_scale("channel")
-            f["lat"].make_scale("lat")
-            f["lon"].make_scale("lon")
-            # label
-            f[entry_key].dims[0].label = "Timestamp in seconds in UTC time zone"
-            f[entry_key].dims[1].label = "Channel name"
-            f[entry_key].dims[2].label = "Latitude in degrees"
-            f[entry_key].dims[3].label = "Longitude in degrees"
-            # attach
-            f[entry_key].dims[0].attach_scale(f["timestamp"])
-            f[entry_key].dims[1].attach_scale(f["channel"])
-            f[entry_key].dims[2].attach_scale(f["lat"])
-            f[entry_key].dims[3].attach_scale(f["lon"])
+        # create dimension scales
+        # datasets
+        f.create_dataset("timestamp", data=timestamps)
+        f.create_dataset("channel", len(channel_names), dtype=h5.string_dtype(length=chanlen))
+        f["channel"][...] = channel_names
+        f.create_dataset("lat", data=lat)
+        f.create_dataset("lon", data=lon)
+        # scales
+        f["timestamp"].make_scale("timestamp")
+        f["channel"].make_scale("channel")
+        f["lat"].make_scale("lat")
+        f["lon"].make_scale("lon")
+        # label
+        f[entry_key].dims[0].label = "Timestamp in seconds in UTC time zone"
+        f[entry_key].dims[1].label = "Channel name"
+        f[entry_key].dims[2].label = "Latitude in degrees"
+        f[entry_key].dims[3].label = "Longitude in degrees"
+        # attach
+        f[entry_key].dims[0].attach_scale(f["timestamp"])
+        f[entry_key].dims[1].attach_scale(f["channel"])
+        f[entry_key].dims[2].attach_scale(f["lat"])
+        f[entry_key].dims[3].attach_scale(f["lon"])
 
-            # populate fields
-            for timebatch in batched(times_local, batch_size):
-                tstart = times.index(timebatch[0])
-                tend = tstart + len(timebatch)
+        # populate fields
+        for timebatch in batched(times_local, batch_size):
+            tstart = times.index(timebatch[0])
+            tend = tstart + len(timebatch)
 
-                # surface channel variables
-                for sc,scwb2 in zip(surface_channel_names,surface_channel_names_wb2):
-                    cidx = channel_names.index(sc)
-                    if scwb2 not in wb2_data:
+            # surface channel variables
+            for sc,scwb2 in zip(surface_channel_names,surface_channel_names_wb2):
+                cidx = channel_names.index(sc)
+                if scwb2 not in wb2_data:
+                    if skip_missing:
+                        if (comm_rank == 0) and not (scwb2 in skipped_channels):
+                            print(f"Key {scwb2} not found in dataset, skipping")
+                        skipped_channels.add(scwb2)
+                        continue
+                    else:
+                        raise IndexError(f"Key {scwb2} not found in dataset.")
+                timebatch = [np.datetime64(t) for t in list(timebatch)]
+                wb2_sel = wb2_data[scwb2]
+                data = wb2_sel[wb2_sel["time"].isin(timebatch)].values
+
+                # checks:
+                if data.shape[0] != len(timebatch):
+                    raise IndexError(f"Dates {timebatch} not all found in dataset for {scwb2}.")
+
+                f[entry_key][tstart:tend, cidx, ...] = data[...]
+
+            # atmospheric level variables
+            for ac, acwb2 in zip(atmospheric_channel_names, atmospheric_channel_names_wb2):
+                for idl, alevel in enumerate(atmospheric_levels):
+                    cidx = channel_names.index(ac + str(alevel))
+                    if acwb2 not in wb2_data:
                         if skip_missing:
-                            if (comm_rank == 0) and not (scwb2 in skipped_channels):
-                                print(f"Key {scwb2} not found in dataset, skipping")
-                            skipped_channels.add(scwb2)
+                            if (comm_rank == 0) and not (acwb2 in skipped_channels):
+                                print(f"Key {acwb2} not found in dataset, skipping")
+                            skipped_channels.add(acwb2)
                             continue
                         else:
-                            raise IndexError(f"Key {scwb2} not found in dataset.")
-                    timebatch = [np.datetime64(t) for t in list(timebatch)]
-                    wb2_sel = wb2_data[scwb2]
+                            raise IndexError(f"Key {acwb2} not found in dataset.")
+                    wb2_sel = wb2_data[acwb2].sel(level=alevel)
                     data = wb2_sel[wb2_sel["time"].isin(timebatch)].values
 
-                    # checks:
                     if data.shape[0] != len(timebatch):
-                        raise IndexError(f"Dates {timebatch} not all found in dataset for {scwb2}.")
-
+                        raise IndexError(f"Dates {timebatch} not all found in dataset for {acwb2}.")
+                    
                     f[entry_key][tstart:tend, cidx, ...] = data[...]
 
-                # atmospheric level variables
-                for ac, acwb2 in zip(atmospheric_channel_names, atmospheric_channel_names_wb2):
-                    for idl, alevel in enumerate(atmospheric_levels):
-                        cidx = channel_names.index(ac + str(alevel))
-                        if acwb2 not in wb2_data:
-                            if skip_missing:
-                                if (comm_rank == 0) and not (acwb2 in skipped_channels):
-                                     print(f"Key {acwb2} not found in dataset, skipping")
-                                skipped_channels.add(acwb2)
-                                continue
-                            else:
-                                raise IndexError(f"Key {acwb2} not found in dataset.")
-                        wb2_sel = wb2_data[acwb2].sel(level=alevel)
-                        data = wb2_sel[wb2_sel["time"].isin(timebatch)].values
+            # update progressbar
+            pbar.update_counter(len(timebatch))
+            pbar.update_progress()
 
-                        if data.shape[0] != len(timebatch):
-                            raise IndexError(f"Dates {timebatch} not all found in dataset for {acwb2}.")
+        # we need to wait here
+        if verbose:
+            print(f"Rank {comm_rank}: waiting for barrier on file {ofile}.")
+        comm.Barrier()
 
-                        f[entry_key][tstart:tend, cidx, ...] = data[...]
+        # close file
+        f.close()
 
-                # update progressbar
-                num_entries_current += len(timebatch) * comm_size
-                if comm_rank == 0:
-                    pbar.update(num_entries_current)
-
-            # we need to wait here
-            comm.Barrier()
+    # do a final pbar update
+    comm.Barrier()
+    pbar.update_progress()
 
     # end time
     end_time = time.perf_counter()
     run_time = str(dt.timedelta(seconds=end_time-start_time))
 
     if comm_rank == 0:
-        pbar.finish()
         print(f"All done. Run time {run_time}. Skipped channels: {list(skipped_channels)}")
 
     comm.Barrier()

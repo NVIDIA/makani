@@ -179,6 +179,12 @@ class Trainer(Driver):
             self.loss_obj = self.loss_obj.to(self.device)
         self.timers["loss handler init"] = timer.time
 
+        # channel weights:
+        if self.log_to_screen:
+            chw_weights = self.loss_obj.channel_weights.squeeze().cpu().numpy().tolist()
+            chw_output = {k: v for k,v in zip(self.params.channel_names, chw_weights)}
+            self.logger.info(f"Channel weights: {chw_output}")
+
         # optimizer and scheduler setup
         with Timer() as timer:
             self.optimizer = self.get_optimizer(self.model, self.params)
