@@ -195,6 +195,9 @@ class ERA5DaliESDataloader(object):
         else:
             raise IOError(f"Path {self.location} does not exist.")
 
+        # get list of excluded timestamps
+        timestamp_boundary_list = params.get("analysis_epoch_start_dates", [])
+
         # get the image sizes
         self.extsource = GeneralES(
             self.location,
@@ -225,6 +228,7 @@ class ERA5DaliESDataloader(object):
             enable_logging=params.log_to_screen,
             seed=self.global_seed,
             is_parallel=True,
+            timestamp_boundary_list=timestamp_boundary_list,
         )
 
         # grid types

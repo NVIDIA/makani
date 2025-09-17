@@ -21,17 +21,6 @@ import datetime as dt
 import torch.utils.data as tud
 
 
-# this is a small helper to convert datetime to correct time zone
-def date_helper(isostring):
-    date = dt.datetime.fromisoformat(isostring)
-    try:
-        date = date.astimezone(dt.timezone.utc)
-    except:
-        date = date.replace(tzinfo=dt.timezone.utc)
-
-    return date
-
-
 def split_list(lst: List[int], nchunks: int) -> List[List[int]]:
     return [list(x) for x in list(divide(nchunks, lst))]
 

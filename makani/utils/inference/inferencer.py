@@ -43,9 +43,10 @@ from makani.models import model_registry
 # distributed computing stuff
 from makani.utils import comm
 from makani.utils import visualize
+from makani.utils.dataloaders.data_helpers import get_date_from_string
 
 # inference specific stuff
-from makani.utils.inference.helpers import split_list, SortedIndexSampler, date_helper, translate_date_sampler_to_timedelta_sampler
+from makani.utils.inference.helpers import split_list, SortedIndexSampler, translate_date_sampler_to_timedelta_sampler
 from makani.utils.inference.rollout_buffer import RolloutBuffer, TemporalAverageBuffer, SpectrumAverageBuffer, ZonalSpectrumAverageBuffer
 
 # checkpoint helpers
@@ -762,10 +763,10 @@ class Inferencer(Driver):
 
         # check if a date range is specified:
         if start_date is not None:
-            start_date = date_helper(start_date)
+            start_date = get_date_from_string(start_date)
 
         if end_date is not None:
-            end_date = date_helper(end_date)
+            end_date = get_date_from_string(end_date)
 
         # now check if the dates are within dataset range:
         if start_date is not None:
