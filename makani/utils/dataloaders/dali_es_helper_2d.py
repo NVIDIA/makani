@@ -230,7 +230,11 @@ class GeneralES(object):
             self.img_shape = _f[self.dataset_path].shape[2:4]
             self.total_channels = _f[self.dataset_path].shape[1]
             self.n_samples_year.append(_f[self.dataset_path].shape[0])
-            self.timestamps.append(self.timezone_fn(_f[self.dataset_path].dims[0]["timestamp"][...]))
+            if "timestamp" in _f[self.dataset_path].dims[0]:
+                self.timestamps.append(self.timezone_fn(_f[self.dataset_path].dims[0]["timestamp"][...]))
+            else:
+                timestamps = np.asarray([get_timestamp(self.years[0], hour=(idx * self.dhours)).timestamp() for idx in range(0, _f[self.dataset_path].shape[0], self.dhours)])
+                self.timestamps.append(self.timezone_fn(timestamps))
 
         # get all sample counts
         for idf, filename in enumerate(self.files_paths[1:], start=1):
