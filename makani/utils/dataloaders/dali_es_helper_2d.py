@@ -183,7 +183,7 @@ class GeneralES(object):
         if timestamp_boundary_list:
             #compute list of allowed timestamps
             timestamp_boundary_list = [get_date_from_string(timestamp_string) for timestamp_string in timestamp_boundary_list]
-           
+
             # now, based on dt, dh, n_history and n_future, we can build regions where no data is allowed
             timestamp_exclusion_list = get_date_ranges(timestamp_boundary_list, lookback_hours = dt_total * (self.n_future + 1), lookahead_hours = dt_total * self.n_history)
 
@@ -227,28 +227,16 @@ class GeneralES(object):
             if enable_logging:
                 logging.info("Getting file stats from {}".format(self.files_paths[0]))
             # original image shape (before padding)
-            dset = _f[self.dataset_path]
-            self.img_shape = dset.shape[2:4]
-            self.total_channels = dset.shape[1]
-            self.n_samples_year.append(dset.shape[0])
-            # read timestamps
-            if "timestamp" in dset.dims[0]:
-                self.timestamps.append(self.timezone_fn(dset.dims[0]["timestamp"][...]))
-            else:
-                timestamps = np.asarray([get_timestamp(self.years[0], hour=(idx * self.dhours)).timestamp() for idx in range(0, dset.shape[0], self.dhours)])
-                self.timestamps.append(self.timezone_fn(timestamps))
+            self.img_shape = _f[self.dataset_path].shape[2:4]
+            self.total_channels = _f[self.dataset_path].shape[1]
+            self.n_samples_year.append(_f[self.dataset_path].shape[0])
+            self.timestamps.append(self.timezone_fn(_f[self.dataset_path].dims[0]["timestamp"][...]))
 
         # get all sample counts
         for idf, filename in enumerate(self.files_paths[1:], start=1):
             with fopen_handle(filename) as _f:
-                dset = _f[self.dataset_path]
-                self.n_samples_year.append(dset.shape[0])
-                # read timestamps
-                if "timestamp" in dset.dims[0]:
-                    self.timestamps.append(self.timezone_fn(dset.dims[0]["timestamp"][...]))
-                else:
-                    timestamps = np.asarray([get_timestamp(self.years[idf], hour=(idx * self.dhours)).timestamp() for idx in range(0, dset.shape[0], self.dhours)])
-                    self.timestamps.append(self.timezone_fn(timestamps))
+                self.n_samples_year.append(_f[self.dataset_path].shape[0])
+                self.timestamps.append(self.timezone_fn(_f[self.dataset_path].dims[0]["timestamp"][...]))
 
         self.timestamps = np.concatenate(self.timestamps, axis=0)
 
@@ -521,7 +509,7 @@ class GeneralES(object):
         # nvtx range
         torch.cuda.nvtx.range_pop()
 
-        return cos_zenith_inp, cos_zenith_tar 
+        return cos_zenith_inp, cos_zenith_tar
 
     def __getstate__(self):
         del self.aws_connector
@@ -593,8 +581,8 @@ class GeneralES(object):
         local_idx, year_idx = self._get_local_year_index_from_global_index(sample_idx)
 
         # if we are not at least self.dt*n_history timesteps into the prediction
-        local_idx = max(local_idx, self.dt * self.n_history)
-        local_idx = min(local_idx, self.n_samples_year[year_idx] - self.dt * (self.n_future + 1) - 1)
+        local_idx = min(local_idx, self.dt * self.n_history)
+        local_idx = max(local_idx, self.n_samples_year[year_idx] - self.dt * (self.n_future + 1) - 1)
 
         if self.files[year_idx] is None:
 
