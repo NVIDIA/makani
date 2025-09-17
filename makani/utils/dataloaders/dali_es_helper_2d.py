@@ -230,7 +230,11 @@ class GeneralES(object):
             self.img_shape = _f[self.dataset_path].shape[2:4]
             self.total_channels = _f[self.dataset_path].shape[1]
             self.n_samples_year.append(_f[self.dataset_path].shape[0])
-            self.timestamps.append(self.timezone_fn(_f[self.dataset_path].dims[0]["timestamp"][...]))
+            if "timestamp" in _f[self.dataset_path].dims[0]:
+                self.timestamps.append(self.timezone_fn(_f[self.dataset_path].dims[0]["timestamp"][...]))
+            else:
+                timestamps = np.asarray([get_timestamp(self.years[0], hour=(idx * self.dhours)).timestamp() for idx in range(0, _f[self.dataset_path].shape[0], self.dhours)])
+                self.timestamps.append(self.timezone_fn(timestamps))
 
         # get all sample counts
         for filename in self.files_paths[1:]:
@@ -457,7 +461,7 @@ class GeneralES(object):
                     self.n_samples_total, self.n_samples_per_epoch, self.num_steps_per_epoch, self.num_shards, self.batch_size
                 )
             )
-            start_lidx, start_yidx = self._get_local_year_index_from_global_index(self.n_samples_offset)
+            start_lidx, start_yidx = self._get_local_year_index_from_global_index(self.samples_start)
             end_lidx, end_yidx = self._get_local_year_index_from_global_index(self.n_samples_available-1)
             start_date = get_timestamp(self.years[start_yidx], hour=(start_lidx * self.dhours))
             end_date = get_timestamp(self.years[end_yidx], hour=(end_lidx * self.dhours))
