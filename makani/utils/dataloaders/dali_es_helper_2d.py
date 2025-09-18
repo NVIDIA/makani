@@ -231,6 +231,7 @@ class GeneralES(object):
             self.img_shape = dset.shape[2:4]
             self.total_channels = dset.shape[1]
             self.n_samples_year.append(dset.shape[0])
+            # read timestamps
             if "timestamp" in dset.dims[0]:
                 self.timestamps.append(self.timezone_fn(dset.dims[0]["timestamp"][...]))
             else:
@@ -241,8 +242,9 @@ class GeneralES(object):
         for idf, filename in enumerate(self.files_paths[1:], start=1):
             with fopen_handle(filename) as _f:
                 dset = _f[self.dataset_path]
+                self.n_samples_year.append(dset.shape[0])
+                # read timestamps
                 if "timestamp" in dset.dims[0]:
-                    self.n_samples_year.append(dset.shape[0])
                     self.timestamps.append(self.timezone_fn(dset.dims[0]["timestamp"][...]))
                 else:
                     timestamps = np.asarray([get_timestamp(self.years[idf], hour=(idx * self.dhours)).timestamp() for idx in range(0, dset.shape[0], self.dhours)])
@@ -459,7 +461,7 @@ class GeneralES(object):
         if enable_logging:
             logging.info("Average number of samples per year: {:.1f}".format(float(self.n_samples_total) / float(self.n_years)))
             logging.info(
-                "Found data at path {}. Number of examples: {} (distributed over {} files). Full image Shape: {} x {} x {}. Read Shape: {} x {} x {}".format(
+                "Found data at path {}. Number of examples: {} (distributed over {} number of files). Full image Shape: {} x {} x {}. Read Shape: {} x {} x {}".format(
                     self.location, self.n_samples_available, len(self.files_paths), self.img_shape[0], self.img_shape[1], self.total_channels, self.read_shape[0], self.read_shape[1], self.n_in_channels
                 )
             )
