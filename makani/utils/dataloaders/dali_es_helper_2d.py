@@ -231,6 +231,7 @@ class GeneralES(object):
             self.img_shape = dset.shape[2:4]
             self.total_channels = dset.shape[1]
             self.n_samples_year.append(dset.shape[0])
+            # read timestamps
             if "timestamp" in dset.dims[0]:
                 self.timestamps.append(self.timezone_fn(dset.dims[0]["timestamp"][...]))
             else:
@@ -241,8 +242,9 @@ class GeneralES(object):
         for idf, filename in enumerate(self.files_paths[1:], start=1):
             with fopen_handle(filename) as _f:
                 dset = _f[self.dataset_path]
+                self.n_samples_year.append(dset.shape[0])
+                # read timestamps
                 if "timestamp" in dset.dims[0]:
-                    self.n_samples_year.append(dset.shape[0])
                     self.timestamps.append(self.timezone_fn(dset.dims[0]["timestamp"][...]))
                 else:
                     timestamps = np.asarray([get_timestamp(self.years[idf], hour=(idx * self.dhours)).timestamp() for idx in range(0, dset.shape[0], self.dhours)])
@@ -342,19 +344,19 @@ class GeneralES(object):
     def _get_files_stats(self, enable_logging):
         # check for hdf5 files
         self.files_paths = []
-        self.location = [self.location] if not isinstance(self.location, list) else self.location
+        self.location = self.location if isinstance(self.location, list) else [self.location]
 
         if not self.enable_s3:
             # check if we are dealing with hdf5 or zarr files
             for location in self.location:
-                self.files_paths = self.files_paths + glob.glob(os.path.join(location, "????.h5"))
+                self.files_paths += glob.glob(os.path.join(location, "????.h5"))
 
             # check for zarr files if no hdf5 files are found
             if self.files_paths:
                 self.file_format = "h5"
             else:
                 for location in self.location:
-                    self.files_paths = self.files_paths + glob.glob(os.path.join(location, "????.zarr"))
+                    self.files_paths += glob.glob(os.path.join(location, "????.zarr"))
                 if self.files_paths:
                     self.file_format = "zarr"
         else:
@@ -383,7 +385,7 @@ class GeneralES(object):
         # get stats
         self.n_years = len(self.files_paths)
 
-        # get stats from first file
+        # get stats from all files
         if self.file_format == "h5":
             self._get_stats_h5(enable_logging)
         else:
@@ -459,8 +461,8 @@ class GeneralES(object):
         if enable_logging:
             logging.info("Average number of samples per year: {:.1f}".format(float(self.n_samples_total) / float(self.n_years)))
             logging.info(
-                "Found data at path {}. Number of examples: {}. Full image Shape: {} x {} x {}. Read Shape: {} x {} x {}".format(
-                    self.location, self.n_samples_available, self.img_shape[0], self.img_shape[1], self.total_channels, self.read_shape[0], self.read_shape[1], self.n_in_channels
+                "Found data at path {}. Number of examples: {} (distributed over {} number of files). Full image Shape: {} x {} x {}. Read Shape: {} x {} x {}".format(
+                    self.location, self.n_samples_available, len(self.files_paths), self.img_shape[0], self.img_shape[1], self.total_channels, self.read_shape[0], self.read_shape[1], self.n_in_channels
                 )
             )
             logging.info(
