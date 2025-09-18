@@ -365,60 +365,71 @@ class DiffusionNoiseS2(BaseNoiseS2):
 
             discount = []
             for phi in self.phi.reshape(-1).tolist():
-                print(phi)
                 phivec = np.power(self.phi, np.arange(0, self.num_time_steps))
-                disc = torch.tensor(toep(phivec, np.zeros(self.num_time_steps)))
+                disc = torch.as_tensor(toep(phivec, np.zeros(self.num_time_steps)))
                 disc = disc.to(dtype=torch.float32)
                 discount.append(disc)
             discount = torch.stack(discount)
-            print(discount.shape)
             self.register_buffer("discount", discount, persistent=False)
 
     # this routine generates a noise sample for a single time step and updates the state accordingly, by appending the last time step
     def update(self, replace_state=False, batch_size=None):
+        
+        print("Inside update, replace_state: ", replace_state, " batch_size: ", batch_size)
 
         # create single occurence
         with torch.no_grad():
-            nsteps = self.num_time_steps if replace_state else 1
-            if batch_size is None:
-                batch_size = self.state.shape[0]
-            eta_l = torch.empty((batch_size, nsteps, self.num_channels, self.lmax_local, self.mmax_local, 2), dtype=torch.float32, device=self.state.device)
-            if self.state.is_cuda:
-                eta_l.normal_(mean=0.0, std=1.0, generator=self.rng_gpu)
-            else:
-                eta_l.normal_(mean=0.0, std=1.0, generator=self.rng_cpu)
-
-            # multiply by sigma
-            eta_l = self.sigma_l * eta_l
-
-            # reflect if required:
-            if self.reflect:
-                eta_l = -eta_l
-
-            if not replace_state:
-                # update previous state
-                if self.num_time_steps > 1:
-                    newstate = self.phi * self.state[:, -1, ...] + eta_l.squeeze(1)
-                    newstate = torch.cat([self.state[:, 1:, ...], newstate.unsqueeze(1)], dim=1)
+            with torch.amp.autocast(device_type="cuda", enabled=False):
+                nsteps = self.num_time_steps if replace_state else 1
+                if batch_size is None:
+                    batch_size = self.state.shape[0]
+                eta_l = torch.empty((batch_size, nsteps, self.num_channels, self.lmax_local, self.mmax_local, 2), dtype=torch.float32, device=self.state.device)
+                if self.state.is_cuda:
+                    eta_l.normal_(mean=0.0, std=1.0, generator=self.rng_gpu)
                 else:
-                    newstate = self.phi * self.state + eta_l
-            else:
-                newstate = eta_l
-                # the very first element in the time history requires a different weighting to sample the stationary distribution
-                newstate[:, 0, ...] = newstate[:, 0, ...] / torch.sqrt(1.0 - self.phi**2)
-                # get the right history by multiplying with the discount matrix
-                if self.num_time_steps > 1:
-                    newstate = torch.einsum("ctr,brclmu->btclmu", self.discount, newstate)
+                    eta_l.normal_(mean=0.0, std=1.0, generator=self.rng_cpu)
 
-            # update the state
-            if newstate.shape == self.state.shape:
-                self.state.copy_(newstate)
-            else:
-                self.state = newstate
+                # multiply by sigma
+                eta_l = self.sigma_l * eta_l
+
+                # reflect if required:
+                if self.reflect:
+                    eta_l = -eta_l
+
+                if not replace_state:
+                    # update previous state
+                    if self.num_time_steps > 1:
+                        last_state = self.state[:, -1, ...].unsqueeze(1)
+                        newstate = self.phi * last_state + eta_l
+                        newstate = torch.cat([self.state[:, 1:, ...], newstate], dim=1)
+                    else:
+                        newstate = self.phi * self.state + eta_l
+
+                    print("update state, state shape: ", self.state.shape, " newstate shape: ", newstate.shape)
+                else:
+                    newstate = eta_l
+                    # the very first element in the time history requires a different weighting to sample the stationary distribution
+                    newstate[:, 0, ...] = newstate[:, 0, ...] / torch.sqrt(1.0 - self.phi**2)
+                    # get the right history by multiplying with the discount matrix
+                    if self.num_time_steps > 1:
+                        newstate = torch.einsum("ctr,brclmu->btclmu", self.discount, newstate).contiguous()
+
+                        print("replace state, discount shape: ", self.discount.shape)
+
+                    print("replace state, state shape: ", self.state.shape, " newstate shape: ", newstate.shape)
+
+                # update the state
+                if newstate.shape == self.state.shape:
+                    self.state.copy_(newstate)
+                else:
+                    self.state = newstate
 
         return
 
     def forward(self, update_internal_state=False):
+
+        print("state shape: ", self.state.shape)
+        print("parameters: ", self.num_time_steps, self.num_channels, self.lmax_local, self.mmax_local)
 
         # combine channels and time:
         cstate = torch.view_as_complex(self.state)
