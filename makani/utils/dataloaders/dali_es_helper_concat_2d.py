@@ -284,6 +284,7 @@ class GeneralConcatES(object):
         read_anchor_y = self.crop_anchor[1] + sum(split_shapes_y[: self.io_rank[1]])
         self.read_anchor = [read_anchor_x, read_anchor_y]
         self.read_shape = [read_shape_x, read_shape_y]
+        self.return_shape = self.read_shape
 
         # do some sample indexing gymnastics
         if self.max_samples is not None:

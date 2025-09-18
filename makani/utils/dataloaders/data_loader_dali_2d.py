@@ -248,8 +248,8 @@ class ERA5DaliESDataloader(object):
         self.img_crop_offset_x = self.extsource.crop_anchor[0]
         self.img_crop_offset_y = self.extsource.crop_anchor[1]
 
-        self.img_local_shape_x = self.extsource.read_shape[0]
-        self.img_local_shape_y = self.extsource.read_shape[1]
+        self.img_local_shape_x = self.extsource.return_shape[0]
+        self.img_local_shape_y = self.extsource.return_shape[1]
         self.img_local_offset_x = self.extsource.read_anchor[0]
         self.img_local_offset_y = self.extsource.read_anchor[1]
 
