@@ -227,20 +227,26 @@ class GeneralES(object):
             if enable_logging:
                 logging.info("Getting file stats from {}".format(self.files_paths[0]))
             # original image shape (before padding)
-            self.img_shape = _f[self.dataset_path].shape[2:4]
-            self.total_channels = _f[self.dataset_path].shape[1]
-            self.n_samples_year.append(_f[self.dataset_path].shape[0])
-            if "timestamp" in _f[self.dataset_path].dims[0]:
-                self.timestamps.append(self.timezone_fn(_f[self.dataset_path].dims[0]["timestamp"][...]))
+            dset = _f[self.dataset_path]
+            self.img_shape = dset.shape[2:4]
+            self.total_channels = dset.shape[1]
+            self.n_samples_year.append(dset.shape[0])
+            if "timestamp" in dset.dims[0]:
+                self.timestamps.append(self.timezone_fn(dset.dims[0]["timestamp"][...]))
             else:
-                timestamps = np.asarray([get_timestamp(self.years[0], hour=(idx * self.dhours)).timestamp() for idx in range(0, _f[self.dataset_path].shape[0], self.dhours)])
+                timestamps = np.asarray([get_timestamp(self.years[0], hour=(idx * self.dhours)).timestamp() for idx in range(0, dset.shape[0], self.dhours)])
                 self.timestamps.append(self.timezone_fn(timestamps))
 
         # get all sample counts
         for idf, filename in enumerate(self.files_paths[1:], start=1):
             with fopen_handle(filename) as _f:
-                self.n_samples_year.append(_f[self.dataset_path].shape[0])
-                self.timestamps.append(self.timezone_fn(_f[self.dataset_path].dims[0]["timestamp"][...]))
+                dset = _f[self.dataset_path]
+                if "timestamp" in dset.dims[0]:
+                    self.n_samples_year.append(dset.shape[0])
+                    self.timestamps.append(self.timezone_fn(dset.dims[0]["timestamp"][...]))
+                else:
+                    timestamps = np.asarray([get_timestamp(self.years[idf], hour=(idx * self.dhours)).timestamp() for idx in range(0, dset.shape[0], self.dhours)])
+                    self.timestamps.append(self.timezone_fn(timestamps))
 
         self.timestamps = np.concatenate(self.timestamps, axis=0)
 
