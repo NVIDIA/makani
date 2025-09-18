@@ -100,7 +100,7 @@ class BaseNoiseS2(nn.Module):
 
     # this routine generates a noise sample for a single time step and updates the state accordingly, by appending the last time step
     def update(self, replace_state=False, batch_size=None):
-        # Update should always create a new state, so 
+        # Update should always create a new state, so
         # we don't need to check for replace_state
         # create single occurence
         with torch.no_grad():
@@ -366,13 +366,12 @@ class DiffusionNoiseS2(BaseNoiseS2):
                 raise NotImplementedError(f"num_time_steps>1 learnable diffusion noise not supported")
 
             discount = []
-            phi_flat = self.phi.reshape(-1)
-            for phi_tmp in phi_flat.tolist():
-                phivec = np.power(phi_tmp, np.arange(0, self.num_time_steps))
+            for phi in self.phi.reshape(-1).tolist():
+                phivec = np.power(self.phi, np.arange(0, self.num_time_steps))
                 disc = torch.as_tensor(toep(phivec, np.zeros(self.num_time_steps)))
                 disc = disc.to(dtype=torch.float32)
                 discount.append(disc)
-            discount = torch.stack(discount, dim=0)
+            discount = torch.stack(discount)
             self.register_buffer("discount", discount, persistent=False)
 
     def is_stateful(self):
@@ -380,6 +379,8 @@ class DiffusionNoiseS2(BaseNoiseS2):
 
     # this routine generates a noise sample for a single time step and updates the state accordingly, by appending the last time step
     def update(self, replace_state=False, batch_size=None):
+
+        print("Inside update, replace_state: ", replace_state, " batch_size: ", batch_size)
 
         # create single occurence
         with torch.no_grad():
@@ -408,6 +409,8 @@ class DiffusionNoiseS2(BaseNoiseS2):
                         newstate = torch.cat([self.state[:, 1:, ...], newstate], dim=1)
                     else:
                         newstate = self.phi * self.state + eta_l
+
+                    print("update state, state shape: ", self.state.shape, " newstate shape: ", newstate.shape)
                 else:
                     newstate = eta_l
                     # the very first element in the time history requires a different weighting to sample the stationary distribution
@@ -415,6 +418,10 @@ class DiffusionNoiseS2(BaseNoiseS2):
                     # get the right history by multiplying with the discount matrix
                     if self.num_time_steps > 1:
                         newstate = torch.einsum("ctr,brclmu->btclmu", self.discount, newstate).contiguous()
+
+                        print("replace state, discount shape: ", self.discount.shape)
+
+                    print("replace state, state shape: ", self.state.shape, " newstate shape: ", newstate.shape)
 
                 # update the state
                 if newstate.shape == self.state.shape:
@@ -425,6 +432,9 @@ class DiffusionNoiseS2(BaseNoiseS2):
         return
 
     def forward(self, update_internal_state=False):
+
+        print("state shape: ", self.state.shape)
+        print("parameters: ", self.num_time_steps, self.num_channels, self.lmax_local, self.mmax_local)
 
         # combine channels and time:
         cstate = torch.view_as_complex(self.state)
