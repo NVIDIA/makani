@@ -461,7 +461,7 @@ class GeneralES(object):
         if enable_logging:
             logging.info("Average number of samples per year: {:.1f}".format(float(self.n_samples_total) / float(self.n_years)))
             logging.info(
-                "Found data at path {}. Number of examples: {} (distributed over {} number of files). Full image Shape: {} x {} x {}. Read Shape: {} x {} x {}".format(
+                "Found data at path {}. Number of examples: {} (distributed over {} files). Full image Shape: {} x {} x {}. Read Shape: {} x {} x {}".format(
                     self.location, self.n_samples_available, len(self.files_paths), self.img_shape[0], self.img_shape[1], self.total_channels, self.read_shape[0], self.read_shape[1], self.n_in_channels
                 )
             )
