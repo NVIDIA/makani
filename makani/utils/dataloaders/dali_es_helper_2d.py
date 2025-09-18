@@ -593,8 +593,8 @@ class GeneralES(object):
         local_idx, year_idx = self._get_local_year_index_from_global_index(sample_idx)
 
         # if we are not at least self.dt*n_history timesteps into the prediction
-        local_idx = min(local_idx, self.dt * self.n_history)
-        local_idx = max(local_idx, self.n_samples_year[year_idx] - self.dt * (self.n_future + 1) - 1)
+        local_idx = max(local_idx, self.dt * self.n_history)
+        local_idx = min(local_idx, self.n_samples_year[year_idx] - self.dt * (self.n_future + 1) - 1)
 
         if self.files[year_idx] is None:
 
