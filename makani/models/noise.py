@@ -366,12 +366,13 @@ class DiffusionNoiseS2(BaseNoiseS2):
                 raise NotImplementedError(f"num_time_steps>1 learnable diffusion noise not supported")
 
             discount = []
-            for phi in self.phi.reshape(-1).tolist():
-                phivec = np.power(self.phi, np.arange(0, self.num_time_steps))
+            phi_flat = self.phi.reshape(-1)
+            for phi_tmp in phi_flat.tolist():
+                phivec = np.power(phi_tmp, np.arange(0, self.num_time_steps))
                 disc = torch.as_tensor(toep(phivec, np.zeros(self.num_time_steps)))
                 disc = disc.to(dtype=torch.float32)
                 discount.append(disc)
-            discount = torch.stack(discount)
+            discount = torch.stack(discount, dim=0)
             self.register_buffer("discount", discount, persistent=False)
 
     def is_stateful(self):
@@ -409,8 +410,6 @@ class DiffusionNoiseS2(BaseNoiseS2):
                         newstate = torch.cat([self.state[:, 1:, ...], newstate], dim=1)
                     else:
                         newstate = self.phi * self.state + eta_l
-
-                    print("update state, state shape: ", self.state.shape, " newstate shape: ", newstate.shape)
                 else:
                     newstate = eta_l
                     # the very first element in the time history requires a different weighting to sample the stationary distribution
@@ -418,10 +417,6 @@ class DiffusionNoiseS2(BaseNoiseS2):
                     # get the right history by multiplying with the discount matrix
                     if self.num_time_steps > 1:
                         newstate = torch.einsum("ctr,brclmu->btclmu", self.discount, newstate).contiguous()
-
-                        print("replace state, discount shape: ", self.discount.shape)
-
-                    print("replace state, state shape: ", self.state.shape, " newstate shape: ", newstate.shape)
 
                 # update the state
                 if newstate.shape == self.state.shape:
