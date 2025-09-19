@@ -600,11 +600,13 @@ class EnsembleTrainer(Trainer):
 
         return train_time, total_data_gb, logs
 
-    def _initialize_noise_states(self):
+    def _initialize_noise_states(self, seed_offset=666):
         noise_states = []
-        for _ in range(self.params.local_ensemble_size):
-            self.preprocessor.update_internal_state(replace_state=True)
-            noise_states.append(self.preprocessor.get_internal_state(tensor=True))
+        for ide in range(self.params.local_ensemble_size):
+            member_seed = seed_offset + self.preprocessor.noise_base_seed * ide
+            self.preprocessor.input_noise.set_rng(seed=member_seed)
+            self.preprocessor.input_noise.update(replace_state=True)
+            noise_states.append(self.preprocessor.input_noise.get_tensor_state())
         return noise_states
 
     def validate_one_epoch(self, epoch, profiler=None):
@@ -652,7 +654,7 @@ class EnsembleTrainer(Trainer):
                     # do autoregression for each ensemble member individually
                     # do the rollout
                     # initialize the noise states with random seeds:
-                    noise_states = self._initialize_noise_states()
+                    noise_states = self._initialize_noise_states(seed_offset=eval_steps)
                     inptlist = [inp.clone() for _ in range(self.params.local_ensemble_size)]
 
                     # loop over lead times
@@ -670,7 +672,7 @@ class EnsembleTrainer(Trainer):
                                 # retrieve input
                                 inpt = inptlist[e]
 
-                                # this is different, depending on local ensemble size
+                                # restore noise state
                                 if self.params.local_ensemble_size > 1:
                                     # recover correct state
                                     self.preprocessor.set_internal_state(noise_states[e])
