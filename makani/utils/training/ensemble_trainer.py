@@ -604,10 +604,9 @@ class EnsembleTrainer(Trainer):
     def _initialize_noise_states(self, seed_offset=666):
         noise_states = []
         for ide in range(self.params.local_ensemble_size):
-            member_seed = seed_offset + self.preprocessor.noise_base_seed * ide
-            self.preprocessor.input_noise.set_rng(seed=member_seed)
-            self.preprocessor.input_noise.update(replace_state=True)
-            noise_states.append(self.preprocessor.input_noise.get_tensor_state())
+            member_seed = seed_offset + self.preprocessor.get_base_seed(default=333) * ide
+            self.preprocessor.set_rng(seed=member_seed, reset=True)
+            noise_states.append(self.preprocessor.get_internal_state(tensor=True))
         return noise_states
 
     def validate_one_epoch(self, epoch, profiler=None):

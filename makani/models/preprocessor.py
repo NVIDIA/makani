@@ -419,6 +419,12 @@ class Preprocessor2D(nn.Module):
 
         return x, y
 
+    def get_base_seed(self, default=333):
+        if hasattr(self, "input_noise"):
+            return self.noise_base_seed
+        else:
+            return default
+
     def get_internal_rng(self, gpu=True):
         if hasattr(self, "input_noise"):
             if gpu:
@@ -427,7 +433,7 @@ class Preprocessor2D(nn.Module):
                 return self.input_noise.rng_cpu
         else:
             return None
-    
+
     def set_rng(self, reset = True, seed=333):
         if hasattr(self, "input_noise"):
             self.input_noise.set_rng(seed)
