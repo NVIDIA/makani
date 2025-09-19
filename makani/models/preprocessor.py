@@ -430,7 +430,7 @@ class Preprocessor2D(nn.Module):
     
     def set_rng(self, reset = True, seed=333):
         if hasattr(self, "input_noise"):
-            self.input_noise.set_rng(reset, seed)
+            self.input_noise.set_rng(seed)
             if reset:
                 self.input_noise.reset()
         return
