@@ -13,8 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
-import copy
 from functools import partial
 from typing import Union, Tuple
 
@@ -22,7 +20,6 @@ import numpy as np
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from makani.utils import comm
 from makani.utils.grids import GridConverter

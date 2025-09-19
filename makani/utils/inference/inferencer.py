@@ -28,9 +28,6 @@ import torch.distributed as dist
 import torch.amp as amp
 import torch.utils.data as tud
 
-import logging
-import wandb
-
 from makani.utils.driver import Driver
 from makani.utils import LossHandler, MetricsHandler
 from makani.utils.dataloader import get_dataloader
@@ -42,7 +39,6 @@ from makani.models import model_registry
 
 # distributed computing stuff
 from makani.utils import comm
-from makani.utils import visualize
 from makani.utils.dataloaders.data_helpers import get_date_from_string
 
 # inference specific stuff
