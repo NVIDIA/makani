@@ -97,14 +97,14 @@ class Preprocessor2D(nn.Module):
 
             # noise seed: important, this will be passed down as-is
             if not centered_noise:
-                seed = 333 + comm.get_rank("model") + comm.get_size("model") * comm.get_rank("data")
+                self.noise_base_seed = 333 + comm.get_rank("model") + comm.get_size("model") * comm.get_rank("data")
                 reflect = False
             else:
                 # here, ranks (0,1), (2,3), ... should map to the same eff rank, since they only differ by reflection but should otherwise get the
                 # same seed
                 ensemble_eff_rank = comm.get_rank("ensemble") // 2
                 reflect = (comm.get_rank("ensemble") % 2 == 0)
-                seed = 333 + comm.get_rank("model") + comm.get_size("model") * ensemble_eff_rank + comm.get_size("model") * comm.get_size("ensemble") * comm.get_rank("batch")
+                self.noise_base_seed = 333 + comm.get_rank("model") + comm.get_size("model") * ensemble_eff_rank + comm.get_size("model") * comm.get_size("ensemble") * comm.get_rank("batch")
 
             if "type" not in noise_params:
                 raise ValueError("Error, please specify an input noise type")
@@ -136,7 +136,7 @@ class Preprocessor2D(nn.Module):
                     kT=kT,  # use various scales
                     lambd=lambd,  # use suggestion here: tau=6h
                     grid_type=params.model_grid_type,
-                    seed=seed,
+                    seed=self.noise_base_seed,
                     reflect=reflect,
                     learnable=noise_params.get("learnable", False)
                 )
@@ -151,7 +151,7 @@ class Preprocessor2D(nn.Module):
                     sigma=noise_params.get("sigma", 1.0),
                     alpha=noise_params.get("alpha", 0.0),
                     grid_type=params.model_grid_type,
-                    seed=seed,
+                    seed=self.noise_base_seed,
                     reflect=reflect,
                     learnable=noise_params.get("learnable", False)
                 )

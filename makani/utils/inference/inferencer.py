@@ -450,6 +450,15 @@ class Inferencer(Driver):
 
         return logs
 
+    def _initialize_noise_states(self, seed_offset=666):
+        noise_states = []
+        for ide in range(self.params.local_ensemble_size):
+            member_seed = seed_offset + self.preprocessor.noise_base_seed * ide
+            self.preprocessor.input_noise.set_rng(seed=member_seed)
+            self.preprocessor.input_noise.update(replace_state=True)
+            noise_states.append(self.preprocessor.input_noise.get_tensor_state())
+        return noise_states
+
     def _inference_indexlist(
         self,
         indices: Union[List[int], torch.Tensor],
@@ -512,7 +521,7 @@ class Inferencer(Driver):
             climatology_iterator = iter(self.climatology_dataloader)
 
         # create loader for the full epoch
-        noise_states = None
+        noise_states = self._initialize_noise_states()
         inptlist = None
         idt = 0
         with torch.inference_mode():
@@ -569,7 +578,7 @@ class Inferencer(Driver):
                         self.preprocessor.update_internal_state(replace_state=True, batch_size=inp.shape[0])
 
                         # reset noise states and input list
-                        noise_states = [None for _ in range(self.params.local_ensemble_size)]
+                        noise_states = self._initialize_noise_states(seed_offset=idt)
                         inptlist = [inp.clone() for _ in range(self.params.local_ensemble_size)]
 
                         if rollout_buffer is not None:
@@ -600,7 +609,7 @@ class Inferencer(Driver):
                                 inpt = inptlist[e]
 
                                 # restore noise state
-                                if (self.params.local_ensemble_size > 1) and (noise_states[e] is not None):
+                                if (self.params.local_ensemble_size > 1):
                                     self.preprocessor.set_internal_state(noise_states[e])
 
                                 # forward pass

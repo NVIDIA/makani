@@ -480,7 +480,6 @@ class EnsembleTrainer(Trainer):
 
         return
 
-
     def _ensemble_step(self, inp: torch.Tensor, tar: torch.Tensor):
         predlist = []
         for _ in range(self.params.local_ensemble_size):
@@ -495,7 +494,6 @@ class EnsembleTrainer(Trainer):
         loss = self.loss_obj(pred, tar)
 
         return pred, loss
-
 
     def train_one_epoch(self, profiler=None):
         self.epoch += 1
@@ -603,6 +601,15 @@ class EnsembleTrainer(Trainer):
 
         return train_time, total_data_gb, logs
 
+    def _initialize_noise_states(self, seed_offset=666):
+        noise_states = []
+        for ide in range(self.params.local_ensemble_size):
+            member_seed = seed_offset + self.preprocessor.noise_base_seed * ide
+            self.preprocessor.input_noise.set_rng(seed=member_seed)
+            self.preprocessor.input_noise.update(replace_state=True)
+            noise_states.append(self.preprocessor.input_noise.get_tensor_state())
+        return noise_states
+
     def validate_one_epoch(self, epoch, profiler=None):
         # set to eval
         self._set_eval()
@@ -647,8 +654,11 @@ class EnsembleTrainer(Trainer):
 
                     # do autoregression for each ensemble member individually
                     # do the rollout
-                    noise_states = [None for _ in range(self.params.local_ensemble_size)]
+                    # initialize the noise states with random seeds:
+                    noise_states = self._initialize_noise_states(seed_offset=eval_steps)
                     inptlist = [inp.clone() for _ in range(self.params.local_ensemble_size)]
+
+                    # loop over lead times
                     for idt, targ in enumerate(tarlist):
 
                         # flatten history of the target
@@ -658,12 +668,13 @@ class EnsembleTrainer(Trainer):
                         predlist = []
 
                         with amp.autocast(device_type="cuda", enabled=self.amp_enabled, dtype=self.amp_dtype):
+                            # loop over local ensemble members
                             for e in range(self.params.local_ensemble_size):
                                 # retrieve input
                                 inpt = inptlist[e]
 
                                 # restore noise state
-                                if (self.params.local_ensemble_size > 1) and (noise_states[e] is not None):
+                                if self.params.local_ensemble_size > 1:
                                     # recover correct state
                                     self.preprocessor.set_internal_state(noise_states[e])
 

@@ -45,7 +45,7 @@ class BaseNoiseS2(nn.Module):
     ):
         r"""
         Abstract base class for noise on the sphere. Initializes the inverse SHT needed by many of the
-        noise classes.
+        noise classes. Derived noise classes can be stateful or stateless.
         """
         super().__init__()
 
@@ -81,6 +81,9 @@ class BaseNoiseS2(nn.Module):
 
         # store the noise state: initialize to None
         self.register_buffer("state", torch.zeros((batch_size, self.num_time_steps, self.num_channels, self.lmax_local, self.mmax_local, 2), dtype=torch.float32), persistent=False)
+
+    def is_stateful(self):
+        raise NotImplementedError("is_stateful method not implemented for this noise class")
 
     def set_rng(self, seed=333):
         self.rng_cpu = torch.Generator(device=torch.device("cpu"))
@@ -164,7 +167,7 @@ class IsotropicGaussianRandomFieldS2(BaseNoiseS2):
         **kwargs,
     ):
         r"""
-        GRF on the unit sphere. This implementation follows [1].
+        GRF on the unit sphere. This implementation follows [1]. This noise is stateless.
 
         References
         ============
@@ -211,6 +214,9 @@ class IsotropicGaussianRandomFieldS2(BaseNoiseS2):
             self.register_parameter("sigma_l", nn.Parameter(sigma_l))
         else:
             self.register_buffer("sigma_l", sigma_l, persistent=False)
+
+    def is_stateful(self):
+        return False
 
     def forward(self, update_internal_state=False):
 
@@ -273,7 +279,7 @@ class DiffusionNoiseS2(BaseNoiseS2):
 
         For details see https://www.ecmwf.int/sites/default/files/elibrary/2009/11577-stochastic-parametrization-and-model-uncertainty.pdf,
         appendix 8.1.
-        Supports noising multiple channels at once
+        Supports noising multiple channels at once. This noise is stateful.
 
         img_shape : (int, int)
             Number of latitudinal and longitudinal modes
@@ -373,10 +379,11 @@ class DiffusionNoiseS2(BaseNoiseS2):
             discount = torch.stack(discount, dim=0)
             self.register_buffer("discount", discount, persistent=False)
 
+    def is_stateful(self):
+        return True
+
     # this routine generates a noise sample for a single time step and updates the state accordingly, by appending the last time step
     def update(self, replace_state=False, batch_size=None):
-        
-        print("Inside update, replace_state: ", replace_state, " batch_size: ", batch_size)
 
         # create single occurence
         with torch.no_grad():
@@ -423,9 +430,6 @@ class DiffusionNoiseS2(BaseNoiseS2):
 
     def forward(self, update_internal_state=False):
 
-        print("state shape: ", self.state.shape)
-        print("parameters: ", self.num_time_steps, self.num_channels, self.lmax_local, self.mmax_local)
-
         # combine channels and time:
         cstate = torch.view_as_complex(self.state)
         batch_size = cstate.shape[0]
@@ -457,7 +461,7 @@ class DummyNoiseS2(nn.Module):
         **kwargs,
     ):
         r"""
-        Dummy noise module for debugging purposes.
+        Dummy noise module for debugging purposes. This noise is stateless.
 
         Parameters
         ============
@@ -489,6 +493,9 @@ class DummyNoiseS2(nn.Module):
 
         # store the noise state: initialize to None
         self.register_buffer("state", torch.zeros((batch_size, self.num_time_steps, self.num_channels, self.nlat_local, self.nlon_local), dtype=torch.float32), persistent=False)
+
+    def is_stateful(self):
+        return False
 
     def update(self, replace_state=False, batch_size=None):
 
