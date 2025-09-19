@@ -38,7 +38,6 @@ from makani.models import model_registry
 
 # distributed computing stuff
 from makani.utils import comm
-from makani.utils import visualize
 from makani.utils.dataloaders.data_helpers import get_date_from_string
 
 # inference specific stuff
