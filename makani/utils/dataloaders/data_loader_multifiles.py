@@ -284,6 +284,7 @@ class MultifilesDataset(Dataset):
         # store the variables
         self.read_anchor = (read_anchor_x, read_anchor_y)
         self.read_shape = (read_shape_x, read_shape_y)
+        self.return_shape = self.read_shape
 
         # do some sample indexing gymnastics
         self.file_offsets = list(accumulate(self.n_samples_file, operator.add))[:-1]
@@ -312,8 +313,8 @@ class MultifilesDataset(Dataset):
         self.img_crop_offset_x = self.crop_anchor[0]
         self.img_crop_offset_y = self.crop_anchor[1]
 
-        self.img_local_shape_x = self.read_shape[0]
-        self.img_local_shape_y = self.read_shape[1]
+        self.img_local_shape_x = self.return_shape[0]
+        self.img_local_shape_y = self.return_shape[1]
         self.img_local_offset_x = self.read_anchor[0]
         self.img_local_offset_y = self.read_anchor[1]
 

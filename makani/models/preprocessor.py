@@ -13,8 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
-import copy
 from functools import partial
 from typing import Union, Tuple
 
@@ -22,7 +20,6 @@ import numpy as np
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from makani.utils import comm
 from makani.utils.grids import GridConverter
@@ -97,14 +94,14 @@ class Preprocessor2D(nn.Module):
 
             # noise seed: important, this will be passed down as-is
             if not centered_noise:
-                seed = 333 + comm.get_rank("model") + comm.get_size("model") * comm.get_rank("data")
+                self.noise_base_seed = 333 + comm.get_rank("model") + comm.get_size("model") * comm.get_rank("data")
                 reflect = False
             else:
                 # here, ranks (0,1), (2,3), ... should map to the same eff rank, since they only differ by reflection but should otherwise get the
                 # same seed
                 ensemble_eff_rank = comm.get_rank("ensemble") // 2
                 reflect = (comm.get_rank("ensemble") % 2 == 0)
-                seed = 333 + comm.get_rank("model") + comm.get_size("model") * ensemble_eff_rank + comm.get_size("model") * comm.get_size("ensemble") * comm.get_rank("batch")
+                self.noise_base_seed = 333 + comm.get_rank("model") + comm.get_size("model") * ensemble_eff_rank + comm.get_size("model") * comm.get_size("ensemble") * comm.get_rank("batch")
 
             if "type" not in noise_params:
                 raise ValueError("Error, please specify an input noise type")
@@ -136,7 +133,7 @@ class Preprocessor2D(nn.Module):
                     kT=kT,  # use various scales
                     lambd=lambd,  # use suggestion here: tau=6h
                     grid_type=params.model_grid_type,
-                    seed=seed,
+                    seed=self.noise_base_seed,
                     reflect=reflect,
                     learnable=noise_params.get("learnable", False)
                 )
@@ -151,7 +148,7 @@ class Preprocessor2D(nn.Module):
                     sigma=noise_params.get("sigma", 1.0),
                     alpha=noise_params.get("alpha", 0.0),
                     grid_type=params.model_grid_type,
-                    seed=seed,
+                    seed=self.noise_base_seed,
                     reflect=reflect,
                     learnable=noise_params.get("learnable", False)
                 )
@@ -419,6 +416,12 @@ class Preprocessor2D(nn.Module):
 
         return x, y
 
+    def get_base_seed(self, default=333):
+        if hasattr(self, "input_noise"):
+            return self.noise_base_seed
+        else:
+            return default
+
     def get_internal_rng(self, gpu=True):
         if hasattr(self, "input_noise"):
             if gpu:
@@ -427,7 +430,7 @@ class Preprocessor2D(nn.Module):
                 return self.input_noise.rng_cpu
         else:
             return None
-    
+
     def set_rng(self, reset = True, seed=333):
         if hasattr(self, "input_noise"):
             self.input_noise.set_rng(seed)

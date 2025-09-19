@@ -33,7 +33,7 @@ import torch
 from physicsnemo.distributed.utils import compute_split_shapes
 
 # data helpers
-from .data_helpers import get_timestamp, get_date_from_timestamp, get_default_aws_connector
+from .data_helpers import get_date_from_string, get_timestamp, get_date_from_timestamp, get_date_ranges, get_default_aws_connector
 
 
 class GeneralES(object):
@@ -73,6 +73,7 @@ class GeneralES(object):
         enable_s3=False,
         seed=333,
         is_parallel=True,
+        timestamp_boundary_list=[],
     ):
         self.batch_size = batch_size
         self.location = location
@@ -140,8 +141,12 @@ class GeneralES(object):
         self.io_grid = io_grid[1:]
         self.io_rank = io_rank[1:]
 
+        # timezone logic
+        self.timezone_fn = np.vectorize(get_date_from_timestamp)
+
         # parse the files
         self._get_files_stats(enable_logging)
+        self._initialize_dataset_properties(enable_logging, timestamp_boundary_list)
 
         # set shuffling to true or false
         self.shuffle = True if train else False
@@ -170,7 +175,27 @@ class GeneralES(object):
         # datetime logic
         self.date_fn = np.vectorize(get_date_from_timestamp)
 
-        return
+    def _generate_indexlist(self, timestamp_boundary_list):
+        # get list of all indices:
+        self.indices_full = np.arange(self.samples_start, self.samples_end)
+
+        dt_total = self.dhours * self.dt
+        if timestamp_boundary_list:
+            #compute list of allowed timestamps
+            timestamp_boundary_list = [get_date_from_string(timestamp_string) for timestamp_string in timestamp_boundary_list]
+           
+            # now, based on dt, dh, n_history and n_future, we can build regions where no data is allowed
+            timestamp_exclusion_list = get_date_ranges(timestamp_boundary_list, lookback_hours = dt_total * (self.n_future + 1), lookahead_hours = dt_total * self.n_history)
+
+            # now, check which of the timestamps fall within these excluded ranges
+            range_fn = np.vectorize(lambda date: not any(date >= exclusion_range[0] and date < exclusion_range[1] for exclusion_range in timestamp_exclusion_list))
+            timestamps_selected = np.array(self.timestamps)[self.indices_full]
+            good_indices = np.vectorize(range_fn)(timestamps_selected)
+
+            # update indices with good indices
+            self.indices_select = self.indices_full[good_indices]
+        else:
+            self.indices_select = self.indices_full.copy()
 
     def _reorder_channels(self, inp, tar):
         # reorder data if requested:
@@ -197,18 +222,35 @@ class GeneralES(object):
             fopen_handle = partial(h5py.File, mode="r", driver=self.file_driver, **self.file_driver_kwargs)
 
         self.n_samples_year = []
+        self.timestamps = []
         with fopen_handle(self.files_paths[0]) as _f:
             if enable_logging:
                 logging.info("Getting file stats from {}".format(self.files_paths[0]))
             # original image shape (before padding)
-            self.img_shape = _f[self.dataset_path].shape[2:4]
-            self.total_channels = _f[self.dataset_path].shape[1]
-            self.n_samples_year.append(_f[self.dataset_path].shape[0])
+            dset = _f[self.dataset_path]
+            self.img_shape = dset.shape[2:4]
+            self.total_channels = dset.shape[1]
+            self.n_samples_year.append(dset.shape[0])
+            # read timestamps
+            if "timestamp" in dset.dims[0]:
+                self.timestamps.append(self.timezone_fn(dset.dims[0]["timestamp"][...]))
+            else:
+                timestamps = np.asarray([get_timestamp(self.years[0], hour=(idx * self.dhours)).timestamp() for idx in range(0, dset.shape[0], self.dhours)])
+                self.timestamps.append(self.timezone_fn(timestamps))
 
         # get all sample counts
-        for filename in self.files_paths[1:]:
+        for idf, filename in enumerate(self.files_paths[1:], start=1):
             with fopen_handle(filename) as _f:
-                self.n_samples_year.append(_f[self.dataset_path].shape[0])
+                dset = _f[self.dataset_path]
+                self.n_samples_year.append(dset.shape[0])
+                # read timestamps
+                if "timestamp" in dset.dims[0]:
+                    self.timestamps.append(self.timezone_fn(dset.dims[0]["timestamp"][...]))
+                else:
+                    timestamps = np.asarray([get_timestamp(self.years[idf], hour=(idx * self.dhours)).timestamp() for idx in range(0, dset.shape[0], self.dhours)])
+                    self.timestamps.append(self.timezone_fn(timestamps))
+
+        self.timestamps = np.concatenate(self.timestamps, axis=0)
 
         return
 
@@ -302,19 +344,19 @@ class GeneralES(object):
     def _get_files_stats(self, enable_logging):
         # check for hdf5 files
         self.files_paths = []
-        self.location = [self.location] if not isinstance(self.location, list) else self.location
+        self.location = self.location if isinstance(self.location, list) else [self.location]
 
         if not self.enable_s3:
             # check if we are dealing with hdf5 or zarr files
             for location in self.location:
-                self.files_paths = self.files_paths + glob.glob(os.path.join(location, "????.h5"))
+                self.files_paths += glob.glob(os.path.join(location, "????.h5"))
 
             # check for zarr files if no hdf5 files are found
             if self.files_paths:
                 self.file_format = "h5"
             else:
                 for location in self.location:
-                    self.files_paths = self.files_paths + glob.glob(os.path.join(location, "????.zarr"))
+                    self.files_paths += glob.glob(os.path.join(location, "????.zarr"))
                 if self.files_paths:
                     self.file_format = "zarr"
         else:
@@ -343,12 +385,13 @@ class GeneralES(object):
         # get stats
         self.n_years = len(self.files_paths)
 
-        # get stats from first file
+        # get stats from all files
         if self.file_format == "h5":
             self._get_stats_h5(enable_logging)
         else:
             self._get_stats_zarr(enable_logging)
 
+    def _initialize_dataset_properties(self, enable_logging, timestamp_boundary_list):
         # determine local read size:
         # sanitize the crops first
         if self.crop_size[0] is None:
@@ -367,22 +410,41 @@ class GeneralES(object):
         read_anchor_y = self.crop_anchor[1] + sum(split_shapes_y[: self.io_rank[1]])
         self.read_anchor = [read_anchor_x, read_anchor_y]
         self.read_shape = [read_shape_x, read_shape_y]
+        self.return_shape = self.read_shape
 
         # do some sample indexing gymnastics
         self.year_offsets = list(accumulate(self.n_samples_year, operator.add))[:-1]
         self.year_offsets.insert(0, 0)
         self.n_samples_available = sum(self.n_samples_year)
+
+        # do some sample indexing gymnastics
         if self.max_samples is not None:
-            self.n_samples_total = min(self.n_samples_available, self.max_samples)
+            n_samples_total_tmp = min(self.n_samples_available, self.max_samples)
         else:
-            self.n_samples_total = self.n_samples_available
+            n_samples_total_tmp = self.n_samples_available
+
+        # compute global offset
+        if self.truncate_old:
+            self.samples_start = max(self.dt * self.n_history, self.n_samples_available - n_samples_total_tmp - self.dt * (self.n_future + 1) - 1)
+            self.samples_end = min(self.samples_start + n_samples_total_tmp, self.n_samples_available) - self.dt * (self.n_future + 1)
+        else:
+            self.samples_start = self.dt * self.n_history
+            self.samples_end = min(self.samples_start + n_samples_total_tmp, self.n_samples_available) - self.dt * (self.n_future + 1)
+
+        # create an unshuffled list of valid indices:
+        self._generate_indexlist(timestamp_boundary_list)
+
+        # some sanity checks
+        min_sample_idx = self.indices_select.min()
+        max_sample_idx = self.indices_select.max()
+        if ( (min_sample_idx < self.dt * self.n_history) or (max_sample_idx >= (self.n_samples_available - self.dt * (self.n_future + 1))) ):
+            raise IndexError(f"Sample index {min_sample_idx} or {max_sample_idx} is out of bounds [{self.dt * self.n_history}, {self.n_samples_available - self.dt * (self.n_future + 1)}). Please check your index list.")
+
+        # update the actual total count with the actual number of included
+        self.n_samples_total = self.indices_select.shape[0]
 
         # do the sharding
         self.n_samples_shard = self.n_samples_total // self.num_shards
-        if self.truncate_old:
-            self.n_samples_offset = max(self.dt * self.n_history, self.n_samples_available - self.n_samples_total - self.dt * (self.n_future + 1) - 1)
-        else:
-            self.n_samples_offset = self.dt * self.n_history
 
         # number of steps per epoch
         self.num_steps_per_cycle = self.n_samples_shard // self.batch_size
@@ -399,8 +461,8 @@ class GeneralES(object):
         if enable_logging:
             logging.info("Average number of samples per year: {:.1f}".format(float(self.n_samples_total) / float(self.n_years)))
             logging.info(
-                "Found data at path {}. Number of examples: {}. Full image Shape: {} x {} x {}. Read Shape: {} x {} x {}".format(
-                    self.location, self.n_samples_available, self.img_shape[0], self.img_shape[1], self.total_channels, self.read_shape[0], self.read_shape[1], self.n_in_channels
+                "Found data at path {}. Number of examples: {} (distributed over {} files). Full image Shape: {} x {} x {}. Read Shape: {} x {} x {}".format(
+                    self.location, self.n_samples_available, len(self.files_paths), self.img_shape[0], self.img_shape[1], self.total_channels, self.read_shape[0], self.read_shape[1], self.n_in_channels
                 )
             )
             logging.info(
@@ -408,7 +470,7 @@ class GeneralES(object):
                     self.n_samples_total, self.n_samples_per_epoch, self.num_steps_per_epoch, self.num_shards, self.batch_size
                 )
             )
-            start_lidx, start_yidx = self._get_local_year_index_from_global_index(self.n_samples_offset)
+            start_lidx, start_yidx = self._get_local_year_index_from_global_index(self.samples_start)
             end_lidx, end_yidx = self._get_local_year_index_from_global_index(self.n_samples_available-1)
             start_date = get_timestamp(self.years[start_yidx], hour=(start_lidx * self.dhours))
             end_date = get_timestamp(self.years[end_yidx], hour=(end_lidx * self.dhours))
@@ -517,9 +579,9 @@ class GeneralES(object):
 
             # shufle if requested
             if self.shuffle:
-                self.index_permutation = self.n_samples_offset + rng.permutation(self.n_samples_total)
+                self.index_permutation = rng.permutation(self.indices_select)
             else:
-                self.index_permutation = self.n_samples_offset + np.arange(self.n_samples_total)
+                self.index_permutation = self.indices_select.copy()
 
             # shard the data
             start = self.n_samples_shard * self.shard_id
@@ -531,11 +593,8 @@ class GeneralES(object):
         local_idx, year_idx = self._get_local_year_index_from_global_index(sample_idx)
 
         # if we are not at least self.dt*n_history timesteps into the prediction
-        if local_idx < self.dt * self.n_history:
-            local_idx += self.dt * self.n_history
-
-        if local_idx >= (self.n_samples_year[year_idx] - self.dt * (self.n_future + 1)):
-            local_idx = self.n_samples_year[year_idx] - self.dt * (self.n_future + 1) - 1
+        local_idx = max(local_idx, self.dt * self.n_history)
+        local_idx = min(local_idx, self.n_samples_year[year_idx] - self.dt * (self.n_future + 1) - 1)
 
         if self.files[year_idx] is None:
 
