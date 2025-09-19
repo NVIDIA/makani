@@ -19,8 +19,7 @@ import os
 import numpy as np
 import h5py
 import logging
-from itertools import groupby, accumulate
-from bisect import bisect_right
+from itertools import groupby
 
 # for nvtx annotation
 import torch
