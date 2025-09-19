@@ -145,6 +145,14 @@ class ModelWrapper(torch.nn.Module):
     def timestep(self):
         return self.params.dt * self.params.dhours
 
+    def update_state(self, replace_state=True):
+        self.model.preprocessor.update_internal_state(replace_state=replace_state)
+        return
+    
+    def set_rng(self, reset=True, seed=333):
+        self.model.preprocessor.set_rng(reset=reset, seed=seed)
+        return
+        
     def forward(self, x, time, normalized_data=True, replace_state=None):
         if not normalized_data:
             x = (x - self.in_bias) / self.in_scale
