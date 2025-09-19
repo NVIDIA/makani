@@ -381,8 +381,6 @@ class DiffusionNoiseS2(BaseNoiseS2):
     # this routine generates a noise sample for a single time step and updates the state accordingly, by appending the last time step
     def update(self, replace_state=False, batch_size=None):
 
-        print("Inside update, replace_state: ", replace_state, " batch_size: ", batch_size)
-
         # create single occurence
         with torch.no_grad():
             with torch.amp.autocast(device_type="cuda", enabled=False):
@@ -427,9 +425,6 @@ class DiffusionNoiseS2(BaseNoiseS2):
         return
 
     def forward(self, update_internal_state=False):
-
-        print("state shape: ", self.state.shape)
-        print("parameters: ", self.num_time_steps, self.num_channels, self.lmax_local, self.mmax_local)
 
         # combine channels and time:
         cstate = torch.view_as_complex(self.state)
