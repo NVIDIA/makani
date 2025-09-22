@@ -96,6 +96,15 @@ def get_timestamp(year, hour):
     # compute offset
     return jan_01_epoch + dt.timedelta(hours=hour)
 
+# this is a small helper to convert datetime to correct time zone
+def get_date_from_string(isostring):
+    date = dt.datetime.fromisoformat(isostring)
+    try:
+        date = date.astimezone(dt.timezone.utc)
+    except:
+        date = date.replace(tzinfo=dt.timezone.utc)
+
+    return date
 
 def get_date_from_timestamp(timestamp):
     return dt.datetime.fromtimestamp(timestamp, tz=dt.timezone.utc)
@@ -111,3 +120,7 @@ def get_default_aws_connector(aws_session_token):
         aws_endpoint_url=os.getenv("AWS_ENDPOINT_URL"),
         aws_session_token=aws_session_token,
     )
+
+def get_date_ranges(dates, lookback_hours: int, lookahead_hours: int):
+    time_ranges = [((date - dt.timedelta(hours=lookback_hours)), (date + dt.timedelta(hours=lookahead_hours))) for date in dates]
+    return time_ranges

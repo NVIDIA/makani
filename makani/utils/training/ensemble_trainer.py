@@ -480,7 +480,6 @@ class EnsembleTrainer(Trainer):
 
         return
 
-
     def _ensemble_step(self, inp: torch.Tensor, tar: torch.Tensor):
         predlist = []
         for _ in range(self.params.local_ensemble_size):
@@ -495,7 +494,6 @@ class EnsembleTrainer(Trainer):
         loss = self.loss_obj(pred, tar)
 
         return pred, loss
-
 
     def train_one_epoch(self, profiler=None):
         self.epoch += 1
@@ -603,6 +601,13 @@ class EnsembleTrainer(Trainer):
 
         return train_time, total_data_gb, logs
 
+    def _initialize_noise_states(self):
+        noise_states = []
+        for _ in range(self.params.local_ensemble_size):
+            self.preprocessor.update_internal_state(replace_state=True)
+            noise_states.append(self.preprocessor.get_internal_state(tensor=True))
+        return noise_states
+
     def validate_one_epoch(self, epoch, profiler=None):
         # set to eval
         self._set_eval()
@@ -647,8 +652,11 @@ class EnsembleTrainer(Trainer):
 
                     # do autoregression for each ensemble member individually
                     # do the rollout
-                    noise_states = [None for _ in range(self.params.local_ensemble_size)]
+                    # initialize the noise states with random seeds:
+                    noise_states = self._initialize_noise_states()
                     inptlist = [inp.clone() for _ in range(self.params.local_ensemble_size)]
+
+                    # loop over lead times
                     for idt, targ in enumerate(tarlist):
 
                         # flatten history of the target
@@ -658,22 +666,27 @@ class EnsembleTrainer(Trainer):
                         predlist = []
 
                         with amp.autocast(device_type="cuda", enabled=self.amp_enabled, dtype=self.amp_dtype):
+                            # loop over local ensemble members
                             for e in range(self.params.local_ensemble_size):
                                 # retrieve input
                                 inpt = inptlist[e]
 
-                                # restore noise state
-                                if (self.params.local_ensemble_size > 1) and (noise_states[e] is not None):
+                                # this is different, depending on local ensemble size
+                                if self.params.local_ensemble_size > 1:
                                     # recover correct state
                                     self.preprocessor.set_internal_state(noise_states[e])
 
-                                # forward pass
-                                pred = self.model_eval(inpt)
-                                predlist.append(pred)
+                                    # forward pass: never replace state since we do that manually
+                                    pred = self.model_eval(inpt, update_state=(idt!=0), replace_state=False)
 
-                                # store new state
-                                if self.params.local_ensemble_size > 1:
+                                    # store new state
                                     noise_states[e] = self.preprocessor.get_internal_state(tensor=True)
+                                else:
+                                    # forward pass: replace state if this is the first step of the rollout
+                                    pred = self.model_eval(inpt, update_state=True, replace_state=(idt==0))
+
+                                # concatenate predictions
+                                predlist.append(pred)
 
                                 # append input to prediction
                                 last_member = e == self.params.local_ensemble_size - 1

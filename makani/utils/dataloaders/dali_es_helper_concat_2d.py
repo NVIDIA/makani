@@ -18,17 +18,14 @@ import sys
 import os
 import numpy as np
 import h5py
-import zarr
 import logging
-from itertools import groupby, accumulate
-import operator
-from bisect import bisect_right
+from itertools import groupby
 
 # for nvtx annotation
 import torch
 
 # we need this for the zenith angle feature
-from .data_helpers import get_timestamp, get_date_from_timestamp
+from .data_helpers import get_date_from_string, get_date_from_timestamp, get_date_ranges
 
 # import splitting logic
 from physicsnemo.distributed.utils import compute_split_shapes
@@ -74,6 +71,7 @@ class GeneralConcatES(object):
         enable_s3=False,
         seed=333,
         is_parallel=True,
+        timestamp_boundary_list=[],
     ):
         self.batch_size = batch_size
         self.location = location
@@ -129,7 +127,8 @@ class GeneralConcatES(object):
         self.timezone_fn = np.vectorize(get_date_from_timestamp)
 
         # parse the files
-        self._get_files_stats(enable_logging)
+        self._get_files_stats()
+        self._initialize_dataset_properties(enable_logging, timestamp_boundary_list)
         self.shuffle = True if train else False
 
         # convert in_channels to list of slices:
@@ -138,10 +137,8 @@ class GeneralConcatES(object):
 
         # we need some additional static fields in this case
         if self.lat_lon is None:
-            resolution = 360.0 / float(self.img_shape[1])
-            longitude = np.arange(0, 360, resolution)
-            latitude = np.arange(-90, 90 + resolution, resolution)
-            latitude = latitude[::-1]
+            latitude = np.linspace(90, -90, self.img_shape[0], endpoint=True)
+            longitude = np.linspace(0, 360, self.img_shape[1], endpoint=False)
             self.lat_lon = (latitude.tolist(), longitude.tolist())
 
         latitude = np.array(self.lat_lon[0])
@@ -153,6 +150,28 @@ class GeneralConcatES(object):
             latitude[self.read_anchor[0] : self.read_anchor[0] + self.read_shape[0]].tolist(),
             longitude[self.read_anchor[1] : self.read_anchor[1] + self.read_shape[1]].tolist(),
         )
+
+    def _generate_indexlist(self, timestamp_boundary_list):
+        # get list of all indices:
+        self.indices_full = np.arange(self.samples_start, self.samples_end)
+
+        dt_total = self.dhours * self.dt
+        if timestamp_boundary_list:
+            #compute list of allowed timestamps
+            timestamp_boundary_list = [get_date_from_string(timestamp_string) for timestamp_string in timestamp_boundary_list]
+           
+            # now, based on dt, dh, n_history and n_future, we can build regions where no data is allowed
+            timestamp_exclusion_list = get_date_ranges(timestamp_boundary_list, lookback_hours = dt_total * (self.n_future + 1), lookahead_hours = dt_total * self.n_history)
+
+            # now, check which of the timestamps fall within these excluded ranges
+            range_fn = np.vectorize(lambda date: not any(date >= exclusion_range[0] and date < exclusion_range[1] for exclusion_range in timestamp_exclusion_list))
+            timestamps_selected = np.array(self.timestamps)[self.indices_full]
+            good_indices = np.vectorize(range_fn)(timestamps_selected)
+
+            # update indices with good indices
+            self.indices_select = self.indices_full[good_indices]
+        else:
+            self.indices_select = self.indices_full.copy()
 
     def _reorder_channels(self, inp, tar):
         # reorder data if requested:
@@ -184,7 +203,7 @@ class GeneralConcatES(object):
                           slice_in, start_x:end_x, start_y:end_y],
                     np.s_[:, start:end, ...])
             else:
-                self.inp_buff[:, start:end, ...] = dset[(local_idx - self.dt * self.n_history) : (local_idx + 1) : self.dt,
+                self.inp_buff[:, start:end, ...] = dset[(sample_idx - self.dt * self.n_history) : (sample_idx + 1) : self.dt,
                                                         slice_in, start_x:end_x, start_y:end_y]
 
             # update offset
@@ -204,7 +223,7 @@ class GeneralConcatES(object):
                     np.s_[:, start:end, ...],
                 )
             else:
-                self.tar_buff[:, start:end, ...] = dset[(local_idx + self.dt) : (local_idx + self.dt * (self.n_future + 1) + 1) : self.dt, slice_out, start_x:end_x, start_y:end_y]
+                self.tar_buff[:, start:end, ...] = dset[(sample_idx + self.dt) : (sample_idx + self.dt * (self.n_future + 1) + 1) : self.dt, slice_out, start_x:end_x, start_y:end_y]
 
             # update offset
             off = end
@@ -214,7 +233,7 @@ class GeneralConcatES(object):
 
         return inp, tar
 
-    def _get_files_stats(self, enable_logging):
+    def _get_files_stats(self):
         # check for h5v file
         self.file_path = self.location
         self.file_format = "h5"
@@ -242,6 +261,7 @@ class GeneralConcatES(object):
             self.total_channels = dset.shape[1]
             self.n_samples_available = dset.shape[0]
 
+    def _initialize_dataset_properties(self, enable_logging, timestamp_boundary_list):
         # determine local read size:
         # sanitize the crops first
         if self.crop_size[0] is None:
@@ -260,19 +280,36 @@ class GeneralConcatES(object):
         read_anchor_y = self.crop_anchor[1] + sum(split_shapes_y[: self.io_rank[1]])
         self.read_anchor = [read_anchor_x, read_anchor_y]
         self.read_shape = [read_shape_x, read_shape_y]
+        self.return_shape = self.read_shape
 
         # do some sample indexing gymnastics
         if self.max_samples is not None:
-            self.n_samples_total = min(self.n_samples_available, self.max_samples)
+            n_samples_total_tmp = min(self.n_samples_available, self.max_samples)
         else:
-            self.n_samples_total = self.n_samples_available
+            n_samples_total_tmp = self.n_samples_available
 
-        # do the sharding
-        self.n_samples_shard = self.n_samples_total // self.num_shards
+        # compute global offset
         if self.truncate_old:
-            self.n_samples_offset = max(self.dt * self.n_history, self.n_samples_available - self.n_samples_total - self.dt * (self.n_future + 1) - 1)
+            self.samples_start = max(self.dt * self.n_history, self.n_samples_available - n_samples_total_tmp - self.dt * (self.n_future + 1) - 1)
+            self.samples_end = min(self.samples_start + n_samples_total_tmp, self.n_samples_available) - self.dt * (self.n_future + 1)
         else:
-            self.n_samples_offset = self.dt * self.n_history
+            self.samples_start = self.dt * self.n_history
+            self.samples_end = min(self.samples_start + n_samples_total_tmp, self.n_samples_available) - self.dt * (self.n_future + 1)
+
+        # create an unshuffled list of valid indices:
+        self._generate_indexlist(timestamp_boundary_list)
+
+        # some sanity checks
+        min_sample_idx = self.indices_select.min()
+        max_sample_idx = self.indices_select.max()
+        if ( (min_sample_idx < self.dt * self.n_history) or (max_sample_idx >= (self.n_samples_available - self.dt * (self.n_future + 1))) ):
+            raise IndexError(f"Sample index {min_sample_idx} or {max_sample_idx} is out of bounds [{self.dt * self.n_history}, {self.n_samples_available - self.dt * (self.n_future + 1)}). Please check your index list.")
+
+        # update the actual total count with the actual number of included
+        self.n_samples_total = self.indices_select.shape[0]
+
+        # now do the sharding
+        self.n_samples_shard = self.n_samples_total // self.num_shards
 
         # number of steps per epoch
         self.num_steps_per_cycle = self.n_samples_shard // self.batch_size
@@ -283,9 +320,10 @@ class GeneralConcatES(object):
         # we need those here
         self.num_samples_per_cycle_shard = self.num_steps_per_cycle * self.batch_size
         self.num_samples_per_epoch_shard = self.num_steps_per_epoch * self.batch_size
+
         # prepare file lists
         if enable_logging:
-            logging.info("Average number of samples per year: {:.1f}".format(float(self.n_samples_total) / float(self.n_years)))
+            logging.info("Average number of included samples per year: {:.1f}".format(float(self.n_samples_total) / float(self.n_years)))
             logging.info(
                 "Found data at path {}. Number of examples: {}. Full image Shape: {} x {} x {}. Read Shape: {} x {} x {}".format(
                     self.location, self.n_samples_available, self.img_shape[0], self.img_shape[1], self.total_channels, self.read_shape[0], self.read_shape[1], self.n_in_channels
@@ -296,7 +334,7 @@ class GeneralConcatES(object):
                     self.n_samples_total, self.n_samples_per_epoch, self.num_steps_per_epoch, self.num_shards, self.batch_size
                 )
             )
-            start_date = self.timestamps[self.n_samples_offset]
+            start_date = self.timestamps[self.samples_start]
             end_date = self.timestamps[self.n_samples_available-1]
             logging.info(f"Date range for data set: {start_date} to {end_date}.")
             logging.info("Delta t: {} hours".format(self.dhours * self.dt))
@@ -390,9 +428,9 @@ class GeneralConcatES(object):
 
             # shufle if requested
             if self.shuffle:
-                self.index_permutation = self.n_samples_offset + rng.permutation(self.n_samples_total)
+                self.index_permutation = rng.permutation(self.indices_select)
             else:
-                self.index_permutation = self.n_samples_offset + np.arange(self.n_samples_total)
+                self.index_permutation = self.indices_select.copy()
 
             # shard the data
             start = self.n_samples_shard * self.shard_id
@@ -401,13 +439,6 @@ class GeneralConcatES(object):
 
         # compute sample idx
         sample_idx = self.index_permutation[cycle_sample_idx]
-
-        # if we are not at least self.dt*n_history timesteps into the prediction
-        if sample_idx < self.dt * self.n_history:
-            sample_idx += self.dt * self.n_history
-
-        if sample_idx >= (self.n_samples_available - self.dt * (self.n_future + 1)):
-            sample_idx = self.n_samples_available - self.dt * (self.n_future + 1) - 1
 
         # load slice of data:
         start_x = self.read_anchor[0]

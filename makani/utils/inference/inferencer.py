@@ -28,9 +28,6 @@ import torch.distributed as dist
 import torch.amp as amp
 import torch.utils.data as tud
 
-import logging
-import wandb
-
 from makani.utils.driver import Driver
 from makani.utils import LossHandler, MetricsHandler
 from makani.utils.dataloader import get_dataloader
@@ -42,10 +39,10 @@ from makani.models import model_registry
 
 # distributed computing stuff
 from makani.utils import comm
-from makani.utils import visualize
+from makani.utils.dataloaders.data_helpers import get_date_from_string
 
 # inference specific stuff
-from makani.utils.inference.helpers import split_list, SortedIndexSampler, date_helper, translate_date_sampler_to_timedelta_sampler
+from makani.utils.inference.helpers import split_list, SortedIndexSampler, translate_date_sampler_to_timedelta_sampler
 from makani.utils.inference.rollout_buffer import RolloutBuffer, TemporalAverageBuffer, SpectrumAverageBuffer, ZonalSpectrumAverageBuffer
 
 # checkpoint helpers
@@ -449,6 +446,13 @@ class Inferencer(Driver):
 
         return logs
 
+    def _initialize_noise_states(self):
+        noise_states = []
+        for _ in range(self.params.local_ensemble_size):
+            self.preprocessor.update_internal_state(replace_state=True)
+            noise_states.append(self.preprocessor.get_internal_state(tensor=True))
+        return noise_states
+
     def _inference_indexlist(
         self,
         indices: Union[List[int], torch.Tensor],
@@ -511,7 +515,7 @@ class Inferencer(Driver):
             climatology_iterator = iter(self.climatology_dataloader)
 
         # create loader for the full epoch
-        noise_states = None
+        noise_states = []
         inptlist = None
         idt = 0
         with torch.inference_mode():
@@ -568,7 +572,7 @@ class Inferencer(Driver):
                         self.preprocessor.update_internal_state(replace_state=True, batch_size=inp.shape[0])
 
                         # reset noise states and input list
-                        noise_states = [None for _ in range(self.params.local_ensemble_size)]
+                        noise_states = self._initialize_noise_states()
                         inptlist = [inp.clone() for _ in range(self.params.local_ensemble_size)]
 
                         if rollout_buffer is not None:
@@ -598,17 +602,22 @@ class Inferencer(Driver):
                                 # retrieve input
                                 inpt = inptlist[e]
 
-                                # restore noise state
-                                if (self.params.local_ensemble_size > 1) and (noise_states[e] is not None):
+                                # this is different, depending on local ensemble size
+                                if (self.params.local_ensemble_size > 1):
+                                    # restore noise belonging to this ensemble member
                                     self.preprocessor.set_internal_state(noise_states[e])
 
-                                # forward pass
-                                pred = self.model(inpt)
-                                predlist.append(pred)
+                                    # forward pass: never replace state since we do that manually
+                                    pred = self.model(inpt, update_state=(idte!=0), replace_state=False)
 
-                                # store new state
-                                if self.params.local_ensemble_size > 1:
+                                    # store new state
                                     noise_states[e] = self.preprocessor.get_internal_state(tensor=True)
+                                else:
+                                    # forward pass: replace state if this is the first step of the rollout
+                                    pred = self.model(inpt, update_state=True, replace_state=(idte==0))
+
+                                # concatenate predictions
+                                predlist.append(pred)
 
                                 # append input to prediction and get the new unpredicted features. idt is 0 here as there is always only one target
                                 last_member = e == self.params.local_ensemble_size - 1
@@ -762,10 +771,10 @@ class Inferencer(Driver):
 
         # check if a date range is specified:
         if start_date is not None:
-            start_date = date_helper(start_date)
+            start_date = get_date_from_string(start_date)
 
         if end_date is not None:
-            end_date = date_helper(end_date)
+            end_date = get_date_from_string(end_date)
 
         # now check if the dates are within dataset range:
         if start_date is not None:

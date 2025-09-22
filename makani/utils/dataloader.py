@@ -170,8 +170,8 @@ def get_dataloader(params, files_pattern, device, mode="train"):
             img_crop_shape_y=dataloader.crop_shape[1],
             img_crop_offset_x=dataloader.crop_anchor[0],
             img_crop_offset_y=dataloader.crop_anchor[1],
-            img_local_shape_x=dataloader.read_shape[0],
-            img_local_shape_y=dataloader.read_shape[1],
+            img_local_shape_x=dataloader.return_shape[0],
+            img_local_shape_y=dataloader.return_shape[1],
             img_local_offset_x=dataloader.read_anchor[0],
             img_local_offset_y=dataloader.read_anchor[1],
         )
