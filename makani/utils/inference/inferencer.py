@@ -446,11 +446,10 @@ class Inferencer(Driver):
 
         return logs
 
-    def _initialize_noise_states(self, seed_offset=666):
+    def _initialize_noise_states(self):
         noise_states = []
-        for ide in range(self.params.local_ensemble_size):
-            member_seed = seed_offset + self.preprocessor.get_base_seed(default=333) * ide
-            self.preprocessor.set_rng(seed=member_seed, reset=True)
+        for _ in range(self.params.local_ensemble_size):
+            self.preprocessor.update_internal_state(replace_state=True)
             noise_states.append(self.preprocessor.get_internal_state(tensor=True))
         return noise_states
 
@@ -516,7 +515,7 @@ class Inferencer(Driver):
             climatology_iterator = iter(self.climatology_dataloader)
 
         # create loader for the full epoch
-        noise_states = self._initialize_noise_states()
+        noise_states = []
         inptlist = None
         idt = 0
         with torch.inference_mode():
@@ -573,7 +572,7 @@ class Inferencer(Driver):
                         self.preprocessor.update_internal_state(replace_state=True, batch_size=inp.shape[0])
 
                         # reset noise states and input list
-                        noise_states = self._initialize_noise_states(seed_offset=idt)
+                        noise_states = self._initialize_noise_states()
                         inptlist = [inp.clone() for _ in range(self.params.local_ensemble_size)]
 
                         if rollout_buffer is not None:
@@ -603,17 +602,22 @@ class Inferencer(Driver):
                                 # retrieve input
                                 inpt = inptlist[e]
 
-                                # restore noise state
+                                # this is different, depending on local ensemble size
                                 if (self.params.local_ensemble_size > 1):
+                                    # restore noise belonging to this ensemble member
                                     self.preprocessor.set_internal_state(noise_states[e])
 
-                                # forward pass
-                                pred = self.model(inpt)
-                                predlist.append(pred)
+                                    # forward pass: never replace state since we do that manually
+                                    pred = self.model(inpt, update_state=(idte!=0), replace_state=False)
 
-                                # store new state
-                                if self.params.local_ensemble_size > 1:
+                                    # store new state
                                     noise_states[e] = self.preprocessor.get_internal_state(tensor=True)
+                                else:
+                                    # forward pass: replace state if this is the first step of the rollout
+                                    pred = self.model(inpt, update_state=True, replace_state=(idte==0))
+
+                                # concatenate predictions
+                                predlist.append(pred)
 
                                 # append input to prediction and get the new unpredicted features. idt is 0 here as there is always only one target
                                 last_member = e == self.params.local_ensemble_size - 1

@@ -25,9 +25,10 @@ class SingleStepWrapper(nn.Module):
         self.preprocessor = Preprocessor2D(params)
         self.model = model_handle()
 
-    def forward(self, inp, replace_state=True):
+    def forward(self, inp, update_state=True, replace_state=True):
         # update internal state
-        self.preprocessor.update_internal_state(replace_state=replace_state)
+        if update_state:
+            self.preprocessor.update_internal_state(replace_state=replace_state)
 
         # append unpredicted features
         inpa = self.preprocessor.append_unpredicted_features(inp)
@@ -65,12 +66,13 @@ class MultiStepWrapper(nn.Module):
         # collect parameters for history
         self.n_future = params.n_future
 
-    def _forward_train(self, inp):
+    def _forward_train(self, inp, update_state=True, replace_state=True):
         result = []
         inpt = inp
 
-        # initialize fresh buffer
-        self.preprocessor.update_internal_state(replace_state=True)
+        # initialize fresh buffer: decide whether we want to replace the state
+        if update_state:
+            self.preprocessor.update_internal_state(replace_state=replace_state)
 
         # do the rollout
         for step in range(self.n_future + 1):
@@ -120,9 +122,10 @@ class MultiStepWrapper(nn.Module):
 
         return result
 
-    def _forward_eval(self, inp):
+    def _forward_eval(self, inp, update_state=True, replace_state=True):
         # update internal state
-        self.preprocessor.update_internal_state(replace_state=True)
+        if update_state:
+            self.preprocessor.update_internal_state(replace_state=replace_state)
 
         # first append unpredicted features
         inpa = self.preprocessor.append_unpredicted_features(inp)
@@ -150,11 +153,11 @@ class MultiStepWrapper(nn.Module):
 
         return y
 
-    def forward(self, inp):
+    def forward(self, inp, replace_state=True):
         # decide which routine to call
         if self.training:
-            y = self._forward_train(inp)
+            y = self._forward_train(inp, update_state=True, replace_state=replace_state)
         else:
-            y = self._forward_eval(inp)
+            y = self._forward_eval(inp, update_state=True, replace_state=replace_state)
 
         return y
