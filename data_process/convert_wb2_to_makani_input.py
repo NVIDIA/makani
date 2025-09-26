@@ -40,6 +40,7 @@ from wb2_helpers import surface_variables, atmospheric_variables, split_convert_
 
 def convert(input_file: str, output_dir: str, metadata_file: str, years: List[int],
             batch_size: Optional[int]=32, entry_key: Optional[str]='fields',
+            force_overwrite: Optional[bool]=False,
             skip_missing: Optional[bool]=False, verbose: Optional[bool]=False):
 
     """Function to convert ARCO-ERA5 data (used by Weatherbench 2) to makani format.
@@ -71,6 +72,8 @@ def convert(input_file: str, output_dir: str, metadata_file: str, years: List[in
         is merely a performance setting. Bigger batches are more efficient but require more memory.
     entry_key: str
         This is the HDF5 dataset name of the data in the files. Defaults to "fields".
+    force_overwrite: bool
+        Setting this flag to True will overwrite existing files.
     skip_missing: bool
         Setting this flag to True will skip missing data instead of failing.
     verbose : bool
@@ -137,7 +140,19 @@ def convert(input_file: str, output_dir: str, metadata_file: str, years: List[in
         # helper arrays:
         timestamps = np.array([t.timestamp() for t in times], dtype=np.float64)
 
+        comm.Barrier()
         ofile = os.path.join(output_dir, f"{year}.h5")
+        file_exists = False
+        if comm_rank == 0:
+            file_exists = os.path.isfile(ofile)
+        file_exists = comm.bcast(file_exists, root=0)
+        if  file_exists and not force_overwrite:
+            if comm_rank == 0:
+                print(f"File {ofile} already exists, skipping.")
+            pbar.update_counter(len(times_local))
+            pbar.update_progress()
+            continue
+
         f = h5.File(ofile, "w", driver="mpio", comm=comm)
         f.create_dataset(entry_key, dataset_shape, dtype=np.float32)
 
@@ -245,6 +260,7 @@ def main(args):
             metadata_file=args.metadata_file,
             years=args.years,
             batch_size=args.batch_size,
+            force_overwrite=args.force_overwrite,
             skip_missing=args.skip_missing,
             verbose=args.verbose)
 
@@ -259,6 +275,7 @@ if __name__ == '__main__':
     parser.add_argument("--years", type=int, nargs='+', help="Which years to convert", required=True)
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size for writing chunks")
     parser.add_argument("--skip_missing", action="store_true", help="Skip missing channels and do not fail")
+    parser.add_argument("--force_overwrite", action="store_true", help="Overwrite existing files")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 

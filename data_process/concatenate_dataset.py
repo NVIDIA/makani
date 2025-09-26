@@ -16,8 +16,7 @@
 import os
 from typing import List, Optional
 import json
-import time
-import pickle
+from itertools import chain, accumulate
 import numpy as np
 import h5py as h5
 import datetime as dt
@@ -25,7 +24,7 @@ import argparse as ap
 from glob import glob
 
 
-def concatenate(input_output_dir: str, output_file: str, metadata: dict,
+def concatenate(input_dirs: List[str], output_file: str, metadata: dict, channel_names: List[str],
                 file_names_to_concatenate: List[str], years: List[int], dhoursrel: Optional[int]=1,
                 entry_key: Optional[str]="fields"):
     """Function to concatenate multiple HDF5 files of an existing makani compatible HDF5 dataset.
@@ -40,11 +39,11 @@ def concatenate(input_output_dir: str, output_file: str, metadata: dict,
 
     Parameters
     ----------
-    input_output_dir: str
-        directory to where the dataset files are located which are to be concatenated. The concatenated dataset will be written to this same directory.
+    input_dir: List[str]
+        directory to where the dataset files are located which are to be concatenated. 
+        Files inside that list will concatenated in time and files from different lists will be concatenated in channel dimension.
     output_file: str
-        file name of the concatenated dataset, has to be different from all the other file names in the directory. To distinguish the file from the others,
-        it is recommended to give it a different suffix, e.g. .h5v instead of .h5.
+        file name of the concatenated dataset, has to include the full path. 
     metadata : dict
         dictionary containing metadata describing the dataset. Most important entries are:
         dhours: distance between subsequent samples in hours
@@ -52,8 +51,10 @@ def concatenate(input_output_dir: str, output_file: str, metadata: dict,
         Example: coords = dict(lat=[-90.0, ..., 90.], lon=[0, ..., 360], channel=["t2m", "u500", "v500", ...])
         Note that the number of entries in coords["lat"] has to match dimension -2 of the dataset, and coords["lon"] dimension -1.
         The length of the channel names has to match dimension -3 (or dimension 1, which is the same) of the dataset.
+    channel_names : List[List[str]]
+        List of list of channel names for each file.
     file_names_to_annotate : List[str]
-        List of filenames to annotate. Has to be the same length as years. File name paths have to be relative to input_output_dir.
+        List of filenames to annotate. Has to be the same length as years. 
     years : int
         List of years, one for each file. For example if the kth file in file_names_to_annotate stores data from year 1990, then
         years[k] = 1990. The datestampts for each entry in the files is computed based on this information and the dhours stamp in the metadata
@@ -65,16 +66,17 @@ def concatenate(input_output_dir: str, output_file: str, metadata: dict,
     """
 
     # ensure that files in file_names_to_concatenate are contained in input_output_dir:
-    for fname in file_names_to_concatenate:
-        ifname = os.path.join(input_output_dir, fname)
-        if not os.path.isfile(ifname):
-            raise FileNotFoundError(f"File {ifname} could not be found. Make sure that file {fname} is contained in the input_output_dir {input_output_dir}")
+    for input_dir in input_dirs:
+        for fname in file_names_to_concatenate:
+            ifname = os.path.join(input_dir, fname)
+            if not os.path.isfile(ifname):
+                raise FileNotFoundError(f"File {ifname} could not be found in {input_dir}.")
 
     # scan all files:
     entries_per_year = []
     entries_per_year_red = []
     for idx, fname in enumerate(file_names_to_concatenate):
-        ifname = os.path.join(input_output_dir, fname)
+        ifname = os.path.join(input_dirs[0], fname)
         with h5.File(ifname, 'r') as f:
             if idx == 0:
                 dataset_shape = f[entry_key].shape
@@ -92,7 +94,7 @@ def concatenate(input_output_dir: str, output_file: str, metadata: dict,
     jan_01_epoch = dt.datetime(years[0], 1, 1, 0, 0, 0, tzinfo=dt.timezone.utc)
     timestamps = []
     for idx, fname in enumerate(file_names_to_concatenate):
-        ifname = os.path.join(input_output_dir, fname)
+        ifname = os.path.join(input_dir, fname)
         try:
             with h5.File(ifname, 'r') as f:
                 ts = f[entry_key].dims[0]["timestamp"][...]
@@ -118,24 +120,27 @@ def concatenate(input_output_dir: str, output_file: str, metadata: dict,
     longitudes = np.array(metadata["coords"]["lon"], dtype=np.float32)
 
     # add channel names
-    channel_names = metadata["coords"]["channel"]
-    chanlen = max([len(v) for v in channel_names])
+    channel_names_flattened = list(chain.from_iterable(channel_names))
+    chanlen = max([len(v) for v in channel_names_flattened])
+    num_channels_total = len(channel_names_flattened)
+    # get the offsets for each channel list:
+    channel_offsets = [0] + list(accumulate([len(cnlist) for cnlist in channel_names]))
 
-    print( f"Combining dataset of size {total_entries} with dhours = {dhours} into single virtual file of size: {(total_entries_red,) + dataset_shape[1:]} for years {years[0]}-{years[-1]} with dhours = {dhours * dhoursrel}." )
+    print( f"Combining dataset of size {total_entries} with dhours = {dhours} into single virtual file of size: {(total_entries_red, num_channels_total) + dataset_shape[2:]} for years {years[0]}-{years[-1]} with dhours = {dhours * dhoursrel}." )
 
     # create virtual layout
-    layout = h5.VirtualLayout(shape=(total_entries_red,) + dataset_shape[1:],
+    layout = h5.VirtualLayout(shape=(total_entries_red, num_channels_total) + dataset_shape[2:],
                               dtype=dataset_dtype)
 
-    with h5.File(os.path.join(input_output_dir, output_file), 'w', libver='latest') as f:
+    with h5.File(os.path.join(output_file), 'w', libver='latest') as f:
         # save timestamps first
         f.create_dataset("timestamp", data=timestamps.astype(np.float64))
         f.create_dataset("lat", data=latitudes)
         f.create_dataset("lon", data=longitudes)
 
         # channels dataset
-        f.create_dataset("channel", len(channel_names), dtype=h5.string_dtype(length=chanlen))
-        f["channel"][...] = channel_names
+        f.create_dataset("channel", num_channels_total, dtype=h5.string_dtype(length=chanlen))
+        f["channel"][...] = channel_names_flattened
 
         # create scales
         f["timestamp"].make_scale("timestamp")
@@ -143,21 +148,27 @@ def concatenate(input_output_dir: str, output_file: str, metadata: dict,
         f["lat"].make_scale("lat")
         f["lon"].make_scale("lon")
 
-        off = 0
+        toff = 0
         for filename, ne, ne_red in zip(file_names_to_concatenate, entries_per_year, entries_per_year_red):
-            # shape
-            shape = (ne,) + dataset_shape[1:]
-            vsource = h5.VirtualSource(filename, entry_key, shape=shape)
-            start = off
-            end = off + ne_red
+            for idc, input_dir in enumerate(input_dirs):
+                # construct full filename
+                filename_full = os.path.join(input_dir, filename)
+                # shape
+                num_channels = len(channel_names[idc])
+                shape = (ne, num_channels) + dataset_shape[2:]
+                vsource = h5.VirtualSource(filename_full, entry_key, shape=shape)
+                tstart = toff
+                tend = toff + ne_red
+                cstart = channel_offsets[idc]
+                cend = channel_offsets[idc+1]
 
-            if dhoursrel > 1:
-                layout[start:end, ...] = vsource[::dhoursrel, ...]
-            else:
-                layout[start:end, ...] = vsource
+                if dhoursrel > 1:
+                    layout[tstart:tend, cstart:cend, ...] = vsource[::dhoursrel, ...]
+                else:
+                    layout[tstart:tend, cstart:cend, ...] = vsource
 
             # increase offset in concatenated file
-            off += ne_red
+            toff += ne_red
 
         f.create_virtual_dataset(entry_key, layout, fillvalue=0)
 
@@ -180,11 +191,23 @@ def concatenate(input_output_dir: str, output_file: str, metadata: dict,
 
 def main(args):
     # get files
-    files = sorted(glob(os.path.join(args.input_output_dir, "*.h5")))
+    files_in_directories = []
+    for input_dir in args.input_dirs:
+        files_in_directories.append(sorted(glob(os.path.join(input_dir, "*.h5"))))
 
     # make sure that years are consecutive
-    years = sorted([int(os.path.splitext(os.path.basename(pname))[0]) for pname in files])
+    years = []
+    for files in files_in_directories:
+        years.append(sorted([int(os.path.splitext(os.path.basename(pname))[0]) for pname in files]))
 
+    # ensure that all input directories contain the same years
+    for yearlist in years[1:]:
+        if yearlist != years[0]:
+            raise ValueError(f"Error, list of years {years[0]} and {yearlist} do not contain the same years! Cannot concatenate dataset.")
+    #since that check is done, we can just take the very first list of years
+    years = years[0]
+
+    # ensure that we have consecutive years present
     start = years[0]
     for y in range(start, start + len(years)):
         if not y in years:
@@ -194,20 +217,41 @@ def main(args):
     files = [str(y) + ".h5" for y in years]
 
     # load metadata:
-    with open(args.dataset_metadata, "r") as f:
-        metadata = json.load(f)
+    metadata_list = []
+    for metadata_file in args.dataset_metadata:
+        with open(metadata_file, "r") as f:
+            metadata = json.load(f)
+            metadata_list.append(metadata)
+
+    # do some sanity checks
+    channels_list = [metadata_list[0]["coords"]["channel"]]
+    for metadata, metadata_file in zip(metadata_list[1:], args.dataset_metadata[1:]):
+        #make sure that those are consistent
+        if metadata["dhours"] != metadata_list[0]["dhours"]:
+            raise ValueError(f"Error, dhours in file {metadata_file} is not the same as in file {args.dataset_metadata[0]}! Cannot concatenate dataset.")
+        if metadata["coords"]["lat"] != metadata_list[0]["coords"]["lat"]:
+            raise ValueError(f"Error, latitudes in file {metadata_file} are not the same as the latitudes in file {args.dataset_metadata[0]}! Cannot concatenate dataset.")
+        if metadata["coords"]["lon"] != metadata_list[0]["coords"]["lon"]:
+            raise ValueError(f"Error, longitudes in file {metadata_file} are not the same as the longitudes in metadata {args.dataset_metadata[0]}! Cannot concatenate dataset.")
+        # make sure that those contain no duplicates
+        channels_list.append(metadata["coords"]["channel"])
+
+    # check for duplicates
+    channels_list_flattened = list(chain.from_iterable(channels_list))
+    if len(channels_list_flattened) != len(set(channels_list_flattened)):
+        raise ValueError(f"Error, channels in files {args.dataset_metadata} contain duplicates! Cannot concatenate dataset.")
 
     # concatenate files with timestamp information
-    concatenate(args.input_output_dir, args.output_file, metadata, files, years, args.dhours_rel)
+    concatenate(args.input_dirs, args.output_file, metadata_list[0], channels_list, files, years, args.dhours_rel)
 
 
 if __name__ == '__main__':
 
     # argparse
     parser = ap.ArgumentParser()
-    parser.add_argument("--dataset_metadata", type=str, help="Input file containing metadata.", required=True)
-    parser.add_argument("--input_output_dir", type=str, help="Directory with input files.", required=True)
-    parser.add_argument("--output_file", type=str, help="Filename for saving virtual file.", required=True)
+    parser.add_argument("--dataset_metadata", type=str, nargs="+", help="Input files containing metadata, one for each input directory specified in input_dirs.", required=True)
+    parser.add_argument("--input_dirs", type=str, nargs="+", help="Directories with input files. Files inside the same directory will be conacted along time dimension, and files from different directories along channel dimension.", required=True)
+    parser.add_argument("--output_file", type=str, help="Filename for saving virtual file. The full path has to be specified.", required=True)
     parser.add_argument("--dhours_rel", type=int, default=1, help="dhours of the output dataset, relative to the input dataset. A value of 1 means the datasets are simply being concatenated, while a value of n > 1 means that every nth sample is taken from the input datasets.")
     args = parser.parse_args()
 
