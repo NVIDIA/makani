@@ -40,7 +40,7 @@ def concatenate(input_dirs: List[str], output_file: str, metadata: dict, channel
     Parameters
     ----------
     input_dir: List[str]
-        directories to where the dataset files are located which are to be concatenated. 
+        List of directories directories in which the dataset files are located which are to be concatenated. 
         Files inside that list will concatenated in time and files from different lists will be concatenated in channel dimension.
     output_file: str
         file name of the concatenated dataset, has to include the full path. 
