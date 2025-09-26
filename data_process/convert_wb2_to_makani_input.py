@@ -40,7 +40,8 @@ from wb2_helpers import surface_variables, atmospheric_variables, split_convert_
 
 def convert(input_file: str, output_dir: str, metadata_file: str, years: List[int],
             batch_size: Optional[int]=32, entry_key: Optional[str]='fields',
-            skip_missing: Optional[bool]=False, verbose: Optional[bool]=False):
+            force_overwrite: Optional[bool]=False, skip_missing_channels: Optional[bool]=False, 
+            impute_missing_timestamps: Optional[bool]=False, verbose: Optional[bool]=False):
 
     """Function to convert ARCO-ERA5 data (used by Weatherbench 2) to makani format.
 
@@ -71,8 +72,12 @@ def convert(input_file: str, output_dir: str, metadata_file: str, years: List[in
         is merely a performance setting. Bigger batches are more efficient but require more memory.
     entry_key: str
         This is the HDF5 dataset name of the data in the files. Defaults to "fields".
-    skip_missing: bool
-        Setting this flag to True will skip missing data instead of failing.
+    force_overwrite: bool
+        Setting this flag to True will overwrite existing files.
+    skip_missing_channels: bool
+        Setting this flag to True will skip missing channels instead of failing.
+    impute_missing_timestamps: bool
+        Setting this flag to True will impute missing timestamps instead of failing.
     verbose : bool
         Enable for more printing.
     """
@@ -137,12 +142,25 @@ def convert(input_file: str, output_dir: str, metadata_file: str, years: List[in
         # helper arrays:
         timestamps = np.array([t.timestamp() for t in times], dtype=np.float64)
 
+        comm.Barrier()
         ofile = os.path.join(output_dir, f"{year}.h5")
+        file_exists = False
+        if comm_rank == 0:
+            file_exists = os.path.isfile(ofile)
+        file_exists = comm.bcast(file_exists, root=0)
+        if  file_exists and not force_overwrite:
+            if comm_rank == 0:
+                print(f"File {ofile} already exists, skipping.")
+            pbar.update_counter(len(times_local))
+            pbar.update_progress()
+            continue
+
         f = h5.File(ofile, "w", driver="mpio", comm=comm)
         f.create_dataset(entry_key, dataset_shape, dtype=np.float32)
 
         # create dimension scales
         # datasets
+        f.create_dataset("valid_data", data=np.ones((len(timestamps),len(channel_names)), dtype=np.int32))
         f.create_dataset("timestamp", data=timestamps)
         f.create_dataset("channel", len(channel_names), dtype=h5.string_dtype(length=chanlen))
         f["channel"][...] = channel_names
@@ -173,7 +191,7 @@ def convert(input_file: str, output_dir: str, metadata_file: str, years: List[in
             for sc,scwb2 in zip(surface_channel_names,surface_channel_names_wb2):
                 cidx = channel_names.index(sc)
                 if scwb2 not in wb2_data:
-                    if skip_missing:
+                    if skip_missing_channels:
                         if (comm_rank == 0) and not (scwb2 in skipped_channels):
                             print(f"Key {scwb2} not found in dataset, skipping")
                         skipped_channels.add(scwb2)
@@ -186,7 +204,19 @@ def convert(input_file: str, output_dir: str, metadata_file: str, years: List[in
 
                 # checks:
                 if data.shape[0] != len(timebatch):
-                    raise IndexError(f"Dates {timebatch} not all found in dataset for {scwb2}.")
+                    if not impute_missing_timestamps:
+                        raise IndexError(f"Dates {timebatch} not all found in dataset for {scwb2}.")
+                    else:
+                        # else:
+                        #iterate over all timestamps and impute the missing values
+                        data = np.empty((len(timebatch), len(lat), len(lon)), dtype=np.float32)
+                        for tid, t in enumerate(timebatch):
+                            if t not in wb2_sel["time"]:
+                                print(f"Imputing timestamp {t} for {scwb2}")
+                                data[tid, ...] = np.nan
+                                f["valid_data"][tstart+tid, cidx] = 0
+                            else:
+                                data[tid, ...] = wb2_sel[wb2_sel["time"].isin([t])].values[...]
 
                 f[entry_key][tstart:tend, cidx, ...] = data[...]
 
@@ -195,7 +225,7 @@ def convert(input_file: str, output_dir: str, metadata_file: str, years: List[in
                 for idl, alevel in enumerate(atmospheric_levels):
                     cidx = channel_names.index(ac + str(alevel))
                     if acwb2 not in wb2_data:
-                        if skip_missing:
+                        if skip_missing_channels:
                             if (comm_rank == 0) and not (acwb2 in skipped_channels):
                                 print(f"Key {acwb2} not found in dataset, skipping")
                             skipped_channels.add(acwb2)
@@ -206,7 +236,18 @@ def convert(input_file: str, output_dir: str, metadata_file: str, years: List[in
                     data = wb2_sel[wb2_sel["time"].isin(timebatch)].values
 
                     if data.shape[0] != len(timebatch):
-                        raise IndexError(f"Dates {timebatch} not all found in dataset for {acwb2}.")
+                        if not impute_missing_timestamps:
+                            raise IndexError(f"Dates {timebatch} not all found in dataset for {acwb2}.")
+                        # else:
+                        #iterate over all timestamps and impute the missing values
+                        data = np.empty((len(timebatch), len(lat), len(lon)), dtype=np.float32)
+                        for tid, t in enumerate(timebatch):
+                            if t not in wb2_sel["time"]:
+                                print(f"Imputing timestamp {t} for {acwb2}")
+                                data[tid, ...] = np.nan
+                                f["valid_data"][tstart+tid, cidx] = 0
+                            else:
+                                data[tid, ...] = wb2_sel[wb2_sel["time"].isin([t])].values[...]
                     
                     f[entry_key][tstart:tend, cidx, ...] = data[...]
 
@@ -245,7 +286,9 @@ def main(args):
             metadata_file=args.metadata_file,
             years=args.years,
             batch_size=args.batch_size,
-            skip_missing=args.skip_missing,
+            force_overwrite=args.force_overwrite,
+            skip_missing_channels=args.skip_missing_channels,
+            impute_missing_timestamps=args.impute_missing_timestamps,
             verbose=args.verbose)
 
 
@@ -258,7 +301,9 @@ if __name__ == '__main__':
     parser.add_argument("--metadata_file", type=str, help="Local file with metadata.", required=True)
     parser.add_argument("--years", type=int, nargs='+', help="Which years to convert", required=True)
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size for writing chunks")
-    parser.add_argument("--skip_missing", action="store_true", help="Skip missing channels and do not fail")
+    parser.add_argument("--skip_missing_channels", action="store_true", help="Skip missing channels and do not fail")
+    parser.add_argument("--impute_missing_timestamps", action="store_true", help="Impute missing timestamps")
+    parser.add_argument("--force_overwrite", action="store_true", help="Overwrite existing files")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 

@@ -127,20 +127,21 @@ class TestConcatenateDataset(unittest.TestCase):
         # Load metadata
         with open(os.path.join(self.metadata_path, "data.json"), "r") as f:
             metadata = json.load(f)
+        channel_names = metadata["coords"]["channel"]
 
         # Get list of files to concatenate
         train_files = sorted([f for f in os.listdir(self.train_path) if f.endswith(".h5")])
         years = [2017, 2018]  # Corresponding years for the files
 
         # Create output directory
-        output_dir = self.train_path
+        input_dirs = [self.train_path]
 
         # Run concatenation
-        output_file = "concatenated.h5v"
-        concatenate(output_dir, output_file, metadata, train_files, years, dhoursrel=dhoursrel)
+        output_file = os.path.join(input_dirs[0], "concatenated.h5v")
+        concatenate(input_dirs, output_file, metadata, [channel_names], train_files, years, dhoursrel=dhoursrel)
 
         # Compare concatenated file with original files
-        with h5.File(os.path.join(output_dir, output_file), "r") as f_conc:
+        with h5.File(output_file, "r") as f_conc:
             # Get total number of samples
             total_samples = f_conc[H5_PATH].shape[0]
             
