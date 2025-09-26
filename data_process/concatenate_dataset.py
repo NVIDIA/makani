@@ -24,7 +24,7 @@ import argparse as ap
 from glob import glob
 
 
-def concatenate(input_dirs: List[str], output_file: str, metadata: dict, channel_names: List[str],
+def concatenate(input_dirs: List[str], output_file: str, metadata: dict, channel_names: List[List[str]],
                 file_names_to_concatenate: List[str], years: List[int], dhoursrel: Optional[int]=1,
                 entry_key: Optional[str]="fields"):
     """Function to concatenate multiple HDF5 files of an existing makani compatible HDF5 dataset.
@@ -40,7 +40,7 @@ def concatenate(input_dirs: List[str], output_file: str, metadata: dict, channel
     Parameters
     ----------
     input_dir: List[str]
-        directory to where the dataset files are located which are to be concatenated. 
+        directories to where the dataset files are located which are to be concatenated. 
         Files inside that list will concatenated in time and files from different lists will be concatenated in channel dimension.
     output_file: str
         file name of the concatenated dataset, has to include the full path. 
