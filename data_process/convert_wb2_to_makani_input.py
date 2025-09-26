@@ -160,6 +160,7 @@ def convert(input_file: str, output_dir: str, metadata_file: str, years: List[in
 
         # create dimension scales
         # datasets
+        f.create_dataset("valid_data", data=np.ones((len(timestamps),len(channel_names)), dtype=np.int32))
         f.create_dataset("timestamp", data=timestamps)
         f.create_dataset("channel", len(channel_names), dtype=h5.string_dtype(length=chanlen))
         f["channel"][...] = channel_names
@@ -213,6 +214,7 @@ def convert(input_file: str, output_dir: str, metadata_file: str, years: List[in
                             if t not in wb2_sel["time"]:
                                 print(f"Imputing timestamp {t} for {scwb2}")
                                 data[tid, ...] = np.nan
+                                f["valid_data"][tstart+tid, cidx] = 0
                             else:
                                 data[tid, ...] = wb2_sel[wb2_sel["time"].isin([t])].values[...]
 
@@ -243,6 +245,7 @@ def convert(input_file: str, output_dir: str, metadata_file: str, years: List[in
                             if t not in wb2_sel["time"]:
                                 print(f"Imputing timestamp {t} for {acwb2}")
                                 data[tid, ...] = np.nan
+                                f["valid_data"][tstart+tid, cidx] = 0
                             else:
                                 data[tid, ...] = wb2_sel[wb2_sel["time"].isin([t])].values[...]
                     
