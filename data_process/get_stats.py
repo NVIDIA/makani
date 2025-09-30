@@ -29,7 +29,6 @@ from glob import glob
 
 # MPI
 from mpi4py import MPI
-from mpi4py.util import dtlib
 
 import torch
 import torch.distributed as dist
@@ -79,7 +78,6 @@ def send_recv_dict(stats, src_rank, dst_rank, group):
             if isinstance(v, torch.Tensor):
                 # send/recv
                 tag = src_rank + group_size * count
-                print(f"Sending {k} from {src_rank} to {dst_rank} with tag {tag}")
                 if group_rank == dst_rank:
                     # we need to convert group rank to global rank
                     src_rank_global = dist.get_global_rank(group, src_rank)
@@ -110,7 +108,7 @@ def collective_reduce(stats, group):
     return stats_reduced
 
 
-def binary_reduce(stats, group):
+def binary_reduce(stats, group, device):
     csize = dist.get_world_size(group)
     crank = dist.get_rank(group)
 
@@ -126,17 +124,12 @@ def binary_reduce(stats, group):
 
     for step in range(nsteps):
         for rrank, srank in zip(recv_ranks, send_ranks):
-            #if crank == rrank:
-            #    rstats = comm.recv(source=srank, tag=srank)
-            #    stats = welford_combine(stats, rstats)
-            #elif crank == srank:
-            #    comm.send(stats, dest=rrank, tag=srank)
             rstats = send_recv_dict(stats, srank, rrank, group)
             if crank == rrank:
                 stats = welford_combine(stats, rstats)
 
         # wait for everyone being ready before doing the next epoch
-        dist.barrier(group=group)
+        dist.barrier(group=group, device_ids=[device.index])
 
         # shrink the list
         if (step < nsteps-1):
@@ -636,7 +629,7 @@ def get_stats(input_path: str, output_path: str, metadata_file: str,
     start = time.time()
     # only rank 0 of the allreduce group will do the binary reduction
     if dist.get_rank(mesh.get_group("reduction")) == 0:
-        stats = binary_reduce(stats, mesh.get_group("tree"))
+        stats = binary_reduce(stats, mesh.get_group("tree"), device)
     comm.Barrier()
     duration = time.time() - start
     if comm_rank == 0:
@@ -692,8 +685,11 @@ def get_stats(input_path: str, output_path: str, metadata_file: str,
     # wait for rank 0 to finish
     comm.Barrier()
 
-    # shut down comms
+    # shut down pytorch comms
+    dist.barrier(device_ids=[device.index])
     dist.destroy_process_group()
+
+    # close MPI
     MPI.Finalize()
 
 
