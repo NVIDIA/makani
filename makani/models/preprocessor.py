@@ -16,14 +16,15 @@
 from functools import partial
 from typing import Union, Tuple
 
+import math
 import numpy as np
 
 import torch
 import torch.nn as nn
 
 from makani.utils import comm
-from makani.utils.grids import GridConverter
-from physicsnemo.distributed.mappings import reduce_from_parallel_region, copy_to_parallel_region
+from makani.utils.grids import GridQuadrature, grid_to_quadrature_rule
+from physicsnemo.distributed.mappings import copy_to_parallel_region
 
 from makani.models.preprocessor_helpers import get_bias_correction, get_static_features
 
@@ -32,6 +33,7 @@ class Preprocessor2D(nn.Module):
     def __init__(self, params):
         super().__init__()
 
+        self.subsampling_factor = params.get("subsampling_factor", 1)
         self.n_history = params.n_history
         self.history_normalization_mode = params.history_normalization_mode
         if self.history_normalization_mode == "exponential":
@@ -46,6 +48,13 @@ class Preprocessor2D(nn.Module):
         else:
             history_normalization_weights = torch.ones(self.n_history + 1, dtype=torch.float32)
         self.register_buffer("history_normalization_weights", history_normalization_weights, persistent=False)
+        if self.history_normalization_mode != "none":
+            self.quadrature = GridQuadrature(grid_to_quadrature_rule(params.model_grid_type), 
+                                             img_shape=self.img_shape_resampled, 
+                                             crop_shape=None, 
+                                             crop_offset=(0, 0), 
+                                             normalize=True, 
+                                             distributed=True)
         self.history_mean = None
         self.history_std = None
         self.history_diff_mean = None
@@ -63,6 +72,7 @@ class Preprocessor2D(nn.Module):
 
         # image shape
         self.img_shape = [params.img_shape_x, params.img_shape_y]
+        self.img_shape_resampled = [params.img_shape_x_resampled, params.img_shape_y_resampled]
 
         # unpredicted input channels:
         self.unpredicted_inp_train = None
@@ -125,7 +135,7 @@ class Preprocessor2D(nn.Module):
                 lambd = noise_params.get("lambd", params.dt * params.dhours / 6.0)
 
                 self.input_noise = DiffusionNoiseS2(
-                    img_shape=self.img_shape,
+                    img_shape=self.img_shape_resampled,
                     batch_size=params.batch_size,
                     num_channels=noise_channels,
                     num_time_steps=self.n_history + 1,
@@ -141,7 +151,7 @@ class Preprocessor2D(nn.Module):
                 from makani.models.noise import IsotropicGaussianRandomFieldS2
 
                 self.input_noise = IsotropicGaussianRandomFieldS2(
-                    img_shape=self.img_shape,
+                    img_shape=self.img_shape_resampled,
                     batch_size=params.batch_size,
                     num_channels=noise_channels,
                     num_time_steps=self.n_history + 1,
@@ -156,7 +166,7 @@ class Preprocessor2D(nn.Module):
                 from makani.models.noise import DummyNoiseS2
 
                 self.input_noise = DummyNoiseS2(
-                    img_shape=self.img_shape,
+                    img_shape=self.img_shape_resampled,
                     batch_size=params.batch_size,
                     num_channels=noise_channels,
                     num_time_steps=self.n_history + 1,
@@ -287,18 +297,10 @@ class Preprocessor2D(nn.Module):
                 xr = x
 
             # time difference mean:
-            self.history_diff_mean = torch.mean(torch.sum(xr[:, 1:, ...] - xr[:, 0:-1, ...], dim=(4, 5)), dim=(1, 2))
-            # reduce across gpus
-            if comm.get_size("spatial") > 1:
-                self.history_diff_mean = reduce_from_parallel_region(self.history_diff_mean, "spatial")
-            self.history_diff_mean = self.history_diff_mean / float(self.img_shape[0] * self.img_shape[1])
+            self.history_diff_mean = torch.mean(self.quadrature(xr[:, 1:, ...] - xr[:, 0:-1, ...]), dim=(1, 2))
 
             # time difference std
-            self.history_diff_var = torch.mean(torch.sum(torch.square((xr[:, 1:, ...] - xr[:, 0:-1, ...]) - self.history_diff_mean), dim=(4, 5)), dim=(1, 2))
-            # reduce across gpus
-            if comm.get_size("spatial") > 1:
-                self.history_diff_var = reduce_from_parallel_region(self.history_diff_var, "spatial")
-            self.history_diff_var = self.history_diff_var / float(self.img_shape[0] * self.img_shape[1])
+            self.history_diff_var = torch.mean(self.quadrature(torch.square((xr[:, 1:, ...] - xr[:, 0:-1, ...]) - self.history_diff_mean)), dim=(1, 2))
 
             # time difference stds
             self.history_diff_mean = copy_to_parallel_region(self.history_diff_mean, "spatial")
@@ -314,18 +316,11 @@ class Preprocessor2D(nn.Module):
 
             # mean
             # compute weighted mean over dim 1, but sum over dim=3,4
-            self.history_mean = torch.sum(xr * self.history_normalization_weights, dim=(1, 3, 4), keepdim=True)
-            # reduce across gpus
-            if comm.get_size("spatial") > 1:
-                self.history_mean = reduce_from_parallel_region(self.history_mean, "spatial")
-            self.history_mean = self.history_mean / float(self.img_shape[0] * self.img_shape[1])
+            self.history_mean = torch.sum(self.quadrature(xr * self.history_normalization_weights), dim=1, keepdim=True)
 
             # compute std
-            self.history_std = torch.sum(torch.square(xr - self.history_mean) * self.history_normalization_weights, dim=(1, 3, 4), keepdim=True)
-            # reduce across gpus
-            if comm.get_size("spatial") > 1:
-                self.history_std = reduce_from_parallel_region(self.history_std, "spatial")
-            self.history_std = torch.sqrt(self.history_std / float(self.img_shape[0] * self.img_shape[1]))
+            self.history_std = torch.sum(self.quadrature(torch.square(xr - self.history_mean) * self.history_normalization_weights), dim=1, keepdim=True)
+            self.history_std = torch.sqrt(self.history_std)
 
             # squeeze
             self.history_mean = torch.squeeze(self.history_mean, dim=1)
