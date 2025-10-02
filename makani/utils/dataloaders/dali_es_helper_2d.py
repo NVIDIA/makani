@@ -19,6 +19,7 @@ import os
 import glob
 from functools import partial
 import numpy as np
+import math
 import h5py
 import zarr
 import logging
@@ -58,10 +59,11 @@ class GeneralES(object):
         out_channels,
         crop_size,
         crop_anchor,
-        num_shards,
-        shard_id,
-        io_grid,
-        io_rank,
+        subsampling_factor=1,
+        num_shards=1,
+        shard_id=0,
+        io_grid=[1, 1, 1],
+        io_rank=[0, 0, 0],
         device_id=0,
         truncate_old=True,
         enable_logging=True,
@@ -91,6 +93,7 @@ class GeneralES(object):
         self.n_out_channels = len(out_channels)
         self.crop_size = crop_size
         self.crop_anchor = crop_anchor
+        self.subsampling_factor = subsampling_factor
         self.base_seed = seed
         self.num_shards = num_shards
         self.device_id = device_id
@@ -146,6 +149,8 @@ class GeneralES(object):
 
         # parse the files
         self._get_files_stats(enable_logging)
+
+        # initialize dataset properties
         self._initialize_dataset_properties(enable_logging, timestamp_boundary_list)
 
         # set shuffling to true or false
@@ -171,6 +176,16 @@ class GeneralES(object):
             latitude[self.read_anchor[0] : self.read_anchor[0] + self.read_shape[0]].tolist(),
             longitude[self.read_anchor[1] : self.read_anchor[1] + self.read_shape[1]].tolist(),
         )
+
+        # incorporate subsampling factor
+        self.lat_grid_local = self.lat_grid_local[::self.subsampling_factor, ::self.subsampling_factor]
+        self.lon_grid_local = self.lon_grid_local[::self.subsampling_factor, ::self.subsampling_factor]
+        self.lat_lon_local = (
+            self.lat_lon_local[0][::self.subsampling_factor],
+            self.lat_lon_local[1][::self.subsampling_factor],
+        )
+        self.img_shape_resampled = (math.ceil(self.img_shape[0] / self.subsampling_factor), 
+                                    math.ceil(self.img_shape[1] / self.subsampling_factor))
 
         # datetime logic
         self.date_fn = np.vectorize(get_date_from_timestamp)
@@ -271,9 +286,22 @@ class GeneralES(object):
             # read the data
             if self.read_direct:
                 dset.read_direct(
-                    self.inp_buff, np.s_[(local_idx - self.dt * self.n_history) : (local_idx + 1) : self.dt, slice_in, start_x:end_x, start_y:end_y], np.s_[:, start:end, ...])
+                    self.inp_buff, 
+                    np.s_[
+                        (local_idx - self.dt * self.n_history) : (local_idx + 1) : self.dt, 
+                        slice_in, 
+                        start_x:end_x:self.subsampling_factor, 
+                        start_y:end_y:self.subsampling_factor
+                    ], 
+                    np.s_[:, start:end, ...]
+                )
             else:
-                self.inp_buff[:, start:end, ...] = dset[(local_idx - self.dt * self.n_history) : (local_idx + 1) : self.dt, slice_in, start_x:end_x, start_y:end_y]
+                self.inp_buff[:, start:end, ...] = dset[
+                    (local_idx - self.dt * self.n_history) : (local_idx + 1) : self.dt, 
+                    slice_in, 
+                    start_x:end_x:self.subsampling_factor, 
+                    start_y:end_y:self.subsampling_factor
+                ]
 
             # update offset
             off = end
@@ -287,10 +315,22 @@ class GeneralES(object):
             # read the data
             if self.read_direct:
                 dset.read_direct(
-                    self.tar_buff, np.s_[(local_idx + self.dt) : (local_idx + self.dt * (self.n_future + 1) + 1) : self.dt, slice_out, start_x:end_x, start_y:end_y], np.s_[:, start:end, ...]
+                    self.tar_buff, 
+                    np.s_[
+                        (local_idx + self.dt) : (local_idx + self.dt * (self.n_future + 1) + 1) : self.dt, 
+                        slice_out, 
+                        start_x:end_x:self.subsampling_factor, 
+                        start_y:end_y:self.subsampling_factor
+                    ], 
+                    np.s_[:, start:end, ...]
                 )
             else:
-                 self.tar_buff[:, start:end, ...] = dset[(local_idx + self.dt) : (local_idx + self.dt * (self.n_future + 1) + 1) : self.dt, slice_out, start_x:end_x, start_y:end_y]
+                self.tar_buff[:, start:end, ...] = dset[
+                    (local_idx + self.dt) : (local_idx + self.dt * (self.n_future + 1) + 1) : self.dt, 
+                    slice_out, 
+                    start_x:end_x:self.subsampling_factor, 
+                    start_y:end_y:self.subsampling_factor
+                ]
 
             # update offset
             off = end
@@ -410,7 +450,8 @@ class GeneralES(object):
         read_anchor_y = self.crop_anchor[1] + sum(split_shapes_y[: self.io_rank[1]])
         self.read_anchor = [read_anchor_x, read_anchor_y]
         self.read_shape = [read_shape_x, read_shape_y]
-        self.return_shape = self.read_shape
+        self.return_shape = (math.ceil(self.read_shape[0] / self.subsampling_factor), 
+                             math.ceil(self.read_shape[1] / self.subsampling_factor))
 
         # do some sample indexing gymnastics
         self.year_offsets = list(accumulate(self.n_samples_year, operator.add))[:-1]
@@ -488,8 +529,8 @@ class GeneralES(object):
             self._init_buffers()
 
     def _init_buffers(self):
-        self.inp_buff = np.zeros((self.n_history + 1, self.n_in_channels, self.read_shape[0], self.read_shape[1]), dtype=np.float32)
-        self.tar_buff = np.zeros((self.n_future + 1, self.n_out_channels, self.read_shape[0], self.read_shape[1]), dtype=np.float32)
+        self.inp_buff = np.zeros((self.n_history + 1, self.n_in_channels, self.return_shape[0], self.return_shape[1]), dtype=np.float32)
+        self.tar_buff = np.zeros((self.n_future + 1, self.n_out_channels, self.return_shape[0], self.return_shape[1]), dtype=np.float32)
 
     def _compute_timestamps(self, local_idx, year_idx):
         # compute hours into the year

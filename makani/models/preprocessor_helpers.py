@@ -34,7 +34,8 @@ def get_bias_correction(params):
         bias = torch.as_tensor(get_bias_correction(bc_path, params.get("out_channels")), dtype=torch.float32)
 
         # shard the bias correction
-        bias = bias[:, :, start_x:end_x, start_y:end_y]
+        subsampling_factor = params.get("subsampling_factor", 1)
+        bias = bias[:, :, start_x:end_x:subsampling_factor, start_y:end_y:subsampling_factor]
 
     else:
         bias = None
@@ -69,6 +70,7 @@ def get_static_features(params):
     end_x = min(start_x + params.get("img_local_shape_x", params.img_shape_x), params.img_shape_x)
     start_y = params.get("img_local_offset_y", 0)
     end_y = min(start_y + params.get("img_local_shape_y", params.img_shape_y), params.img_shape_y)
+    subsampling_factor = params.get("subsampling_factor", 1)
 
     static_features = None
     if params.get("add_grid", False):
@@ -120,7 +122,7 @@ def get_static_features(params):
                 static_features = normalizer(static_features)
 
             # shard spatially
-            static_features = static_features[:, :, start_x:end_x, start_y:end_y]
+            static_features = static_features[:, :, start_x:end_x:subsampling_factor, start_y:end_y:subsampling_factor]
 
     if params.get("add_orography", False):
         from makani.utils.auxiliary_fields import get_orography
@@ -140,7 +142,7 @@ def get_static_features(params):
                 oro = (oro - torch.mean(oro)) / (torch.std(oro) + eps)
 
             # shard
-            oro = oro[:, :, start_x:end_x, start_y:end_y]
+            oro = oro[:, :, start_x:end_x:subsampling_factor, start_y:end_y:subsampling_factor]
 
             if static_features is None:
                 static_features = oro
@@ -174,7 +176,7 @@ def get_static_features(params):
             # no normalization since the data is one hot encoded
 
             # shard
-            lsm = lsm[:, :, start_x:end_x, start_y:end_y]
+            lsm = lsm[:, :, start_x:end_x:subsampling_factor, start_y:end_y:subsampling_factor]
 
             if static_features is None:
                 static_features = lsm
@@ -198,7 +200,7 @@ def get_static_features(params):
             # no normalization since the data is one hot encoded
 
             # shard
-            st = st[:, :, start_x:end_x, start_y:end_y]
+            st = st[:, :, start_x:end_x:subsampling_factor, start_y:end_y:subsampling_factor]
 
             if static_features is None:
                 static_features = st
@@ -227,7 +229,7 @@ def get_static_features(params):
                 emb = (emb - torch.mean(emb)) / (torch.std(emb) + eps)
 
             # shard
-            emb = emb[:, :, start_x:end_x, start_y:end_y]
+            emb = emb[:, :, start_x:end_x:subsampling_factor, start_y:end_y:subsampling_factor]
 
             if static_features is None:
                 static_features = emb

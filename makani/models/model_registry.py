@@ -147,7 +147,7 @@ def get_model(params: ParamsBase, use_stochastic_interpolation: bool = False, mu
 
     if params is not None:
         # makani requires that these entries are set in params for now
-        inp_shape = (params.img_crop_shape_x, params.img_crop_shape_y)
+        inp_shape = (params.img_shape_x_resampled, params.img_shape_y_resampled)
         out_shape = (params.out_shape_x, params.out_shape_y) if hasattr(params, "out_shape_x") and hasattr(params, "out_shape_y") else inp_shape
         inp_chans = params.N_in_channels
         out_chans = params.N_out_channels
