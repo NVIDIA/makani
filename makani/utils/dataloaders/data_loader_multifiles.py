@@ -153,8 +153,6 @@ class MultifilesDataset(Dataset):
             self.lat_lon_local[0][::self.subsampling_factor],
             self.lat_lon_local[1][::self.subsampling_factor],
         )
-        self.img_shape_resampled = (math.ceil(self.img_shape[0] / self.subsampling_factor), 
-                                    math.ceil(self.img_shape[1] / self.subsampling_factor))
 
         # grid types
         self.grid_converter = GridConverter(
@@ -332,6 +330,9 @@ class MultifilesDataset(Dataset):
         self.img_local_offset_x = self.read_anchor[0]
         self.img_local_offset_y = self.read_anchor[1]
 
+        # resampling stuff
+        self.img_shape_resampled = (math.ceil(self.img_shape[0] / self.subsampling_factor), 
+                                    math.ceil(self.img_shape[1] / self.subsampling_factor))
         self.img_local_shape_x_resampled = self.return_shape[0]
         self.img_local_shape_y_resampled = self.return_shape[1]
         self.img_shape_x_resampled = self.img_shape_resampled[0]

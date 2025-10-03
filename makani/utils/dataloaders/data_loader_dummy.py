@@ -114,10 +114,6 @@ class DummyLoader(object):
             torch.deg2rad(torch.tensor(self.lat_lon[1][self.crop_anchor[1] : self.crop_anchor[1] + self.crop_shape[1]])).to(torch.float32),
         )
 
-        # rescaled image shape
-        self.img_shape_resampled = (math.ceil(self.img_shape[0] / self.subsampling_factor), 
-                                    math.ceil(self.img_shape[1] / self.subsampling_factor))
-
     def _get_files_stats(self):
 
         if self.img_shape is None:
@@ -198,6 +194,9 @@ class DummyLoader(object):
         self.img_local_offset_x = self.read_anchor[0]
         self.img_local_offset_y = self.read_anchor[1]
 
+        # resampling stuff
+        self.img_shape_resampled = (math.ceil(self.img_shape[0] / self.subsampling_factor), 
+                                    math.ceil(self.img_shape[1] / self.subsampling_factor))
         self.img_local_shape_x_resampled = self.return_shape[0]
         self.img_local_shape_y_resampled = self.return_shape[1]
         self.img_shape_x_resampled = self.img_shape_resampled[0]
