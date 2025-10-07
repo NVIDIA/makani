@@ -49,12 +49,15 @@ class Preprocessor2D(nn.Module):
             history_normalization_weights = torch.ones(self.n_history + 1, dtype=torch.float32)
         self.register_buffer("history_normalization_weights", history_normalization_weights, persistent=False)
         if self.history_normalization_mode != "none":
-            self.quadrature = GridQuadrature(grid_to_quadrature_rule(params.model_grid_type), 
-                                             img_shape=self.img_shape_resampled, 
-                                             crop_shape=None, 
-                                             crop_offset=(0, 0), 
-                                             normalize=True, 
-                                             distributed=True)
+            self.quadrature = GridQuadrature(
+                grid_to_quadrature_rule(params.model_grid_type),
+                img_shape=self.img_shape_resampled,
+                crop_shape=None,
+                crop_offset=(0, 0),
+                normalize=True,
+                distributed=True
+            )
+
         self.history_mean = None
         self.history_std = None
         self.history_diff_mean = None
