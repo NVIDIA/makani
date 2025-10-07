@@ -317,18 +317,18 @@ class GeneralES(object):
                 dset.read_direct(
                     self.tar_buff, 
                     np.s_[
-                        (local_idx + self.dt) : (local_idx + self.dt * (self.n_future + 1) + 1) : self.dt, 
-                        slice_out, 
-                        start_x:end_x:self.subsampling_factor, 
+                        (local_idx + self.dt) : (local_idx + self.dt * (self.n_future + 1) + 1) : self.dt,
+                        slice_out,
+                        start_x:end_x:self.subsampling_factor,
                         start_y:end_y:self.subsampling_factor
                     ], 
                     np.s_[:, start:end, ...]
                 )
             else:
                 self.tar_buff[:, start:end, ...] = dset[
-                    (local_idx + self.dt) : (local_idx + self.dt * (self.n_future + 1) + 1) : self.dt, 
-                    slice_out, 
-                    start_x:end_x:self.subsampling_factor, 
+                    (local_idx + self.dt) : (local_idx + self.dt * (self.n_future + 1) + 1) : self.dt,
+                    slice_out,
+                    start_x:end_x:self.subsampling_factor,
                     start_y:end_y:self.subsampling_factor
                 ]
 
