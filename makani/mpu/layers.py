@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional
+from typing import Optional, Union, Tuple
 import math
 import torch
 import torch.nn as nn
@@ -33,6 +33,7 @@ from physicsnemo.distributed.mappings import copy_to_parallel_region
 # use some distributed routines from torch harmonics
 from torch_harmonics.distributed import distributed_transpose_azimuth as distributed_transpose_w
 from torch_harmonics.distributed import distributed_transpose_polar as distributed_transpose_h
+from torch_harmonics.distributed import DistributedAttentionS2 as THDistributedAttentionS2
 
 
 class _DistMatmulHelper(torch.autograd.Function):
@@ -507,3 +508,61 @@ class DistributedAFNO2Dv2(nn.Module):
             x = gather_from_parallel_region(x, 1, self.gather_shapes, "matmul")
 
         return x
+
+
+class DistributedAttentionS2(nn.Module):
+    def __init__(
+        self, 
+        in_channels: int,
+        num_heads: int,
+        in_shape: Tuple[int],
+        out_shape: Tuple[int],
+        grid_in: Optional[str] = "equiangular",
+        grid_out: Optional[str] = "equiangular",
+        scale: Optional[Union[torch.Tensor, float]] = None,
+        bias: Optional[bool] = True,
+        k_channels: Optional[int] = None,
+        out_channels: Optional[int] = None,
+        drop_rate: Optional[float]=0.0,
+    ):
+        super().__init__()
+
+        assert in_channels % num_heads == 0, "in_channels should be divisible by num_heads"
+        assert out_channels % num_heads == 0, "out_channels should be divisible by num_heads"
+        
+        self.attn = THDistributedAttentionS2(
+            in_channels=in_channels,
+            num_heads=num_heads,
+            in_shape=in_shape,
+            out_shape=out_shape,
+            grid_in=grid_in,
+            grid_out=grid_out,
+            scale=scale,
+            bias=bias,
+            k_channels=k_channels,
+            out_channels=out_channels,
+            drop_rate=drop_rate,
+        )
+
+        # set up weight sharing
+        if comm.get_size("spatial") > 1:
+            self.attn.q_weights.is_shared_mp = ["spatial"]
+            self.attn.q_weights.sharded_dims_mp = [None, None, None, None]
+            self.attn.k_weights.is_shared_mp = ["spatial"]
+            self.attn.k_weights.sharded_dims_mp = [None, None, None, None]
+            self.attn.v_weights.is_shared_mp = ["spatial"]
+            self.attn.v_weights.sharded_dims_mp = [None, None, None, None]
+            self.attn.proj_weights.is_shared_mp = ["spatial"]
+            self.attn.proj_weights.sharded_dims_mp = [None, None, None, None]
+            if bias:
+                self.attn.q_bias.is_shared_mp = ["spatial"]
+                self.attn.q_bias.sharded_dims_mp = [None]
+                self.attn.k_bias.is_shared_mp = ["spatial"]
+                self.attn.k_bias.sharded_dims_mp = [None]
+                self.attn.v_bias.is_shared_mp = ["spatial"]
+                self.attn.v_bias.sharded_dims_mp = [None]
+                self.attn.proj_bias.is_shared_mp = ["spatial"]
+                self.attn.proj_bias.sharded_dims_mp = [None]
+
+    def forward(self, query: torch.Tensor, key: Optional[torch.Tensor] = None, value: Optional[torch.Tensor] = None) -> torch.Tensor:
+        return self.attn(query, key, value)
