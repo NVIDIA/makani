@@ -111,7 +111,7 @@ class TestConstraints(unittest.TestCase):
                 # check the hb loss
                 hb_loss_tens = hbloss(data_map, None)
 
-		# average over batch and sum over channels
+                # average over batch and sum over channels
                 hb_loss_val = torch.mean(torch.sum(hb_loss_tens, dim=1)).item()
                 
                 self.assertTrue(hb_loss_val <= 1e-6)
