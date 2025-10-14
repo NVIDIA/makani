@@ -13,13 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional, Tuple, List
-from dataclasses import dataclass
+from typing import Optional, Tuple
 
-import math
 import torch
 
-from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature
 from makani.utils import comm
 from physicsnemo.distributed.mappings import scatter_to_parallel_region, reduce_from_parallel_region
 from physicsnemo.distributed.utils import split_tensor_along_dim
