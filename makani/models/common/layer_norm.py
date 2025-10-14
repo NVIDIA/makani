@@ -58,7 +58,13 @@ class GeometricInstanceNormS2(nn.Module):
 
         # we only need the weights
         self.quadrature = GridQuadrature(
-            quadrature_rule, img_shape=img_shape, crop_shape=crop_shape, crop_offset=crop_offset, normalize=True, pole_mask=pole_mask, distributed=False
+            quadrature_rule, 
+            img_shape=img_shape, 
+            crop_shape=crop_shape, 
+            crop_offset=crop_offset, 
+            normalize=True, 
+            pole_mask=pole_mask, 
+            distributed=False
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -66,9 +72,9 @@ class GeometricInstanceNormS2(nn.Module):
         # extract shapes
         B, C, H, W = x.shape
 
+        xtype = x.dtype
         with amp.autocast(device_type="cuda", enabled=False):
-            dtype = x.dtype
-            x = x.float()
+            x = x.to(torch.float32)
 
             # compute var and mean
             mean = self.quadrature(x)
@@ -79,9 +85,9 @@ class GeometricInstanceNormS2(nn.Module):
         mean = mean.reshape(B, C, 1, 1)
 
         # convert types
-        x = x.to(dtype)
-        mean = mean.to(dtype)
-        var = var.to(dtype)
+        x = x.to(xtype)
+        mean = mean.to(xtype)
+        var = var.to(xtype)
 
         # apply the normalization
         if self.affine:

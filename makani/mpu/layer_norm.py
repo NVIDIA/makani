@@ -66,11 +66,8 @@ def _welford_kernel(vars: torch.Tensor, means: torch.Tensor, counts: torch.Tenso
     # use Welford's algorithm to accumulate them into a single mean and variance
     for i in range(1, means.shape[0]):
         delta = means[i, ...] - mean
+        mean = mean + delta * counts[i, ...] / (count + counts[i, ...])
         m2 = m2 + m2s[i, ...] + delta**2 * count * counts[i, ...] / (count + counts[i, ...])
-        if i == 1:
-            mean = (mean * count + means[i, ...] * counts[i, ...]) / (count + counts[i, ...])
-        else:
-            mean = mean + delta * counts[i, ...] / (count + counts[i, ...])
 
         # update the current count
         count = count + counts[i, ...]
@@ -122,7 +119,7 @@ class DistributedInstanceNorm2d(nn.Module):
         """Computes the statistics locally, then uses the Welford online algorithm to reduce them"""
 
         # extract shapes
-        B, C, H, W = x.shape
+        B, C, _, _ = x.shape
 
         # those have the shapes [B, C]
         var, mean = torch.var_mean(x, dim=(-2, -1), unbiased=False, keepdim=False)
@@ -141,9 +138,9 @@ class DistributedInstanceNorm2d(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
 
+        xtype = x.dtype
         with amp.autocast(device_type="cuda", enabled=False):
-            dtype = x.dtype
-            x = x.float()
+            x = x.to(torch.float32)
 
             # start by computing std and mean
             var, mean = self._stats_welford(x)
@@ -152,9 +149,9 @@ class DistributedInstanceNorm2d(nn.Module):
             mean = copy_to_parallel_region(mean, "spatial")
             var = copy_to_parallel_region(var, "spatial")
 
-        x = x.to(dtype)
-        mean = mean.to(dtype)
-        var = var.to(dtype)
+        x = x.to(xtype)
+        mean = mean.to(xtype)
+        var = var.to(xtype)
 
         # apply the normalization
         if self.affine:
@@ -188,7 +185,13 @@ class DistributedGeometricInstanceNormS2(DistributedInstanceNorm2d):
 
         # we only need the weights
         quad_weight = GridQuadrature(
-            quadrature_rule, img_shape=img_shape, crop_shape=crop_shape, crop_offset=crop_offset, normalize=True, pole_mask=pole_mask, distributed=True
+            quadrature_rule, 
+            img_shape=img_shape, 
+            crop_shape=crop_shape, 
+            crop_offset=crop_offset, 
+            normalize=True,
+            pole_mask=pole_mask, 
+            distributed=True
         ).quad_weight
 
         self.register_buffer("quad_weight", quad_weight, persistent=False)
@@ -197,12 +200,12 @@ class DistributedGeometricInstanceNormS2(DistributedInstanceNorm2d):
         """Computes the statistics locally, then uses the Welford online algorithm to reduce them"""
 
         # extract shapes
-        B, C, H, W = x.shape
+        B, C, _, _ = x.shape
 
         # compute var, mean locally: those have the shapes [B, C]
-        mean = torch.sum(x * self.quad_weight, dim=(-2, -1), keepdim=False)
-        var = torch.sum(torch.square(x - mean.reshape(B, C, 1, 1)) * self.quad_weight, dim=(-2, -1), keepdim=False)
         count = torch.tile(torch.sum(self.quad_weight, dim=(-2, -1), keepdim=False), (B, C))
+        mean = torch.sum(x * self.quad_weight, dim=(-2, -1), keepdim=False) / count
+        var = torch.sum(torch.square(x - mean.reshape(B, C, 1, 1)) * self.quad_weight, dim=(-2, -1), keepdim=False) / count
 
         # compute welford variance
         var, mean, _ = distributed_welford_variance(var, mean, count, "spatial")
@@ -215,9 +218,9 @@ class DistributedGeometricInstanceNormS2(DistributedInstanceNorm2d):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
 
+        xtype = x.dtype
         with amp.autocast(device_type="cuda", enabled=False):
-            dtype = x.dtype
-            x = x.float()
+            x = x.to(torch.float32)
 
             # start by computing std and mean
             var, mean = self._stats_welford(x)
@@ -226,9 +229,9 @@ class DistributedGeometricInstanceNormS2(DistributedInstanceNorm2d):
             mean = copy_to_parallel_region(mean, "spatial")
             var = copy_to_parallel_region(var, "spatial")
 
-        x = x.to(dtype)
-        mean = mean.to(dtype)
-        var = var.to(dtype)
+        x = x.to(xtype)
+        mean = mean.to(xtype)
+        var = var.to(xtype)
 
         # apply the normalization
         if self.affine:
