@@ -17,7 +17,6 @@ import logging
 from typing import Optional, List, Tuple
 import glob
 import torch
-import random
 import numpy as np
 import h5py
 import torch
@@ -56,6 +55,7 @@ class DummyLoader(object):
                  dataset_path: Optional[str]="fields",
                  crop_size: Optional[Tuple[int, int]]=(None, None),
                  crop_anchor: Optional[Tuple[int, int]]=(0, 0),
+                 subsampling_factor: Optional[int]=1,
                  io_grid: Optional[List[int]]=[1, 1, 1],
                  io_rank: Optional[List[int]]=[0, 0, 0],
                  device: Optional[torch.device]=torch.device("cpu"),
@@ -77,6 +77,7 @@ class DummyLoader(object):
         self.n_out_channels = len(out_channels)
         self.img_shape = img_shape
         self.device = device
+        self.subsampling_factor = subsampling_factor
         self.return_timestamp = return_timestamp
         self.return_target = return_target
         self.io_grid = io_grid[1:]
@@ -103,7 +104,7 @@ class DummyLoader(object):
         # zenith angle yes or no?
         self.add_zenith = add_zenith
         if self.add_zenith:
-            self.zen_dummy = torch.zeros((self.batch_size, self.n_history + 1, 1, self.img_local_shape_x, self.img_local_shape_y), dtype=torch.float32, device=self.device)
+            self.zen_dummy = torch.zeros((self.batch_size, self.n_history + 1, 1, self.return_shape[0], self.return_shape[1]), dtype=torch.float32, device=self.device)
 
         # grid types
         self.grid_converter = GridConverter(
@@ -176,7 +177,8 @@ class DummyLoader(object):
         # store exposed variables
         self.read_anchor = (read_anchor_x, read_anchor_y)
         self.read_shape = (read_shape_x, read_shape_y)
-        self.return_shape = self.read_shape
+        self.return_shape = (math.ceil(self.read_shape[0] / self.subsampling_factor), 
+                             math.ceil(self.read_shape[1] / self.subsampling_factor))
 
         # set properties for compatibility
         self.img_shape_x = self.img_shape[0]
@@ -187,10 +189,18 @@ class DummyLoader(object):
         self.img_crop_offset_x = self.crop_anchor[0]
         self.img_crop_offset_y = self.crop_anchor[1]
 
-        self.img_local_shape_x = self.return_shape[0]
-        self.img_local_shape_y = self.return_shape[1]
+        self.img_local_shape_x = self.read_shape[0]
+        self.img_local_shape_y = self.read_shape[1]
         self.img_local_offset_x = self.read_anchor[0]
         self.img_local_offset_y = self.read_anchor[1]
+
+        # resampling stuff
+        self.img_shape_resampled = (math.ceil(self.img_shape[0] / self.subsampling_factor), 
+                                    math.ceil(self.img_shape[1] / self.subsampling_factor))
+        self.img_local_shape_x_resampled = self.return_shape[0]
+        self.img_local_shape_y_resampled = self.return_shape[1]
+        self.img_shape_x_resampled = self.img_shape_resampled[0]
+        self.img_shape_y_resampled = self.img_shape_resampled[1]
 
         # sharding
         self.n_samples_total = self.n_samples_per_epoch
