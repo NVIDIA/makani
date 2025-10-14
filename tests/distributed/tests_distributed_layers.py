@@ -16,6 +16,8 @@
 
 import os
 import unittest
+
+from torch.nn.modules.container import T
 from parameterized import parameterized
 
 import torch
@@ -32,6 +34,10 @@ from physicsnemo.distributed.mappings import gather_from_parallel_region, scatte
                                          reduce_from_parallel_region
 
 from makani.mpu.mappings import init_gradient_reduction_hooks
+
+# layer norm imports
+from makani.models.common.layer_norm import GeometricInstanceNormS2
+from makani.mpu.layer_norm import DistributedGeometricInstanceNormS2
 
 from distributed_helpers import split_helper, gather_helper
 
@@ -96,14 +102,17 @@ class TestDistributedLayers(unittest.TestCase):
         return tensor_gather
 
 
-    @parameterized.expand([
-        [256, 512, 256, 512, 32,  8, 1e-5],
-        [181, 360, 181, 360, 1, 10, 1e-5],
-        [256, 512, 128, 256, 32,  8, 1e-5],
-        [181, 360,  91, 180, 1, 10, 1e-5],
-        [128, 256, 256, 512, 32,  8, 1e-5],
-        [ 91, 180, 181, 360, 1, 10, 1e-5],
-    ])
+    @parameterized.expand(
+        [
+            [180, 360, 256, 512, 32,  8, 1e-5],
+            [181, 360, 181, 360, 1, 10, 1e-5],
+            [180, 360, 128, 256, 32,  8, 1e-5],
+            [181, 360,  91, 180, 1, 10, 1e-5],
+            [128, 256, 256, 512, 32,  8, 1e-5],
+            [ 91, 180, 181, 360, 1, 10, 1e-5],
+        ],
+        skip_on_empty=True,
+    )
     def test_distributed_spectral_conv(self, nlat_in, nlon_in, nlat_out, nlon_out, batch_size, num_chan, tol, verbose=True):
         B, C, Hi, Wi, Ho, Wo = batch_size, num_chan, nlat_in, nlon_in, nlat_out, nlon_out
 
@@ -146,7 +155,7 @@ class TestDistributedLayers(unittest.TestCase):
             reduction_buffer_count=1,
             broadcast_buffers=False,
             find_unused_parameters=False,
-	    gradient_as_bucket_view=True,
+            gradient_as_bucket_view=True,
             static_graph=True,
             verbose=False,
         )
@@ -158,7 +167,6 @@ class TestDistributedLayers(unittest.TestCase):
             spect_conv_dist.module.bias.copy_(spect_conv_local.bias)
         
         # input
-        self._init_seed(444)
         inp_full = torch.randn((B, C, Hi, Wi), dtype=torch.float32, device=self.device)
         
         #############################################################
@@ -169,7 +177,6 @@ class TestDistributedLayers(unittest.TestCase):
         out_full, _ = spect_conv_local(inp_full)
 
         # create grad for backward
-        self._init_seed(555)
         with torch.no_grad():
             # create full grad
             ograd_full = torch.randn_like(out_full)
@@ -237,6 +244,163 @@ class TestDistributedLayers(unittest.TestCase):
             if verbose and (self.world_rank == 0):
                 print(f"final relative error of bias gradients: {err.item()}")
         self.assertTrue(err.item() <= tol)
+
+
+    @parameterized.expand(
+        [
+            [181, 360, 1, 4, 1e-5, "equiangular", True],
+            [181, 360, 1, 4, 1e-5, "equiangular", False],
+            [180, 360, 1, 10, 1e-5, "legendre-gauss", True],
+            [180, 360, 1, 10, 1e-5, "legendre-gauss", False],
+        ],
+        skip_on_empty=True,
+    )
+    def test_distributed_geometric_instance_norm_s2(self, nlat, nlon, batch_size, num_chan, tol, grid_type, affine, verbose=True):
+        B, C, H, W = batch_size, num_chan, nlat, nlon
+
+        # set up layer norm parameters
+        img_shape = (H, W)
+        crop_shape = (H, W)
+        crop_offset = (0, 0)
+        pole_mask = 0
+        eps = 1e-5
+
+        self._init_seed(333)
+
+        # create local (serial) layer norm
+        norm_local = GeometricInstanceNormS2(
+            img_shape=img_shape,
+            crop_shape=crop_shape,
+            crop_offset=crop_offset,
+            grid_type=grid_type,
+            pole_mask=pole_mask,
+            num_features=C,
+            eps=eps,
+            affine=affine,
+        ).to(self.device)
+
+        # create distributed layer norm
+        norm_dist = DistributedGeometricInstanceNormS2(
+            img_shape=img_shape,
+            crop_shape=crop_shape,
+            crop_offset=crop_offset,
+            grid_type=grid_type,
+            pole_mask=pole_mask,
+            num_features=C,
+            eps=eps,
+            affine=affine,
+        ).to(self.device)
+
+        # set up gradient reduction hooks for distributed version
+        if affine:
+            norm_dist = init_gradient_reduction_hooks(
+                norm_dist,
+                device=self.device,
+                reduction_buffer_count=1,
+                broadcast_buffers=False,
+                find_unused_parameters=False,
+                gradient_as_bucket_view=True,
+                static_graph=True,
+                verbose=False,
+            )
+            norm_dist_handle = norm_dist.module
+
+        #make sure weights are the same if affine=True
+        if affine:
+            with torch.no_grad():
+                norm_dist.module.weight.copy_(norm_local.weight)
+                norm_dist.module.bias.copy_(norm_local.bias)
+        
+        # input
+        inp_full = torch.randn((B, C, H, W), dtype=torch.float32, device=self.device)
+        
+        #############################################################
+        # local (serial) transform
+        #############################################################
+        # FWD pass
+        inp_full.requires_grad = True
+        out_full = norm_local(inp_full)
+
+        # create grad for backward
+        with torch.no_grad():
+            # create full grad
+            ograd_full = torch.randn_like(out_full)
+
+        # BWD pass
+        out_full.backward(ograd_full)
+        igrad_full = inp_full.grad.clone()
+
+        if affine:
+            wgrad_full = norm_local.weight.grad.clone()
+            bgrad_full = norm_local.bias.grad.clone()
+        
+        #############################################################
+        # distributed transform
+        #############################################################
+        # FWD pass
+        inp_local = self._split_helper(inp_full, hdim=-2, wdim=-1)
+        inp_local.requires_grad = True
+        out_local = norm_dist(inp_local)
+
+        # BWD pass
+        ograd_local = self._split_helper(ograd_full, hdim=-2, wdim=-1)
+        out_local.backward(ograd_local)
+        igrad_local = inp_local.grad.clone()
+
+        if affine:
+            wgrad_local = norm_dist.module.weight.grad.clone()
+            bgrad_local = norm_dist.module.bias.grad.clone()
+        
+        #############################################################
+        # evaluate FWD pass
+        #############################################################
+        with torch.no_grad():
+            out_gather_full = self._gather_helper(out_local, hdim=-2, wdim=-1)
+            err = fn.relative_error(out_gather_full, out_full)
+            if verbose and (self.world_rank == 0):
+                print(f"GeometricInstanceNormS2 forward relative error: {err.item()}")
+        self.assertTrue(err.item() <= tol)
+
+        #############################################################
+        # evaluate input grads
+        #############################################################
+        with torch.no_grad():
+            igrad_gather_full = self._gather_helper(igrad_local, hdim=-2, wdim=-1)
+            err = fn.relative_error(igrad_gather_full, igrad_full)
+            if verbose and (self.world_rank == 0):
+                print(f"GeometricInstanceNormS2 input grad relative error: {err.item()}")
+        self.assertTrue(err.item() <= tol)
+
+        #############################################################
+        # evaluate weight and bias grads
+        #############################################################
+        # weight gradients should be the same across all processes
+        if affine:
+            with torch.no_grad():
+                wgrad_gather_list = [torch.empty_like(wgrad_local) for _ in range(self.world_size)]
+                wgrad_gather_list[self.world_rank] = wgrad_local
+                dist.all_gather(wgrad_gather_list, wgrad_local, group=None)
+                errs = []
+                for wgrad_gather_full in wgrad_gather_list:
+                    errs.append(fn.relative_error(wgrad_gather_full, wgrad_full))
+                err = torch.mean(torch.stack(errs, dim=0))
+                if verbose and (self.world_rank == 0):
+                    print(f"GeometricInstanceNormS2 weight grad relative error: {err.item()}")
+            self.assertTrue(err.item() <= tol)
+
+        # bias gradients should be the same across all processes
+        if affine:
+            with torch.no_grad():
+                bgrad_gather_list = [torch.empty_like(bgrad_local) for _ in range(self.world_size)]
+                bgrad_gather_list[self.world_rank] = bgrad_local
+                dist.all_gather(bgrad_gather_list, bgrad_local, group=None)
+                errs = []
+                for bgrad_gather_full in bgrad_gather_list:
+                    errs.append(fn.relative_error(bgrad_gather_full, bgrad_full))
+                err = torch.mean(torch.stack(errs, dim=0))
+                if verbose and (self.world_rank == 0):
+                    print(f"GeometricInstanceNormS2 bias grad relative error: {err.item()}")
+            self.assertTrue(err.item() <= tol)
         
 
 if __name__ == '__main__':    
