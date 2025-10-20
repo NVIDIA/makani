@@ -136,8 +136,8 @@ def init(model_parallel_sizes=[1, 1, 1, 1], model_parallel_names=["h", "w", "fin
     pconfig.add_node(ProcessGroupNode("spatial"), parent="model")
     pconfig.add_node(ProcessGroupNode("matmul"), parent="model")
     # subgroups for spatial
-    pconfig.add_node(ProcessGroupNode("h"), parent="spatial")
     pconfig.add_node(ProcessGroupNode("w"), parent="spatial")
+    pconfig.add_node(ProcessGroupNode("h"), parent="spatial")
     # subgroups for matmul:
     pconfig.add_node(ProcessGroupNode("fin"), parent="matmul")
     pconfig.add_node(ProcessGroupNode("fout"), parent="matmul")
