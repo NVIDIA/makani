@@ -32,7 +32,6 @@ import torch_harmonics as th
 import torch_harmonics.distributed as thd
 
 # get pre-formulated layers
-#from makani.models.common import GeometricInstanceNormS2
 from makani.mpu.layers import DistributedMLP, DistributedEncoderDecoder
 
 # more distributed stuff
@@ -57,6 +56,47 @@ def _soft_clamp(x: torch.Tensor, offset: float = 0.0):
     y = torch.where(x >= 0.5, x - 0.25, y)
     return y
 
+# helper module to handle imputation of SST
+# class MLPImputer(nn.Module):
+#     def __init__(
+#         self,
+#         inp_chans = 2,
+#         out_chans = 2,
+#         mlp_ratio = 2.0,
+#         activation_function=nn.GELU,
+#     ):
+
+#     self.mlp = EncoderDecoder(
+#         num_layers=1,
+#         input_dim=inp_chans,
+#         output_dim=out_chans,
+#         hidden_dim=int(mlp_ratio * out_chans),
+#         act_layer=activation_function,
+#         input_format="nchw",
+#     )
+
+#     def forward(self, inp, out):
+#         return torch.where(torch.isnan(out), self.mlp(inp), out)
+
+class ConstantImputation(nn.Module):
+    def __init__(
+        self,
+        inp_chans = 2,
+    ):
+        super().__init__()
+
+        self.weight = nn.Parameter(torch.randn(inp_chans, 1, 1))
+
+        if comm.get_size("spatial") > 1:
+            self.weight.is_shared_mp = ["spatial"]
+            self.weight.sharded_dims_mp = [None, None, None]
+
+    def forward(self, x, mask = None):
+        if mask is None:
+            mask = torch.isnan(x)
+        else:
+            mask = torch.logical_or(mask, torch.isnan(x))
+        return torch.where(mask, self.weight, x)
 
 class DiscreteContinuousEncoder(nn.Module):
     def __init__(
@@ -408,7 +448,8 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         n_history=0,
         atmo_embed_dim=8,
         surf_embed_dim=8,
-        aux_embed_dim=8,
+        dyn_aux_embed_dim=8,
+        stat_aux_embed_dim=8,
         pos_embed_dim=0,
         num_layers=4,
         num_groups=1,
@@ -425,6 +466,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         sfno_block_frequency=2,
         big_skip=False,
         clamp_water=False,
+        encoder_bias=False,
         bias=False,
         checkpointing_level=0,
         freeze_encoder=False,
@@ -437,13 +479,12 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         self.out_shape = out_shape
         self.atmo_embed_dim = atmo_embed_dim
         self.surf_embed_dim = surf_embed_dim
-        self.aux_embed_dim = aux_embed_dim
+        self.dyn_aux_embed_dim = dyn_aux_embed_dim
+        self.stat_aux_embed_dim = stat_aux_embed_dim
         self.pos_embed_dim = pos_embed_dim
         self.big_skip = big_skip
         self.checkpointing_level = checkpointing_level
-
-        # currently doesn't support neither history nor future:
-        assert n_history == 0
+        self.n_history = n_history
 
         # compute the downscaled image size
         self.h = int(self.inp_shape[0] // scale_factor)
@@ -453,11 +494,12 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         self._init_spectral_transforms(model_grid_type, sht_grid_type, hard_thresholding_fraction, max_modes)
 
         # compute static permutations to extract
-        self._precompute_channel_groups(channel_names, aux_channel_names)
+        self._precompute_channel_groups(channel_names, aux_channel_names, n_history)
 
         # compute the total number of internal groups
         self.n_out_chans = self.n_atmo_groups * self.n_atmo_chans + self.n_surf_chans
         self.total_embed_dim = self.n_atmo_groups * self.atmo_embed_dim + self.surf_embed_dim
+        self.total_aux_embed_dim = (self.n_dyn_aux_chans > 0) * self.dyn_aux_embed_dim + (self.n_stat_aux_chans > 0) * self.stat_aux_embed_dim + self.pos_embed_dim
 
         # convert kernel shape to tuple
         kernel_shape = tuple(kernel_shape)
@@ -473,11 +515,10 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
             raise ValueError(f"Unknown activation function {activation_function}")
 
         # encoder for the atmospheric channels
-        # TODO: add the groups
         self.atmo_encoder = DiscreteContinuousEncoder(
             inp_shape=inp_shape,
             out_shape=(self.h, self.w),
-            inp_chans=self.n_atmo_chans,
+            inp_chans=self.n_atmo_chans * (self.n_history + 1),
             out_chans=self.atmo_embed_dim,
             grid_in=model_grid_type,
             grid_out=sht_grid_type,
@@ -486,16 +527,16 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
             basis_norm_mode=filter_basis_norm_mode,
             activation_function=activation_function,
             groups=math.gcd(self.n_atmo_chans, self.atmo_embed_dim),
-            bias=bias,
+            bias=encoder_bias,
             use_mlp=encoder_mlp,
         )
 
-        # encoder for the auxiliary channels
+        # encoder for the surface channels
         if self.n_surf_chans > 0:
             self.surf_encoder = DiscreteContinuousEncoder(
                 inp_shape=inp_shape,
                 out_shape=(self.h, self.w),
-                inp_chans=self.n_surf_chans,
+                inp_chans=self.n_surf_chans * (self.n_history + 1),
                 out_chans=self.surf_embed_dim,
                 grid_in=model_grid_type,
                 grid_out=sht_grid_type,
@@ -504,9 +545,51 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
                 basis_norm_mode=filter_basis_norm_mode,
                 activation_function=activation_function,
                 groups=math.gcd(self.n_surf_chans, self.surf_embed_dim),
-                bias=bias,
+                bias=encoder_bias,
                 use_mlp=encoder_mlp,
             )
+
+            if self.sst_channels_in.shape[0] > 0:
+                self.sst_imputation = ConstantImputation(
+                    inp_chans=self.sst_channels_in.shape[0],
+                )
+
+        # encoder for the auxiliary channels
+        if self.n_dyn_aux_chans > 0:
+            self.dyn_aux_encoder = DiscreteContinuousEncoder(
+                inp_shape=inp_shape,
+                out_shape=(self.h, self.w),
+                inp_chans=self.n_dyn_aux_chans * (self.n_history + 1),
+                out_chans=self.dyn_aux_embed_dim,
+                grid_in=model_grid_type,
+                grid_out=sht_grid_type,
+                kernel_shape=kernel_shape,
+                basis_type=filter_basis_type,
+                basis_norm_mode=filter_basis_norm_mode,
+                activation_function=activation_function,
+                groups=math.gcd(self.n_dyn_aux_chans, self.dyn_aux_embed_dim),
+                bias=encoder_bias,
+                use_mlp=encoder_mlp,
+            )
+
+        # encoder for the auxiliary channels
+        if self.n_stat_aux_chans > 0:
+            self.stat_aux_encoder = DiscreteContinuousEncoder(
+                inp_shape=inp_shape,
+                out_shape=(self.h, self.w),
+                inp_chans=self.n_stat_aux_chans,
+                out_chans=self.stat_aux_embed_dim,
+                grid_in=model_grid_type,
+                grid_out=sht_grid_type,
+                kernel_shape=kernel_shape,
+                basis_type=filter_basis_type,
+                basis_norm_mode=filter_basis_norm_mode,
+                activation_function=activation_function,
+                groups=math.gcd(self.n_stat_aux_chans, self.stat_aux_embed_dim),
+                bias=encoder_bias,
+                use_mlp=encoder_mlp,
+            )
+
 
         # decoder for the atmospheric variables
         self.atmo_decoder = DiscreteContinuousDecoder(
@@ -521,7 +604,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
             basis_norm_mode=filter_basis_norm_mode,
             activation_function=activation_function,
             groups=math.gcd(self.n_atmo_chans, self.atmo_embed_dim),
-            bias=bias,
+            bias=encoder_bias,
             use_mlp=encoder_mlp,
             upsample_sht=upsample_sht,
         )
@@ -540,27 +623,9 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
                 basis_norm_mode=filter_basis_norm_mode,
                 activation_function=activation_function,
                 groups=math.gcd(self.n_surf_chans, self.surf_embed_dim),
-                bias=bias,
+                bias=encoder_bias,
                 use_mlp=encoder_mlp,
                 upsample_sht=upsample_sht,
-            )
-
-        # encoder for the auxiliary channels
-        if self.n_aux_chans > 0:
-            self.aux_encoder = DiscreteContinuousEncoder(
-                inp_shape=inp_shape,
-                out_shape=(self.h, self.w),
-                inp_chans=self.n_aux_chans,
-                out_chans=self.aux_embed_dim,
-                grid_in=model_grid_type,
-                grid_out=sht_grid_type,
-                kernel_shape=kernel_shape,
-                basis_type=filter_basis_type,
-                basis_norm_mode=filter_basis_norm_mode,
-                activation_function=activation_function,
-                groups=math.gcd(self.n_aux_chans, self.aux_embed_dim),
-                bias=bias,
-                use_mlp=encoder_mlp,
             )
 
         # position embedding
@@ -572,7 +637,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         dpr = [x.item() for x in torch.linspace(0, path_drop_rate, num_layers)]
 
         # get the handle for the normalization layer
-        norm_layer = self._get_norm_layer_handle(self.h, self.w, self.total_embed_dim, normalization_layer=normalization_layer, sht_grid_type=sht_grid_type)
+        norm_layer = self._get_norm_layer_handle(self.h, self.w, self.total_embed_dim + self.total_aux_embed_dim, normalization_layer=normalization_layer, sht_grid_type=sht_grid_type)
 
         # Internal NO blocks
         self.blocks = nn.ModuleList([])
@@ -589,7 +654,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
             block = NeuralOperatorBlock(
                 self.sht,
                 self.isht,
-                self.total_embed_dim + (self.n_aux_chans > 0) * self.aux_embed_dim + self.pos_embed_dim,
+                self.total_embed_dim + self.total_aux_embed_dim,
                 self.total_embed_dim,
                 conv_type=conv_type,
                 mlp_ratio=mlp_ratio,
@@ -608,17 +673,6 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
             )
 
             self.blocks.append(block)
-
-        # residual prediction
-        if self.big_skip:
-            self.residual_transform = nn.Conv2d(self.n_out_chans, self.n_out_chans, 1, bias=False)
-            self.residual_transform.weight.is_shared_mp = ["spatial"]
-            self.residual_transform.weight.sharded_dims_mp = [None, None, None, None]
-            if self.residual_transform.bias is not None:
-                self.residual_transform.bias.is_shared_mp = ["spatial"]
-                self.residual_transform.bias.sharded_dims_mp = [None]
-            scale = math.sqrt(0.5 / self.n_out_chans)
-            nn.init.normal_(self.residual_transform.weight, mean=0.0, std=scale)
 
         # controlled output normalization of q and tcwv
         if clamp_water:
@@ -738,22 +792,51 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         group the channels appropriately into atmospheric pressure levels and surface variables
         """
 
-        atmo_chans, surf_chans, aux_chans, pressure_lvls = get_channel_groups(channel_names, aux_channel_names)
+        atmo_chans, surf_chans, dyn_aux_chans, stat_aux_chans, pressure_lvls = get_channel_groups(channel_names, aux_channel_names)
+        sst_chans = [channel_names.index("sst")] if "sst" in channel_names else []
+        lsml_chans = [len(channel_names) + aux_channel_names.index("xlsml")] if "xlsml" in aux_channel_names else []
 
         # compute how many channel groups will be kept internally
         self.n_atmo_groups = len(pressure_lvls)
         self.n_atmo_chans = len(atmo_chans) // self.n_atmo_groups
+        self.n_surf_chans = len(surf_chans)
+        self.n_dyn_aux_chans = len(dyn_aux_chans)
+        self.n_stat_aux_chans= len(stat_aux_chans)
+        self.n_aux_chans = self.n_dyn_aux_chans + self.n_stat_aux_chans
 
         # make sure they are divisible. Attention! This does not guarantee that the grrouping is correct
         if len(atmo_chans) % self.n_atmo_groups:
             raise ValueError(f"Expected number of atmospheric variables to be divisible by number of atmospheric groups but got {len(atmo_chans)} and {self.n_atmo_groups}")
 
-        self.register_buffer("atmo_channels", torch.LongTensor(atmo_chans), persistent=False)
-        self.register_buffer("surf_channels", torch.LongTensor(surf_chans), persistent=False)
-        self.register_buffer("aux_channels", torch.LongTensor(aux_chans), persistent=False)
+        # if history is included, adapt the channel lists to include the offsets
+        self.n_atmo_groups = self.n_atmo_groups
+        n_dyn_chans = len(atmo_chans) + len(surf_chans) + len(dyn_aux_chans)
+        atmo_chans_in = atmo_chans.copy()
+        surf_chans_in = surf_chans.copy()
+        sst_chans_in = sst_chans.copy()
+        for ih in range(1, n_history+1):
+            atmo_chans_in += [(c + ih*n_dyn_chans) for c in atmo_chans]
+            surf_chans_in += [(c + ih*n_dyn_chans) for c in surf_chans]
+            sst_chans_in  += [(c + ih*n_dyn_chans) for c in ssts_chan]
+            dyn_aux_chans += [(c + ih*n_dyn_chans) for c in dyn_aux_chans]
+        # account for the history offset in the static aux channels
+        stat_aux_chans = [c + n_history*n_dyn_chans for c in stat_aux_chans]
+        lsml_chans = [c + n_history*n_dyn_chans for c in lsml_chans]
 
-        self.n_surf_chans = self.surf_channels.shape[0]
-        self.n_aux_chans = self.aux_channels.shape[0]
+        self.register_buffer("atmo_channels_in", torch.LongTensor(atmo_chans_in), persistent=False)
+        self.register_buffer("atmo_channels_out", torch.LongTensor(atmo_chans), persistent=False)
+        self.register_buffer("surf_channels_in", torch.LongTensor(surf_chans_in), persistent=False)
+        self.register_buffer("surf_channels_out", torch.LongTensor(surf_chans), persistent=False)
+        self.register_buffer("sst_channels_in", torch.LongTensor(sst_chans_in), persistent=False)
+        self.register_buffer("sst_channels_out", torch.LongTensor(sst_chans), persistent=False)
+        self.register_buffer("dyn_aux_channels", torch.LongTensor(dyn_aux_chans), persistent=False)
+        self.register_buffer("stat_aux_channels", torch.LongTensor(stat_aux_chans), persistent=False)
+        self.register_buffer("land_mask_channels", torch.LongTensor(lsml_chans), persistent=False)
+        self.register_buffer("pred_channels", torch.LongTensor(surf_chans + atmo_chans), persistent=False)
+
+        # print(f"in atmo: {self.atmo_channels_in}")
+        # print(f"out atmo: {self.atmo_channels_out}")
+        # print(f"q50: {channel_names.index("q50")}")
 
         return
 
@@ -763,13 +846,24 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         """
         batchdims = x.shape[:-3]
 
-        # for atmospheric channels the same encoder is applied to each atmospheric level
-        x_atmo = x[..., self.atmo_channels, :, :].contiguous().reshape(-1, self.n_atmo_chans, *x.shape[-2:])
+        if hasattr(self, "sst_imputation"):
+            if self.land_mask_channels.nelement() > 0:
+                mask = x[..., self.land_mask_channels, :, :]
+            else:
+                mask = None
+            x[..., self.sst_channels_in, :, :] = self.sst_imputation(x[..., self.sst_channels_in, :, :], mask=mask)
+
+        # for atmospheric channels the same encoder is applied to each atmospheric level and takes the entire history into account
+        x_atmo = x[..., self.atmo_channels_in, :, :].reshape(-1, 1 + self.n_history, self.n_atmo_groups, self.n_atmo_chans, *x.shape[-2:])
+        # move the history backwards and fold it into the channel dimension
+        x_atmo = x_atmo.permute(0,2,3,1,4,5).reshape(-1, self.n_atmo_chans * (1 + self.n_history), *x.shape[-2:]).contiguous()
         x_out = self.atmo_encoder(x_atmo)
         x_out = x_out.reshape(*batchdims, self.n_atmo_groups * self.atmo_embed_dim, *x_out.shape[-2:])
 
         if hasattr(self, "surf_encoder"):
-            x_surf = x[..., self.surf_channels, :, :].contiguous()
+            x_surf = x[..., self.surf_channels_in, :, :].reshape(-1, 1 + self.n_history, self.n_surf_chans, *x.shape[-2:])
+            # move the history backwards and fold it into the channel dimension
+            x_surf = x_surf.transpose(-3,-4).reshape(-1, self.n_surf_chans * (1 + self.n_history), *x.shape[-2:]).contiguous()
             x_surf = self.surf_encoder(x_surf)
             x_out = torch.cat((x_out, x_surf), dim=-3)
 
@@ -783,19 +877,29 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         """
         batchdims = x.shape[:-3]
 
-        if hasattr(self, "aux_encoder"):
-            x_aux = x[..., self.aux_channels, :, :]
-            x_aux = self.aux_encoder(x_aux)
-            x_aux = x_aux.reshape(*batchdims, self.aux_embed_dim, *x_aux.shape[-2:])
-        else:
-            x_aux = None
+        aux_tensors = []
+
+        if hasattr(self, "dyn_aux_encoder"):
+            x_aux = x[..., self.dyn_aux_channels, :, :].reshape(-1, 1 + self.n_history, self.n_dyn_aux_chans, *x.shape[-2:])
+            x_aux = x_aux.transpose(-3,-4).reshape(-1, self.n_dyn_aux_chans * (1 + self.n_history), *x.shape[-2:]).contiguous()
+            x_aux = self.dyn_aux_encoder(x_aux)
+            x_aux = x_aux.reshape(*batchdims, self.dyn_aux_embed_dim, *x_aux.shape[-2:])
+            aux_tensors.append(x_aux)
+
+        if hasattr(self, "stat_aux_encoder"):
+            x_aux = x[..., self.stat_aux_channels, :, :].contiguous()
+            x_aux = self.stat_aux_encoder(x_aux)
+            x_aux = x_aux.reshape(*batchdims, self.stat_aux_embed_dim, *x_aux.shape[-2:])
+            aux_tensors.append(x_aux)
 
         if hasattr(self, "pos_embed"):
             x_pos = self.pos_embed()
-            if x_aux is not None:
-                x_aux = torch.cat([x_aux, x_pos], dim=-3)
-            else:
-                x_aux = x_pos
+            aux_tensors.append(x_pos)
+
+        if len(aux_tensors) > 0:
+            x_aux = torch.cat(aux_tensors, dim=-3)
+        else:
+            x_aux = None
 
         return x_aux
 
@@ -809,12 +913,13 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         x_atmo = x[..., : (self.n_atmo_groups * self.atmo_embed_dim), :, :].reshape(-1, self.atmo_embed_dim, *x.shape[-2:])
         x_atmo = self.atmo_decoder(x_atmo)
         x_out = torch.zeros(*batchdims, self.n_out_chans, *x_atmo.shape[-2:], dtype=x.dtype, device=x.device)
-        x_out[..., self.atmo_channels, :, :] = x_atmo.reshape(*batchdims, -1, *x_atmo.shape[-2:])
+        x_out[..., self.atmo_channels_out, :, :] = x_atmo.reshape(*batchdims, -1, *x_atmo.shape[-2:])
+
 
         if hasattr(self, "surf_decoder"):
             x_surf = x[..., -self.surf_embed_dim :, :, :]
             x_surf = self.surf_decoder(x_surf)
-            x_out[..., self.surf_channels, :, :] = x_surf.reshape(*batchdims, -1, *x_surf.shape[-2:])
+            x_out[..., self.surf_channels_out, :, :] = x_surf.reshape(*batchdims, -1, *x_surf.shape[-2:])
 
         return x_out
 
@@ -850,7 +955,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
 
         # save big skip
         if self.big_skip:
-            residual = x[..., : self.n_out_chans, :, :].contiguous()
+            residual = x[..., self.pred_channels, :, :].contiguous()
 
         # extract embeddings for the auxiliary embeddings
         x_aux = self.encode_auxiliary_channels(x)
@@ -864,6 +969,13 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         # run the processor
         x = self.processor_blocks(x, x_aux)
 
+        # for debugging print the activations
+        atmo_activations = x[..., : (self.n_atmo_groups * self.atmo_embed_dim), :, :].reshape(-1, self.n_atmo_groups, self.atmo_embed_dim, *x.shape[-2:])
+        s, m = torch.std_mean(atmo_activations, dim=(0, -1, -2))
+        print(f"group 0, stds: {s[0]} means: {m[0]}")
+        print(f"group -1, stds: {s[-1]} means: {m[-1]}")
+
+
         # run the decoder
         if self.checkpointing_level >= 1:
             x = checkpoint(self.decode, x, use_reentrant=False)
@@ -871,7 +983,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
             x = self.decode(x)
 
         if self.big_skip:
-            x = x + self.residual_transform(residual)
+            x[..., self.pred_channels, :, :] = x + residual
 
         # apply output transform
         x = self.clamp_water_channels(x)
