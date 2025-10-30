@@ -27,7 +27,7 @@ from makani.utils.dataloaders.data_helpers import get_data_normalization, get_ti
 from physicsnemo.distributed.mappings import gather_from_parallel_region, reduce_from_parallel_region
 
 from .losses import LossType, GeometricLpLoss, SpectralH1Loss, SpectralAMSELoss
-from .losses import EnsembleCRPSLoss, EnsembleSpectralCRPSLoss, EnsembleVortDivCRPSLoss
+from .losses import EnsembleCRPSLoss, EnsembleSpectralCRPSLoss, EnsembleVortDivCRPSLoss, EnergyScoreLoss
 from .losses import EnsembleNLLLoss, EnsembleMMDLoss
 from .losses import DriftRegularization, HydrostaticBalanceLoss
 
@@ -114,8 +114,6 @@ class LossHandler(nn.Module):
             )
 
             # append to dict and compile before:
-            # TODO: fix the compile issue
-            # self.loss_fn[loss_type] = torch.compile(loss_fn)
             self.loss_fn.append(loss_fn)
 
             # determine channel weighting
@@ -135,7 +133,8 @@ class LossHandler(nn.Module):
             # get channel weights either directly or through the compute routine
             if isinstance(channel_weight_type, List):
                 chw = torch.tensor(channel_weight_type, dtype=torch.float32)
-                chw = chw * time_diff_scale
+                if time_diff_scale is not None:
+                    chw = chw * time_diff_scale
                 assert chw.shape[1] == loss_fn.n_channels
             else:
                 chw = loss_fn.compute_channel_weighting(channel_weight_type, time_diff_scale=time_diff_scale)
@@ -244,6 +243,8 @@ class LossHandler(nn.Module):
             loss_handle = EnsembleNLLLoss
         elif "ensemble_mmd" in loss_type:
             loss_handle = EnsembleMMDLoss
+        elif "energy_score" in loss_type:
+            loss_handle = partial(EnergyScoreLoss)
         elif "drift_regularization" in loss_type:
             loss_handle = DriftRegularization
         else:
@@ -349,6 +350,8 @@ class LossHandler(nn.Module):
                 loss_vals.append(lfn(prd, tar, wgt))
         all_losses = torch.cat(loss_vals, dim=-1)
 
+        # print(all_losses)
+
         if self.training and self.track_running_stats:
             self._update_running_stats(all_losses.clone())
 
@@ -356,12 +359,14 @@ class LossHandler(nn.Module):
         chw = self.channel_weights
         if self.uncertainty_weighting and self.training:
             var, _ = self.get_running_stats()
+            if self.num_batches_tracked.item() <= 100:
+                var = torch.ones_like(var)
             chw = chw / (torch.sqrt(2 * var) + self.eps)
         elif self.balanced_weighting and self.training:
             _, mean = self.get_running_stats()
             if self.num_batches_tracked.item() <= 100:
                 mean = torch.ones_like(mean)
-            chw = chw / mean
+            chw = chw / (mean + self.eps)
 
         if self.randomized_loss_weights:
             rmask = torch.zeros_like(chw)
