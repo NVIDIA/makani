@@ -156,7 +156,7 @@ class MultiStepWrapper(nn.Module):
     def forward(self, inp, update_state=True, replace_state=True):
         # decide which routine to call
         if self.training:
-            y = self._forward_train(inp, update_state=True, replace_state=replace_state)
+            y = self._forward_train(inp, update_state=update_state, replace_state=replace_state)
         else:
             y = self._forward_eval(inp, update_state=update_state, replace_state=replace_state)
 

@@ -452,7 +452,7 @@ class EarthAttention3D(nn.Module):
             x: input features with shape of (B * num_lon, num_pl*num_lat, N, C)
             mask: (0/-inf) mask with shape of (num_lon, num_pl*num_lat, Wpl*Wlat*Wlon, Wpl*Wlat*Wlon)
         """
-        
+
         B_, nW_, N, C = x.shape
         qkv = (
             self.qkv(x)
@@ -478,7 +478,7 @@ class EarthAttention3D(nn.Module):
             attn = self.attn_drop_fn(attn)
 
             x = self.apply_attention(attn, v, B_, nW_, N, C)
-        
+
         else:
             if mask is not None:
                 bias = mask.unsqueeze(1).unsqueeze(0) + earth_position_bias.unsqueeze(0).unsqueeze(0)
@@ -486,10 +486,10 @@ class EarthAttention3D(nn.Module):
                 #bias = bias.squeeze(2)
             else:
                 bias = earth_position_bias.unsqueeze(0)
-            
+
             # extract batch size for q,k,v
             nLon = self.num_lon
-            q = q.view(B_ // nLon, nLon, q.shape[1], q.shape[2], q.shape[3], q.shape[4]) 
+            q = q.view(B_ // nLon, nLon, q.shape[1], q.shape[2], q.shape[3], q.shape[4])
             k = k.view(B_ // nLon, nLon, k.shape[1], k.shape[2], k.shape[3], k.shape[4])
             v = v.view(B_ // nLon, nLon, v.shape[1], v.shape[2], v.shape[3], v.shape[4])
             ####
@@ -736,7 +736,7 @@ class Pangu(nn.Module):
     - https://arxiv.org/abs/2211.02556
     """
 
-    def __init__(self, 
+    def __init__(self,
         inp_shape=(721,1440),
         out_shape=(721,1440),
         grid_in="equiangular",
@@ -773,14 +773,14 @@ class Pangu(nn.Module):
         self.checkpointing_level = checkpointing_level
 
         drop_path = np.linspace(0, drop_path_rate, 8).tolist()
-        
+
         # Add static channels to surface
         self.num_aux = len(self.aux_channel_names)
         N_total_surface = self.num_aux + self.num_surface
 
         # compute static permutations to extract
         self._precompute_channel_groups(self.channel_names, self.aux_channel_names)
-        
+
         # Patch embeddings are 2D or 3D convolutions, mapping the data to the required patches
         self.patchembed2d = PatchEmbed2D(
             img_size=self.inp_shape,
@@ -791,7 +791,7 @@ class Pangu(nn.Module):
             flatten=False,
             norm_layer=None,
         )
-        
+
         self.patchembed3d = PatchEmbed3D(
             img_size=(num_levels, self.inp_shape[0], self.inp_shape[1]),
             patch_size=patch_size,
@@ -870,7 +870,7 @@ class Pangu(nn.Module):
         self.patchrecovery3d = PatchRecovery3D(
             (num_levels, self.inp_shape[0], self.inp_shape[1]), patch_size, 2 * embed_dim, num_atmospheric
         )
-        
+
     def _precompute_channel_groups(
         self,
         channel_names=[],
@@ -901,7 +901,7 @@ class Pangu(nn.Module):
 
     def prepare_input(self, input):
         """
-        Prepares the input tensor for the Pangu model by splitting it into surface * static variables and atmospheric, 
+        Prepares the input tensor for the Pangu model by splitting it into surface * static variables and atmospheric,
         and reshaping the atmospheric variables into the required format.
         """
 
@@ -932,23 +932,23 @@ class Pangu(nn.Module):
         level_dict = {level: [idx for idx, value in enumerate(self.channel_names) if value[1:] == level] for level in levels}
         reordered_ids = [idx for level in levels for idx in level_dict[level]]
         check_reorder = [f'{level}_{idx}' for level in levels for idx in level_dict[level]]
-    
+
         # Flatten & reorder the output atmospheric to original order (doublechecked that this is working correctly!)
         flattened_atmospheric = output_atmospheric.reshape(output_atmospheric.shape[0], -1, output_atmospheric.shape[3], output_atmospheric.shape[4])
         reordered_atmospheric = torch.cat([torch.zeros_like(output_surface), torch.zeros_like(flattened_atmospheric)], dim=1)
         for i in range(len(reordered_ids)):
             reordered_atmospheric[:, reordered_ids[i], :, :] = flattened_atmospheric[:, i, :, :]
-        
+
         # Append the surface output, this has not been reordered.
         if output_surface is not None:
-            _, surf_chans, _, _ = features.get_channel_groups(self.channel_names, self.aux_channel_names)
+            _, surf_chans, _, _, _ = features.get_channel_groups(self.channel_names, self.aux_channel_names)
             reordered_atmospheric[:, surf_chans, :, :] = output_surface
             output = reordered_atmospheric
         else:
             output = reordered_atmospheric
 
         return output
-      
+
     def forward(self, input):
 
         # Prep the input by splitting into surface and atmospheric variables
@@ -959,7 +959,7 @@ class Pangu(nn.Module):
             surface = checkpoint(self.patchembed2d, surface_aux, use_reentrant=False)
             atmospheric = checkpoint(self.patchembed3d, atmospheric, use_reentrant=False)
         else:
-            surface = self.patchembed2d(surface_aux) 
+            surface = self.patchembed2d(surface_aux)
             atmospheric = self.patchembed3d(atmospheric)
 
         if surface.shape[1] == 0:
@@ -1011,11 +1011,5 @@ class Pangu(nn.Module):
                 output_atmospheric = self.patchrecovery3d(output_atmospheric)
 
         output = self.prepare_output(output_surface, output_atmospheric)
-        
+
         return output
-
-        
-    
-
-    
-    

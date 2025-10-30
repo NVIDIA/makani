@@ -38,7 +38,7 @@ class PanguOnnx(OnnxWrapper):
         channel_order_PL: List containing the names of the pressure levels with the ordering that the ONNX model expects
         onnx_file: Path to the ONNX file containing the model
     '''
-    def __init__(self, 
+    def __init__(self,
         channel_names=[],
         aux_channel_names=[],
         onnx_file=None,
@@ -58,7 +58,7 @@ class PanguOnnx(OnnxWrapper):
         group the channels appropriately into atmospheric pressure levels and surface variables
         """
 
-        atmo_chans, surf_chans, _, pressure_lvls = get_channel_groups(channel_names, aux_channel_names)
+        atmo_chans, surf_chans, _, _, pressure_lvls = get_channel_groups(channel_names, aux_channel_names)
 
         # compute how many channel groups will be kept internally
         self.n_atmo_groups = len(pressure_lvls)
@@ -78,12 +78,12 @@ class PanguOnnx(OnnxWrapper):
         B,V,Lat,Long=input.shape
 
         if B>1:
-            raise NotImplementedError("Not implemented yet for batch size greater than 1")   
+            raise NotImplementedError("Not implemented yet for batch size greater than 1")
 
         input=input.squeeze(0)
         surface_aux_inp=input[self.surf_channels]
         atmospheric_inp=input[self.atmo_channels].reshape(self.n_atmo_groups,self.n_atmo_chans,Lat,Long).transpose(1,0)
-        
+
         return surface_aux_inp, atmospheric_inp
 
     def prepare_output(self, output_surface, output_atmospheric):
@@ -99,9 +99,9 @@ class PanguOnnx(OnnxWrapper):
 
         return output.unsqueeze(0)
 
-      
+
     def forward(self, input):
-        
+
         surface, atmospheric = self.prepare_input(input)
 
 
@@ -109,5 +109,5 @@ class PanguOnnx(OnnxWrapper):
 
         output = self.prepare_output(output_surface, output)
 
-        
+
         return output

@@ -45,7 +45,7 @@ def _compute_channel_weighting_helper(channel_names: List[str], channel_weight_t
     elif channel_weight_type == "auto":
 
         for c, chn in enumerate(channel_names):
-            if chn in ["u10m", "v10m", "u100m", "v100m", "tp", "sp", "msl", "tcwv"]:
+            if chn in ["u10m", "v10m", "u100m", "v100m", "tp", "sp", "msl", "tcwv", "sst"]:
                 channel_weights[c] = 0.1
             elif chn in ["t2m", "2d"]:
                 channel_weights[c] = 1.0
@@ -58,7 +58,7 @@ def _compute_channel_weighting_helper(channel_names: List[str], channel_weight_t
     elif channel_weight_type == "new auto":
 
         for c, chn in enumerate(channel_names):
-            if chn in ["u10m", "v10m", "u100m", "v100m", "tp", "sp", "msl", "tcwv"]:
+            if chn in ["u10m", "v10m", "u100m", "v100m", "tp", "sp", "msl", "tcwv", "sst"]:
                 channel_weights[c] = 0.1
             elif chn in ["t2m", "2d"]:
                 channel_weights[c] = 2.0
@@ -71,7 +71,7 @@ def _compute_channel_weighting_helper(channel_names: List[str], channel_weight_t
     elif channel_weight_type == "new auto 2":
 
         for c, chn in enumerate(channel_names):
-            if chn in ["u10m", "v10m", "u100m", "v100m", "tp", "sp", "msl", "tcwv"]:
+            if chn in ["u10m", "v10m", "u100m", "v100m", "tp", "sp", "msl", "tcwv", "sst"]:
                 channel_weights[c] = 0.1
             elif chn in ["t2m", "2d"]:
                 channel_weights[c] = 2.0

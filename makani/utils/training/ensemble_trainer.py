@@ -171,11 +171,11 @@ class EnsembleTrainer(Trainer):
             self.loss_obj = self.loss_obj.to(self.device)
         self.timers["loss handler init"] = timer.time
 
-        # channel weights:
-        if self.log_to_screen:
-            chw_weights = self.loss_obj.channel_weights.squeeze().cpu().numpy().tolist()
-            chw_output = {k: v for k,v in zip(self.params.channel_names, chw_weights)}
-            self.logger.info(f"Channel weights: {chw_output}")
+        # # channel weights:
+        # if self.log_to_screen:
+        #     chw_weights = self.loss_obj.channel_weights.squeeze().cpu().numpy().tolist()
+        #     chw_output = {k: v for k,v in zip(self.params.channel_names, chw_weights)}
+        #     self.logger.info(f"Channel weights: {chw_output}")
 
         # optimizer and scheduler setup
         # model
@@ -231,7 +231,9 @@ class EnsembleTrainer(Trainer):
 
         # visualization wrapper:
         with Timer() as timer:
-            plot_list = [{"name": "windspeed_uv10", "functor": "lambda x: np.sqrt(np.square(x[0, ...]) + np.square(x[1, ...]))", "diverging": False}]
+            plot_channel = "q50"
+            plot_index = self.params.channel_names.index(plot_channel)
+            plot_list = [{"name": plot_channel, "functor": f"lambda x: x[{plot_index}, ...]", "diverging": False}]
             out_bias, out_scale = self.train_dataloader.get_output_normalization()
             self.visualizer = visualize.VisualizationWrapper(
                 self.params.log_to_wandb,

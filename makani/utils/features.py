@@ -97,13 +97,15 @@ def get_wind_channels(channel_names):
 
 def get_channel_groups(channel_names, aux_channel_names=[]):
     """
-    Helper routine to extract indices of atmospheric, surface and auxiliary variables and group them into their respective groups
+    Helper routine to extract indices of atmospheric, surface and auxiliary variables and group them into their respective groups.
+    The resulting numbering does NOT respect history.
     """
 
     atmo_groups = OrderedDict()
     atmo_chans = []
     surf_chans = []
-    aux_chans = []
+    dyn_aux_chans = []
+    stat_aux_chans = []
 
     # parse channel names and group variables by pressure level/surface variables
     for idx, chn in enumerate(channel_names):
@@ -127,6 +129,10 @@ def get_channel_groups(channel_names, aux_channel_names=[]):
         atmo_chans += idx
 
     # append the auxiliary variable to the surface channels
-    aux_chans = [idx + len(channel_names) for idx in range(len(aux_channel_names))]
+    for idx, chn in enumerate(aux_channel_names):
+        if chn in ["xoro", "xlsml", "xlsms"]:
+            stat_aux_chans.append(idx + len(channel_names))
+        else:
+            dyn_aux_chans.append(idx + len(channel_names))
 
-    return atmo_chans, surf_chans, aux_chans, atmo_groups.keys()
+    return atmo_chans, surf_chans, dyn_aux_chans, stat_aux_chans, atmo_groups.keys()
