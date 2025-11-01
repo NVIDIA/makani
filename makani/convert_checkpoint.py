@@ -100,7 +100,7 @@ def consolidate_checkpoints(input_path, output_path, checkpoint_version=0):
     print(checkpoint_paths)
 
     # load the static data necessary for instantiating the preprocessor (required due to the way the registry works)
-    LocalPackage._load_static_data(input_path, params)
+    LocalPackage._load_static_data(LocalPackage(input_path), params)
 
     # get the model
     multistep = params.n_future > 0
