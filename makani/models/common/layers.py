@@ -51,12 +51,12 @@ class DropPath(nn.Module):
         return drop_path(x, self.drop_prob, self.training)
 
 
-class SeededDropout(nn.Module):
+class SeededDropout2d(nn.Module):
     def __init__(self, drop_prob=0.0, seed=333):
-        super(SeededDropout, self).__init__()
+        super(SeededDropout2d, self).__init__()
         self.drop_prob = drop_prob
         self.seed = seed
-        self.drop = nn.Dropout(p=self.drop_prob)
+        self.drop = nn.Dropout2d(p=self.drop_prob)
 
         # set RNG states
         self.rng_cpu = torch.Generator(device=torch.device("cpu"))
