@@ -100,7 +100,7 @@ class BaseNoiseS2(nn.Module):
 
     # this routine generates a noise sample for a single time step and updates the state accordingly, by appending the last time step
     def update(self, replace_state=False, batch_size=None):
-        # Update should always create a new state, so 
+        # Update should always create a new state, so
         # we don't need to check for replace_state
         # create single occurence
         with torch.no_grad():

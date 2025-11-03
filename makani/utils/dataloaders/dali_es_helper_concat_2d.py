@@ -159,7 +159,7 @@ class GeneralConcatES(object):
         if timestamp_boundary_list:
             #compute list of allowed timestamps
             timestamp_boundary_list = [get_date_from_string(timestamp_string) for timestamp_string in timestamp_boundary_list]
-           
+
             # now, based on dt, dh, n_history and n_future, we can build regions where no data is allowed
             timestamp_exclusion_list = get_date_ranges(timestamp_boundary_list, lookback_hours = dt_total * (self.n_future + 1), lookahead_hours = dt_total * self.n_history)
 
