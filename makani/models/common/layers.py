@@ -19,6 +19,8 @@ from torch.nn.modules.container import Sequential
 from torch.utils.checkpoint import checkpoint, checkpoint_sequential
 import math
 
+from makani.models.common.context import rng_context
+
 
 @torch.compile
 def drop_path(x: torch.Tensor, drop_prob: float = 0.0, training: bool = False) -> torch.Tensor:
@@ -47,6 +49,26 @@ class DropPath(nn.Module):
 
     def forward(self, x):
         return drop_path(x, self.drop_prob, self.training)
+
+
+class SeededDropout(nn.Module):
+    def __init__(self, drop_prob=0.0, seed=333):
+        super(SeededDropout, self).__init__()
+        self.drop_prob = drop_prob
+        self.seed = seed
+        self.drop = nn.Dropout(p=self.drop_prob)
+
+        # set RNG states
+        self.rng_cpu = torch.Generator(device=torch.device("cpu"))
+        self.rng_cpu.manual_seed(seed)
+        if torch.cuda.is_available():
+            self.rng_gpu = torch.Generator(device=torch.cuda.current_device())
+            self.rng_gpu.manual_seed(seed)
+
+    def forward(self, x):
+        with rng_context(self.rng_cpu, self.rng_gpu):
+            xdrop = self.drop(x)
+        return xdrop
 
 
 class LayerScale(nn.Module):
