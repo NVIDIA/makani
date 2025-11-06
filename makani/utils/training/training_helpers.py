@@ -45,34 +45,59 @@ def normalize_weights(model, eps=1e-5):
     return
 
 
-def clip_grads(model, max_grad_norm):
+def _compute_total_grad_norm(model, norm_type=2.0):
+    # iterate over parameters
+    gnorms = []
+    for param in model.parameters():
+
+        if param.grad is None:
+            continue
+
+        # compute local norm: compute abs first to support complex grads
+        if norm_type == 2.0:
+            gnorm = torch.sum(torch.square(torch.abs(param.grad)))
+        else:
+            gnorm = torch.sum(torch.abs(param.grad))
+
+        # compute global norm
+        if hasattr(param, "sharded_dims_mp"):
+
+            for group in param.sharded_dims_mp:
+                # continue if there is nothing to do
+                if (group is None) or (comm.get_size(group) == 1):
+                    continue
+
+                dist.all_reduce(gnorm, group=comm.get_group(group))
+
+        gnorms.append(gnorm)
+
+    # compute total norm
+    if gnorms:
+        total_gnorm = torch.sum(torch.stack(gnorms))
+    else:
+        total_gnorm = torch.tensor(0.0, device=model.device)
+
+    # post-process norm
+    if norm_type == 2.0:
+        total_gnorm = torch.sqrt(total_gnorm)
+
+    return total_gnorm
+
+
+def clip_grads(model, max_grad_norm, norm_type=2.0):
 
     # iterate over parameters
     with torch.no_grad():
-        for param in model.parameters():
+        total_gnorm = _compute_total_grad_norm(model, norm_type)
 
+        clip_factor = max_grad_norm / (total_gnorm + 1e-6)  # add small epsilon to avoid division by zero
+        clip_factor = torch.clamp(clip_factor, max=1.0)
+
+        for param in model.parameters():
             if param.grad is None:
                 continue
 
-            # compute local norm: compute abs first to support complex grads
-            gnorm = torch.sum(torch.square(torch.abs(param.grad)))
-
-            # compute global norm
-            if hasattr(param, "sharded_dims_mp"):
-
-                for d, group in enumerate(param.sharded_dims_mp):
-                    # continue if there is nothing to do
-                    if (group is None) or (comm.get_size(group) == 1):
-                        continue
-
-                    dist.all_reduce(gnorm, group=comm.get_group(group))
-
-            # compute square root
-            gnorm = torch.sqrt(gnorm)
-
-            # update grads
-            if gnorm > max_grad_norm:
-                param.grad.mul_(max_grad_norm / gnorm)
+            param.grad.mul_(clip_factor)
 
     return
 
