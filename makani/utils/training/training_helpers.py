@@ -90,7 +90,7 @@ def clip_grads(model, max_grad_norm, norm_type=2.0):
     with torch.no_grad():
         total_gnorm = _compute_total_grad_norm(model, norm_type)
 
-        clip_factor = max_grad_norm / total_gnorm
+        clip_factor = max_grad_norm / (total_gnorm + 1e-6)  # add small epsilon to avoid division by zero
         clip_factor = torch.clamp(clip_factor, max=1.0)
 
         for param in model.parameters():
