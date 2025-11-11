@@ -99,7 +99,7 @@ def clip_grads(model, max_grad_norm, norm_type=2.0):
 
             param.grad.mul_(clip_factor)
 
-    return
+    return total_gnorm
 
 
 def wandb_register_activations_monitor(model: nn.Module, step: int):
