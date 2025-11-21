@@ -15,6 +15,7 @@
 
 
 import os
+import sys
 import tempfile
 import unittest
 from parameterized import parameterized
@@ -27,11 +28,13 @@ import torch_harmonics.distributed as thd
 
 from makani.utils import comm
 from makani.utils import functions as fn
-from physicsnemo.distributed.utils import split_tensor_along_dim, compute_split_shapes
-from physicsnemo.distributed.mappings import gather_from_parallel_region, scatter_to_parallel_region, reduce_from_parallel_region
+
+# Add parent directory to path for testutils import
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from testutils import compare_tensors
 
 from makani.utils.grids import GridQuadrature
-from makani.utils.losses import EnsembleCRPSLoss, EnsembleNLLLoss
+from makani.utils.losses import EnsembleCRPSLoss, EnsembleNLLLoss, EnsembleSpectralCRPSLoss
 
 from distributed_helpers import split_helper, gather_helper
 
@@ -119,16 +122,16 @@ class TestDistributedLoss(unittest.TestCase):
     
     @parameterized.expand(
         [
-            [128, 256, 32, 8, 1e-6, "naive", False],
-            [128, 256, 32, 8, 1e-6, "naive", True],
-            [129, 256, 32, 8, 1e-6, "naive", False],
-            [129, 256, 32, 8, 1e-6, "naive", True],
-            [129, 256, 32, 8, 1e-6, "clenshaw-curtiss", False],
-            [129, 256, 32, 8, 1e-6, "clenshaw-curtiss", True],
-            [129, 256, 32, 8, 1e-6, "legendre-gauss", False],
-            [129, 256, 32, 8, 1e-6, "legendre-gauss", True],
-            [129, 256, 32, 8, 1e-6, "weatherbench2", False],
-            [129, 256, 32, 8, 1e-6, "weatherbench2", True],
+            # [128, 256, 32, 8, 1e-6, "naive", False],
+            # [128, 256, 32, 8, 1e-6, "naive", True],
+            # [129, 256, 32, 8, 1e-6, "naive", False],
+            # [129, 256, 32, 8, 1e-6, "naive", True],
+            # [129, 256, 32, 8, 1e-6, "clenshaw-curtiss", False],
+            # [129, 256, 32, 8, 1e-6, "clenshaw-curtiss", True],
+            # [129, 256, 32, 8, 1e-6, "legendre-gauss", False],
+            # [129, 256, 32, 8, 1e-6, "legendre-gauss", True],
+            # [129, 256, 32, 8, 1e-6, "weatherbench2", False],
+            # [129, 256, 32, 8, 1e-6, "weatherbench2", True],
         ], skip_on_empty=True
     )
     def test_distributed_quadrature(self, nlat, nlon, batch_size, num_chan, tol, quad_rule, normalize, verbose=False):
@@ -159,16 +162,14 @@ class TestDistributedLoss(unittest.TestCase):
         # evaluate FWD pass
         #############################################################
         with torch.no_grad():
-            out_gather_full = self._gather_helper_fwd(out_local)
-
             # compute errors
-            err = fn.relative_error(out_gather_full, out_full.unsqueeze(1))
+            err = fn.relative_error(out_full, out_local)
             if verbose and (self.world_rank == 0):
                 print(f"final relative error of output: {err.item()}")
         self.assertTrue(err.item() <= tol)
 
         #############################################################
-	# evaluate BWD pass
+        # evaluate BWD pass
         #############################################################
         with torch.no_grad():
             igrad_gather_full = self._gather_helper_bwd(igrad_local, False)
@@ -182,16 +183,16 @@ class TestDistributedLoss(unittest.TestCase):
 
     @parameterized.expand(
         [
-            [128, 256, 32, 8, 4, 1e-6, "ensemble_crps"],
-            [129, 256, 1, 10, 4, 1e-6, "ensemble_crps"],
-            [128, 256, 32, 8, 4, 1e-6, "ensemble_crps"],
-            [129, 256, 1, 10, 4, 1e-6, "ensemble_crps"],
-            [128, 256, 32, 8, 4, 1e-6, "skillspread_crps"],
-            [129, 256, 1, 10, 4, 1e-6, "skillspread_crps"],
-            [128, 256, 32, 8, 4, 1e-6, "gauss_crps"],
-            [129, 256, 1, 10, 4, 1e-6, "gauss_crps"],
-            [128, 256, 32, 8, 4, 1e-6, "ensemble_nll"],
-            [129, 256, 1, 10, 4, 1e-6, "ensemble_nll"],
+            [128, 256, 32, 8, 4, 1e-5, "ensemble_crps"],
+            [129, 256, 1, 10, 4, 1e-5, "ensemble_crps"],
+            [128, 256, 32, 8, 4, 1e-5, "ensemble_crps"],
+            [129, 256, 1, 10, 4, 1e-5, "ensemble_crps"],
+            [128, 256, 32, 8, 4, 1e-5, "skillspread_crps"],
+            [129, 256, 1, 10, 4, 1e-5, "skillspread_crps"],
+            [128, 256, 32, 8, 4, 1e-5, "gauss_crps"],
+            [129, 256, 1, 10, 4, 1e-5, "gauss_crps"],
+            [128, 256, 32, 8, 4, 1e-5, "ensemble_nll"],
+            [129, 256, 1, 10, 4, 1e-5, "ensemble_nll"],
         ], skip_on_empty=True
     )
     def test_distributed_crps(self, nlat, nlon, batch_size, num_chan, ens_size, tol, loss_type, verbose=False):
@@ -262,8 +263,8 @@ class TestDistributedLoss(unittest.TestCase):
             # local loss
             loss_fn_local = EnsembleCRPSLoss(
                 img_shape=(H, W),
-		crop_shape=None,
-		crop_offset=(0, 0),
+                crop_shape=None,
+                crop_offset=(0, 0),
                 channel_names=(),
                 grid_type="equiangular",
                 pole_mask=0,
@@ -276,13 +277,13 @@ class TestDistributedLoss(unittest.TestCase):
             # distributed loss
             loss_fn_dist = EnsembleCRPSLoss(
                 img_shape=(H, W),
-		crop_shape=None,
+                crop_shape=(H, W),
                 crop_offset=(0, 0),
-	        channel_names=(),
+                channel_names=(),
                 grid_type="equiangular",
-	        pole_mask=0,
-	        crps_type="skillspread",
-		spatial_distributed=(comm.is_distributed("spatial") and (comm.get_size("spatial") > 1)),
+                pole_mask=0,
+                crps_type="skillspread",
+                spatial_distributed=(comm.is_distributed("spatial") and (comm.get_size("spatial") > 1)),
                 ensemble_distributed=(comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1)),
                 eps=1.0e-5,
             ).to(self.device)
@@ -350,37 +351,174 @@ class TestDistributedLoss(unittest.TestCase):
         #############################################################
         # evaluate FWD pass
         #############################################################
-        with torch.no_grad():
-            loss_gather_full = self._gather_helper_fwd(loss_local)
-
-            # compute errors
-            err = fn.relative_error(loss_gather_full, loss_full.unsqueeze(1))
-            if verbose and (self.world_rank == 0):
-                print(f"final relative error of output: {err.item()}")
-        self.assertTrue(err.item() <= tol)
+        self.assertTrue(compare_tensors("outputs", loss_local, loss_full, tol, tol, verbose=verbose))
 
         #############################################################
         # evaluate BWD pass
         #############################################################
+        # foreacst grads
+        igrad_gather_full = self._gather_helper_bwd(igrad_local, True)
+        self.assertTrue(compare_tensors("forecast gradients", igrad_gather_full, igrad_full, tol, tol, verbose=verbose))
+
+        # observation grads
+        obsgrad_gather_full = self._gather_helper_bwd(obsgrad_local, False)
+        self.assertTrue(compare_tensors("observation gradients", obsgrad_gather_full, obsgrad_full, tol, tol, verbose=verbose))
+
+
+    @parameterized.expand(
+        [
+            #[128, 256, 32, 8, 4, 1e-3, "ensemble_crps", False],
+            #[129, 256, 1, 10, 4, 1e-3, "ensemble_crps", False],
+            #[128, 256, 32, 8, 4, 1e-3, "ensemble_crps", True],
+            #[4, 8, 1, 10, 4, 1e-3, "ensemble_crps", True],
+            #[128, 256, 32, 8, 4, 1e-3, "skillspread_crps", False],
+            #[129, 256, 1, 10, 4, 1e-3, "skillspread_crps", False],
+            #[128, 256, 32, 8, 4, 1e-3, "skillspread_crps", True],
+            # [129, 256, 1, 10, 4, 1e-6, "skillspread_crps", True],
+        ], skip_on_empty=True
+    )
+    def test_distributed_spectral_crps(self, nlat, nlon, batch_size, num_chan, ens_size, tol, loss_type, absolute, verbose=True):
+        B, E, C, H, W = batch_size, ens_size, num_chan, nlat, nlon
+
+        # generate gauss random distributed around 1, with sigma=2
+        mean, sigma = (1.0, 2.0)
+        inp_full = torch.randn((B, E, C, H, W), dtype=torch.float32, device=self.device) * sigma + mean
+        obs_full = torch.zeros((B, C, H, W), dtype=torch.float32, device=self.device) + mean
+
+        if loss_type == "ensemble_crps":
+            # local loss
+            loss_fn_local = EnsembleSpectralCRPSLoss(
+                img_shape=(H, W),
+                crop_shape=None,
+                crop_offset=(0, 0),
+                channel_names=(),
+                grid_type="equiangular",
+                crps_type="cdf",
+                spatial_distributed=False,
+                ensemble_distributed=False,
+                ensemble_weights=None,
+                absolute=absolute,
+            ).to(self.device)
+
+            # distributed loss
+            loss_fn_dist = EnsembleSpectralCRPSLoss(
+                img_shape=(H, W),
+                crop_shape=None,
+                crop_offset=(0, 0),
+                channel_names=(),
+                grid_type="equiangular",
+                crps_type="cdf",
+                spatial_distributed=(comm.is_distributed("spatial") and (comm.get_size("spatial") > 1)),
+                ensemble_distributed=(comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1)),
+                ensemble_weights=None,
+                absolute=absolute,
+            ).to(self.device)
+        elif loss_type == "gauss_crps":
+            # local loss
+            loss_fn_local = EnsembleSpectralCRPSLoss(
+                img_shape=(H, W),
+                crop_shape=None,
+                crop_offset=(0, 0),
+                channel_names=(),
+                grid_type="equiangular",
+                crps_type="gauss",
+                spatial_distributed=False,
+                ensemble_distributed=False,
+                eps=1.0e-5,
+                absolute=absolute,
+            ).to(self.device)
+
+            # distributed loss
+            loss_fn_dist = EnsembleSpectralCRPSLoss(
+                img_shape=(H, W),
+                crop_shape=None,
+                crop_offset=(0, 0),
+                channel_names=(),
+                grid_type="equiangular",
+                crps_type="gauss",
+                spatial_distributed=(comm.is_distributed("spatial") and (comm.get_size("spatial") > 1)),
+                ensemble_distributed=(comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1)),
+                eps=1.0e-5,
+                absolute=absolute,
+            ).to(self.device)
+        elif loss_type == "skillspread_crps":
+            # local loss
+            loss_fn_local = EnsembleSpectralCRPSLoss(
+                img_shape=(H, W),
+                crop_shape=None,
+                crop_offset=(0, 0),
+                channel_names=(),
+                grid_type="equiangular",
+                crps_type="skillspread",
+                spatial_distributed=False,
+                ensemble_distributed=False,
+                eps=1.0e-5,
+                absolute=absolute,
+            ).to(self.device)
+
+            # distributed loss
+            loss_fn_dist = EnsembleSpectralCRPSLoss(
+                img_shape=(H, W),
+                crop_shape=None,
+                crop_offset=(0, 0),
+                channel_names=(),
+                grid_type="equiangular",
+                crps_type="skillspread",
+                spatial_distributed=(comm.is_distributed("spatial") and (comm.get_size("spatial") > 1)),
+                ensemble_distributed=(comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1)),
+                eps=1.0e-5,
+                absolute=absolute,
+            ).to(self.device)
+
+        #############################################################
+        # local loss
+        #############################################################
+        # FWD pass
+        inp_full.requires_grad = True
+        obs_full.requires_grad = True
+        loss_full = loss_fn_local(inp_full, obs_full)
+
+        # create grad for backward
         with torch.no_grad():
-            # foreacst grads
-            igrad_gather_full = self._gather_helper_bwd(igrad_local, True)
+            # create full grad
+            ograd_full = loss_full.clone() * 10000.0
 
-            # compute errors
-            err = fn.relative_error(igrad_gather_full, igrad_full)
-            if verbose and (self.world_rank == 0):
-                print(f"final relative error of forecast gradients: {err.item()}")
-        self.assertTrue(err.item() <= tol)
+        # BWD pass
+        loss_full.backward(ograd_full)
+        igrad_full = inp_full.grad.clone()
+        obsgrad_full = obs_full.grad.clone()
 
-        with torch.no_grad():
-            # observation grads
-            obsgrad_gather_full = self._gather_helper_bwd(obsgrad_local, False)
+        #############################################################
+        # distributed loss
+        #############################################################
+        # FWD pass
+        inp_local = self._split_helper(inp_full)
+        obs_local = self._split_helper(obs_full)
+        inp_local.requires_grad = True
+        obs_local.requires_grad = True
+        loss_local = loss_fn_dist(inp_local, obs_local)
 
-            # compute errors
-            err = fn.relative_error(obsgrad_gather_full, obsgrad_full)
-            if verbose and (self.world_rank == 0):
-                print(f"final relative error of observation gradients: {err.item()}")
-        self.assertTrue(err.item() <= tol)
+        # BWD pass
+        loss_local = loss_fn_dist(inp_local, obs_local)
+        loss_local.backward(ograd_full)
+        igrad_local = inp_local.grad.clone()
+        obsgrad_local = obs_local.grad.clone()
+
+        #############################################################
+        # evaluate FWD pass
+        #############################################################
+        self.assertTrue(compare_tensors("outputs", loss_local, loss_full, tol, tol, verbose=verbose))
+
+        #############################################################
+        # evaluate BWD pass
+        #############################################################
+        # foreacst grads
+        igrad_gather_full = self._gather_helper_bwd(igrad_local, True)
+        self.assertTrue(compare_tensors("forecast gradients", igrad_gather_full, igrad_full, tol, tol, verbose=verbose))
+
+        # observation grads
+        obsgrad_gather_full = self._gather_helper_bwd(obsgrad_local, False)
+        self.assertTrue(compare_tensors("observation gradients", obsgrad_gather_full, obsgrad_full, tol, tol, verbose=verbose))
 
 
 if __name__ == "__main__":

@@ -21,6 +21,8 @@ from typing import List, Optional
 import numpy as np
 import h5py as h5
 
+import torch
+
 from makani.utils.YParams import ParamsBase
 
 H5_PATH = "fields"
@@ -209,3 +211,20 @@ def init_dataset(
         json.dump(metadata, f)
 
     return train_path, num_train, test_path, num_test, stats_path, metadata_path
+
+def compare_tensors(msg, tensor1, tensor2, atol, rtol, verbose=False):
+    diff = torch.abs(tensor1 - tensor2)
+    abs_diff = torch.mean(diff, dim=0)
+    rel_diff = torch.mean(diff / torch.clamp(torch.abs(tensor2), min=1e-6), dim=0)
+    allclose = torch.allclose(tensor1, tensor2, atol=atol, rtol=rtol)
+    if not allclose and verbose:
+        print(f"Absolute difference on {msg}: min = {abs_diff.min()}, mean = {abs_diff.mean()}, max = {abs_diff.max()}")
+        print(f"Relative difference on {msg}: min = {rel_diff.min()}, mean = {rel_diff.mean()}, max = {rel_diff.max()}")
+        print(f"Element values with max difference on {msg}: {tensor1.flatten()[diff.argmax()]} and {tensor2.flatten()[diff.argmax()]}")
+        # find violating entry
+        #violations = (diff > (atol + rtol * torch.abs(tensor2)))
+        worst_diff = torch.argmax(diff - (atol + rtol * torch.abs(tensor2)))
+        diff_bad = diff.flatten()[worst_diff].item()
+        tensor2_abs_bad = torch.abs(tensor2).flatten()[worst_diff].item()
+        print(f"Worst allclose condition violation: {diff_bad} <= {atol} + {rtol} * {tensor2_abs_bad} = {atol + rtol * tensor2_abs_bad}")
+    return allclose

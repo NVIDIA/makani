@@ -27,7 +27,7 @@ from makani.utils import comm
 
 # distributed stuff
 from physicsnemo.distributed.utils import compute_split_shapes, split_tensor_along_dim
-from physicsnemo.distributed.mappings import scatter_to_parallel_region, reduce_from_parallel_region
+from physicsnemo.distributed.mappings import scatter_to_parallel_region, reduce_from_parallel_region, copy_to_parallel_region
 from makani.mpu.mappings import distributed_transpose
 
 
@@ -363,20 +363,35 @@ class EnsembleSpectralCRPSLoss(SpectralBaseLoss):
 
         # get the local l weights
         lmax = self.sht.lmax
-        ls = torch.arange(lmax).reshape(-1, 1)
         # l_weights = 1 / (2*ls+1)
-        l_weights = torch.ones(lmax).reshape(-1, 1)
-        if comm.get_size("h") > 1:
-            l_weights = split_tensor_along_dim(l_weights, dim=-2, num_chunks=comm.get_size("h"))[comm.get_rank("h")]
-        self.register_buffer("l_weights", l_weights, persistent=False)
+        l_weights = torch.ones(lmax)#.reshape(-1, 1)
+        #if comm.get_size("h") > 1:
+        #    l_weights = split_tensor_along_dim(l_weights, dim=-2, num_chunks=comm.get_size("h"))[comm.get_rank("h")]
+        #self.register_buffer("l_weights", l_weights, persistent=False)
 
         # get the local m weights
         mmax = self.sht.mmax
-        m_weights = 2 * torch.ones(mmax).reshape(1, -1)
-        m_weights[0, 0] = 1.0
-        if comm.get_size("w") > 1:
-            m_weights = split_tensor_along_dim(m_weights, dim=-1, num_chunks=comm.get_size("w"))[comm.get_rank("w")]
-        self.register_buffer("m_weights", m_weights, persistent=False)
+        m_weights = 2 * torch.ones(mmax)#.reshape(1, -1)
+        m_weights[0] = 1.0
+        #if comm.get_size("w") > 1:
+        #    m_weights = split_tensor_along_dim(m_weights, dim=-1, num_chunks=comm.get_size("w"))[comm.get_rank("w")]
+        #self.register_buffer("m_weights", m_weights, persistent=False)
+
+        # get meshgrid of weights:
+        l_weights, m_weights = torch.meshgrid(l_weights, m_weights, indexing="ij")
+
+        # use the product weights
+        lm_weights = l_weights * m_weights
+
+        # split the tensors along all dimensions:
+        lm_weights = l_weights * m_weights
+        if spatial_distributed and comm.get_size("h") > 1:
+            lm_weights = split_tensor_along_dim(lm_weights, dim=-2, num_chunks=comm.get_size("h"))[comm.get_rank("h")]
+        if spatial_distributed and comm.get_size("w") > 1:
+            lm_weights = split_tensor_along_dim(lm_weights, dim=-1, num_chunks=comm.get_size("w"))[comm.get_rank("w")]
+
+        # register
+        self.register_buffer("lm_weights", lm_weights, persistent=False)
 
     @property
     def type(self):
@@ -402,8 +417,10 @@ class EnsembleSpectralCRPSLoss(SpectralBaseLoss):
             observations = self.sht(observations.float()) / 4.0 / math.pi
 
         if self.absolute:
+            print("before absolute", forecasts.shape, observations.shape)
             forecasts = torch.abs(forecasts).to(dtype)
             observations = torch.abs(observations).to(dtype)
+            print("after absolute", forecasts.shape, observations.shape)
         else:
             forecasts = torch.view_as_real(forecasts).to(dtype)
             observations = torch.view_as_real(observations).to(dtype)
@@ -418,10 +435,11 @@ class EnsembleSpectralCRPSLoss(SpectralBaseLoss):
         # observations: batch, channels, mmax, lmax
         B, E, C, H, W = forecasts.shape
 
+        # always use lm_weights
         if spectral_weights is None:
-            spectral_weights = self.m_weights * self.l_weights
+            spectral_weights = self.lm_weights
         else:
-            spectral_weights = spectral_weights * self.m_weights * self.l_weights
+            spectral_weights = spectral_weights * self.lm_weights
 
         # if ensemble dim is one dimensional then computing the score is quick:
         if (not self.ensemble_distributed) and (E == 1):
