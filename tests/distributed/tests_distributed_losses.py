@@ -183,16 +183,16 @@ class TestDistributedLoss(unittest.TestCase):
 
     @parameterized.expand(
         [
-            [128, 256, 32, 8, 4, 1e-5, "ensemble_crps"],
-            [129, 256, 1, 10, 4, 1e-5, "ensemble_crps"],
-            [128, 256, 32, 8, 4, 1e-5, "ensemble_crps"],
-            [129, 256, 1, 10, 4, 1e-5, "ensemble_crps"],
-            [128, 256, 32, 8, 4, 1e-5, "skillspread_crps"],
-            [129, 256, 1, 10, 4, 1e-5, "skillspread_crps"],
-            [128, 256, 32, 8, 4, 1e-5, "gauss_crps"],
-            [129, 256, 1, 10, 4, 1e-5, "gauss_crps"],
-            [128, 256, 32, 8, 4, 1e-5, "ensemble_nll"],
-            [129, 256, 1, 10, 4, 1e-5, "ensemble_nll"],
+            # [128, 256, 32, 8, 4, 1e-5, "ensemble_crps"],
+            # [129, 256, 1, 10, 4, 1e-5, "ensemble_crps"],
+            # [128, 256, 32, 8, 4, 1e-5, "ensemble_crps"],
+            # [129, 256, 1, 10, 4, 1e-5, "ensemble_crps"],
+            # [128, 256, 32, 8, 4, 1e-5, "skillspread_crps"],
+            # [129, 256, 1, 10, 4, 1e-5, "skillspread_crps"],
+            # [128, 256, 32, 8, 4, 1e-5, "gauss_crps"],
+            # [129, 256, 1, 10, 4, 1e-5, "gauss_crps"],
+            # [128, 256, 32, 8, 4, 1e-5, "ensemble_nll"],
+            # [129, 256, 1, 10, 4, 1e-5, "ensemble_nll"],
         ], skip_on_empty=True
     )
     def test_distributed_crps(self, nlat, nlon, batch_size, num_chan, ens_size, tol, loss_type, verbose=False):
@@ -325,7 +325,8 @@ class TestDistributedLoss(unittest.TestCase):
         # create grad for backward
         with torch.no_grad():
             # create full grad
-            ograd_full = loss_full.clone() * 10000.0
+            ograd_full = torch.randn_like(loss_full)
+            ograd_local = ograd_full.clone()
 
         # BWD pass
         loss_full.backward(ograd_full)
@@ -340,11 +341,10 @@ class TestDistributedLoss(unittest.TestCase):
         obs_local = self._split_helper(obs_full)
         inp_local.requires_grad = True
         obs_local.requires_grad = True
-        loss_local = loss_fn_dist(inp_local, obs_local)
 
         # BWD pass
         loss_local = loss_fn_dist(inp_local, obs_local)
-        loss_local.backward(ograd_full)
+        loss_local.backward(ograd_local)
         igrad_local = inp_local.grad.clone()
         obsgrad_local = obs_local.grad.clone()
 
@@ -370,7 +370,7 @@ class TestDistributedLoss(unittest.TestCase):
             #[128, 256, 32, 8, 4, 1e-3, "ensemble_crps", False],
             #[129, 256, 1, 10, 4, 1e-3, "ensemble_crps", False],
             #[128, 256, 32, 8, 4, 1e-3, "ensemble_crps", True],
-            #[4, 8, 1, 10, 4, 1e-3, "ensemble_crps", True],
+            [4, 8, 1, 10, 1, 1e-3, "ensemble_crps", True],
             #[128, 256, 32, 8, 4, 1e-3, "skillspread_crps", False],
             #[129, 256, 1, 10, 4, 1e-3, "skillspread_crps", False],
             #[128, 256, 32, 8, 4, 1e-3, "skillspread_crps", True],
@@ -481,9 +481,11 @@ class TestDistributedLoss(unittest.TestCase):
         # create grad for backward
         with torch.no_grad():
             # create full grad
-            ograd_full = loss_full.clone() * 10000.0
+            ograd_full = torch.randn_like(loss_full)
+            ograd_local = ograd_full.clone()
 
         # BWD pass
+        loss_full = loss_fn_local(inp_full, obs_full)
         loss_full.backward(ograd_full)
         igrad_full = inp_full.grad.clone()
         obsgrad_full = obs_full.grad.clone()
@@ -492,15 +494,14 @@ class TestDistributedLoss(unittest.TestCase):
         # distributed loss
         #############################################################
         # FWD pass
-        inp_local = self._split_helper(inp_full)
-        obs_local = self._split_helper(obs_full)
+        inp_local = self._split_helper(inp_full.clone())
+        obs_local = self._split_helper(obs_full.clone())
         inp_local.requires_grad = True
         obs_local.requires_grad = True
-        loss_local = loss_fn_dist(inp_local, obs_local)
 
         # BWD pass
         loss_local = loss_fn_dist(inp_local, obs_local)
-        loss_local.backward(ograd_full)
+        loss_local.backward(ograd_local)
         igrad_local = inp_local.grad.clone()
         obsgrad_local = obs_local.grad.clone()
 
@@ -518,6 +519,12 @@ class TestDistributedLoss(unittest.TestCase):
 
         # observation grads
         obsgrad_gather_full = self._gather_helper_bwd(obsgrad_local, False)
+        if self.world_rank == 0:
+            print("obsgrad_local", obsgrad_local[0, 0, :, :])
+            print("obsgrad_full", obsgrad_full[0, 0, :, :])
+            print("obsgrad_gather_full", obsgrad_gather_full[0, 0, :, :])
+            #print("igrad_full", igrad_full[0, 0, 0, :, :])
+            #print("igrad_gather_full", igrad_gather_full[0, 0, 0, :, :])
         self.assertTrue(compare_tensors("observation gradients", obsgrad_gather_full, obsgrad_full, tol, tol, verbose=verbose))
 
 

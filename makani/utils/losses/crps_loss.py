@@ -412,15 +412,15 @@ class EnsembleSpectralCRPSLoss(SpectralBaseLoss):
 
         # before anything else compute the transform
         # as the CDF definition doesn't generalize well to more than one-dimensional variables, we treat complex and imaginary part as the same
+        forecasts = forecasts.float()
+        observations = observations.float()
         with amp.autocast(device_type="cuda", enabled=False):
-            forecasts = self.sht(forecasts.float()) / 4.0 / math.pi
-            observations = self.sht(observations.float()) / 4.0 / math.pi
+            forecasts = self.sht(forecasts) / 4.0 / math.pi
+            observations = self.sht(observations) / 4.0 / math.pi
 
         if self.absolute:
-            print("before absolute", forecasts.shape, observations.shape)
             forecasts = torch.abs(forecasts).to(dtype)
             observations = torch.abs(observations).to(dtype)
-            print("after absolute", forecasts.shape, observations.shape)
         else:
             forecasts = torch.view_as_real(forecasts).to(dtype)
             observations = torch.view_as_real(observations).to(dtype)
