@@ -503,6 +503,11 @@ class EnsembleTrainer(Trainer):
         # we need this for the loss average
         accumulated_loss = torch.zeros((2), dtype=torch.float32, device=self.device)
 
+        if self.max_grad_norm > 0.0:
+            accumulated_grad_norm = torch.zeros((2), dtype=torch.float32, device=self.device)
+        else:
+            accumulated_grad_norm = None
+
         train_steps = 0
         train_start = time.perf_counter_ns()
         self.model_train.zero_grad(set_to_none=True)
@@ -552,7 +557,9 @@ class EnsembleTrainer(Trainer):
             if do_update:
                 if self.max_grad_norm > 0.0:
                     self.gscaler.unscale_(self.model_optimizer)
-                    clip_grads(self.model_train, self.max_grad_norm)
+                    grad_norm = clip_grads(self.model_train, self.max_grad_norm)
+                    accumulated_grad_norm[0] += grad_norm.detach()
+                    accumulated_grad_norm[1] += 1.0
 
                 self.gscaler.step(self.model_optimizer)
                 self.gscaler.update()
@@ -589,6 +596,11 @@ class EnsembleTrainer(Trainer):
 
         # add train steps to log
         logs["train_steps"] = train_steps
+
+        # log gradient norm
+        if accumulated_grad_norm is not None:
+            grad_norm = accumulated_grad_norm[0] / accumulated_grad_norm[1]
+            logs["gradient norm"] = grad_norm.item()
 
         # global sync is in order
         if dist.is_initialized():
@@ -774,6 +786,9 @@ class EnsembleTrainer(Trainer):
             # validation summary
             self.logger.info("Metrics:")
             self.logger.info(print_prefix + "training loss: {}{}".format(get_pad(pad_len[0]), train_logs["loss"]))
+            if "gradient norm" in train_logs:
+                plen = max_len - len("gradient norm")
+                self.logger.info(print_prefix + "gradient norm: {}{}".format(get_pad(plen), train_logs["gradient norm"]))
             self.logger.info(print_prefix + "validation loss: {}{}".format(get_pad(pad_len[1]), valid_logs["base"]["validation loss"]))
             for idk, key in enumerate(print_list[3:], start=3):
                 value = valid_logs["metrics"][key]
