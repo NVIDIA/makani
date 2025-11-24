@@ -33,6 +33,20 @@ def grid_to_quadrature_rule(grid_type):
         return grid_to_quad_dict[grid_type]
 
 
+def compute_spherical_bandlimit(img_shape, grid_type):
+
+    if grid_type == "equiangular":
+        lmax = (img_shape[0] - 1) // 2
+        mmax = img_shape[1] // 2
+        return min(lmax, mmax)
+    elif grid_type == "legendre-gauss":
+        lmax = img_shape[0] - 1
+        mmax = img_shape[1] // 2
+        return min(lmax, mmax)
+    else:
+        raise NotImplementedError(f"Unknown type {grid_type} not implemented")
+
+
 class GridConverter(torch.nn.Module):
     def __init__(self, src_grid, dst_grid, lat_rad, lon_rad):
         super(GridConverter, self).__init__()
