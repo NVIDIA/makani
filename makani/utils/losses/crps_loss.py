@@ -364,18 +364,12 @@ class EnsembleSpectralCRPSLoss(SpectralBaseLoss):
         # get the local l weights
         lmax = self.sht.lmax
         # l_weights = 1 / (2*ls+1)
-        l_weights = torch.ones(lmax)#.reshape(-1, 1)
-        #if comm.get_size("h") > 1:
-        #    l_weights = split_tensor_along_dim(l_weights, dim=-2, num_chunks=comm.get_size("h"))[comm.get_rank("h")]
-        #self.register_buffer("l_weights", l_weights, persistent=False)
+        l_weights = torch.ones(lmax)
 
         # get the local m weights
         mmax = self.sht.mmax
         m_weights = 2 * torch.ones(mmax)#.reshape(1, -1)
         m_weights[0] = 1.0
-        #if comm.get_size("w") > 1:
-        #    m_weights = split_tensor_along_dim(m_weights, dim=-1, num_chunks=comm.get_size("w"))[comm.get_rank("w")]
-        #self.register_buffer("m_weights", m_weights, persistent=False)
 
         # get meshgrid of weights:
         l_weights, m_weights = torch.meshgrid(l_weights, m_weights, indexing="ij")

@@ -183,16 +183,16 @@ class TestDistributedLoss(unittest.TestCase):
 
     @parameterized.expand(
         [
-            # [128, 256, 32, 8, 4, 1e-5, "ensemble_crps"],
-            # [129, 256, 1, 10, 4, 1e-5, "ensemble_crps"],
-            # [128, 256, 32, 8, 4, 1e-5, "ensemble_crps"],
-            # [129, 256, 1, 10, 4, 1e-5, "ensemble_crps"],
-            # [128, 256, 32, 8, 4, 1e-5, "skillspread_crps"],
-            # [129, 256, 1, 10, 4, 1e-5, "skillspread_crps"],
-            # [128, 256, 32, 8, 4, 1e-5, "gauss_crps"],
-            # [129, 256, 1, 10, 4, 1e-5, "gauss_crps"],
-            # [128, 256, 32, 8, 4, 1e-5, "ensemble_nll"],
-            # [129, 256, 1, 10, 4, 1e-5, "ensemble_nll"],
+            [128, 256, 32, 8, 4, 1e-5, "ensemble_crps"],
+            [129, 256, 1, 10, 4, 1e-5, "ensemble_crps"],
+            [128, 256, 32, 8, 4, 1e-5, "ensemble_crps"],
+            [129, 256, 1, 10, 4, 1e-5, "ensemble_crps"],
+            [128, 256, 32, 8, 4, 1e-5, "skillspread_crps"],
+            [129, 256, 1, 10, 4, 1e-5, "skillspread_crps"],
+            [128, 256, 32, 8, 4, 1e-5, "gauss_crps"],
+            [129, 256, 1, 10, 4, 1e-5, "gauss_crps"],
+            [128, 256, 32, 8, 4, 1e-5, "ensemble_nll"],
+            [129, 256, 1, 10, 4, 1e-5, "ensemble_nll"],
         ], skip_on_empty=True
     )
     def test_distributed_crps(self, nlat, nlon, batch_size, num_chan, ens_size, tol, loss_type, verbose=False):
@@ -201,7 +201,7 @@ class TestDistributedLoss(unittest.TestCase):
         # generate gauss random distributed around 1, with sigma=2
         mean, sigma = (1.0, 2.0)
         inp_full = torch.randn((B, E, C, H, W), dtype=torch.float32, device=self.device) * sigma + mean
-        obs_full = torch.zeros((B, C, H, W), dtype=torch.float32, device=self.device) + mean
+        obs_full = torch.full((B, C, H, W), fill_value=mean, dtype=torch.float32, device=self.device)
 
         if loss_type == "ensemble_crps":
             # local loss
@@ -367,14 +367,13 @@ class TestDistributedLoss(unittest.TestCase):
 
     @parameterized.expand(
         [
-            #[128, 256, 32, 8, 4, 1e-3, "ensemble_crps", False],
-            #[129, 256, 1, 10, 4, 1e-3, "ensemble_crps", False],
-            #[128, 256, 32, 8, 4, 1e-3, "ensemble_crps", True],
-            [4, 8, 1, 10, 1, 1e-3, "ensemble_crps", True],
-            #[128, 256, 32, 8, 4, 1e-3, "skillspread_crps", False],
-            #[129, 256, 1, 10, 4, 1e-3, "skillspread_crps", False],
-            #[128, 256, 32, 8, 4, 1e-3, "skillspread_crps", True],
-            # [129, 256, 1, 10, 4, 1e-6, "skillspread_crps", True],
+            [128, 256, 32, 8, 4, 1e-3, "ensemble_crps", False],
+            [129, 256, 1, 10, 4, 1e-3, "ensemble_crps", False],
+            [128, 256, 32, 8, 4, 1e-3, "ensemble_crps", True],
+            [128, 256, 32, 8, 4, 1e-3, "skillspread_crps", False],
+            [129, 256, 1, 10, 4, 1e-3, "skillspread_crps", False],
+            [128, 256, 32, 8, 4, 1e-3, "skillspread_crps", True],
+            [129, 256, 1, 10, 4, 1e-6, "skillspread_crps", True],
         ], skip_on_empty=True
     )
     def test_distributed_spectral_crps(self, nlat, nlon, batch_size, num_chan, ens_size, tol, loss_type, absolute, verbose=True):
@@ -383,7 +382,7 @@ class TestDistributedLoss(unittest.TestCase):
         # generate gauss random distributed around 1, with sigma=2
         mean, sigma = (1.0, 2.0)
         inp_full = torch.randn((B, E, C, H, W), dtype=torch.float32, device=self.device) * sigma + mean
-        obs_full = torch.zeros((B, C, H, W), dtype=torch.float32, device=self.device) + mean
+        obs_full = torch.full((B, C, H, W), fill_value=mean, dtype=torch.float32, device=self.device)
 
         if loss_type == "ensemble_crps":
             # local loss
@@ -519,12 +518,6 @@ class TestDistributedLoss(unittest.TestCase):
 
         # observation grads
         obsgrad_gather_full = self._gather_helper_bwd(obsgrad_local, False)
-        if self.world_rank == 0:
-            print("obsgrad_local", obsgrad_local[0, 0, :, :])
-            print("obsgrad_full", obsgrad_full[0, 0, :, :])
-            print("obsgrad_gather_full", obsgrad_gather_full[0, 0, :, :])
-            #print("igrad_full", igrad_full[0, 0, 0, :, :])
-            #print("igrad_gather_full", igrad_gather_full[0, 0, 0, :, :])
         self.assertTrue(compare_tensors("observation gradients", obsgrad_gather_full, obsgrad_full, tol, tol, verbose=verbose))
 
 
