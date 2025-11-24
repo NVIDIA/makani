@@ -266,6 +266,134 @@ class DistributedMLP(nn.Module):
         else:
             return self.fwd(x)
 
+# Stochastic MLP needs comm datastructure
+class StochasticMLP(nn.Module):
+    def __init__(
+        self,
+        in_features,
+        hidden_features=None,
+        out_features=None,
+        act_layer=nn.GELU,
+        output_bias=True,
+        input_format="nchw",
+        drop_rate=0.0,
+        drop_type="iid",
+        checkpointing=False,
+        gain=1.0,
+        seed=333,
+        **kwargs,
+    ):
+        super().__init__()
+
+        self.checkpointing = checkpointing
+        out_features = out_features or in_features
+        hidden_features = hidden_features or in_features
+
+        # generator objects:
+        self.set_rng(seed=seed)
+
+        # First fully connected layer
+        if input_format == "nchw":
+            self.fc1_weight_std = nn.Parameter(torch.zeros(hidden_features, in_features, 1, 1))
+            self.fc1_weight_mean = nn.Parameter(torch.zeros(hidden_features, in_features, 1, 1))
+            self.fc1_bias = nn.Parameter(torch.zeros(hidden_features))
+        else:
+            raise NotImplementedError(f"Error, input format {input_format} not supported.")
+
+        # sharing settings
+        self.fc1_weight_std.is_shared_mp = ["spatial"]
+        self.fc1_weight_mean.is_shared_mp = ["spatial"]
+        self.fc1_bias.is_shared_mp = ["spatial"]
+
+        # initialize the weights correctly
+        scale = math.sqrt(1.0 / in_features)
+        nn.init.normal_(self.fc1_weight_std, mean=0.0, std=scale)
+        nn.init.normal_(self.fc1_weight_mean, mean=0.0, std=scale)
+
+        # activation
+        self.act = act_layer()
+
+        # sanity checks
+        if (input_format == "traditional") and (drop_type == "features"):
+            raise NotImplementedError(f"Error, traditional input format and feature dropout cannot be selected simultaneously")
+
+        # output layer
+        if input_format == "nchw":
+            self.fc2_weight_std = nn.Parameter(torch.zeros(out_features, hidden_features, 1, 1))
+            self.fc2_weight_mean = nn.Parameter(torch.zeros(out_features, hidden_features, 1, 1))
+            self.fc2_bias = nn.Parameter(torch.zeros(out_features)) if output_bias else None
+        else:
+            raise NotImplementedError(f"Error, input format {input_format} not supported.")
+
+        # sharing settings
+        self.fc2_weight_std.is_shared_mp = ["spatial"]
+        self.fc2_weight_mean.is_shared_mp = ["spatial"]
+        if self.fc2_bias is not None:
+            self.fc2_bias.is_shared_mp = ["spatial"]
+
+        # gain factor for the output determines the scaling of the output init
+        scale = math.sqrt(gain / hidden_features / 2)
+        nn.init.normal_(self.fc2_weight_std, mean=0.0, std=scale)
+        nn.init.normal_(self.fc2_weight_mean, mean=0.0, std=scale)
+        if self.fc2_bias is not None:
+            nn.init.constant_(self.fc2_bias, 0.0)
+
+        if drop_rate > 0.0:
+            if drop_type == "iid":
+                self.drop = nn.Dropout(drop_rate)
+            elif drop_type == "features":
+                self.drop = nn.Dropout2d(drop_rate)
+            else:
+                raise NotImplementedError(f"Error, drop_type {drop_type} not supported")
+        else:
+            self.drop = nn.Identity()
+
+    @torch.compiler.disable(recursive=False)
+    def set_rng(self, seed=333):
+        self.rng_cpu = torch.Generator(device=torch.device("cpu"))
+        self.rng_cpu.manual_seed(seed)
+        if torch.cuda.is_available():
+            self.rng_gpu = torch.Generator(device=torch.device(f"cuda:{comm.get_local_rank()}"))
+            self.rng_gpu.manual_seed(seed)
+
+    @torch.compiler.disable(recursive=False)
+    def checkpoint_forward(self, x):
+        return checkpoint(self.fwd, x, use_reentrant=False)
+
+    def fwd(self, x):
+
+        # generate weight1
+        weight1 = torch.empty_like(self.fc1_weight_mean)
+        weight1.normal_(mean=0.0, std=1.0, generator=self.rng_gpu if weight1.is_cuda else self.rng_cpu)
+        weight1 = self.fc1_weight_std * weight1 + self.fc1_weight_mean
+
+        # fully connected 1
+        x = nn.functional.conv2d(x, weight1, bias=self.fc1_bias)
+
+        # activation
+        x = self.act(x)
+
+        # dropout
+        x = self.drop(x)
+
+        # generate weight1
+        weight2 = torch.empty_like(self.fc2_weight_mean)
+        weight2.normal_(mean=0.0, std=1.0, generator=self.rng_gpu if weight2.is_cuda else self.rng_cpu)
+        weight2 = self.fc2_weight_std * weight2 + self.fc2_weight_mean
+
+        # fully connected 2
+        x = nn.functional.conv2d(x, weight2, bias=self.fc2_bias)
+
+        # dropout
+        x = self.drop(x)
+
+        return x
+
+    def forward(self, x):
+        if self.checkpointing:
+            return self.checkpoint_forward(x)
+        else:
+            return self.fwd(x)
 
 class DistributedPatchEmbed(nn.Module):
     def __init__(self, img_size=(224, 224), patch_size=(16, 16), in_chans=3, embed_dim=768, input_is_matmul_parallel=False, output_is_matmul_parallel=True):
