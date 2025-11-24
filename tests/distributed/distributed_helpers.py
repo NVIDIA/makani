@@ -60,7 +60,6 @@ def get_default_parameters():
     params.N_in_channels = len(params.in_channels)
     params.N_out_channels = len(params.out_channels)
 
-    params.target = "default"
     params.batch_size = 1
     params.valid_autoreg_steps = 0
     params.num_data_workers = 1
@@ -92,7 +91,7 @@ def split_helper(tensor, dim=None, group=None):
             tensor_local = tensor_list_local[grank]
         else:
             tensor_local = tensor.clone()
-                        
+
     return tensor_local
 
 
@@ -116,5 +115,5 @@ def gather_helper(tensor, dim=None, group=None):
         tensor_gather = torch.cat(tens_gather, dim=dim)
     else:
         tensor_gather = tensor.clone()
-    
+
     return tensor_gather

@@ -63,7 +63,6 @@ def get_default_parameters():
     params.N_in_channels = len(params.in_channels)
     params.N_out_channels = len(params.out_channels)
 
-    params.target = "default"
     params.batch_size = 1
     params.valid_autoreg_steps = 0
     params.num_data_workers = 1
