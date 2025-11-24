@@ -489,11 +489,11 @@ class StochasticTrainer(Driver):
             with amp.autocast(device_type="cuda", enabled=self.amp_enabled, dtype=self.amp_dtype):
                 if do_update:
                     pred, tar = self.model_train(inp, tar, n_samples=self.params.stochastic_size)
-                    loss = self.loss_obj(pred, tar)
+                    loss = self.loss_obj(pred, tar, inp=inp)
                 else:
                     with self.model_train.no_sync():
                         pred, tar = self.model_train(inp, tar, n_samples=self.params.stochastic_size)
-                        loss = self.loss_obj(pred, tar)
+                        loss = self.loss_obj(pred, tar, inp=inp)
                 loss = loss * loss_scaling_fact
 
             self.gscaler.scale(loss).backward()

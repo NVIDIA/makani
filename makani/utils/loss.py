@@ -43,6 +43,7 @@ class LossHandler(nn.Module):
 
         self.rank = comm.get_rank("matmul")
         self.n_future = params.n_future
+        self.n_history = params.n_history
         self.spatial_distributed = comm.is_distributed("spatial") and (comm.get_size("spatial") > 1)
         self.ensemble_distributed = comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1)
 
@@ -85,11 +86,15 @@ class LossHandler(nn.Module):
 
         # create module list
         self.loss_fn = nn.ModuleList([])
+        self.loss_requires_input = []  # track which losses need input state
 
         channel_weights = []
 
         for loss in losses:
             loss_type = loss["type"]
+
+            # check if this is a tendency loss (from explicit field, not string parsing)
+            requires_input = loss.get("tendency", False)
 
             # get pole mask if it was specified
             pole_mask = loss.get("pole_mask", 0)
@@ -115,6 +120,7 @@ class LossHandler(nn.Module):
 
             # append to dict and compile before:
             self.loss_fn.append(loss_fn)
+            self.loss_requires_input.append(requires_input)
 
             # determine channel weighting
             if "channel_weights" not in loss.keys():
@@ -303,7 +309,23 @@ class LossHandler(nn.Module):
             self.running_var.fill_(1)
             self.num_batches_tracked.zero_()
 
-    def forward(self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None):
+    def _extract_input_state(self, inp: torch.Tensor) -> torch.Tensor:
+        """
+        Extract last timestep from flattened history input.
+
+        Args:
+            inp: Input tensor with shape (B, (n_history+1)*C, H, W)
+
+        Returns:
+            Last timestep with shape (B, C, H, W)
+        """
+        # inp shape: (B, (n_history+1)*C, H, W)
+        # we want: (B, C, H, W) - the last timestep
+        n_channels_per_step = inp.shape[1] // (self.n_history + 1)
+        inp_last = inp[..., -n_channels_per_step:, :, :]
+        return inp_last
+
+    def forward(self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None, inp: Optional[torch.Tensor] = None):
         # we assume the following:
         # if prd is 5D, we assume that the dims are
         # batch, ensemble, channel, h, w
@@ -341,13 +363,48 @@ class LossHandler(nn.Module):
         else:
             prdm = prd
 
+        # transform to tendency space if any loss requires it
+        if inp is not None and any(self.loss_requires_input):
+            inp_state = self._extract_input_state(inp)
+
+            # validate channel counts for single-step predictions
+            if self.n_future == 0:
+                n_pred_channels = prdm.shape[1]
+                n_inp_channels = inp_state.shape[1]
+                assert n_pred_channels == n_inp_channels, \
+                    f"Channel mismatch: prediction has {n_pred_channels} channels but input has {n_inp_channels} channels"
+
+            # transform predictions and targets to tendency space
+            # this allows ANY loss function to compute tendency-based metrics
+            prdm_tendency = prdm - inp_state
+            tar_tendency = tar - inp_state
+
+            # also transform ensemble predictions if present
+            if prd.dim() == 5:
+                # expand inp_state to match ensemble dim
+                inp_state_expanded = inp_state.unsqueeze(1)
+                prd_tendency = prd - inp_state_expanded
+            else:
+                prd_tendency = prdm_tendency
+        else:
+            prdm_tendency = prdm
+            tar_tendency = tar
+            prd_tendency = prd
+
         # compute loss contributions from each loss
         loss_vals = []
-        for lfn in self.loss_fn:
+        for lfn, requires_inp in zip(self.loss_fn, self.loss_requires_input):
             if lfn.type == LossType.Deterministic:
-                loss_vals.append(lfn(prdm, tar, wgt))
+                if requires_inp:
+                    loss_vals.append(lfn(prdm_tendency, tar_tendency, wgt))
+                else:
+                    loss_vals.append(lfn(prdm, tar, wgt))
             else:
-                loss_vals.append(lfn(prd, tar, wgt))
+                # probabilistic losses: use tendency-transformed ensemble if needed
+                if requires_inp:
+                    loss_vals.append(lfn(prd_tendency, tar_tendency, wgt))
+                else:
+                    loss_vals.append(lfn(prd, tar, wgt))
         all_losses = torch.cat(loss_vals, dim=-1)
 
         # print(all_losses)

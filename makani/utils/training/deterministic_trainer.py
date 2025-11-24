@@ -227,8 +227,10 @@ class Trainer(Driver):
 
         # visualization wrapper:
         with Timer() as timer:
-            plot_channel = "q50"
-            plot_index = self.params.channel_names.index(plot_channel)
+            plot_channel = "z500"
+            # plot_channel = "q50"
+            # plot_index = self.params.channel_names.index(plot_channel)
+            plot_index = 0
             print(self.params.channel_names)
             plot_list = [{"name": plot_channel, "functor": f"lambda x: x[{plot_index}, ...]", "diverging": False}]
             out_bias, out_scale = self.train_dataloader.get_output_normalization()
@@ -515,12 +517,12 @@ class Trainer(Driver):
                 if do_update:
                     # regular forward pass including DDP
                     pred = self.model_train(inp)
-                    loss = self.loss_obj(pred, tar)
+                    loss = self.loss_obj(pred, tar, inp=inp)
                 else:
                     # disable sync step
                     with self.model_train.no_sync():
                         pred = self.model_train(inp)
-                        loss = self.loss_obj(pred, tar)
+                        loss = self.loss_obj(pred, tar, inp=inp)
                 loss = loss * loss_scaling_fact
 
             # backward pass
