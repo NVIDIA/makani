@@ -66,9 +66,6 @@ base_config: &BASE_CONFIG
     N_grid_channels: 0
     gridtype: "sinusoidal" #options "sinusoidal" or "linear"
 
-    #options default, residual
-    target: "default"
-
     channel_names: ["u10m", "v10m", "t2m", "sp", "msl", "t850", "u1000", "v1000", "z1000", "u850", "v850", "z850", "u500", "v500", "z500", "t500", "z50", "r500", "r850", "tcwv", "u100m", "v100m", "u250", "v250", "z250", "t250", "u100", "v100", "z100", "t100", "u900", "v900", "z900", "t900"]
     normalization: "zscore" #options zscore or minmax or none
 
