@@ -24,7 +24,7 @@ import h5py as h5
 from typing import Optional
 
 from makani.utils.inference.rollout_buffer import TemporalAverageBuffer
-from testutils import init_dataset, get_default_parameters, H5_PATH, NUM_CHANNELS, IMG_SIZE_H, IMG_SIZE_W
+from .testutils import init_dataset, get_default_parameters, H5_PATH, NUM_CHANNELS, IMG_SIZE_H, IMG_SIZE_W
 
 
 def init_dataset_params(

@@ -29,7 +29,7 @@ import torch
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature
-from testutils import init_dataset, H5_PATH, NUM_CHANNELS, IMG_SIZE_H, IMG_SIZE_W
+from .testutils import init_dataset, H5_PATH, NUM_CHANNELS, IMG_SIZE_H, IMG_SIZE_W
 
 class TestAnnotateDataset(unittest.TestCase):
 

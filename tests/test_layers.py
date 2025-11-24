@@ -21,7 +21,7 @@ import torch
 from makani.models.networks.pangu import EarthAttention3D
 
 from makani.utils import functions as fn
-from testutils import get_default_parameters
+from .testutils import get_default_parameters
 
 class TestLayers(unittest.TestCase):
 

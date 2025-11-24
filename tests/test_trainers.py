@@ -28,8 +28,8 @@ from makani.utils.YParams import YParams, ParamsBase
 from makani.models.model_package import load_model_package
 from makani.utils import comm
 
-from testutils import get_default_parameters, init_dataset
-from testutils import H5_PATH
+from .testutils import get_default_parameters, init_dataset
+from .testutils import H5_PATH
 
 
 def init_params(

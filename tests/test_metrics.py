@@ -29,7 +29,7 @@ from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature
 from makani.utils import MetricsHandler
 from makani.utils.metrics.functions import GeometricL1, GeometricRMSE, GeometricACC, GeometricPCC, GeometricCRPS, GeometricSSR, GeometricRankHistogram, Quadrature
 
-from testutils import get_default_parameters
+from .testutils import get_default_parameters
 
 # check consistency with weatherbench2 if it is installed
 try:

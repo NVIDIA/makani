@@ -28,7 +28,7 @@ from makani.models.common import MLP
 from makani.utils.driver import Driver
 from makani.utils.checkpoint_helpers import get_latest_checkpoint_version
 
-from testutils import get_default_parameters
+from .testutils import get_default_parameters
 
 
 class TestSaveRestore(unittest.TestCase):

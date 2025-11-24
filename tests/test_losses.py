@@ -26,7 +26,7 @@ from makani.models import model_registry
 from makani.utils import LossHandler
 from makani.utils.losses import EnsembleCRPSLoss
 
-from testutils import get_default_parameters
+from .testutils import get_default_parameters
 
 from properscoring import crps_ensemble, crps_gaussian
 

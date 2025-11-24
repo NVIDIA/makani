@@ -29,8 +29,8 @@ import h5py as h5
 from makani.utils.dataloader import get_dataloader
 from makani.utils.dataloaders.dali_es_helper_2d import GeneralES
 
-from testutils import get_default_parameters, init_dataset
-from testutils import H5_PATH, NUM_CHANNELS, IMG_SIZE_H, IMG_SIZE_W
+from .testutils import get_default_parameters, init_dataset
+from .testutils import H5_PATH, NUM_CHANNELS, IMG_SIZE_H, IMG_SIZE_W
 
 _multifiles_params = [True]
 _have_dali = True

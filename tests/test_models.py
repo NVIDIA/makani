@@ -23,7 +23,7 @@ from makani.utils import checkpoint_helpers
 from makani.utils import functions as fn
 from makani.utils import LossHandler
 
-from testutils import get_default_parameters
+from .testutils import get_default_parameters
 
 class TestModels(unittest.TestCase):
 
