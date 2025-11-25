@@ -16,7 +16,6 @@
 
 import os
 import sys
-import tempfile
 import unittest
 from parameterized import parameterized
 
@@ -29,14 +28,13 @@ import torch_harmonics.distributed as thd
 from makani.utils import comm
 from makani.utils import functions as fn
 
-# Add parent directory to path for testutils import
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from testutils import compare_tensors
-
 from makani.utils.grids import GridQuadrature
 from makani.utils.losses import EnsembleCRPSLoss, EnsembleNLLLoss, EnsembleSpectralCRPSLoss
 
-from distributed_helpers import split_helper, gather_helper
+# Add parent directory to path for testutils import
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+from .distributed_helpers import split_helper, gather_helper
+from ..testutils import compare_tensors
 
 class TestDistributedLoss(unittest.TestCase):
 
