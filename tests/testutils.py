@@ -212,19 +212,68 @@ def init_dataset(
 
     return train_path, num_train, test_path, num_test, stats_path, metadata_path
 
-def compare_tensors(msg, tensor1, tensor2, atol, rtol, verbose=False):
-    diff = torch.abs(tensor1 - tensor2)
-    abs_diff = torch.mean(diff, dim=0)
-    rel_diff = torch.mean(diff / torch.clamp(torch.abs(tensor2), min=1e-6), dim=0)
-    allclose = torch.allclose(tensor1, tensor2, atol=atol, rtol=rtol)
-    if not allclose and verbose:
-        print(f"Absolute difference on {msg}: min = {abs_diff.min()}, mean = {abs_diff.mean()}, max = {abs_diff.max()}")
-        print(f"Relative difference on {msg}: min = {rel_diff.min()}, mean = {rel_diff.mean()}, max = {rel_diff.max()}")
-        print(f"Element values with max difference on {msg}: {tensor1.flatten()[diff.argmax()]} and {tensor2.flatten()[diff.argmax()]}")
-        # find violating entry
-        #violations = (diff > (atol + rtol * torch.abs(tensor2)))
-        worst_diff = torch.argmax(diff - (atol + rtol * torch.abs(tensor2)))
-        diff_bad = diff.flatten()[worst_diff].item()
-        tensor2_abs_bad = torch.abs(tensor2).flatten()[worst_diff].item()
-        print(f"Worst allclose condition violation: {diff_bad} <= {atol} + {rtol} * {tensor2_abs_bad} = {atol + rtol * tensor2_abs_bad}")
+def compare_tensors(msg, tensor1, tensor2, atol=1e-8, rtol=1e-5, verbose=False):
+
+    # some None checks
+    if tensor1 is None and tensor2 is None:
+        allclose = True
+    elif tensor1 is None and tensor2 is not None:
+        allclose = False
+        if verbose:
+            print(f"tensor1 is None and tensor2 is not None")
+    elif tensor1 is not None and tensor2 is None:
+        allclose = False
+        if verbose:
+            print(f"tensor1 is not None and tensor2 is None")
+    else:
+        diff = torch.abs(tensor1 - tensor2)
+        abs_diff = torch.mean(diff, dim=0)
+        rel_diff = torch.mean(diff / torch.clamp(torch.abs(tensor2), min=1e-6), dim=0)
+        allclose = torch.allclose(tensor1, tensor2, atol=atol, rtol=rtol)
+        if not allclose and verbose:
+            print(f"Absolute difference on {msg}: min = {abs_diff.min()}, mean = {abs_diff.mean()}, max = {abs_diff.max()}")
+            print(f"Relative difference on {msg}: min = {rel_diff.min()}, mean = {rel_diff.mean()}, max = {rel_diff.max()}")
+            print(f"Element values with max difference on {msg}: {tensor1.flatten()[diff.argmax()]} and {tensor2.flatten()[diff.argmax()]}")
+            # find violating entry
+            worst_diff = torch.argmax(diff - (atol + rtol * torch.abs(tensor2)))
+            diff_bad = diff.flatten()[worst_diff].item()
+            tensor2_abs_bad = torch.abs(tensor2).flatten()[worst_diff].item()
+            print(f"Worst allclose condition violation: {diff_bad} <= {atol} + {rtol} * {tensor2_abs_bad} = {atol + rtol * tensor2_abs_bad}")
+
+    return allclose
+
+
+def compare_arrays(msg, array1, array2, atol=1e-8, rtol=1e-5, verbose=False):
+    # some None checks
+    if array1 is None and array2 is None:
+        allclose = True
+    elif array1 is None and array2 is not None:
+        allclose = False
+        if verbose:
+            print(f"array1 is None and array2 is not None")
+    elif array1 is not None and array2 is None:
+        allclose = False
+        if verbose:
+            print(f"array1 is not None and array2 is None")
+    else:
+        # some sanitization
+        if array1.ndim == 0:
+            array1 = array1.reshape(1)
+        if array2.ndim == 0:
+            array2 = array2.reshape(1)
+        # compute error
+        diff = np.abs(array1 - array2)
+        abs_diff = np.mean(diff, axis=0)
+        rel_diff = np.mean(diff / np.clip(np.abs(array2), a_min=1e-6, a_max=None), axis=0)
+        allclose = np.allclose(array1, array2, atol=atol, rtol=rtol)
+        if not allclose and verbose:
+            print(f"Absolute difference on {msg}: min = {abs_diff.min()}, mean = {abs_diff.mean()}, max = {abs_diff.max()}")
+            print(f"Relative difference on {msg}: min = {rel_diff.min()}, mean = {rel_diff.mean()}, max = {rel_diff.max()}")
+            print(f"Element values with max difference on {msg}: {array1.flatten()[diff.argmax()]} and {array2.flatten()[diff.argmax()]}")
+            # find violating entry
+            worst_diff = np.argmax(diff - (atol + rtol * np.abs(array2)))
+            diff_bad = diff.flatten()[worst_diff].item()
+            array2_abs_bad = np.abs(array2).flatten()[worst_diff].item()
+            print(f"Worst allclose condition violation: {diff_bad} <= {atol} + {rtol} * {array2_abs_bad} = {atol + rtol * array2_abs_bad}")
+
     return allclose

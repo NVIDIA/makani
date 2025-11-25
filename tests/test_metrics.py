@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import os
+import sys
 import unittest
 from parameterized import parameterized
 
@@ -29,7 +30,8 @@ from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature
 from makani.utils import MetricsHandler
 from makani.utils.metrics.functions import GeometricL1, GeometricRMSE, GeometricACC, GeometricPCC, GeometricCRPS, GeometricSSR, GeometricRankHistogram, Quadrature
 
-from .testutils import get_default_parameters
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+from .testutils import get_default_parameters, compare_arrays
 
 # check consistency with weatherbench2 if it is installed
 try:
@@ -150,11 +152,7 @@ class TestMetrics(unittest.TestCase):
         B = xr.DataArray(B.cpu(), dims=["batch", "channels", "lat", "lon"])
         rmse_xskillscore = xs.rmse(A, B, weights=lwf, dim=["lat", "lon"]).to_numpy().mean(axis=0)
 
-        # relative difference
-        rdiff = np.abs(rmse - rmse_xskillscore) / np.abs(rmse_xskillscore)
-
-        self.assertTrue(rdiff.mean() <= 1e-5)
-        self.assertTrue(np.allclose(rmse, rmse_xskillscore, rtol=1e-5, atol=0))
+        self.assertTrue(compare_arrays("rmse", rmse, rmse_xskillscore, rtol=1e-5, atol=0))
 
     @parameterized.expand(_deterministic_metrics_params, skip_on_empty=True)
     def test_l1(self, grid_type, batch_size, num_channels, nlat, nlon):
@@ -173,9 +171,7 @@ class TestMetrics(unittest.TestCase):
         B = xr.DataArray(B.cpu(), dims=["batch", "channels", "lat", "lon"])
         l1_xskillscore = xs.mae(A, B, weights=lwf).to_numpy()
 
-        rdiff = np.abs(l1 - l1_xskillscore) / np.abs(l1_xskillscore)
-
-        self.assertTrue(rdiff <= 1e-5)
+        self.assertTrue(compare_arrays("l1", l1_xskillscore, l1, rtol=1e-5, atol=0))
 
     @parameterized.expand(_deterministic_metrics_params, skip_on_empty=True)
     def test_weighted_acc_macro(self, grid_type, batch_size, num_channels, nlat, nlon):
@@ -202,11 +198,7 @@ class TestMetrics(unittest.TestCase):
         # compute score using xskillscore
         acc_xskillscore = xs.pearson_r(A, B, weights=lwf, dim=["lat", "lon"]).to_numpy().mean(axis=0)
 
-        # compute difference
-        rdiff = np.abs(acc - acc_xskillscore) / np.abs(acc_xskillscore)
-
-        self.assertTrue(rdiff.mean() <= 1e-5)
-        self.assertTrue(np.allclose(acc, acc_xskillscore, rtol=5e-5, atol=0))
+        self.assertTrue(compare_arrays("acc macro", acc, acc_xskillscore, rtol=5e-5, atol=0))
 
     @parameterized.expand(_deterministic_metrics_params, skip_on_empty=True)
     def test_weighted_acc_micro(self, grid_type, batch_size, num_channels, nlat, nlon):
@@ -236,11 +228,7 @@ class TestMetrics(unittest.TestCase):
         # compute score using xskillscore   
         acc_xskillscore = xs.pearson_r(A, B, weights=lwf, dim=["batch", "lat", "lon"]).to_numpy()
 
-        # compute difference
-        rdiff = np.abs(acc - acc_xskillscore) / np.abs(acc_xskillscore)
-
-        self.assertTrue(rdiff.mean() <= 1e-5)
-        self.assertTrue(np.allclose(acc, acc_xskillscore, rtol=5e-5, atol=0))
+        self.assertTrue(compare_arrays("acc micro", acc, acc_xskillscore, rtol=5e-5, atol=0))
 
     @parameterized.expand(_deterministic_metrics_params, skip_on_empty=True)
     def test_weighted_pcc(self, grid_type, batch_size, num_channels, nlat, nlon):
@@ -270,11 +258,7 @@ class TestMetrics(unittest.TestCase):
         # compute score using xskillscore
         pcc_xskillscore = xs.pearson_r(A, B, weights=lwf, dim=["batch", "lat", "lon"]).to_numpy()
 
-        # compute difference
-        rdiff = np.abs(pcc - pcc_xskillscore) / np.abs(pcc_xskillscore)
-
-        self.assertTrue(rdiff.mean() <= 1e-5)
-        self.assertTrue(np.allclose(pcc, pcc_xskillscore, rtol=5e-5, atol=0))
+        self.assertTrue(compare_arrays("pcc", pcc, pcc_xskillscore, rtol=5e-5, atol=0))
 
     @parameterized.expand(_probabilistic_metrics_params, skip_on_empty=True)
     def test_weighted_crps(self, grid_type, batch_size, ensemble_size, num_channels, nlat, nlon):
@@ -294,13 +278,10 @@ class TestMetrics(unittest.TestCase):
         obs = xr.DataArray(obs.cpu(), dims=["batch", "channels", "lat", "lon"])
         fct = xr.DataArray(fct.cpu(), dims=["batch", "ensemble", "channels", "lat", "lon"])
 
+        # compute score using xskillscore
         crps_xskillscore = xs.crps_ensemble(obs, fct, member_dim="ensemble", weights=lwf, dim=["lat", "lon"]).to_numpy()
 
-        # compute difference 
-        rdiff = np.abs(crps - crps_xskillscore) / np.abs(crps_xskillscore)
-
-        self.assertTrue(rdiff.mean() <= 1e-5)
-        self.assertTrue(np.allclose(crps, crps_xskillscore, rtol=5e-5, atol=0))
+        self.assertTrue(compare_arrays("crps", crps, crps_xskillscore, rtol=5e-5, atol=0))
 
     # we need to relax the bounds here because on CPU, for some reason, the deviations are big
     @parameterized.expand(_probabilistic_metrics_params, skip_on_empty=True)
@@ -333,7 +314,8 @@ class TestMetrics(unittest.TestCase):
         # expected means: always 1 / (ensemble_size+1)
         means_expected = torch.ones([num_channels]) / float(ensemble_size + 1)
 
-        self.assertTrue(np.allclose(means_expected.cpu().numpy(), means.cpu().numpy(), atol=atol, rtol=rtol))
+        with self.subTest(desc="means"):
+            self.assertTrue(compare_arrays("means", means_expected.cpu().numpy(), means.cpu().numpy(), atol=atol, rtol=rtol, verbose=verbose))
 
         # compare to xskillscore:
         obs = xr.DataArray(obs.cpu().numpy(), dims=["batch", "channels", "lat", "lon"])
@@ -348,14 +330,8 @@ class TestMetrics(unittest.TestCase):
         qw = rankhist_handle.quad_weight_split.squeeze(0).cpu().numpy()
         rankhist_xskillscore = np.sum(rankhist_xskillscore * qw, axis=1)
 
-        if verbose:
-            rerr = fn.relative_error(rankhist, torch.from_numpy(rankhist_xskillscore).to(self.device))
-            aerr = fn.absolute_error(rankhist, torch.from_numpy(rankhist_xskillscore).to(self.device))
-            if verbose:
-                print(f"final relative error of output: {rerr.item()}")
-                print(f"final absolute error of output: {aerr.item()}")
-
-        self.assertTrue(np.allclose(rankhist.cpu().numpy(), rankhist_xskillscore, atol=atol, rtol=rtol))
+        with self.subTest(desc="rank histogram"):
+            self.assertTrue(compare_arrays("rank histogram", rankhist.cpu().numpy(), rankhist_xskillscore, atol=atol, rtol=rtol, verbose=verbose))
 
 
 class TestMetricsAggregation(unittest.TestCase):
@@ -407,13 +383,11 @@ class TestMetricsAggregation(unittest.TestCase):
         res_split = metric_func.finalize(res_split, counts_split)
 
         # compare
-        if verbose:
-            print(f"Result full: {res_full}, result split: {res_split}")
-        self.assertTrue(np.allclose(res_full.cpu().numpy(), res_split.cpu().numpy(), rtol=1e-6, atol=1e-6))
+        self.assertTrue(compare_arrays("deterministic aggregation", res_full.cpu().numpy(), res_split.cpu().numpy(), rtol=1e-6, atol=1e-6, verbose=verbose))
 
 
     @parameterized.expand(_probabilistic_metric_aggregation_params, skip_on_empty=True)
-    def test_probabilistic_aggregation(self, metric_handle, grid_type, batch_size, ensemble_size, num_channels, nlat, nlon, cred, bred):
+    def test_probabilistic_aggregation(self, metric_handle, grid_type, batch_size, ensemble_size, num_channels, nlat, nlon, cred, bred, verbose=False):
 
         # inflate batch size
         batch_size = 4 * batch_size
@@ -449,7 +423,7 @@ class TestMetricsAggregation(unittest.TestCase):
         res_split = metric_func.finalize(res_split, counts_split)
 
         # compare
-        self.assertTrue(np.allclose(res_full.cpu().numpy(), res_split.cpu().numpy(), rtol=1e-6, atol=1e-6))
+        self.assertTrue(compare_arrays("probabilistic aggregation", res_full.cpu().numpy(), res_split.cpu().numpy(), rtol=1e-6, atol=1e-6, verbose=verbose))
 
         
 class TestMetricsHandler(unittest.TestCase):
@@ -532,7 +506,7 @@ class TestMetricsHandler(unittest.TestCase):
 
 
     @parameterized.expand(_metric_handler_params, skip_on_empty=True)
-    def test_aggregation(self, grid_type, batch_size, ensemble_size, num_rollout_steps, bred):
+    def test_aggregation(self, grid_type, batch_size, ensemble_size, num_rollout_steps, bred, verbose=False):
 
         # create dummy climatology
         num_steps = 4
@@ -598,7 +572,8 @@ class TestMetricsHandler(unittest.TestCase):
 
         # compare loss
         mloss_full = logs_full["base"]["validation loss"]
-        self.assertTrue(np.allclose(mloss_full, loss_acc))
+        with self.subTest(desc="metrics_handler validation loss"):
+            self.assertTrue(compare_arrays("metrics handler validation loss", np.asarray(mloss_full), np.asarray(loss_acc), rtol=1e-6, atol=1e-6, verbose=verbose))
 
         # metric handler split:
         inplist_split = list(itertools.chain.from_iterable([torch.split(tens, batch_size // 2, dim=1) for tens in inplist]))
@@ -620,7 +595,8 @@ class TestMetricsHandler(unittest.TestCase):
         
         # compare loss
         mloss_split = logs_split["base"]["validation loss"]
-        self.assertTrue(np.allclose(mloss_split, loss_acc))
+        with self.subTest(desc="metrics_handler_split validation loss"):
+            self.assertTrue(compare_arrays("metrics handler split validation loss", np.asarray(mloss_split), np.asarray(loss_acc), rtol=1e-6, atol=1e-6, verbose=verbose))
 
         # extract dicts
         metrics_full = logs_full["metrics"]
@@ -649,7 +625,8 @@ class TestMetricsHandler(unittest.TestCase):
             data_split.append(row[-1])
         data_split = np.array(data_split)
 
-        self.assertTrue(np.allclose(data_full, data_split))
+        with self.subTest(desc="rollouts"):
+            self.assertTrue(compare_arrays("rollouts", data_full, data_split, rtol=1e-6, atol=1e-6, verbose=verbose))
 
 
 # TODO: ssr test comparing to xskillcore
@@ -668,7 +645,7 @@ class ComparetMetricsWB2(unittest.TestCase):
 
     # same as above but compare to wb2
     @parameterized.expand(_wb2_metrics_params, skip_on_empty=True)
-    def test_weighted_crps(self, grid_type, batch_size, ensemble_size, num_channels, nlat, nlon):
+    def test_weighted_crps(self, grid_type, batch_size, ensemble_size, num_channels, nlat, nlon, verbose=False):
 
         # CRPS handle
         crps_func = GeometricCRPS(
@@ -695,13 +672,11 @@ class ComparetMetricsWB2(unittest.TestCase):
         crps = crps_func(fct, obs).cpu().numpy()
         crps_wb2 = wb2.metrics.CRPS(ensemble_dim="ensemble").compute_chunk(xr_fct, xr_obs, region=None)["var"].to_numpy()
 
-        rdiff = np.abs(crps - crps_wb2) / np.abs(crps_wb2)
-        self.assertTrue(rdiff.mean() <= 5e-4)
-        self.assertTrue(np.allclose(crps, crps_wb2, rtol=5e-4, atol=0))
+        self.assertTrue(compare_arrays("crps", crps, crps_wb2, rtol=5e-4, atol=0, verbose=verbose))
 
     # same as above but compare to wb2
     @parameterized.expand(_wb2_metrics_params, skip_on_empty=True)
-    def test_weighted_ssr(self, grid_type, batch_size, ensemble_size, num_channels, nlat, nlon):
+    def test_weighted_ssr(self, grid_type, batch_size, ensemble_size, num_channels, nlat, nlon, verbose=False):
 
         # CRPS handle
         ssr_func = GeometricSSR(
@@ -730,9 +705,7 @@ class ComparetMetricsWB2(unittest.TestCase):
         ssr_spread_wb2 = wb2.metrics.EnergyScoreSpread(ensemble_dim="ensemble").compute_chunk(xr_fct, xr_obs, region=None)["var"].to_numpy()
         ssr_wb2 = ssr_spread_wb2 / ssr_skill_wb2
 
-        rdiff = np.abs(ssr - ssr_wb2) / np.abs(ssr_wb2)
-        self.assertTrue(rdiff.mean() <= 1e-2)
-        self.assertTrue(np.allclose(ssr, ssr_wb2, rtol=2e-2, atol=0))
+        self.assertTrue(compare_arrays("ssr", ssr, ssr_wb2, rtol=2e-2, atol=0, verbose=verbose))
 
 
 if __name__ == "__main__":

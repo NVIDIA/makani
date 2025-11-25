@@ -34,7 +34,7 @@ import torch
 import torch.distributed as dist
 from makani.utils.grids import GridQuadrature
 
-from wb2_helpers import DistributedProgressBar
+from .wb2_helpers import DistributedProgressBar
 
 def mask_data(data):
     data_masked = data.clone()

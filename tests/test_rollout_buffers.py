@@ -17,14 +17,16 @@ import unittest
 from parameterized import parameterized
 import tempfile
 import os
-import shutil
+import sys
 import numpy as np
 import torch
 import h5py as h5
 from typing import Optional
 
 from makani.utils.inference.rollout_buffer import TemporalAverageBuffer
-from .testutils import init_dataset, get_default_parameters, H5_PATH, NUM_CHANNELS, IMG_SIZE_H, IMG_SIZE_W
+
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+from .testutils import init_dataset, get_default_parameters, compare_arrays, H5_PATH, IMG_SIZE_H, IMG_SIZE_W
 
 
 def init_dataset_params(
@@ -230,27 +232,34 @@ class TestRolloutBuffers(unittest.TestCase):
             lons = hf["lon"][:]
         
         # Verify file structure
-        self.assertEqual(buffer_mean.shape, (num_rollout_steps, len(self.output_channels), *self.img_shape))
-        self.assertEqual(buffer_std.shape, (num_rollout_steps, len(self.output_channels), *self.img_shape))
-        self.assertEqual(len(lead_time), num_rollout_steps)
-        self.assertEqual(len(channels), len(self.output_channels))
-        self.assertEqual(len(lats), self.img_shape[0])
-        self.assertEqual(len(lons), self.img_shape[1])
+        with self.subTest(desc="buffer shapes"):
+            self.assertEqual(buffer_mean.shape, (num_rollout_steps, len(self.output_channels), *self.img_shape))
+            self.assertEqual(buffer_std.shape, (num_rollout_steps, len(self.output_channels), *self.img_shape))
+            self.assertEqual(len(lead_time), num_rollout_steps)
+            self.assertEqual(len(channels), len(self.output_channels))
+            self.assertEqual(len(lats), self.img_shape[0])
+            self.assertEqual(len(lons), self.img_shape[1])
 
         # Verify channel names
-        self.assertEqual(channels, self.output_channels)
+        with self.subTest(desc="channel names"):
+            self.assertEqual(channels, self.output_channels)
 
         # Verify lead times
         expected_lead_times = np.arange(self.rollout_dt, (num_rollout_steps + 1) * self.rollout_dt, self.rollout_dt, dtype=np.float64)
-        self.assertTrue(np.allclose(lead_time, expected_lead_times))
+        with self.subTest(desc="lead times"):
+            self.assertTrue(compare_arrays("lead times", lead_time, expected_lead_times, atol=0.0, rtol=1e-6))
 
         # Verify lat/lon coordinates
-        self.assertTrue(np.allclose(lats, self.latitude, atol=0.0, rtol=1e-6))
-        self.assertTrue(np.allclose(lons, self.longitude, atol=0.0, rtol=1e-6))
+        with self.subTest(desc="latitudes"):
+            self.assertTrue(compare_arrays("latitudes", lats, self.latitude, atol=0.0, rtol=1e-6))
+        with self.subTest(desc="longitudes"):
+            self.assertTrue(compare_arrays("longitudes", lons, self.longitude, atol=0.0, rtol=1e-6))
 
         # Compare with buffer output
-        self.assertTrue(np.allclose(buffer_mean, manual_mean, atol=0.0, rtol=1e-5))
-        self.assertTrue(np.allclose(buffer_std, manual_std, atol=0.0, rtol=1e-5))
+        with self.subTest(desc="mean"):
+            self.assertTrue(compare_arrays("mean", buffer_mean, manual_mean, atol=0.0, rtol=1e-5))
+        with self.subTest(desc="std"):
+            self.assertTrue(compare_arrays("std", buffer_std, manual_std, atol=0.0, rtol=1e-5))
 
 
 if __name__ == "__main__":

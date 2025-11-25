@@ -13,15 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import sys
+import os
 import unittest
 from parameterized import parameterized
 
 import torch
 
 from makani.models.networks.pangu import EarthAttention3D
-
 from makani.utils import functions as fn
-from .testutils import get_default_parameters
+
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+from .testutils import get_default_parameters, compare_tensors
 
 class TestLayers(unittest.TestCase):
 
@@ -119,44 +122,22 @@ class TestLayers(unittest.TestCase):
         #############################################################
         # evaluate FWD pass
         #############################################################
-        with torch.no_grad():
-            err = fn.relative_error(out_sdpa, out_naive)
-            if verbose:
-                print(f"final relative error of output: {err.item()}")
-        self.assertTrue(err.item() <= rtol)
+        with self.subTest(desc="output"):
+            self.assertTrue(compare_tensors("output", out_sdpa, out_naive, atol=atol, rtol=rtol, verbose=verbose))
         
         #############################################################
         # evaluate BWD pass
         #############################################################
         # igrads
-        with torch.no_grad():
-            err = fn.relative_error(igrad_sdpa, igrad_naive)
-            if verbose:
-                print(f"final relative error of input gradients: {err.item()}")
-        self.assertTrue(err.item() <= rtol)
+        with self.subTest(desc="input gradient"):
+            self.assertTrue(compare_tensors("input gradient", igrad_sdpa, igrad_naive, atol=atol, rtol=rtol, verbose=verbose))
         
         # wgrads
         with torch.no_grad():
-            good = True
-            errs = []
-            for ngrad, sgrad in zip(ea_naive.parameters(), ea_sdpa.parameters()):
-                err = fn.relative_error(sgrad, ngrad)
-                if err > rtol:
-                    # in some cases, the gradient itself can be small, check absolute tolerance then
-                    aerr = fn.absolute_error(sgrad, ngrad)
-                    if aerr < atol:
-                        continue
-                    if verbose:
-                        print(f"final relative error of weight gradient {key}: {err.item()}, absolute error: {aerr.item()}")
-                    good = False
-                errs.append(err)
-        merr = torch.stack(errs, dim=0).mean().item()
-        if verbose:
-            print(f"final relative average error of weight gradients: {merr}")
-        self.assertTrue(good)
-        
-        
-        
+            for (_, ngrad), (skey, sgrad) in zip(ea_naive.named_parameters(), ea_sdpa.named_parameters()):
+                with self.subTest(desc=f"weight gradient {skey}"):
+                    self.assertTrue(compare_tensors(f"weight gradient {skey}", sgrad, ngrad, atol=atol, rtol=rtol, verbose=verbose))
+
 
 if __name__ == "__main__":
     unittest.main()
