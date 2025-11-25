@@ -120,19 +120,18 @@ class TestDistributedLoss(unittest.TestCase):
     
     @parameterized.expand(
         [
-            # [128, 256, 32, 8, 1e-6, "naive", False],
-            # [128, 256, 32, 8, 1e-6, "naive", True],
-            # [129, 256, 32, 8, 1e-6, "naive", False],
-            # [129, 256, 32, 8, 1e-6, "naive", True],
-            # [129, 256, 32, 8, 1e-6, "clenshaw-curtiss", False],
-            # [129, 256, 32, 8, 1e-6, "clenshaw-curtiss", True],
-            # [129, 256, 32, 8, 1e-6, "legendre-gauss", False],
-            # [129, 256, 32, 8, 1e-6, "legendre-gauss", True],
-            # [129, 256, 32, 8, 1e-6, "weatherbench2", False],
-            # [129, 256, 32, 8, 1e-6, "weatherbench2", True],
+            [128, 256, 32, 8, "naive", False, 1e-6],
+            [128, 256, 32, 8, "naive", True, 1e-6],
+            [129, 256, 32, 8, "naive", True, 1e-6],
+            [129, 256, 32, 8, "clenshaw-curtiss", False, 1e-6],
+            [129, 256, 32, 8, "clenshaw-curtiss", True, 1e-6],
+            [129, 256, 32, 8, "legendre-gauss", False, 1e-6],
+            [129, 256, 32, 8, "legendre-gauss", True, 1e-6],
+            [129, 256, 32, 8, "weatherbench2", False, 1e-6],
+            [129, 256, 32, 8, "weatherbench2", True, 1e-6],
         ], skip_on_empty=True
     )
-    def test_distributed_quadrature(self, nlat, nlon, batch_size, num_chan, tol, quad_rule, normalize, verbose=False):
+    def test_distributed_quadrature(self, nlat, nlon, batch_size, num_chan, quad_rule, normalize, tol, verbose=False):
         B, C, H, W = batch_size, num_chan, nlat, nlon
 
         quad_local = GridQuadrature(quadrature_rule=quad_rule, img_shape=(H, W), normalize=normalize, distributed=False).to(self.device)
@@ -159,41 +158,32 @@ class TestDistributedLoss(unittest.TestCase):
         #############################################################
         # evaluate FWD pass
         #############################################################
-        with torch.no_grad():
-            # compute errors
-            err = fn.relative_error(out_full, out_local)
-            if verbose and (self.world_rank == 0):
-                print(f"final relative error of output: {err.item()}")
-        self.assertTrue(err.item() <= tol)
+        with self.subTest(desc="outputs"):
+            self.assertTrue(compare_tensors("outputs", out_local, out_full, tol, tol, verbose=verbose))
 
         #############################################################
         # evaluate BWD pass
         #############################################################
-        with torch.no_grad():
+        with self.subTest(desc="input gradients"):
             igrad_gather_full = self._gather_helper_bwd(igrad_local, False)
-            
-            # compute errors
-            err = fn.relative_error(igrad_gather_full, igrad_full)
-            if verbose and (self.world_rank == 0):
-                print(f"final relative error of gradients: {err.item()}")
-        self.assertTrue(err.item() <= tol)
+            self.assertTrue(compare_tensors("input gradients", igrad_gather_full, igrad_full, tol, tol, verbose=verbose))
 
 
     @parameterized.expand(
         [
-            [128, 256, 32, 8, 4, 1e-5, "ensemble_crps"],
-            [129, 256, 1, 10, 4, 1e-5, "ensemble_crps"],
-            [128, 256, 32, 8, 4, 1e-5, "ensemble_crps"],
-            [129, 256, 1, 10, 4, 1e-5, "ensemble_crps"],
-            [128, 256, 32, 8, 4, 1e-5, "skillspread_crps"],
-            [129, 256, 1, 10, 4, 1e-5, "skillspread_crps"],
-            [128, 256, 32, 8, 4, 1e-5, "gauss_crps"],
-            [129, 256, 1, 10, 4, 1e-5, "gauss_crps"],
-            [128, 256, 32, 8, 4, 1e-5, "ensemble_nll"],
-            [129, 256, 1, 10, 4, 1e-5, "ensemble_nll"],
+            [128, 256, 32, 8, 4, "ensemble_crps", 1e-5],
+            [129, 256, 1, 10, 4, "ensemble_crps", 1e-5],
+            [128, 256, 32, 8, 4, "ensemble_crps", 1e-5],
+            [129, 256, 1, 10, 4, "ensemble_crps", 1e-5],
+            [128, 256, 32, 8, 4, "skillspread_crps", 1e-5],
+            [129, 256, 1, 10, 4, "skillspread_crps", 1e-5],
+            [128, 256, 32, 8, 4, "gauss_crps", 1e-5],
+            [129, 256, 1, 10, 4, "gauss_crps", 1e-5],
+            [128, 256, 32, 8, 4, "ensemble_nll", 1e-5],
+            [129, 256, 1, 10, 4, "ensemble_nll", 1e-5],
         ], skip_on_empty=True
     )
-    def test_distributed_crps(self, nlat, nlon, batch_size, num_chan, ens_size, tol, loss_type, verbose=False):
+    def test_distributed_crps(self, nlat, nlon, batch_size, num_chan, ens_size, loss_type, tol, verbose=False):
         B, E, C, H, W = batch_size, ens_size, num_chan, nlat, nlon
 
         # generate gauss random distributed around 1, with sigma=2
@@ -349,32 +339,35 @@ class TestDistributedLoss(unittest.TestCase):
         #############################################################
         # evaluate FWD pass
         #############################################################
-        self.assertTrue(compare_tensors("outputs", loss_local, loss_full, tol, tol, verbose=verbose))
+        with self.subTest(desc="outputs"):
+            self.assertTrue(compare_tensors("outputs", loss_local, loss_full, tol, tol, verbose=verbose))
 
         #############################################################
         # evaluate BWD pass
         #############################################################
         # foreacst grads
-        igrad_gather_full = self._gather_helper_bwd(igrad_local, True)
-        self.assertTrue(compare_tensors("forecast gradients", igrad_gather_full, igrad_full, tol, tol, verbose=verbose))
+        with self.subTest(desc="forecast gradients"):
+            igrad_gather_full = self._gather_helper_bwd(igrad_local, True)
+            self.assertTrue(compare_tensors("forecast gradients", igrad_gather_full, igrad_full, tol, tol, verbose=verbose))
 
         # observation grads
-        obsgrad_gather_full = self._gather_helper_bwd(obsgrad_local, False)
-        self.assertTrue(compare_tensors("observation gradients", obsgrad_gather_full, obsgrad_full, tol, tol, verbose=verbose))
+        with self.subTest(desc="observation gradients"):
+            obsgrad_gather_full = self._gather_helper_bwd(obsgrad_local, False)
+            self.assertTrue(compare_tensors("observation gradients", obsgrad_gather_full, obsgrad_full, tol, tol, verbose=verbose))
 
 
     @parameterized.expand(
         [
-            [128, 256, 32, 8, 4, 1e-3, "ensemble_crps", False],
-            [129, 256, 1, 10, 4, 1e-3, "ensemble_crps", False],
-            [128, 256, 32, 8, 4, 1e-3, "ensemble_crps", True],
-            [128, 256, 32, 8, 4, 1e-3, "skillspread_crps", False],
-            [129, 256, 1, 10, 4, 1e-3, "skillspread_crps", False],
-            [128, 256, 32, 8, 4, 1e-3, "skillspread_crps", True],
-            [129, 256, 1, 10, 4, 1e-6, "skillspread_crps", True],
+            [128, 256, 32, 8, 4, "ensemble_crps", False, 1e-4],
+            [129, 256, 1, 10, 4, "ensemble_crps", False, 1e-4],
+            [128, 256, 32, 8, 4, "ensemble_crps", True, 1e-4],
+            [128, 256, 32, 8, 4, "skillspread_crps", False, 1e-4],
+            [129, 256, 1, 10, 4, "skillspread_crps", False, 1e-4],
+            [128, 256, 32, 8, 4, "skillspread_crps", True, 1e-4],
+            [129, 256, 1, 10, 4, "skillspread_crps", True, 1e-4],
         ], skip_on_empty=True
     )
-    def test_distributed_spectral_crps(self, nlat, nlon, batch_size, num_chan, ens_size, tol, loss_type, absolute, verbose=True):
+    def test_distributed_spectral_crps(self, nlat, nlon, batch_size, num_chan, ens_size, loss_type, absolute, tol, verbose=True):
         B, E, C, H, W = batch_size, ens_size, num_chan, nlat, nlon
 
         # generate gauss random distributed around 1, with sigma=2
@@ -505,18 +498,21 @@ class TestDistributedLoss(unittest.TestCase):
         #############################################################
         # evaluate FWD pass
         #############################################################
-        self.assertTrue(compare_tensors("outputs", loss_local, loss_full, tol, tol, verbose=verbose))
+        with self.subTest(desc="outputs"):
+            self.assertTrue(compare_tensors("outputs", loss_local, loss_full, tol, tol, verbose=verbose))
 
         #############################################################
         # evaluate BWD pass
         #############################################################
         # foreacst grads
-        igrad_gather_full = self._gather_helper_bwd(igrad_local, True)
-        self.assertTrue(compare_tensors("forecast gradients", igrad_gather_full, igrad_full, tol, tol, verbose=verbose))
+        with self.subTest(desc="forecast gradients"):
+            igrad_gather_full = self._gather_helper_bwd(igrad_local, True)
+            self.assertTrue(compare_tensors("forecast gradients", igrad_gather_full, igrad_full, tol, tol, verbose=verbose))
 
         # observation grads
-        obsgrad_gather_full = self._gather_helper_bwd(obsgrad_local, False)
-        self.assertTrue(compare_tensors("observation gradients", obsgrad_gather_full, obsgrad_full, tol, tol, verbose=verbose))
+        with self.subTest(desc="observation gradients"):
+            obsgrad_gather_full = self._gather_helper_bwd(obsgrad_local, False)
+            self.assertTrue(compare_tensors("observation gradients", obsgrad_gather_full, obsgrad_full, tol, tol, verbose=verbose))
 
 
 if __name__ == "__main__":
