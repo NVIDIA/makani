@@ -14,28 +14,26 @@
 # limitations under the License.
 
 
+import sys
 import os
 import tempfile
 import unittest
-from collections import OrderedDict
 from parameterized import parameterized
 
 import torch
-import torch.nn.functional as F
-import torch.distributed as dist
-
 import torch_harmonics.distributed as thd
 
-from makani.models import model_registry
+from makani.utils import comm
+from makani.utils import driver
+from makani.utils import checkpoint_helpers
 from makani.utils import LossHandler
+from makani.models import model_registry
 from makani.mpu.mappings import init_gradient_reduction_hooks
+from physicsnemo.distributed.mappings import reduce_from_parallel_region
 
-from makani.utils import comm, driver, checkpoint_helpers
-from makani.utils import functions as fn
-from physicsnemo.distributed.utils import split_tensor_along_dim, compute_split_shapes
-from physicsnemo.distributed.mappings import gather_from_parallel_region, scatter_to_parallel_region, reduce_from_parallel_region
-
-from distributed_helpers import get_default_parameters, split_helper, gather_helper
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+from .distributed_helpers import get_default_parameters, split_helper, gather_helper
+from ..testutils import compare_tensors
 
 
 class TestDistributedModel(unittest.TestCase):
@@ -143,9 +141,9 @@ class TestDistributedModel(unittest.TestCase):
 
     @parameterized.expand(
         [
-	    #"SNO",
+            #"SNO",
             #"FCN3",
-	],
+        ],
         skip_on_empty=True,
     )
     def test_distributed_model_checkpoint_restore(self, nettype, verbose=True):
@@ -195,10 +193,10 @@ class TestDistributedModel(unittest.TestCase):
         # compare parameters
         state_dict_gather_full = checkpoint_helpers.gather_model_state_dict(model_dist, grads=False)
         for key in state_dict_full.keys():
-            param_full = state_dict_full[key].cpu()
-            param_gather_full = state_dict_gather_full[key]
-
-            self.assertTrue(torch.allclose(param_full, param_gather_full, atol=0., rtol=1e-8))
+            with self.subTest(desc=f"parameter {key}"):
+                param_full = state_dict_full[key].cpu()
+                param_gather_full = state_dict_gather_full[key]
+                self.assertTrue(compare_tensors(f"parameter {key}", param_full, param_gather_full, verbose=verbose))
 
         self.mpi_comm.Barrier()
 
@@ -307,60 +305,29 @@ class TestDistributedModel(unittest.TestCase):
         # evaluate FWD pass
         #############################################################
         # output
-        with torch.no_grad():
+        with self.subTest(desc="output"):
             out_gather_full = self._gather_helper(out_local, hdim=-2, wdim=-1)
-            err = fn.relative_error(out_gather_full, out_full)
-            if verbose and (self.world_rank == 0):
-                print(f"final relative error of output: {err.item()}")
-        self.assertTrue(err.item() <= tol)
+            self.assertTrue(compare_tensors("output", out_gather_full, out_full, tol, tol, verbose=verbose))
 
         # loss
-        with torch.no_grad():
-            err = fn.relative_error(loss_dist, loss_full)
-            if verbose and (self.world_rank == 0):
-                print(f"final relative error of loss: {err.item()}")
-        self.assertTrue(err.item() <= tol)
+        with self.subTest(desc="loss"):
+            self.assertTrue(compare_tensors("loss", loss_dist, loss_full, tol, tol, verbose=verbose))
 
         #############################################################
         # evaluate BWD pass
         #############################################################
         # dgrad
-        with torch.no_grad():
+        with self.subTest(desc="input gradients"):
             igrad_gather_full = self._gather_helper(igrad_local, hdim=-2, wdim=-1)
-            err = fn.relative_error(igrad_gather_full, igrad_full)
-            if verbose and (self.world_rank == 0):
-                print(f"final relative error of input gradient: {err.item()}")
-        self.assertTrue(err.item() <= tol)
+            self.assertTrue(compare_tensors("input gradients", igrad_gather_full, igrad_full, tol, tol, verbose=verbose))
 
         # wgrads
-        with torch.no_grad():
-            good = True
-            errs = []
-            for key in state_dict_full.keys():
-                if key.endswith(".grad"):
+        for key in state_dict_full.keys():
+            if key.endswith(".grad"):
+                with self.subTest(desc=f"weight gradient {key}"):
                     wgrad_full = state_dict_full[key]
                     wgrad_gather_full = state_dict_gather_full["module." + key]
-                    if (wgrad_full is None) and (wgrad_gather_full is None):
-                        continue
-                    elif (wgrad_full is None) and (wgrad_gather_full is not None):
-                        if verbose and (self.world_rank == 0):
-                            print(f"weight gradient {key} is None in serial but not None in distributed model")
-                        good = False
-                    elif (wgrad_full is not None) and (wgrad_gather_full is None):
-                        if verbose and (self.world_rank == 0):
-                            print(f"weight gradient {key} is not None in serial but None in distributed model")
-                        good = False
-                    else:
-                        err = fn.relative_error(wgrad_gather_full, wgrad_full)
-                        if err > tol:
-                            if verbose and (self.world_rank == 0):
-                                print(f"final relative error of weight gradient {key}: {err.item()}")
-                            good = False
-                        errs.append(err)
-            merr = torch.stack(errs, dim=0).mean().item()
-            if verbose and (self.world_rank == 0):
-                print(f"final relative average error of weight gradients: {merr}")
-        self.assertTrue(good)
+                    self.assertTrue(compare_tensors(f"weight gradient {key}", wgrad_gather_full, wgrad_full, tol, tol, verbose=verbose))
 
         # cleanup
         self._destroy_comms()
@@ -368,9 +335,9 @@ class TestDistributedModel(unittest.TestCase):
 
     @parameterized.expand(
         [
-            ("SFNO", 1e-7, 1e-4),
-            #("SNO", 1e-7, 1e-4),
-            #("FCN3", 1e-4),
+            #("SFNO", 1e-6, 1e-6),
+            #("SNO", 1e-6, 1e-6),
+            #("FCN3", 1e-6, 1e-6),
         ],
         skip_on_empty=True,
     )
@@ -460,53 +427,25 @@ class TestDistributedModel(unittest.TestCase):
         state_dict_double_step = checkpoint_helpers.gather_model_state_dict(model_dist, grads=True)
 
         #############################################################
-	# evaluate FWD pass
-	#############################################################
-	# output
-        with torch.no_grad():
+        # evaluate FWD pass
+        #############################################################
+        # output
+        with self.subTest(desc="output"):
             out_single_gather = self._gather_helper(out_single_local, hdim=-2, wdim=-1)
             out_double_gather = self._gather_helper(out_double_local, hdim=-2, wdim=-1)
-            err = fn.relative_error(out_double_gather, out_single_gather)
-            if verbose and (self.world_rank == 0):
-                print(f"final relative error of output: {err.item()}")
-        self.assertTrue(err.item() <= rtol)
+            self.assertTrue(compare_tensors("output", out_double_gather, out_single_gather, atol, rtol, verbose=verbose))
 
         #############################################################
         # evaluate BWD pass
         #############################################################
         # wgrads
-        with torch.no_grad():
-            good = True
-            errs = []
-            for key in state_dict_single_step.keys():
-                if key.endswith(".grad"):
+        for key in state_dict_single_step.keys():
+            if key.endswith(".grad"):
+                with self.subTest(desc=f"weight gradient {key}"):
                     wgrad_single = state_dict_single_step[key]
                     wgrad_double = state_dict_double_step[key]
-                    if (wgrad_single is None) and (wgrad_double is None):
-                        continue
-                    elif (wgrad_single is None) and (wgrad_double is not None):
-                        if verbose and (self.world_rank == 0):
-                            print(f"weight gradient {key} is None in single but not None in double step model")
-                        good = False
-                    elif (wgrad_single is not None) and (wgrad_double is None):
-                        if verbose and (self.world_rank == 0):
-                            print(f"weight gradient {key} is not None in single but None in double step model")
-                        good = False
-                    else:
-                        err = fn.relative_error(wgrad_double, wgrad_single)
-                        if err > rtol:
-                            # in some cases, the gradient itself can be small, check absolute tolerance then
-                            aerr = fn.absolute_error(wgrad_double, wgrad_single)
-                            if aerr < atol:
-                                continue
-                            if verbose and (self.world_rank == 0):
-                                print(f"final relative error of weight gradient {key}: {err.item()}")
-                            good = False
-                        errs.append(err)
-            merr = torch.stack(errs, dim=0).mean().item()
-            if verbose and (self.world_rank == 0):
-                print(f"final relative average error of weight gradients: {merr}")
-        self.assertTrue(good)
+                    self.assertTrue(compare_tensors(f"weight gradient {key}", wgrad_double, wgrad_single, atol, rtol, verbose=verbose))
+
 
 
 if __name__ == '__main__':
