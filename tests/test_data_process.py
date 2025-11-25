@@ -224,18 +224,14 @@ class TestGetStats(unittest.TestCase):
     @unittest.skipUnless(importlib.util.find_spec("mpi4py") is not None, "mpi4py needs to be installed for this test")
     def test_get_stats(self, batch_size, verbose=True):
         # import necessary modules
-        from data_process.get_stats import welford_combine, get_file_stats
-
-        # Load metadata
-        with open(os.path.join(self.metadata_path, "data.json"), "r") as f:
-            metadata = json.load(f)
+        from data_process.get_stats import welford_combine, get_file_stats, mask_data
 
         # Get list of files to process
         train_files = sorted([os.path.join(self.train_path, f) for f in os.listdir(self.train_path) if f.endswith(".h5")])
         
         # Create quadrature rule
         quadrature_rule = grid_to_quadrature_rule("equiangular")
-        quadrature = GridQuadrature(quadrature_rule, (IMG_SIZE_H, IMG_SIZE_W))
+        quadrature = GridQuadrature(quadrature_rule, (IMG_SIZE_H, IMG_SIZE_W), normalize=False)
 
         # Get stats using get_file_stats
         stats = None
@@ -264,21 +260,28 @@ class TestGetStats(unittest.TestCase):
         
         # Convert to torch tensor for quadrature
         tdata = torch.from_numpy(all_data)
+        tdata_masked, valid_mask = mask_data(tdata)
+        valid_count = torch.sum(quadrature(valid_mask), dim=0).reshape(1, -1, 1, 1)
         
         # Compute means and variances using quadrature
-        tmean = torch.mean(quadrature(tdata), keepdims=False, dim=0).reshape(1, -1, 1, 1)
-        tvar = torch.mean(quadrature(torch.square(tdata - tmean)), keepdims=False, dim=0).reshape(1, -1, 1, 1)
+        tmean = torch.sum(quadrature(tdata_masked), keepdims=False, dim=0).reshape(1, -1, 1, 1) / valid_count
+        tm2 = torch.sum(quadrature(torch.square(tdata_masked - tmean)), keepdims=False, dim=0).reshape(1, -1, 1, 1)
         
-        # Compute time differences
-        tdiff = tdata[1:] - tdata[:-1]
-        tdiffmean = torch.mean(quadrature(tdiff), keepdims=False, dim=0).reshape(1, -1, 1, 1)
-        tdiffvar = torch.mean(quadrature(torch.square(tdiff - tdiffmean)), keepdims=False, dim=0).reshape(1, -1, 1, 1)
+        # # Compute time differences
+        # tdiff = tdata[1:] - tdata[:-1]
+        # tdiffmean = torch.mean(quadrature(tdiff), keepdims=False, dim=0).reshape(1, -1, 1, 1)
+        # tdiffvar = torch.mean(quadrature(torch.square(tdiff - tdiffmean)), keepdims=False, dim=0).reshape(1, -1, 1, 1)
+
+        print("stats['global_meanvar']['values'][0]: ", stats["global_meanvar"]["values"][0])
+        print("tmean: ", tmean)
+        print("stats['global_meanvar']['values'][1]: ", stats["global_meanvar"]["values"][1])
+        print("tm2: ", tm2)
 
         # Compare results
         with self.subTest(desc="mean"):
             self.assertTrue(compare_arrays("mean", stats["global_meanvar"]["values"][0].numpy(), tmean.numpy(), verbose=verbose))
-        with self.subTest(desc="var"):
-            self.assertTrue(compare_arrays("var", stats["global_meanvar"]["values"][1].numpy(), float(all_data.shape[0]) * tvar.numpy(), verbose=verbose))
+        with self.subTest(desc="m2"):
+            self.assertTrue(compare_arrays("m2", stats["global_meanvar"]["values"][1].numpy(), tm2.numpy(), verbose=verbose))
         
         # this test is more tricky since it crosses file boundaries
         #self.assertTrue(np.allclose(stats["time_diff_meanvar"]["values"][0], tdiffmean.numpy()))
