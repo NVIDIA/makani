@@ -86,8 +86,8 @@ class TestDistributedRealFFT(unittest.TestCase):
 
     @parameterized.expand(
         [
-            # [256, 512, 32,  8, 1e-6],
-            # [361, 720,  1, 10, 1e-6],
+            [256, 512, 32,  8, 1e-6],
+            [361, 720,  1, 10, 1e-6],
         ],
         skip_on_empty=True,
     )
@@ -147,8 +147,8 @@ class TestDistributedRealFFT(unittest.TestCase):
 
     @parameterized.expand(
         [
-            # [256, 512, 32,  8, 1e-6],
-            # [361, 720,  1, 10, 1e-6],
+            [256, 512, 32,  8, 1e-6],
+            [361, 720,  1, 10, 1e-6],
         ],
         skip_on_empty=True,
     )
@@ -215,10 +215,10 @@ class TestDistributedRealFFT(unittest.TestCase):
 
     @parameterized.expand(
         [
-            # [256, 512, 0, 32,  8, 1e-6],
-            # [361, 720, 0,  1, 10, 1e-6],
-            # [256, 512, 4, 32,  8, 1e-6],
-            # [361, 720, 4,  1, 10, 1e-6],
+            [256, 512, 0, 32,  8, 1e-6],
+            [361, 720, 0,  1, 10, 1e-6],
+            [256, 512, 4, 32,  8, 1e-6],
+            [361, 720, 4,  1, 10, 1e-6],
         ],
         skip_on_empty=True,
     )
