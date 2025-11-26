@@ -61,7 +61,7 @@ class SpectralAMSELoss(SpectralBaseLoss):
         with amp.autocast(device_type="cuda", enabled=False):
             xcoeffs = self.sht(prd)
             ycoeffs = self.sht(tar)
-        
+
         # compute the SHT:
         xcoeffssq = torch.square(torch.abs(xcoeffs))
         ycoeffssq = torch.square(torch.abs(ycoeffs))
@@ -100,5 +100,5 @@ class SpectralAMSELoss(SpectralBaseLoss):
         loss = torch.sum(loss, dim=-1)
         if self.spatial_distributed and (comm.get_size("h") > 1):
             loss = reduce_from_parallel_region(loss, "h")
-        
+
         return loss

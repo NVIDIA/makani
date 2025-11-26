@@ -58,6 +58,17 @@ def get_data_normalization(params):
 
     return bias, scale
 
+def get_time_diff_stds(params):
+
+    time_diff_stds = None
+
+    if hasattr(params, "time_diff_stds_path"):
+        time_diff_stds = np.load(params.time_diff_stds_path)
+    else:
+        raise ValueError(f"time_diff_std_path not defined.")
+
+    return time_diff_stds
+
 
 def get_climatology(params):
     """
