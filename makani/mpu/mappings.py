@@ -173,11 +173,6 @@ def init_gradient_reduction_hooks(model, device, reduction_buffer_count=1, broad
 
             return bucket.buffer()
 
-        # WAR: we need to add a workaround for complex gradients here, therefore we need to hack the allreduce step a little bit.
-        # once this is fixed, the below line can be uncommented and we can remove the hack
-        # get future for allreduce
-        # fut = dist.all_reduce(buff, op=dist.ReduceOp.AVG, group=comm.get_group("data"), async_op=True).get_future()
-
         # get future
         fut = torch.futures.Future()
         fut.set_result(bucket.buffer())

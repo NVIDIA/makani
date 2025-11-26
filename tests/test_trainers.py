@@ -14,9 +14,10 @@
 # limitations under the License.
 
 import os
+import sys
 
 import tempfile
-from typing import List, Optional
+from typing import Optional
 
 import unittest
 from parameterized import parameterized
@@ -24,12 +25,11 @@ from parameterized import parameterized
 import torch
 
 from makani import Trainer, EnsembleTrainer, StochasticTrainer, AutoencoderTrainer
-from makani.utils.YParams import YParams, ParamsBase
-from makani.models.model_package import load_model_package
 from makani.utils import comm
 
-from testutils import get_default_parameters, init_dataset
-from testutils import H5_PATH
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+from .testutils import get_default_parameters, init_dataset
+from .testutils import H5_PATH, compare_tensors
 
 
 def init_params(
@@ -187,11 +187,13 @@ class TestTrainer(unittest.TestCase):
 
         # check that a checkpoint file exists
         checkpoint_dir = os.path.join(self.params.experiment_dir, "training_checkpoints")
-        self.assertTrue(os.path.isfile(self.params.checkpoint_path.format(mp_rank=comm.get_rank("model"))))
-        self.assertTrue(os.path.isfile(self.params.best_checkpoint_path.format(mp_rank=comm.get_rank("model"))))
+        with self.subTest(desc="checkpoint files"):
+            self.assertTrue(os.path.isfile(self.params.checkpoint_path.format(mp_rank=comm.get_rank("model"))))
+            self.assertTrue(os.path.isfile(self.params.best_checkpoint_path.format(mp_rank=comm.get_rank("model"))))
 
         # check that the number of epochs and iterations is right
-        self.assertEqual(self.trainer.epoch, self.params.max_epochs)
+        with self.subTest(desc="epoch counter vs max epoch counter"):
+            self.assertEqual(self.trainer.epoch, self.params.max_epochs)
 
         # setup some dummy and remember the output of the model
         inp_shape = (self.params.batch_size, self.params.N_in_channels, self.params.img_shape_x, self.params.img_shape_y)
@@ -206,33 +208,38 @@ class TestTrainer(unittest.TestCase):
 
         # forward pass and remember the output
         out_ref = self.trainer.model(inp)
-        self.assertEqual(out_ref.shape, out_shape)
+        with self.subTest(desc="output shape"):
+            self.assertEqual(out_ref.shape, out_shape)
 
         # restore a new trainer from checkpoint
         self.params.resuming = True
         self.trainer_restored = trainer_handle(self.params, 0, device=device)
 
         # check that counters are still the same
-        self.assertEqual(self.trainer_restored.epoch, self.trainer.epoch)
-        self.assertEqual(self.trainer_restored.iters, self.trainer.iters)
+        with self.subTest(desc="epoch and iteration counters"):
+            self.assertEqual(self.trainer_restored.epoch, self.trainer.epoch)
+            self.assertEqual(self.trainer_restored.iters, self.trainer.iters)
 
         # test that the models produce the same results
         if test_eval:
             self.trainer_restored._set_eval()
             out = self.trainer_restored.model(inp)
             out_ref = self.trainer.model(inp)
-            self.assertTrue(torch.allclose(out, out_ref))
+            with self.subTest(desc="test output vs reference"):
+                self.assertTrue(compare_tensors("test output vs reference", out, out_ref))
 
         # redo this but in train mode
         if test_train:
             self.trainer._set_train()
             out = self.trainer.model(inp)
-            self.assertTrue(torch.allclose(out, out_ref))
+            with self.subTest(desc="train output vs reference roundtrip 1"):
+                self.assertTrue(compare_tensors("train output vs reference roundtrip 1", out, out_ref))
             out_ref = out
 
             self.trainer_restored._set_train()
             out = self.trainer_restored.model(inp)
-            self.assertTrue(torch.allclose(out, out_ref))
+            with self.subTest(desc="train output vs reference roundtrip 2"):
+                self.assertTrue(compare_tensors("train output vs reference roundtrip 2", out, out_ref))
 
 
 if __name__ == "__main__":

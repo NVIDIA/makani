@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import sys
+import os
 import unittest
 from parameterized import parameterized
 
@@ -23,7 +25,8 @@ from makani.utils import checkpoint_helpers
 from makani.utils import functions as fn
 from makani.utils import LossHandler
 
-from testutils import get_default_parameters
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+from .testutils import get_default_parameters, compare_tensors
 
 class TestModels(unittest.TestCase):
 
@@ -84,20 +87,18 @@ class TestModels(unittest.TestCase):
 
     @parameterized.expand(
         [
-            ('AFNO', 1e-7, 5e-3),
-            # test on the CPU vor AFNOv2 yields lower
-            # agreement than on GPU, adjusting this for CI
-            ('AFNOv2', 1e-7, 5e-3),
-            ('FNO', 1e-7, 1e-5),
-            ('ViT', 1e-7, 1e-5),
-            ("SFNO", 1e-7, 1e-5),
-            ("SNO", 1e-7, 1e-5),
-            ("FCN3", 1e-7, 1e-5),
-            ("Pangu", 1e-7, 1e-5)
+            ('AFNO', 1e-5, 1e-5),
+            ('AFNOv2', 1e-6, 1e-6),
+            ('FNO', 1e-6, 1e-6),
+            ('ViT', 5e-6, 5e-6),
+            ("SFNO", 1e-6, 1e-6),
+            ("SNO", 1e-6, 1e-6),
+            ("FCN3", 1e-6, 1e-6),
+            ("Pangu", 1e-6, 1e-6)
         ],
         skip_on_empty=True,
     )
-    def test_gradient_accumulation(self, nettype, atol, rtol, verbose=False):
+    def test_gradient_accumulation(self, nettype, atol, rtol, verbose=True):
         """
         Tests initialization of all the models and the forward and backward pass
         """
@@ -167,54 +168,24 @@ class TestModels(unittest.TestCase):
         #############################################################
         # evaluate FWD pass
         #############################################################
-        with torch.no_grad():
-            err = fn.relative_error(out_double, out_single)
-            if verbose:
-                print(f"final relative error of output: {err.item()}")
-        self.assertTrue(err.item() <= rtol)
+        with self.subTest(desc="output"):
+            self.assertTrue(compare_tensors("output", out_double, out_single, atol, rtol, verbose))
 
         #############################################################
         # evaluate BWD pass
         #############################################################
         # igrads
-        with torch.no_grad():
-            err = fn.relative_error(igrad_double, igrad_single)
-            if verbose:
-                print(f"final relative error of input grads: {err.item()}")
-        self.assertTrue(err.item() <= rtol)
+        with self.subTest(desc="input gradient"):
+            self.assertTrue(compare_tensors("input gradient", igrad_double, igrad_single, atol, rtol, verbose))
+
         # wgrads
         with torch.no_grad():
-            good = True
-            errs = []
             for key in state_dict_single_step.keys():
                 if key.endswith(".grad"):
                     wgrad_single = state_dict_single_step[key]
                     wgrad_double = state_dict_double_step[key]
-                    if (wgrad_single is None) and (wgrad_double is None):
-                        continue
-                    elif (wgrad_single is None) and (wgrad_double is not None):
-                        if verbose:
-                            print(f"weight gradient {key} is None in single but not None in double step model")
-                        good = False
-                    elif (wgrad_single is not None) and (wgrad_double is None):
-                        if verbose:
-                            print(f"weight gradient {key} is not None in single but None in double step model")
-                        good = False
-                    else:
-                        err = fn.relative_error(wgrad_double, wgrad_single)
-                        if err > rtol:
-                            # in some cases, the gradient itself can be small, check absolute tolerance then
-                            aerr = fn.absolute_error(wgrad_double, wgrad_single)
-                            if aerr < atol:
-                                continue
-                            if verbose:
-                                print(f"final relative error of weight gradient {key}: {err.item()}, absolute error: {aerr.item()}")
-                            good = False
-                        errs.append(err)
-            merr = torch.stack(errs, dim=0).mean().item()
-            if verbose:
-                print(f"final relative average error of weight gradients: {merr}")
-        self.assertTrue(good)
+                    with self.subTest(desc=f"weight gradient {key}"):
+                        self.assertTrue(compare_tensors(f"weight gradient {key}", wgrad_double, wgrad_single, atol, rtol, verbose))
 
 
 

@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import unittest
 
 import numpy as np
@@ -31,7 +32,8 @@ class TestConstraints(unittest.TestCase):
         torch.cuda.manual_seed(333)
 
         # load the data:
-        data = np.load("tests/data/sample_30km_equator.npz")
+        data_dir = os.path.join(os.path.dirname(__file__), "data")
+        data = np.load(os.path.join(data_dir, "sample_30km_equator.npz"))
 
         # fields
         self.data = torch.from_numpy(data["data"].astype(np.float32))
@@ -111,7 +113,7 @@ class TestConstraints(unittest.TestCase):
                 # check the hb loss
                 hb_loss_tens = hbloss(data_map, None)
 
-		# average over batch and sum over channels
+                # average over batch and sum over channels
                 hb_loss_val = torch.mean(torch.sum(hb_loss_tens, dim=1)).item()
                 
                 self.assertTrue(hb_loss_val <= 1e-6)

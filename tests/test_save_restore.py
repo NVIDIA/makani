@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import sys
 import os
 import time
 import unittest
@@ -28,7 +29,8 @@ from makani.models.common import MLP
 from makani.utils.driver import Driver
 from makani.utils.checkpoint_helpers import get_latest_checkpoint_version
 
-from testutils import get_default_parameters
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+from .testutils import get_default_parameters, compare_arrays
 
 
 class TestSaveRestore(unittest.TestCase):
@@ -132,7 +134,7 @@ class TestSaveRestore(unittest.TestCase):
         out_after = model(inp).detach().cpu().numpy()
 
         # compare
-        self.assertTrue(np.allclose(out_before, out_after, rtol=1e-6, atol=1e-6))
+        self.assertTrue(compare_arrays("output", out_before, out_after, rtol=1e-6, atol=1e-6))
 
 
 if __name__ == "__main__":

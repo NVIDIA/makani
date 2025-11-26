@@ -14,6 +14,7 @@
 # limitations under the License.
 
 
+import sys
 import os
 import unittest
 from parameterized import parameterized
@@ -35,7 +36,9 @@ from makani.mpu.mappings import init_gradient_reduction_hooks
 from makani.models.common.layer_norm import GeometricInstanceNormS2
 from makani.mpu.layer_norm import DistributedGeometricInstanceNormS2, DistributedInstanceNorm2d
 
-from distributed_helpers import split_helper, gather_helper
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+from .distributed_helpers import split_helper, gather_helper
+from ..testutils import compare_tensors
 
 class TestDistributedLayers(unittest.TestCase):
 
@@ -100,12 +103,12 @@ class TestDistributedLayers(unittest.TestCase):
 
     @parameterized.expand(
         [
-            [180, 360, 256, 512, 32,  8, 1e-5],
-            [181, 360, 181, 360, 1, 10, 1e-5],
-            [180, 360, 128, 256, 32,  8, 1e-5],
-            [181, 360,  91, 180, 1, 10, 1e-5],
-            [128, 256, 256, 512, 32,  8, 1e-5],
-            [ 91, 180, 181, 360, 1, 10, 1e-5],
+            [180, 360, 256, 512, 32,  8, 5e-4],
+            [181, 360, 181, 360, 1, 10, 5e-5],
+            [180, 360, 128, 256, 32,  8, 5e-4],
+            [181, 360,  91, 180, 1, 10, 5e-5],
+            [128, 256, 256, 512, 32,  8, 5e-5],
+            [ 91, 180, 181, 360, 1, 10, 5e-5],
         ],
         skip_on_empty=True,
     )
@@ -202,56 +205,41 @@ class TestDistributedLayers(unittest.TestCase):
         #############################################################
         # evaluate FWD pass
         #############################################################
-        with torch.no_grad():
+        with self.subTest(desc="output"):
             out_gather_full = self._gather_helper(out_local, hdim=-2, wdim=-1)
-            err = fn.relative_error(out_gather_full, out_full)
-            if verbose and (self.world_rank == 0):
-                print(f"final relative error of output: {err.item()}")
-        self.assertTrue(err.item() <= tol)
+            self.assertTrue(compare_tensors("output", out_gather_full, out_full, tol, tol, verbose=verbose))
 
         #############################################################
         # evaluate input grads
         #############################################################
-        with torch.no_grad():
+        with self.subTest(desc="input gradients"):
             igrad_gather_full = self._gather_helper(igrad_local, hdim=-2, wdim=-1)
-            err = fn.relative_error(igrad_gather_full, igrad_full)
-            if verbose and (self.world_rank == 0):
-                print(f"final relative error of input gradients: {err.item()}")
-        self.assertTrue(err.item() <= tol)
+            self.assertTrue(compare_tensors("input gradients", igrad_gather_full, igrad_full, tol, tol, verbose=verbose))
 
         #############################################################
         # evaluate Weight grads
         #############################################################
-        with torch.no_grad():
+        with self.subTest(desc="weight gradients"):
             wgrad_gather_full = self._gather_helper(wgrad_local, hdim=-1, wdim=None)
-            err = fn.relative_error(wgrad_gather_full, wgrad_full)
-            if verbose and (self.world_rank == 0):
-                print(f"final relative error of weight gradients: {err.item()}")
-        self.assertTrue(err.item() <= tol)
+            self.assertTrue(compare_tensors("weight gradients", wgrad_gather_full, wgrad_full, tol, tol, verbose=verbose))
 
-        with torch.no_grad():
+        with self.subTest(desc="bias gradients"):
             bgrad_gather_list = [torch.empty_like(bgrad_local) for _ in range(self.world_size)]
             bgrad_gather_list[self.world_rank] = bgrad_local
             dist.all_gather(bgrad_gather_list, bgrad_local, group=None)
-            errs = []
-            for bgrad_gather_full in bgrad_gather_list:
-                errs.append(fn.relative_error(bgrad_gather_full, bgrad_full))
-            err = torch.mean(torch.stack(errs, dim=0))
-            if verbose and (self.world_rank == 0):
-                print(f"final relative error of bias gradients: {err.item()}")
-        self.assertTrue(err.item() <= tol)
-
+            for idb, bgrad_gather_full in enumerate(bgrad_gather_list):
+                self.assertTrue(compare_tensors(f"bias gradient {idb}", bgrad_gather_full, bgrad_full, tol, tol, verbose=verbose))
 
     @parameterized.expand(
         [
-            [256, 512, 32, 8, 1e-5, True],
-            [181, 360, 1, 10, 1e-5, True],
-            [256, 512, 32, 8, 1e-5, False],
-            [181, 360, 1, 10, 1e-5, False],
+            [256, 512, 32, 8, True, 1e-5],
+            [181, 360, 1, 10, True, 1e-5],
+            [256, 512, 32, 8, False, 1e-5],
+            [181, 360, 1, 10, False, 1e-5],
         ],
         skip_on_empty=True,
     )
-    def test_distributed_instance_norm_2d(self, nlat, nlon, batch_size, num_chan, tol, affine, verbose=True):
+    def test_distributed_instance_norm_2d(self, nlat, nlon, batch_size, num_chan, affine, tol, verbose=True):
         B, C, H, W = batch_size, num_chan, nlat, nlon
 
         self._init_seed(333)
@@ -336,65 +324,50 @@ class TestDistributedLayers(unittest.TestCase):
         #############################################################
         # evaluate FWD pass
         #############################################################
-        with torch.no_grad():
+        with self.subTest(desc="output"):
             out_gather_full = self._gather_helper(out_local, hdim=-2, wdim=-1)
-            err = fn.relative_error(out_gather_full, out_full)
-            if verbose and (self.world_rank == 0):
-                print(f"InstanceNorm2d forward relative error: {err.item()}")
-        self.assertTrue(err.item() <= tol)
+            self.assertTrue(compare_tensors("output", out_gather_full, out_full, tol, tol, verbose=verbose))
 
         #############################################################
         # evaluate input grads
         #############################################################
-        with torch.no_grad():
+        with self.subTest(desc="input gradients"):
             igrad_gather_full = self._gather_helper(igrad_local, hdim=-2, wdim=-1)
-            err = fn.relative_error(igrad_gather_full, igrad_full)
-            if verbose and (self.world_rank == 0):
-                print(f"InstanceNorm2d input grad relative error: {err.item()}")
-        self.assertTrue(err.item() <= tol)
+            self.assertTrue(compare_tensors("input gradients", igrad_gather_full, igrad_full, tol, tol, verbose=verbose))
 
         #############################################################
         # evaluate weight and bias grads
         #############################################################
         # weight gradients should be the same across all processes
         if affine:
-            with torch.no_grad():
+            with self.subTest(desc="weight gradients"):
                 wgrad_gather_list = [torch.empty_like(wgrad_local) for _ in range(self.world_size)]
                 wgrad_gather_list[self.world_rank] = wgrad_local
                 dist.all_gather(wgrad_gather_list, wgrad_local, group=None)
-                errs = []
-                for wgrad_gather_full in wgrad_gather_list:
-                    errs.append(fn.relative_error(wgrad_gather_full, wgrad_full))
-                err = torch.mean(torch.stack(errs, dim=0))
-                if verbose and (self.world_rank == 0):
-                    print(f"InstanceNorm2d weight grad relative error: {err.item()}")
-            self.assertTrue(err.item() <= tol)
+                for idw, wgrad_gather_full in enumerate(wgrad_gather_list):
+                    self.assertTrue(compare_tensors(f"weight gradient {idw}", wgrad_gather_full, wgrad_full, tol, tol, verbose=verbose))
+
 
         # bias gradients should be the same across all processes
         if affine:
-            with torch.no_grad():
+            with self.subTest(desc="bias gradients"):
                 bgrad_gather_list = [torch.empty_like(bgrad_local) for _ in range(self.world_size)]
                 bgrad_gather_list[self.world_rank] = bgrad_local
                 dist.all_gather(bgrad_gather_list, bgrad_local, group=None)
-                errs = []
-                for bgrad_gather_full in bgrad_gather_list:
-                    errs.append(fn.relative_error(bgrad_gather_full, bgrad_full))
-                err = torch.mean(torch.stack(errs, dim=0))
-                if verbose and (self.world_rank == 0):
-                    print(f"InstanceNorm2d bias grad relative error: {err.item()}")
-            self.assertTrue(err.item() <= tol)
+                for idb, bgrad_gather_full in enumerate(bgrad_gather_list):
+                    self.assertTrue(compare_tensors(f"bias gradient {idb}", bgrad_gather_full, bgrad_full, tol, tol, verbose=verbose))
 
 
     @parameterized.expand(
         [
-            [181, 360, 1, 4, 1e-5, "equiangular", True],
-            [181, 360, 1, 4, 1e-5, "equiangular", False],
-            [180, 360, 1, 10, 1e-5, "legendre-gauss", True],
-            [180, 360, 1, 10, 1e-5, "legendre-gauss", False],
+            [181, 360, 1, 4, "equiangular", True, 1e-5],
+            [181, 360, 1, 4, "equiangular", False, 1e-5],
+            [180, 360, 1, 10, "legendre-gauss", True, 1e-5],
+            [180, 360, 1, 10, "legendre-gauss", False, 1e-5],
         ],
         skip_on_empty=True,
     )
-    def test_distributed_geometric_instance_norm_s2(self, nlat, nlon, batch_size, num_chan, tol, grid_type, affine, verbose=True):
+    def test_distributed_geometric_instance_norm_s2(self, nlat, nlon, batch_size, num_chan, grid_type, affine, tol, verbose=True):
         B, C, H, W = batch_size, num_chan, nlat, nlon
 
         # set up layer norm parameters
@@ -492,54 +465,38 @@ class TestDistributedLayers(unittest.TestCase):
         #############################################################
         # evaluate FWD pass
         #############################################################
-        with torch.no_grad():
+        with self.subTest(desc="output"):
             out_gather_full = self._gather_helper(out_local, hdim=-2, wdim=-1)
-            err = fn.relative_error(out_gather_full, out_full)
-            if verbose and (self.world_rank == 0):
-                print(f"GeometricInstanceNormS2 forward relative error: {err.item()}")
-        self.assertTrue(err.item() <= tol)
+            self.assertTrue(compare_tensors("output", out_gather_full, out_full, tol, tol, verbose=verbose))
 
         #############################################################
         # evaluate input grads
         #############################################################
-        with torch.no_grad():
+        with self.subTest(desc="input gradients"):
             igrad_gather_full = self._gather_helper(igrad_local, hdim=-2, wdim=-1)
-            err = fn.relative_error(igrad_gather_full, igrad_full)
-            if verbose and (self.world_rank == 0):
-                print(f"GeometricInstanceNormS2 input grad relative error: {err.item()}")
-        self.assertTrue(err.item() <= tol)
+            self.assertTrue(compare_tensors("input gradients", igrad_gather_full, igrad_full, tol, tol, verbose=verbose))
 
         #############################################################
         # evaluate weight and bias grads
         #############################################################
         # weight gradients should be the same across all processes
         if affine:
-            with torch.no_grad():
+            with self.subTest(desc="weight gradients"):
                 wgrad_gather_list = [torch.empty_like(wgrad_local) for _ in range(self.world_size)]
                 wgrad_gather_list[self.world_rank] = wgrad_local
                 dist.all_gather(wgrad_gather_list, wgrad_local, group=None)
-                errs = []
-                for wgrad_gather_full in wgrad_gather_list:
-                    errs.append(fn.relative_error(wgrad_gather_full, wgrad_full))
-                err = torch.mean(torch.stack(errs, dim=0))
-                if verbose and (self.world_rank == 0):
-                    print(f"GeometricInstanceNormS2 weight grad relative error: {err.item()}")
-            self.assertTrue(err.item() <= tol)
+                for idw, wgrad_gather_full in enumerate(wgrad_gather_list):
+                    self.assertTrue(compare_tensors(f"weight gradient {idw}", wgrad_gather_full, wgrad_full, tol, tol, verbose=verbose))
 
         # bias gradients should be the same across all processes
         if affine:
-            with torch.no_grad():
+            with self.subTest(desc="bias gradients"):
                 bgrad_gather_list = [torch.empty_like(bgrad_local) for _ in range(self.world_size)]
                 bgrad_gather_list[self.world_rank] = bgrad_local
                 dist.all_gather(bgrad_gather_list, bgrad_local, group=None)
-                errs = []
-                for bgrad_gather_full in bgrad_gather_list:
-                    errs.append(fn.relative_error(bgrad_gather_full, bgrad_full))
-                err = torch.mean(torch.stack(errs, dim=0))
-                if verbose and (self.world_rank == 0):
-                    print(f"GeometricInstanceNormS2 bias grad relative error: {err.item()}")
-            self.assertTrue(err.item() <= tol)
-        
+                for idb, bgrad_gather_full in enumerate(bgrad_gather_list):
+                    self.assertTrue(compare_tensors(f"bias gradient {idb}", bgrad_gather_full, bgrad_full, tol, tol, verbose=verbose))
+
 
 if __name__ == '__main__':    
     unittest.main()

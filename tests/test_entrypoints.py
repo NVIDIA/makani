@@ -29,7 +29,7 @@
 
 import unittest
 from parameterized import parameterized
-from importlib.metadata import entry_points, EntryPoint
+from importlib.metadata import entry_points
 
 class TestEntryPoints(unittest.TestCase):
 
@@ -42,15 +42,18 @@ class TestEntryPoints(unittest.TestCase):
 
         # Check the model entry point.
         model_ep = self.model_entry_points.get(model_name)
-        self.assertIsNotNone(model_ep)
+        with self.subTest(desc="model entry point is not None"):
+            self.assertIsNotNone(model_ep)
 
         # Try loading the model type.
         model_type = model_ep.load()
-        self.assertIsNotNone(model_type)
+        with self.subTest(desc="model type is not None"):
+            self.assertIsNotNone(model_type)
 
         # Create the model.
         model = model_type()
-        self.assertIsNotNone(model)
+        with self.subTest(desc="model is not None"):
+            self.assertIsNotNone(model)
 
 if __name__ == '__main__':
     unittest.main()

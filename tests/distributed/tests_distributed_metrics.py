@@ -14,6 +14,7 @@
 # limitations under the License.
 
 
+import sys
 import os
 import tempfile
 import unittest
@@ -23,19 +24,17 @@ import h5py as h5
 import numpy as np
 
 import torch
-import torch.nn.functional as F
-import torch.distributed as dist
 
 import torch_harmonics.distributed as thd
 
 from makani.utils import comm
-from makani.utils import functions as fn
-from physicsnemo.distributed.utils import split_tensor_along_dim, compute_split_shapes
-from physicsnemo.distributed.mappings import gather_from_parallel_region, scatter_to_parallel_region, reduce_from_parallel_region
+from physicsnemo.distributed.utils import compute_split_shapes
 
 from makani.utils import MetricsHandler
 
-from distributed_helpers import split_helper, gather_helper, get_default_parameters
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+from .distributed_helpers import split_helper, get_default_parameters
+from ..testutils import compare_arrays
 
 # because of physicsnemo/NCCL tear down issues, we can only run one test at a time
 _metric_handler_params = [
@@ -183,7 +182,6 @@ class TestDistributedMetricHandler(unittest.TestCase):
         tarlist = [torch.randn((num_rollout_steps, batch_size, num_channels, self.params.img_local_shape_x, self.params.img_local_shape_y),
                                dtype=torch.float32, device=self.device) for _ in range(num_steps)]
 
-        loss_acc = 0.
         for inp, tar in zip(inplist, tarlist):
             for idt in range(num_rollout_steps):
                 inpp = inp[idt, ...]
@@ -279,7 +277,8 @@ class TestDistributedMetricHandler(unittest.TestCase):
             data_dist.append(row[-1])
         data_dist = np.array(data_dist)
 
-        self.assertTrue(np.allclose(data_local, data_dist))
+        with self.subTest(desc="rollouts"):
+            self.assertTrue(compare_arrays("rollouts", data_dist, data_local, verbose=verbose))
 
         # save output files and compare
         if comm.get_world_rank() == 0:
@@ -292,9 +291,8 @@ class TestDistributedMetricHandler(unittest.TestCase):
             for key in file_local.keys():
                 data_local = file_local[key]["metric_data"][...]
                 data_dist = file_dist[key]["metric_data"][...]
-                if verbose:
-                    print(f"file metric {key}: local={data_local}, dist={data_dist}")
-                self.assertTrue(np.allclose(data_local, data_dist))
+                with self.subTest(desc=f"file metric {key}"):
+                    self.assertTrue(compare_arrays(f"file metric {key}", data_dist, data_local, verbose=verbose))
 
             # close files
             file_local.close()

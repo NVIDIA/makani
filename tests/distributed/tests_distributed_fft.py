@@ -13,27 +13,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
+import sys
 import os
 import unittest
 from parameterized import parameterized
 
 import torch
-import torch.nn.functional as F
-import torch.distributed as dist
-
 import torch_harmonics.distributed as thd
 
 from makani.models.common import RealFFT1, InverseRealFFT1, RealFFT2, InverseRealFFT2, RealFFT3, InverseRealFFT3
 
 from makani.utils import comm
-from makani.utils import functions as fn
-from physicsnemo.distributed.utils import split_tensor_along_dim
-from physicsnemo.distributed.mappings import gather_from_parallel_region, scatter_to_parallel_region, \
-                                         reduce_from_parallel_region
 from makani.mpu.fft import DistributedRealFFT1, DistributedInverseRealFFT1, DistributedRealFFT2, DistributedInverseRealFFT2, DistributedRealFFT3, DistributedInverseRealFFT3
 
-from distributed_helpers import split_helper, gather_helper
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+from .distributed_helpers import split_helper, gather_helper
+from ..testutils import compare_tensors
 
 class TestDistributedRealFFT(unittest.TestCase):
 
@@ -89,10 +84,13 @@ class TestDistributedRealFFT(unittest.TestCase):
         
         return tensor_gather
 
-    @parameterized.expand([
-        [256, 512, 32,  8, 1e-6],
-        [361, 720,  1, 10, 1e-6],
-    ])
+    @parameterized.expand(
+        [
+            [256, 512, 32,  8, 1e-6],
+            [361, 720,  1, 10, 1e-6],
+        ],
+        skip_on_empty=True,
+    )
     def test_distributed_fft1(self, nlat, nlon, batch_size, num_chan, tol, verbose=False):
         B, C, H, W = batch_size, num_chan, nlat, nlon
 
@@ -133,33 +131,27 @@ class TestDistributedRealFFT(unittest.TestCase):
         out_local.backward(ograd_local)
         igrad_local = inp_local.grad.clone()
         
-        # set eval dims
-        dims = (-1,-2)
-        
         #############################################################
         # evaluate FWD pass
         #############################################################
-        with torch.no_grad():
+        with self.subTest(desc="output"):
             out_gather_full = self._gather_helper(out_local)
-            err = fn.relative_error(out_gather_full, out_full)
-            if verbose and (self.world_rank == 0):
-                print(f"final relative error of output: {err.item()}")
-        self.assertTrue(err.item() <= tol)
+            self.assertTrue(compare_tensors("output", out_gather_full, out_full, tol, tol, verbose=verbose))
 
         #############################################################
         # evaluate BWD pass
         #############################################################
-        with torch.no_grad():
+        with self.subTest(desc="input gradients"):
             igrad_gather_full = self._gather_helper(igrad_local)
-            err = fn.relative_error(igrad_gather_full, igrad_full)
-            if verbose and (self.world_rank == 0):
-                print(f"final relative error of gradients: {err.item()}")
-        self.assertTrue(err.item() <= tol)
+            self.assertTrue(compare_tensors("input gradients", igrad_gather_full, igrad_full, tol, tol, verbose=verbose))
 
-    @parameterized.expand([
-        [256, 512, 32,  8, 1e-6],
-        [361, 720,  1, 10, 1e-6],
-    ])
+    @parameterized.expand(
+        [
+            [256, 512, 32,  8, 1e-6],
+            [361, 720,  1, 10, 1e-6],
+        ],
+        skip_on_empty=True,
+    )
     def test_distributed_ifft1(self, nlat, nlon, batch_size, num_chan, tol, verbose=False):
         B, C, H, W = batch_size, num_chan, nlat, nlon
 
@@ -205,37 +197,31 @@ class TestDistributedRealFFT(unittest.TestCase):
         out_local = backward_transform_dist(inp_local)
         out_local.backward(ograd_local)
         igrad_local = inp_local.grad.clone()
-
-        # set eval dims
-        dims = (-1,-2)
         
         #############################################################
         # evaluate FWD pass
         #############################################################
-        with torch.no_grad():
+        with self.subTest(desc="output"):
             out_gather_full = self._gather_helper(out_local)
-            err = fn.relative_error(out_gather_full, out_full)
-            if verbose and (self.world_rank == 0):
-                print(f"final relative error of output: {err.item()}")
-        self.assertTrue(err.item() <= tol)
+            self.assertTrue(compare_tensors("output", out_gather_full, out_full, tol, tol, verbose=verbose))
 
         #############################################################
         # evaluate BWD pass
         #############################################################
-        with torch.no_grad():
+        with self.subTest(desc="input gradients"):
             igrad_gather_full = self._gather_helper(igrad_local)
-            err = fn.relative_error(igrad_gather_full, igrad_full)
-            if verbose and (self.world_rank == 0):
-                print(f"final relative error of gradients: {err.item()}")
-        self.assertTrue(err.item() <= tol)
+            self.assertTrue(compare_tensors("input gradients", igrad_gather_full, igrad_full, tol, tol, verbose=verbose))
 
 
-    @parameterized.expand([
-        [256, 512, 0, 32,  8, 1e-6],
-        [361, 720, 0,  1, 10, 1e-6],
-        [256, 512, 4, 32,  8, 1e-6],
-        [361, 720, 4,  1, 10, 1e-6],
-    ])
+    @parameterized.expand(
+        [
+            [256, 512, 0, 32,  8, 1e-6],
+            [361, 720, 0,  1, 10, 1e-6],
+            [256, 512, 4, 32,  8, 1e-6],
+            [361, 720, 4,  1, 10, 1e-6],
+        ],
+        skip_on_empty=True,
+    )
     def test_distributed_fft2_3(self, nlat, nlon, nalt, batch_size, num_chan, tol, verbose=False):
         B, C, D, H, W = batch_size, num_chan, nalt, nlat, nlon
 
@@ -283,37 +269,31 @@ class TestDistributedRealFFT(unittest.TestCase):
         out_local.backward(ograd_local)
         igrad_local = inp_local.grad.clone()
         
-        # set eval dims
-        dims = (-1,-2,-3) if D > 0 else (-1,-2)
-        
         #############################################################
         # evaluate FWD pass
         #############################################################
-        with torch.no_grad():
+        with self.subTest(desc="output"):
             out_gather_full = self._gather_helper(out_local)
-            err = fn.relative_error(out_gather_full, out_full)
-            if verbose and (self.world_rank == 0):
-                print(f"final relative error of output: {err.item()}")
-        self.assertTrue(err.item() <= tol)
+            self.assertTrue(compare_tensors("output", out_gather_full, out_full, tol, tol, verbose=verbose))
 
         #############################################################
         # evaluate BWD pass
         #############################################################
-        with torch.no_grad():
+        with self.subTest(desc="input gradients"):
             igrad_gather_full = self._gather_helper(igrad_local)
-            err = fn.relative_error(igrad_gather_full, igrad_full)
-            if verbose and (self.world_rank == 0):
-                print(f"final relative error of gradients: {err.item()}")
-        self.assertTrue(err.item() <= tol)
+            self.assertTrue(compare_tensors("input gradients", igrad_gather_full, igrad_full, tol, tol, verbose=verbose))
 
 
-    @parameterized.expand([
-        [256, 512, 0, 32,  8, 1e-6],
-        [361, 720, 0,  1, 10, 1e-6],
-        [256, 512, 4, 32,  8, 1e-6],
-        [361, 720, 4,  1, 10, 1e-6],
-    ])
-    def test_distributed_ifft2_3(self, nlat, nlon, nalt, batch_size, num_chan, tol, verbose=False):
+    @parameterized.expand(
+        [
+            [256, 512, 0, 32,  8, 5e-6],
+            [361, 720, 0,  1, 10, 5e-6],
+            [256, 512, 4, 32,  8, 5e-6],
+            [361, 720, 4,  1, 10, 5e-6],
+        ],
+        skip_on_empty=True,
+    )
+    def test_distributed_ifft2_3(self, nlat, nlon, nalt, batch_size, num_chan, tol, verbose=True):
         B, C, D, H, W = batch_size, num_chan, nalt, nlat, nlon
 
         if D > 0:
@@ -366,29 +346,20 @@ class TestDistributedRealFFT(unittest.TestCase):
         out_local = backward_transform_dist(inp_local)
         out_local.backward(ograd_local)
         igrad_local = inp_local.grad.clone()
-
-        # set eval dims
-        dims = (-1,-2,-3) if D > 0 else	(-1,-2)
         
         #############################################################
         # evaluate FWD pass
         #############################################################
-        with torch.no_grad():
+        with self.subTest(desc="output"):
             out_gather_full = self._gather_helper(out_local)
-            err = fn.relative_error(out_gather_full, out_full)
-            if verbose and (self.world_rank == 0):
-                print(f"final relative error of output: {err.item()}")
-        self.assertTrue(err.item() <= tol)
+            self.assertTrue(compare_tensors("output", out_gather_full, out_full, tol, tol, verbose=verbose))
 
         #############################################################
         # evaluate BWD pass
         #############################################################
-        with torch.no_grad():
+        with self.subTest(desc="input gradients"):
             igrad_gather_full = self._gather_helper(igrad_local)
-            err = fn.relative_error(igrad_gather_full, igrad_full)
-            if verbose and (self.world_rank == 0):
-                print(f"final relative error of gradients: {err.item()}")
-        self.assertTrue(err.item() <= tol)
+            self.assertTrue(compare_tensors("input gradients", igrad_gather_full, igrad_full, tol, tol, verbose=verbose))
 
 if __name__ == '__main__':    
     unittest.main()

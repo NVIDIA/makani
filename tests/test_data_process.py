@@ -26,10 +26,10 @@ from parameterized import parameterized
 
 import torch
 
-sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-
 from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature
-from testutils import init_dataset, H5_PATH, NUM_CHANNELS, IMG_SIZE_H, IMG_SIZE_W
+
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+from .testutils import init_dataset, H5_PATH, IMG_SIZE_H, IMG_SIZE_W, compare_arrays
 
 class TestAnnotateDataset(unittest.TestCase):
 
@@ -53,7 +53,7 @@ class TestAnnotateDataset(unittest.TestCase):
     def tearDownClass(cls):
         cls.tmpdir.cleanup()
 
-    def test_annotate_dataset(self):
+    def test_annotate_dataset(self, verbose=False):
         # import necessary modules
         from data_process.annotate_dataset import annotate
 
@@ -79,24 +79,36 @@ class TestAnnotateDataset(unittest.TestCase):
         for file_path, ref_file_path in zip(all_files, all_files_ref):
             with h5.File(file_path, "r") as f, h5.File(ref_file_path, "r") as ref_f:
                 # Check data content
-                self.assertTrue(np.allclose(f[H5_PATH][...], ref_f[H5_PATH][...]))
+                with self.subTest(desc="data"):
+                    self.assertTrue(np.allclose(f[H5_PATH][...], ref_f[H5_PATH][...]))
 
                 # Check annotations
-                self.assertTrue(np.allclose(f["timestamp"][...], ref_f["timestamp"][...]))
-                self.assertTrue(np.allclose(f["lat"][...], ref_f["lat"][...]))
-                self.assertTrue(np.allclose(f["lon"][...], ref_f["lon"][...]))
-                self.assertEqual(f["channel"][...].tolist(), ref_f["channel"][...].tolist())
+                with self.subTest(desc="timestamp"):
+                    self.assertTrue(compare_arrays("timestamp", f["timestamp"][...], ref_f["timestamp"][...], verbose=verbose))
+                with self.subTest(desc="lat"):
+                    self.assertTrue(compare_arrays("lat", f["lat"][...], ref_f["lat"][...], verbose=verbose))
+                with self.subTest(desc="lon"):
+                    self.assertTrue(compare_arrays("lon", f["lon"][...], ref_f["lon"][...], verbose=verbose))
+                with self.subTest(desc="channel"):
+                    self.assertEqual(f["channel"][...].tolist(), ref_f["channel"][...].tolist())
 
                 # Check dimension labels
-                self.assertEqual(f[H5_PATH].dims[0].label, "Timestamp in UTC time zone")
-                self.assertEqual(f[H5_PATH].dims[1].label, "Channel name")
-                self.assertEqual(f[H5_PATH].dims[2].label, "Latitude in degrees")
-                self.assertEqual(f[H5_PATH].dims[3].label, "Longitude in degrees")
+                with self.subTest(desc="timestamp label"):
+                    self.assertEqual(f[H5_PATH].dims[0].label, "Timestamp in UTC time zone")
+                with self.subTest(desc="channel label"):
+                    self.assertEqual(f[H5_PATH].dims[1].label, "Channel name")
+                with self.subTest(desc="latitude label"):
+                    self.assertEqual(f[H5_PATH].dims[2].label, "Latitude in degrees")
+                with self.subTest(desc="longitude label"):
+                    self.assertEqual(f[H5_PATH].dims[3].label, "Longitude in degrees")
 
                 # Check scales
-                self.assertTrue(np.allclose(f[H5_PATH].dims[0]["timestamp"], ref_f[H5_PATH].dims[0]["timestamp"]))
-                self.assertTrue(np.allclose(f[H5_PATH].dims[2]["lat"],ref_f[H5_PATH].dims[2]["lat"]))
-                self.assertTrue(np.allclose(f[H5_PATH].dims[3]["lon"], ref_f[H5_PATH].dims[3]["lon"]))
+                with self.subTest(desc="timestamp scale"):
+                    self.assertTrue(compare_arrays("timestamp scale", f[H5_PATH].dims[0]["timestamp"][...], ref_f[H5_PATH].dims[0]["timestamp"][...], verbose=verbose))
+                with self.subTest(desc="channel scale"):
+                    self.assertTrue(compare_arrays("channel scale", f[H5_PATH].dims[2]["lat"][...], ref_f[H5_PATH].dims[2]["lat"][...], verbose=verbose))
+                with self.subTest(desc="longitude scale"):
+                    self.assertTrue(compare_arrays("longitude scale", f[H5_PATH].dims[3]["lon"][...], ref_f[H5_PATH].dims[3]["lon"][...], verbose=verbose))
 
 
 class TestConcatenateDataset(unittest.TestCase):
@@ -170,18 +182,26 @@ class TestConcatenateDataset(unittest.TestCase):
                     current_pos += num_samples
 
             # Verify total number of samples
-            self.assertEqual(current_pos, total_samples)
+            with self.subTest(desc="total number of samples"):
+                self.assertEqual(current_pos, total_samples)
 
             # Verify metadata
-            self.assertTrue(np.allclose(f_conc["lat"][...], metadata["coords"]["lat"]))
-            self.assertTrue(np.allclose(f_conc["lon"][...], metadata["coords"]["lon"]))
-            self.assertEqual([c.decode() for c in f_conc["channel"][...].tolist()], metadata["coords"]["channel"])
+            with self.subTest(desc="lat"):
+                self.assertTrue(np.allclose(f_conc["lat"][...], metadata["coords"]["lat"]))
+            with self.subTest(desc="lon"):
+                self.assertTrue(np.allclose(f_conc["lon"][...], metadata["coords"]["lon"]))
+            with self.subTest(desc="channel"):
+                self.assertEqual([c.decode() for c in f_conc["channel"][...].tolist()], metadata["coords"]["channel"])
 
             # Verify dimension labels
-            self.assertEqual(f_conc[H5_PATH].dims[0].label, "Timestamp in UTC time zone")
-            self.assertEqual(f_conc[H5_PATH].dims[1].label, "Channel name")
-            self.assertEqual(f_conc[H5_PATH].dims[2].label, "Latitude in degrees")
-            self.assertEqual(f_conc[H5_PATH].dims[3].label, "Longitude in degrees")
+            with self.subTest(desc="timestamp label"):
+                self.assertEqual(f_conc[H5_PATH].dims[0].label, "Timestamp in UTC time zone")
+            with self.subTest(desc="channel label"):
+                self.assertEqual(f_conc[H5_PATH].dims[1].label, "Channel name")
+            with self.subTest(desc="latitude label"):
+                self.assertEqual(f_conc[H5_PATH].dims[2].label, "Latitude in degrees")
+            with self.subTest(desc="longitude label"):
+                self.assertEqual(f_conc[H5_PATH].dims[3].label, "Longitude in degrees")
 
 
 class TestGetStats(unittest.TestCase):
@@ -202,29 +222,26 @@ class TestGetStats(unittest.TestCase):
 
     @parameterized.expand([8, 16], skip_on_empty=False)
     @unittest.skipUnless(importlib.util.find_spec("mpi4py") is not None, "mpi4py needs to be installed for this test")
-    def test_get_stats(self, batch_size):
+    def test_get_stats(self, batch_size, verbose=True):
         # import necessary modules
-        from data_process.get_stats import welford_combine, get_file_stats
-
-        # Load metadata
-        with open(os.path.join(self.metadata_path, "data.json"), "r") as f:
-            metadata = json.load(f)
+        from data_process.get_stats import welford_combine, get_file_stats, mask_data
 
         # Get list of files to process
         train_files = sorted([os.path.join(self.train_path, f) for f in os.listdir(self.train_path) if f.endswith(".h5")])
         
         # Create quadrature rule
         quadrature_rule = grid_to_quadrature_rule("equiangular")
-        quadrature = GridQuadrature(quadrature_rule, (IMG_SIZE_H, IMG_SIZE_W))
+        quadrature = GridQuadrature(quadrature_rule, (IMG_SIZE_H, IMG_SIZE_W), normalize=False)
 
         # Get stats using get_file_stats
         stats = None
         for file_path in train_files:
             file_stats = get_file_stats(
-                file_path,
-                slice(0, None),  # Process entire file
-                None,  # No wind indices
-                quadrature,
+                filename=file_path,
+                file_slice=slice(0, None),  # Process entire file
+                wind_indices=None,  # No wind indices
+                quadrature=quadrature,
+                fail_on_nan=True,
                 dt=1,
                 batch_size=batch_size,
             )
@@ -243,27 +260,38 @@ class TestGetStats(unittest.TestCase):
         
         # Convert to torch tensor for quadrature
         tdata = torch.from_numpy(all_data)
+        tdata_masked, valid_mask = mask_data(tdata)
+        valid_count = torch.sum(quadrature(valid_mask), dim=0).reshape(1, -1, 1, 1)
         
         # Compute means and variances using quadrature
-        tmean = torch.mean(quadrature(tdata), keepdims=False, dim=0).reshape(1, -1, 1, 1)
-        tvar = torch.mean(quadrature(torch.square(tdata - tmean)), keepdims=False, dim=0).reshape(1, -1, 1, 1)
+        tmean = torch.sum(quadrature(tdata_masked), keepdims=False, dim=0).reshape(1, -1, 1, 1) / valid_count
+        tm2 = torch.sum(quadrature(torch.square(tdata_masked - tmean)), keepdims=False, dim=0).reshape(1, -1, 1, 1)
         
-        # Compute time differences
-        tdiff = tdata[1:] - tdata[:-1]
-        tdiffmean = torch.mean(quadrature(tdiff), keepdims=False, dim=0).reshape(1, -1, 1, 1)
-        tdiffvar = torch.mean(quadrature(torch.square(tdiff - tdiffmean)), keepdims=False, dim=0).reshape(1, -1, 1, 1)
+        # # Compute time differences
+        # tdiff = tdata[1:] - tdata[:-1]
+        # tdiffmean = torch.mean(quadrature(tdiff), keepdims=False, dim=0).reshape(1, -1, 1, 1)
+        # tdiffvar = torch.mean(quadrature(torch.square(tdiff - tdiffmean)), keepdims=False, dim=0).reshape(1, -1, 1, 1)
 
-        # Compare results        
-        self.assertTrue(np.allclose(stats["global_meanvar"]["values"][0], tmean.numpy()))
-        self.assertTrue(np.allclose(stats["global_meanvar"]["values"][1], float(all_data.shape[0]) * tvar.numpy(), atol=0.0, rtol=1e-3))
+        print("stats['global_meanvar']['values'][0]: ", stats["global_meanvar"]["values"][0])
+        print("tmean: ", tmean)
+        print("stats['global_meanvar']['values'][1]: ", stats["global_meanvar"]["values"][1])
+        print("tm2: ", tm2)
+
+        # Compare results
+        with self.subTest(desc="mean"):
+            self.assertTrue(compare_arrays("mean", stats["global_meanvar"]["values"][0].numpy(), tmean.numpy(), verbose=verbose))
+        with self.subTest(desc="m2"):
+            self.assertTrue(compare_arrays("m2", stats["global_meanvar"]["values"][1].numpy(), tm2.numpy(), verbose=verbose))
         
         # this test is more tricky since it crosses file boundaries
         #self.assertTrue(np.allclose(stats["time_diff_meanvar"]["values"][0], tdiffmean.numpy()))
         #self.assertTrue(np.allclose(stats["time_diff_meanvar"]["values"][1], float(tdiff.shape[0]) * tdiffvar.numpy()))
         
         # Compare min/max
-        self.assertTrue(np.allclose(stats["maxs"]["values"], np.max(all_data, keepdims=True, axis=(0, 2, 3))))
-        self.assertTrue(np.allclose(stats["mins"]["values"], np.min(all_data, keepdims=True, axis=(0, 2, 3))))
+        with self.subTest(desc="max"):
+            self.assertTrue(compare_arrays("max", stats["maxs"]["values"].numpy(), np.max(all_data, keepdims=True, axis=(0, 2, 3)), verbose=verbose))
+        with self.subTest(desc="min"):
+            self.assertTrue(compare_arrays("min", stats["mins"]["values"].numpy(), np.min(all_data, keepdims=True, axis=(0, 2, 3)), verbose=verbose))
 
 
 if __name__ == "__main__":
