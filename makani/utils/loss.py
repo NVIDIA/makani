@@ -32,7 +32,8 @@ import torch_harmonics as harmonics
 from torch_harmonics.quadrature import clenshaw_curtiss_weights, legendre_gauss_weights
 
 from .losses import LossType, GeometricLpLoss, SpectralLpLoss, SpectralH1Loss, SpectralAMSELoss
-from .losses import EnsembleCRPSLoss, EnsembleSpectralCRPSLoss, EnsembleGradientCRPSLoss, EnsembleVortDivCRPSLoss, LpEnergyScoreLoss
+from .losses import EnsembleCRPSLoss, EnsembleSpectralCRPSLoss, EnsembleGradientCRPSLoss, EnsembleVortDivCRPSLoss
+from .losses import LpEnergyScoreLoss, H1EnergyScoreLoss
 from .losses import EnsembleNLLLoss, EnsembleMMDLoss
 from .losses import DriftRegularization, HydrostaticBalanceLoss
 
@@ -263,6 +264,8 @@ class LossHandler(nn.Module):
             loss_handle = EnsembleMMDLoss
         elif "energy score" in loss_type:
             loss_handle = partial(LpEnergyScoreLoss)
+        elif "h1 energy score" in loss_type:
+            loss_handle = partial(H1EnergyScoreLoss)
         elif "drift_regularization" in loss_type:
             loss_handle = DriftRegularization
         else:
