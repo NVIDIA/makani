@@ -323,6 +323,7 @@ class SpectralBaseLoss(nn.Module, metaclass=ABCMeta):
         crop_offset: Tuple[int, int],
         channel_names: List[str],
         grid_type: str,
+        lmax: Optional[int] = None,
         spatial_distributed: Optional[bool] = False,
     ):
         super().__init__()
@@ -339,9 +340,9 @@ class SpectralBaseLoss(nn.Module, metaclass=ABCMeta):
                 polar_group = None if (comm.get_size("h") == 1) else comm.get_group("h")
                 azimuth_group = None if (comm.get_size("w") == 1) else comm.get_group("w")
                 thd.init(polar_group, azimuth_group)
-            self.sht = thd.DistributedRealSHT(*img_shape, grid=grid_type)
+            self.sht = thd.DistributedRealSHT(*img_shape, lmax=lmax, mmax=lmax, grid=grid_type)
         else:
-            self.sht = th.RealSHT(*img_shape, grid=grid_type).float()
+            self.sht = th.RealSHT(*img_shape, lmax=lmax, mmax=lmax, grid=grid_type).float()
 
     @property
     def type(self):
@@ -373,6 +374,7 @@ class VortDivBaseLoss(nn.Module, metaclass=ABCMeta):
         channel_names: List[str],
         grid_type: str,
         pole_mask: int,
+        lmax: Optional[int] = None,
         spatial_distributed: Optional[bool] = False,
     ):
         super().__init__()
@@ -393,11 +395,11 @@ class VortDivBaseLoss(nn.Module, metaclass=ABCMeta):
                 polar_group = None if (comm.get_size("h") == 1) else comm.get_group("h")
                 azimuth_group = None if (comm.get_size("w") == 1) else comm.get_group("w")
                 thd.init(polar_group, azimuth_group)
-            self.vsht = thd.DistributedRealVectorSHT(*img_shape, grid=grid_type)
-            self.isht = thd.DistributedInverseRealVectorSHT(nlat=self.vsht.nlat, nlon=self.vsht.nlon, grid=grid_type)
+            self.vsht = thd.DistributedRealVectorSHT(*img_shape, lmax=lmax, mmax=lmax, grid=grid_type)
+            self.isht = thd.DistributedInverseRealVectorSHT(nlat=self.vsht.nlat, nlon=self.vsht.nlon, lmax=lmax, mmax=lmax, grid=grid_type)
         else:
-            self.vsht = th.RealVectorSHT(*img_shape, grid=grid_type)
-            self.isht = th.InverseRealVectorSHT(nlat=self.vsht.nlat, nlon=self.vsht.nlon, grid=grid_type)
+            self.vsht = th.RealVectorSHT(*img_shape, lmax=lmax, mmax=lmax, grid=grid_type)
+            self.isht = th.InverseRealVectorSHT(nlat=self.vsht.nlat, nlon=self.vsht.nlon, lmax=lmax, mmax=lmax, grid=grid_type)
 
         # get the quadrature rule for the corresponding grid
         quadrature_rule = grid_to_quadrature_rule(grid_type)
@@ -430,6 +432,71 @@ class VortDivBaseLoss(nn.Module, metaclass=ABCMeta):
         chw[0::2] = chw[1::2]
 
         return chw
+
+    @abstractmethod
+    def forward(self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None) -> torch.Tensor:
+        pass
+
+class GradientBaseLoss(nn.Module, metaclass=ABCMeta):
+    """
+    Gradient base loss class used by all gradient based losses
+    """
+
+    def __init__(
+        self,
+        img_shape: Tuple[int, int],
+        crop_shape: Tuple[int, int],
+        crop_offset: Tuple[int, int],
+        channel_names: List[str],
+        grid_type: str,
+        pole_mask: int,
+        lmax: Optional[int] = None,
+        spatial_distributed: Optional[bool] = False,
+    ):
+        super().__init__()
+
+        self.img_shape = img_shape
+        self.crop_shape = crop_shape
+        self.crop_offset = crop_offset
+        self.channel_names = channel_names
+        self.pole_mask = pole_mask
+        self.spatial_distributed = comm.is_distributed("spatial") and spatial_distributed
+
+        if self.spatial_distributed and (comm.get_size("spatial") > 1):
+            if not thd.is_initialized():
+                polar_group = None if (comm.get_size("h") == 1) else comm.get_group("h")
+                azimuth_group = None if (comm.get_size("w") == 1) else comm.get_group("w")
+                thd.init(polar_group, azimuth_group)
+            self.sht = thd.DistributedRealSHT(*img_shape, lmax=lmax, mmax=lmax, grid=grid_type)
+            self.ivsht = thd.DistributedInverseRealVectorSHT(nlat=self.sht.nlat, nlon=self.sht.nlon, lmax=lmax, mmax=lmax, grid=grid_type)
+        else:
+            self.sht = th.RealSHT(*img_shape, lmax=lmax, mmax=lmax, grid=grid_type)
+            self.ivsht = th.InverseRealVectorSHT(nlat=self.sht.nlat, nlon=self.sht.nlon, lmax=lmax, mmax=lmax, grid=grid_type)
+
+        # get the quadrature rule for the corresponding grid
+        quadrature_rule = grid_to_quadrature_rule(grid_type)
+        self.quadrature = GridQuadrature(
+            quadrature_rule,
+            img_shape=self.img_shape,
+            crop_shape=self.crop_shape,
+            crop_offset=self.crop_offset,
+            normalize=True,
+            pole_mask=self.pole_mask,
+            distributed=self.spatial_distributed,
+        )
+
+    @property
+    def type(self):
+        return LossType.Deterministic
+
+    @property
+    def n_channels(self):
+        return len(self.n_channels)
+
+    @torch.compiler.disable(recursive=False)
+    def compute_channel_weighting(self, channel_weight_type: str, time_diff_scale: torch.Tensor = None) -> torch.Tensor:
+        return _compute_channel_weighting_helper(self.channel_names, channel_weight_type, time_diff_scale=time_diff_scale)
+
 
     @abstractmethod
     def forward(self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None) -> torch.Tensor:
