@@ -32,7 +32,7 @@ import torch_harmonics as harmonics
 from torch_harmonics.quadrature import clenshaw_curtiss_weights, legendre_gauss_weights
 
 from .losses import LossType, GeometricLpLoss, SpectralLpLoss, SpectralH1Loss, SpectralAMSELoss
-from .losses import EnsembleCRPSLoss, EnsembleSpectralCRPSLoss, EnsembleGradientCRPSLoss, EnsembleVortDivCRPSLoss, EnergyScoreLoss
+from .losses import EnsembleCRPSLoss, EnsembleSpectralCRPSLoss, EnsembleGradientCRPSLoss, EnsembleVortDivCRPSLoss, LpEnergyScoreLoss
 from .losses import EnsembleNLLLoss, EnsembleMMDLoss
 from .losses import DriftRegularization, HydrostaticBalanceLoss
 
