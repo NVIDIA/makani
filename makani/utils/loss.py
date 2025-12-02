@@ -257,9 +257,9 @@ class LossHandler(nn.Module):
             loss_handle = EnsembleNLLLoss
         elif "ensemble_mmd" in loss_type:
             loss_handle = EnsembleMMDLoss
-        elif "energy score" in loss_type:
+        elif "energy_score" in loss_type:
             loss_handle = partial(LpEnergyScoreLoss)
-        elif "h1 energy score" in loss_type:
+        elif "h1_energy_score" in loss_type:
             loss_handle = partial(H1EnergyScoreLoss)
         elif "drift_regularization" in loss_type:
             loss_handle = DriftRegularization
