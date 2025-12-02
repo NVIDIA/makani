@@ -111,37 +111,16 @@ class LpEnergyScoreLoss(GeometricBaseLoss):
         # get the data type before stripping amp types
         dtype = forecasts.dtype
 
-        # before anything else compute the transform
-        # as the CDF definition doesn't generalize well to more than one-dimensional variables, we treat complex and imaginary part as the same
-        with amp.autocast(device_type="cuda", enabled=False):
-
-            # compute the SH coefficients of the forecasts and observations
-            forecasts = self.sht(forecasts.float()).unsqueeze(-3)
-            observations = self.sht(observations.float()).unsqueeze(-3)
-
-            # append zeros, so that we can use the inverse vector SHT
-            forecasts = torch.cat([forecasts, torch.zeros_like(forecasts)], dim=-3)
-            observations = torch.cat([observations, torch.zeros_like(observations)], dim=-3)
-
-            forecasts = self.ivsht(forecasts)
-            observations = self.ivsht(observations)
-
-        forecasts = forecasts.to(dtype)
-        observations = observations.to(dtype)
-
-        forecasts = forecasts.reshape(B, E, 2*C, H, W)
-        observations = observations.reshape(B, 2*C, H, W)
-
         # transpose the forecasts to ensemble, batch, channels, lat, lon and then do distributed transpose into ensemble direction.
         # ideally we split spatial dims
         forecasts = torch.moveaxis(forecasts, 1, 0)
-        forecasts = forecasts.reshape(E, B, 2*C, H * W)
+        forecasts = forecasts.reshape(E, B, C, H * W)
         if self.ensemble_distributed:
             ensemble_shapes = [forecasts.shape[0] for _ in range(comm.get_size("ensemble"))]
             forecasts = distributed_transpose.apply(forecasts, (-1, 0), ensemble_shapes, "ensemble")
 
         # observations does not need a transpose, but just a split
-        observations = observations.reshape(1, B, 2*C, H * W)
+        observations = observations.reshape(1, B, C, H * W)
         if self.ensemble_distributed:
             observations = scatter_to_parallel_region(observations, -1, "ensemble")
 
@@ -283,16 +262,40 @@ class H1EnergyScoreLoss(GradientBaseLoss):
         # observations: batch, channels, lat, lon
         B, E, C, H, W = forecasts.shape
 
+        # get the data type before stripping amp types
+        dtype = forecasts.dtype
+
+        # before anything else compute the transform
+        # as the CDF definition doesn't generalize well to more than one-dimensional variables, we treat complex and imaginary part as the same
+        with amp.autocast(device_type="cuda", enabled=False):
+
+            # compute the SH coefficients of the forecasts and observations
+            forecasts = self.sht(forecasts.float()).unsqueeze(-3)
+            observations = self.sht(observations.float()).unsqueeze(-3)
+
+            # append zeros, so that we can use the inverse vector SHT
+            forecasts = torch.cat([forecasts, torch.zeros_like(forecasts)], dim=-3)
+            observations = torch.cat([observations, torch.zeros_like(observations)], dim=-3)
+
+            forecasts = self.ivsht(forecasts)
+            observations = self.ivsht(observations)
+
+        forecasts = forecasts.to(dtype)
+        observations = observations.to(dtype)
+
+        forecasts = forecasts.reshape(B, E, 2*C, H, W)
+        observations = observations.reshape(B, 2*C, H, W)
+
         # transpose the forecasts to ensemble, batch, channels, lat, lon and then do distributed transpose into ensemble direction.
         # ideally we split spatial dims
         forecasts = torch.moveaxis(forecasts, 1, 0)
-        forecasts = forecasts.reshape(E, B, C, H * W)
+        forecasts = forecasts.reshape(E, B, 2*C, H * W)
         if self.ensemble_distributed:
             ensemble_shapes = [forecasts.shape[0] for _ in range(comm.get_size("ensemble"))]
             forecasts = distributed_transpose.apply(forecasts, (-1, 0), ensemble_shapes, "ensemble")
 
         # observations does not need a transpose, but just a split
-        observations = observations.reshape(1, B, C, H * W)
+        observations = observations.reshape(1, B, 2*C, H * W)
         if self.ensemble_distributed:
             observations = scatter_to_parallel_region(observations, -1, "ensemble")
 
@@ -348,5 +351,5 @@ class H1EnergyScoreLoss(GradientBaseLoss):
         espread = espread.sum(dim=(0,1)).pow(1/self.beta) * (float(num_ensemble) - 1.0 + self.alpha) / float(num_ensemble * num_ensemble * (num_ensemble - 1))
         eskill = eskill.sum(dim=0).pow(1/self.beta) / float(num_ensemble)
 
-        # the resulting tensor should have dimension B, C which is what we return
+        # the resulting tensor should have dimension B, 1 which is what we return
         return eskill - 0.5 * espread
