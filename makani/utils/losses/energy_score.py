@@ -32,7 +32,7 @@ from physicsnemo.distributed.mappings import scatter_to_parallel_region, reduce_
 from makani.mpu.mappings import distributed_transpose
 
 
-class EnergyScoreLoss(GeometricBaseLoss):
+class LpEnergyScoreLoss(GeometricBaseLoss):
 
     def __init__(
         self,

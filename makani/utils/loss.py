@@ -35,7 +35,6 @@ from .losses import LossType, GeometricLpLoss, SpectralLpLoss, SpectralH1Loss, S
 from .losses import EnsembleCRPSLoss, EnsembleSpectralCRPSLoss, EnsembleGradientCRPSLoss, EnsembleVortDivCRPSLoss, EnergyScoreLoss
 from .losses import EnsembleNLLLoss, EnsembleMMDLoss
 from .losses import DriftRegularization, HydrostaticBalanceLoss
-from .losses import RandomizedKernelCRPS
 
 
 class LossHandler(nn.Module):
@@ -266,8 +265,6 @@ class LossHandler(nn.Module):
             loss_handle = partial(EnergyScoreLoss)
         elif "drift_regularization" in loss_type:
             loss_handle = DriftRegularization
-        elif "randomized_kernel" in loss_type:
-            loss_handle = RandomizedKernelCRPS
         else:
             raise NotImplementedError(f"Unknown loss function: {loss_type}")
 
