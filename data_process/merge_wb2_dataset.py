@@ -16,26 +16,13 @@
 from typing import Optional, List
 from itertools import batched
 import progressbar
-import os
-import re
-import json
 import time
-import pickle
-import numpy as np
 import h5py as h5
 import datetime as dt
 import argparse as ap
-from glob import glob
-import xarray as xr
 
 # MPI
 from mpi4py import MPI
-
-from makani.utils.features import get_channel_groups
-from makani.utils.dataloaders.data_helpers import get_date_from_timestamp
-
-from wb2_helpers import surface_variables, atmospheric_variables, split_convert_channel_names
-
 
 def transfer_channels(input_file: str, output_file: str, channels: List[str],
                       batch_size: Optional[int]=32, entry_key: Optional[str]='fields',
