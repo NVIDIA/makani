@@ -15,8 +15,6 @@
 
 import os
 from typing import Optional
-import sys
-import shutil
 import glob
 import argparse as ap 
 import h5py as h5

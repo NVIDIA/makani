@@ -20,9 +20,8 @@ import time
 import pickle
 import numpy as np
 import h5py as h5
-from math import ceil
 import argparse as ap
-from itertools import groupby, accumulate
+from itertools import accumulate
 import operator
 from bisect import bisect_right
 from tqdm import tqdm
@@ -36,7 +35,6 @@ import json
 
 # we need that for quadrature
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import torch
 from makani.utils.grids import GridQuadrature
 
 
