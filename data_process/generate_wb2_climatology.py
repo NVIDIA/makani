@@ -13,8 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typings import Optional
-import re
+from typing import Optional
 import argparse as ap
 import xarray as xr
 import h5py as h5
@@ -25,8 +24,6 @@ from tqdm import tqdm
 
 from mpi4py import MPI
 
-from makani.utils.dataloaders.data_helpers import get_timestamp
-from makani.utils.features import get_channel_groups
 from wb2_helpers import split_convert_channel_names
 
 
