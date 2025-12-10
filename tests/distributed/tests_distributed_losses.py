@@ -29,7 +29,7 @@ from makani.utils import comm
 from makani.utils import functions as fn
 
 from makani.utils.grids import GridQuadrature
-from makani.utils.losses import EnsembleCRPSLoss, EnsembleNLLLoss, EnsembleSpectralCRPSLoss
+from makani.utils.losses import CRPSLoss, EnsembleNLLLoss, SpectralCRPSLoss
 
 # Add parent directory to path for testutils import
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
@@ -117,7 +117,7 @@ class TestDistributedLoss(unittest.TestCase):
 
         return tensor_gather
 
-    
+
     @parameterized.expand(
         [
             [128, 256, 32, 8, "naive", False, 1e-6],
@@ -149,7 +149,7 @@ class TestDistributedLoss(unittest.TestCase):
             ograd_full = torch.randn_like(out_full)
         out_full.backward(ograd_full)
         igrad_full = inp_full.grad.clone()
-        
+
         # distributed
         out_local = quad_dist(inp_local)
         out_local.backward(ograd_full)
@@ -193,7 +193,7 @@ class TestDistributedLoss(unittest.TestCase):
 
         if loss_type == "ensemble_crps":
             # local loss
-            loss_fn_local = EnsembleCRPSLoss(
+            loss_fn_local = CRPSLoss(
                 img_shape=(H, W),
                 crop_shape=None,
                 crop_offset=(0, 0),
@@ -207,7 +207,7 @@ class TestDistributedLoss(unittest.TestCase):
             ).to(self.device)
 
             # distributed loss
-            loss_fn_dist = EnsembleCRPSLoss(
+            loss_fn_dist = CRPSLoss(
                 img_shape=(H, W),
                 crop_shape=None,
                 crop_offset=(0, 0),
@@ -221,7 +221,7 @@ class TestDistributedLoss(unittest.TestCase):
             ).to(self.device)
         elif loss_type == "gauss_crps":
             # local loss
-            loss_fn_local = EnsembleCRPSLoss(
+            loss_fn_local = CRPSLoss(
                 img_shape=(H, W),
                 crop_shape=None,
                 crop_offset=(0, 0),
@@ -235,7 +235,7 @@ class TestDistributedLoss(unittest.TestCase):
             ).to(self.device)
 
             # distributed loss
-            loss_fn_dist = EnsembleCRPSLoss(
+            loss_fn_dist = CRPSLoss(
                 img_shape=(H, W),
                 crop_shape=None,
                 crop_offset=(0, 0),
@@ -249,7 +249,7 @@ class TestDistributedLoss(unittest.TestCase):
             ).to(self.device)
         elif loss_type == "skillspread_crps":
             # local loss
-            loss_fn_local = EnsembleCRPSLoss(
+            loss_fn_local = CRPSLoss(
                 img_shape=(H, W),
                 crop_shape=None,
                 crop_offset=(0, 0),
@@ -263,7 +263,7 @@ class TestDistributedLoss(unittest.TestCase):
             ).to(self.device)
 
             # distributed loss
-            loss_fn_dist = EnsembleCRPSLoss(
+            loss_fn_dist = CRPSLoss(
                 img_shape=(H, W),
                 crop_shape=(H, W),
                 crop_offset=(0, 0),
@@ -377,7 +377,7 @@ class TestDistributedLoss(unittest.TestCase):
 
         if loss_type == "ensemble_crps":
             # local loss
-            loss_fn_local = EnsembleSpectralCRPSLoss(
+            loss_fn_local = SpectralCRPSLoss(
                 img_shape=(H, W),
                 crop_shape=None,
                 crop_offset=(0, 0),
@@ -391,7 +391,7 @@ class TestDistributedLoss(unittest.TestCase):
             ).to(self.device)
 
             # distributed loss
-            loss_fn_dist = EnsembleSpectralCRPSLoss(
+            loss_fn_dist = SpectralCRPSLoss(
                 img_shape=(H, W),
                 crop_shape=None,
                 crop_offset=(0, 0),
@@ -405,7 +405,7 @@ class TestDistributedLoss(unittest.TestCase):
             ).to(self.device)
         elif loss_type == "gauss_crps":
             # local loss
-            loss_fn_local = EnsembleSpectralCRPSLoss(
+            loss_fn_local = SpectralCRPSLoss(
                 img_shape=(H, W),
                 crop_shape=None,
                 crop_offset=(0, 0),
@@ -419,7 +419,7 @@ class TestDistributedLoss(unittest.TestCase):
             ).to(self.device)
 
             # distributed loss
-            loss_fn_dist = EnsembleSpectralCRPSLoss(
+            loss_fn_dist = SpectralCRPSLoss(
                 img_shape=(H, W),
                 crop_shape=None,
                 crop_offset=(0, 0),
@@ -433,7 +433,7 @@ class TestDistributedLoss(unittest.TestCase):
             ).to(self.device)
         elif loss_type == "skillspread_crps":
             # local loss
-            loss_fn_local = EnsembleSpectralCRPSLoss(
+            loss_fn_local = SpectralCRPSLoss(
                 img_shape=(H, W),
                 crop_shape=None,
                 crop_offset=(0, 0),
@@ -447,7 +447,7 @@ class TestDistributedLoss(unittest.TestCase):
             ).to(self.device)
 
             # distributed loss
-            loss_fn_dist = EnsembleSpectralCRPSLoss(
+            loss_fn_dist = SpectralCRPSLoss(
                 img_shape=(H, W),
                 crop_shape=None,
                 crop_offset=(0, 0),

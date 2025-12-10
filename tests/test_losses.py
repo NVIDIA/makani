@@ -24,7 +24,7 @@ import numpy as np
 import torch
 
 from makani.utils import LossHandler
-from makani.utils.losses import EnsembleCRPSLoss
+from makani.utils.losses import CRPSLoss
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from .testutils import get_default_parameters, compare_tensors, compare_arrays
@@ -139,7 +139,7 @@ class TestLosses(unittest.TestCase):
 
         # test initialization of loss object
         loss_obj = LossHandler(self.params)
-        
+
         shape = (self.params.batch_size, self.params.N_out_channels, self.params.img_shape_x, self.params.img_shape_y)
 
         inp = torch.randn(*shape)
@@ -158,7 +158,7 @@ class TestLosses(unittest.TestCase):
         """
         Tests initialization of loss, as well as the forward and backward pass
         """
-        
+
         self.params.losses = losses
         self.params.uncertainty_weighting = uncertainty_weighting
 
@@ -180,7 +180,7 @@ class TestLosses(unittest.TestCase):
 
         # compute weighted loss
         out_weighted = loss_obj(tar, inp, wgt)
-        
+
         self.assertTrue(compare_tensors("loss", out, out_weighted))
 
 
@@ -252,7 +252,7 @@ class TestLosses(unittest.TestCase):
             self.assertTrue(compare_tensors("var", var, expected_var))
 
     def test_ensemble_crps(self):
-        crps_func = EnsembleCRPSLoss(
+        crps_func = CRPSLoss(
             img_shape=(self.params.img_shape_x, self.params.img_shape_y),
             crop_shape=(self.params.img_shape_x, self.params.img_shape_y),
             crop_offset=(0, 0),
@@ -264,7 +264,7 @@ class TestLosses(unittest.TestCase):
             ensemble_distributed=False,
             ensemble_weights=None,
         )
-    
+
         for ensemble_size in [1, 10]:
             with self.subTest(desc=f"ensemble size {ensemble_size}"):
                 # generate input tensor
@@ -293,15 +293,15 @@ class TestLosses(unittest.TestCase):
                 result_proper = crps_ensemble(tar_arr, inp_arr, weights=None, issorted=False, axis=axis)
                 quad_weight_arr = crps_func.quadrature.quad_weight.cpu().numpy()
                 result_proper = np.sum(result_proper * quad_weight_arr, axis=(2, 3))
-    
+
                 self.assertTrue(compare_arrays("output", result, result_proper))
 
     def test_gauss_crps(self):
-    
+
         # protext against sigma=0
         eps = 1.0e-5
-    
-        crps_func = EnsembleCRPSLoss(
+
+        crps_func = CRPSLoss(
             img_shape=(self.params.img_shape_x, self.params.img_shape_y),
             crop_shape=(self.params.img_shape_x, self.params.img_shape_y),
             crop_offset=(0, 0),
@@ -313,32 +313,32 @@ class TestLosses(unittest.TestCase):
             ensemble_distributed=False,
             eps=eps,
         )
-    
+
         for ensemble_size in [1, 10]:
             with self.subTest(desc=f"ensemble size {ensemble_size}"):
                 # generate input tensor
                 inp = torch.empty((self.params.batch_size, ensemble_size, self.params.N_in_channels, self.params.img_shape_x, self.params.img_shape_y), dtype=torch.float32)
                 with torch.no_grad():
                     inp.normal_(1.0, 1.0)
-    
+
                 # target tensor
                 tar = torch.ones((self.params.batch_size, self.params.N_in_channels, self.params.img_shape_x, self.params.img_shape_y), dtype=torch.float32)
-    
+
                 # torch result
                 result = crps_func(inp, tar).cpu().numpy()
-    
+
                 # properscoring result
                 tar_arr = tar.cpu().numpy()
                 inp_arr = inp.cpu().numpy()
-    
+
                 # compute mu, sigma, guard against underflows
                 mu = np.mean(inp_arr, axis=1)
                 sigma = np.maximum(np.sqrt(np.var(inp_arr, axis=1)), eps)
-    
+
                 result_proper = crps_gaussian(tar_arr, mu, sigma, grad=False)
                 quad_weight_arr = crps_func.quadrature.quad_weight.cpu().numpy()
                 result_proper = np.sum(result_proper * quad_weight_arr, axis=(2, 3))
-    
+
                 self.assertTrue(compare_arrays("output", result, result_proper))
 
 

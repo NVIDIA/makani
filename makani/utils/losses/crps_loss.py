@@ -268,7 +268,7 @@ def _crps_gauss_kernel(observation: torch.Tensor, forecasts: torch.Tensor, weigh
     return crps
 
 
-class EnsembleCRPSLoss(GeometricBaseLoss):
+class CRPSLoss(GeometricBaseLoss):
 
     def __init__(
         self,
@@ -422,7 +422,7 @@ class EnsembleCRPSLoss(GeometricBaseLoss):
         return crps
 
 
-class EnsembleSpectralCRPSLoss(SpectralBaseLoss):
+class SpectralCRPSLoss(SpectralBaseLoss):
 
     def __init__(
         self,
@@ -624,7 +624,7 @@ class EnsembleSpectralCRPSLoss(SpectralBaseLoss):
         # the resulting tensor should have dimension B, C, which is what we return
         return crps
 
-class EnsembleGradientCRPSLoss(GradientBaseLoss):
+class GradientCRPSLoss(GradientBaseLoss):
 
     def __init__(
         self,
@@ -818,7 +818,7 @@ class EnsembleGradientCRPSLoss(GradientBaseLoss):
         # the resulting tensor should have dimension B, C, which is what we return
         return crps
 
-class EnsembleVortDivCRPSLoss(VortDivBaseLoss):
+class VortDivCRPSLoss(VortDivBaseLoss):
 
     def __init__(
         self,
