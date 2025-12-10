@@ -173,8 +173,8 @@ class LpEnergyScoreLoss(GeometricBaseLoss):
         eskill = eskill.sum(dim=-1, keepdim=True)
 
         # now we have reduced everything and need to sum appropriately
-        espread = espread.sum(dim=(0,1)).pow(1/self.beta) * (float(num_ensemble) - 1.0 + self.alpha) / float(num_ensemble * num_ensemble * (num_ensemble - 1))
-        eskill = eskill.sum(dim=0).pow(1/self.beta) / float(num_ensemble)
+        espread = espread.pow(1/self.beta).sum(dim=(0,1)) * (float(num_ensemble) - 1.0 + self.alpha) / float(num_ensemble * num_ensemble * (num_ensemble - 1))
+        eskill = eskill.pow(1/self.beta).sum(dim=0) / float(num_ensemble)
 
         # the resulting tensor should have dimension B, C which is what we return
         return eskill - 0.5 * espread
@@ -348,8 +348,8 @@ class H1EnergyScoreLoss(GradientBaseLoss):
         eskill = eskill.sum(dim=-1, keepdim=True)
 
         # now we have reduced everything and need to sum appropriately
-        espread = espread.sum(dim=(0,1)).pow(1/self.beta) * (float(num_ensemble) - 1.0 + self.alpha) / float(num_ensemble * num_ensemble * (num_ensemble - 1))
-        eskill = eskill.sum(dim=0).pow(1/self.beta) / float(num_ensemble)
+        espread = espread.pow(1/self.beta).sum(dim=(0,1)) * (float(num_ensemble) - 1.0 + self.alpha) / float(num_ensemble * num_ensemble * (num_ensemble - 1))
+        eskill = eskill.pow(1/self.beta).sum(dim=0) / float(num_ensemble)
 
         # the resulting tensor should have dimension B, 1 which is what we return
         return eskill - 0.5 * espread

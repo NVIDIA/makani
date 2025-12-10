@@ -18,8 +18,8 @@ from .h1_loss import SpectralH1Loss
 from .lp_loss import GeometricLpLoss, SpectralLpLoss
 from .amse_loss import SpectralAMSELoss
 from .hydrostatic_loss import HydrostaticBalanceLoss
-from .crps_loss import EnsembleCRPSLoss, EnsembleSpectralCRPSLoss, EnsembleGradientCRPSLoss, EnsembleVortDivCRPSLoss
+from .crps_loss import CRPSLoss, SpectralCRPSLoss, GradientCRPSLoss, VortDivCRPSLoss
 from .energy_score import LpEnergyScoreLoss, H1EnergyScoreLoss
-from .mmd_loss import EnsembleMMDLoss
+from .mmd_loss import GaussianMMDLoss
 from .likelihood_loss import EnsembleNLLLoss
 from .drift_regularization import DriftRegularization

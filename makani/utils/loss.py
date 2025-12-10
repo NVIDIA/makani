@@ -32,9 +32,10 @@ import torch_harmonics as harmonics
 from torch_harmonics.quadrature import clenshaw_curtiss_weights, legendre_gauss_weights
 
 from .losses import LossType, GeometricLpLoss, SpectralLpLoss, SpectralH1Loss, SpectralAMSELoss
-from .losses import EnsembleCRPSLoss, EnsembleSpectralCRPSLoss, EnsembleGradientCRPSLoss, EnsembleVortDivCRPSLoss
+from .losses import CRPSLoss, SpectralCRPSLoss, GradientCRPSLoss, VortDivCRPSLoss
 from .losses import LpEnergyScoreLoss, H1EnergyScoreLoss
-from .losses import EnsembleNLLLoss, EnsembleMMDLoss
+from .losses import GaussianMMDLoss
+from .losses import EnsembleNLLLoss
 from .losses import DriftRegularization, HydrostaticBalanceLoss
 
 
@@ -230,17 +231,17 @@ class LossHandler(nn.Module):
                     p_max = int(x.replace("p_max=", ""))
             loss_handle = partial(HydrostaticBalanceLoss, p_min=p_min, p_max=p_max, use_moist_air_formula=use_moist_air_formula)
         elif "ensemble_crps" in loss_type:
-            loss_handle = partial(EnsembleCRPSLoss)
+            loss_handle = partial(CRPSLoss)
         elif "ensemble_spectral_crps" in loss_type:
-            loss_handle = partial(EnsembleSpectralCRPSLoss)
+            loss_handle = partial(SpectralCRPSLoss)
         elif "ensemble_vort_div_crps" in loss_type:
-            loss_handle = partial(EnsembleVortDivCRPSLoss)
+            loss_handle = partial(VortDivCRPSLoss)
         elif "ensemble_gradient_crps" in loss_type:
-            loss_handle = partial(EnsembleGradientCRPSLoss)
+            loss_handle = partial(GradientCRPSLoss)
         elif "ensemble_nll" in loss_type:
             loss_handle = EnsembleNLLLoss
-        elif "ensemble_mmd" in loss_type:
-            loss_handle = EnsembleMMDLoss
+        elif "gaussian_mmd" in loss_type:
+            loss_handle = GaussianMMDLoss
         elif "energy_score" in loss_type:
             loss_handle = partial(LpEnergyScoreLoss)
         elif "h1_energy_score" in loss_type:

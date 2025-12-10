@@ -24,7 +24,7 @@ import torch
 
 from makani.models import model_registry
 from makani.utils import LossHandler
-from makani.utils.losses import EnsembleCRPSLoss
+from makani.utils.losses import CRPSLoss
 
 from testutils import get_default_parameters
 
@@ -138,7 +138,7 @@ class TestLosses(unittest.TestCase):
 
         # test initialization of loss object
         loss_obj = LossHandler(self.params)
-        
+
         shape = (self.params.batch_size, self.params.N_out_channels, self.params.img_shape_x, self.params.img_shape_y)
 
         inp = torch.randn(*shape)
@@ -150,14 +150,14 @@ class TestLosses(unittest.TestCase):
         out2 = loss_obj(tar2, inp2)
 
         self.assertTrue(torch.allclose(out, out2))
-        
+
 
     @parameterized.expand(_loss_weighted_params)
     def test_loss_weighted(self, losses, uncertainty_weighting=False):
         """
         Tests initialization of loss, as well as the forward and backward pass
         """
-        
+
         self.params.losses = losses
         self.params.uncertainty_weighting = uncertainty_weighting
 
@@ -179,7 +179,7 @@ class TestLosses(unittest.TestCase):
 
         # compute weighted loss
         out_weighted = loss_obj(tar, inp, wgt)
-        
+
         self.assertTrue(torch.allclose(out, out_weighted))
 
     @parameterized.expand(_loss_weighted_params)
@@ -211,44 +211,44 @@ class TestLosses(unittest.TestCase):
         # compute weighted loss
         out_weighted = loss_obj(tar, inp, wgt)
 
-        self.assertTrue(torch.allclose(out, out_weighted))        
+        self.assertTrue(torch.allclose(out, out_weighted))
 
     def test_running_stats(self):
         """
         Tests computation of the running stats
         """
-    
+
         self.params.losses = [{"type": "l2"}]
-    
+
         # test initialization of loss object
         loss_obj = LossHandler(self.params, track_running_stats=True)
         loss_obj.train()
-    
+
         shape = (self.params.batch_size, self.params.N_out_channels, self.params.img_shape_x, self.params.img_shape_y)
-    
+
         # this needs to be sufficiently large to mitigarte the bias due to the initialization of the running stats
         num_samples = 100
         for i in range(num_samples):
-    
+
             inp = i * torch.ones(*shape)
             inp.requires_grad = True
             tar = torch.zeros(*shape)
             tar.requires_grad = True
-    
+
             # forward pass and check shapes
             out = loss_obj(tar, inp)
-    
+
         # generate simulated dataset
         data = torch.arange(num_samples).float().reshape(1, 1, -1).repeat(self.params.batch_size, self.params.N_out_channels, 1)
         expected_var, expected_mean = torch.var_mean(data, correction=0, dim=(0, -1))
-    
+
         var, mean = loss_obj.get_running_stats()
-    
+
         self.assertTrue(torch.allclose(mean, expected_mean))
         self.assertTrue(torch.allclose(var, expected_var))
 
     def test_ensemble_crps(self):
-        crps_func = EnsembleCRPSLoss(
+        crps_func = CRPSLoss(
             img_shape=(self.params.img_shape_x, self.params.img_shape_y),
             crop_shape=(self.params.img_shape_x, self.params.img_shape_y),
             crop_offset=(0, 0),
@@ -260,24 +260,24 @@ class TestLosses(unittest.TestCase):
             ensemble_distributed=False,
             ensemble_weights=None,
         )
-    
+
         for ensemble_size in [1, 10]:
             with self.subTest(f"{ensemble_size}"):
                 # generate input tensor
                 inp = torch.empty((self.params.batch_size, ensemble_size, self.params.N_in_channels, self.params.img_shape_x, self.params.img_shape_y), dtype=torch.float32)
                 with torch.no_grad():
                     inp.normal_(1.0, 1.0)
-    
+
                 # target tensor
                 tar = torch.ones((self.params.batch_size, self.params.N_in_channels, self.params.img_shape_x, self.params.img_shape_y), dtype=torch.float32)
-    
+
                 # torch result
                 result = crps_func(inp, tar).cpu().numpy()
-    
+
                 # properscoring result
                 tar_arr = tar.cpu().numpy()
                 inp_arr = inp.cpu().numpy()
-    
+
                 # I think this is a bug with the axis index in properscoring
                 # for the degenerate case:
                 if ensemble_size == 1:
@@ -285,19 +285,19 @@ class TestLosses(unittest.TestCase):
                     inp_arr = np.squeeze(inp_arr, axis=1)
                 else:
                     axis = 1
-    
+
                 result_proper = crps_ensemble(tar_arr, inp_arr, weights=None, issorted=False, axis=axis)
                 quad_weight_arr = crps_func.quadrature.quad_weight.cpu().numpy()
                 result_proper = np.sum(result_proper * quad_weight_arr, axis=(2, 3))
-    
+
                 self.assertTrue(np.allclose(result, result_proper, rtol=1e-5, atol=0))
 
     def test_gauss_crps(self):
-    
+
         # protext against sigma=0
         eps = 1.0e-5
-    
-        crps_func = EnsembleCRPSLoss(
+
+        crps_func = CRPSLoss(
             img_shape=(self.params.img_shape_x, self.params.img_shape_y),
             crop_shape=(self.params.img_shape_x, self.params.img_shape_y),
             crop_offset=(0, 0),
@@ -309,32 +309,32 @@ class TestLosses(unittest.TestCase):
             ensemble_distributed=False,
             eps=eps,
         )
-    
+
         for ensemble_size in [1, 10]:
             with self.subTest(f"{ensemble_size}"):
                 # generate input tensor
                 inp = torch.empty((self.params.batch_size, ensemble_size, self.params.N_in_channels, self.params.img_shape_x, self.params.img_shape_y), dtype=torch.float32)
                 with torch.no_grad():
                     inp.normal_(1.0, 1.0)
-    
+
                 # target tensor
                 tar = torch.ones((self.params.batch_size, self.params.N_in_channels, self.params.img_shape_x, self.params.img_shape_y), dtype=torch.float32)
-    
+
                 # torch result
                 result = crps_func(inp, tar).cpu().numpy()
-    
+
                 # properscoring result
                 tar_arr = tar.cpu().numpy()
                 inp_arr = inp.cpu().numpy()
-    
+
                 # compute mu, sigma, guard against underflows
                 mu = np.mean(inp_arr, axis=1)
                 sigma = np.maximum(np.sqrt(np.var(inp_arr, axis=1)), eps)
-    
+
                 result_proper = crps_gaussian(tar_arr, mu, sigma, grad=False)
                 quad_weight_arr = crps_func.quadrature.quad_weight.cpu().numpy()
                 result_proper = np.sum(result_proper * quad_weight_arr, axis=(2, 3))
-    
+
                 self.assertTrue(np.allclose(result, result_proper, rtol=1e-5, atol=0))
 
 
