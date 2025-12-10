@@ -22,7 +22,7 @@ from physicsnemo.distributed.mappings import scatter_to_parallel_region, reduce_
 from physicsnemo.distributed.utils import split_tensor_along_dim
 from makani.mpu.mappings import distributed_transpose
 
-from makani.utils.losses import EnsembleCRPSLoss, LossType
+from makani.utils.losses import CRPSLoss, LossType
 from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature
 from makani.utils.metrics.base_metric import _sanitize_shapes, _welford_reduction_helper, GeometricBaseMetric
 
@@ -203,7 +203,7 @@ class GeometricACC(GeometricBaseMetric):
             # stack along dim -1:
             # we form the ratio in the finalization step
             acc = torch.stack([cov_xy, var_x, var_y], dim=-1)
-        
+
         # reduce
         if self.channel_reduction == "mean":
             acc = torch.mean(acc, dim=1)
@@ -267,7 +267,7 @@ class GeometricSpread(GeometricBaseMetric):
             counts = torch.sum(counts, dim=0)
 
         return counts
-    
+
     def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, weight: Optional[torch.Tensor] = None) -> torch.Tensor:
 
         # sanity checks
@@ -437,7 +437,7 @@ class GeometricCRPS(torch.nn.Module):
     ):
         super().__init__()
 
-        self.metric_func = EnsembleCRPSLoss(
+        self.metric_func = CRPSLoss(
             img_shape=img_shape,
             crop_shape=crop_shape,
             crop_offset=crop_offset,
