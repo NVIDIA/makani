@@ -213,7 +213,7 @@ class Inferencer(Driver):
 
     # shorthand for inference range running over the full dataset
     def inference_epoch(
-            self, rollout_steps: int, compute_metrics: bool = False, output_channels: List[str] = [], output_file: Optional[str] = None, output_memory_buffer_size: Optional[int] = None, bias_file: Optional[str] = None, spectrum_file: Optional[str] = None, zonal_spectrum_file: Optional[str] = None, wb2_compatible: Optional[bool] = False, profiler=None
+            self, rollout_steps: int, compute_metrics: bool = False, output_channels: List[str] = [], output_file: Optional[str] = None, output_memory_buffer_size: Optional[int] = None, bias_file: Optional[str] = None, spectrum_file: Optional[str] = None, zonal_spectrum_file: Optional[str] = None, wb2_compatible: Optional[bool] = False, enable_gds: Optional[bool] = False, profiler=None
     ):
         """
         Runs the model in autoregressive inference mode on the entire validation dataset. Computes metrics and scores the model.
@@ -243,6 +243,7 @@ class Inferencer(Driver):
             spectrum_file=spectrum_file,
             zonal_spectrum_file=zonal_spectrum_file,
             wb2_compatible=wb2_compatible,
+            enable_gds=enable_gds,
             profiler=profiler,
         )
 
@@ -265,6 +266,7 @@ class Inferencer(Driver):
         spectrum_file: Optional[str] = None,
         zonal_spectrum_file: Optional[str] = None,
         wb2_compatible: Optional[bool] = False,
+        enable_gds: Optional[bool] = False,
         profiler=None,
     ):
 
@@ -285,6 +287,7 @@ class Inferencer(Driver):
             spectrum_file=spectrum_file,
             zonal_spectrum_file=zonal_spectrum_file,
             wb2_compatible=wb2_compatible,
+            enable_gds=enable_gds,
             profiler=profiler,
         )
 
@@ -304,6 +307,7 @@ class Inferencer(Driver):
         spectrum_file: Optional[str] = None,
         zonal_spectrum_file: Optional[str] = None,
         wb2_compatible: Optional[bool] = False,
+        enable_gds: Optional[bool] = False,
         profiler=None,
     ):
 
@@ -364,6 +368,7 @@ class Inferencer(Driver):
                 output_file=output_file,
                 output_channels=output_channels,
                 output_memory_buffer_size=output_memory_buffer_size,
+                enable_gds=enable_gds,
             )
         else:
             rollout_buffer = None
@@ -745,7 +750,7 @@ class Inferencer(Driver):
         return
 
     def score_model(
-            self, metrics_file: Optional[str] = None, output_channels: List[str] = [], output_file: Optional[str] = None, output_memory_buffer_size: Optional[int]=None, bias_file: Optional[str]=None, spectrum_file: Optional[str]=None, zonal_spectrum_file: Optional[str]=None, start_date=None, end_date=None, date_step=1, wb2_compatible=False, profiler=None
+            self, metrics_file: Optional[str] = None, output_channels: List[str] = [], output_file: Optional[str] = None, output_memory_buffer_size: Optional[int]=None, bias_file: Optional[str]=None, spectrum_file: Optional[str]=None, zonal_spectrum_file: Optional[str]=None, start_date=None, end_date=None, date_step=1, wb2_compatible=False, enable_gds=False, profiler=None
     ):
         """
         main routine for scoring models. Runs the inference over the entire dataset and computes the score. Then writes them to disk
@@ -833,6 +838,7 @@ class Inferencer(Driver):
             spectrum_file=spectrum_file,
             zonal_spectrum_file=zonal_spectrum_file,
             wb2_compatible=wb2_compatible,
+            enable_gds=enable_gds,
             profiler=profiler,
         )
 

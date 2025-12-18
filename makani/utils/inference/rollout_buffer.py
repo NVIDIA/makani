@@ -30,11 +30,18 @@ from makani.models.common import RealFFT1
 from makani.mpu.fft import DistributedRealFFT1
 from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature
 from physicsnemo.distributed.utils import compute_split_shapes, split_tensor_along_dim
-from physicsnemo.distributed.mappings import gather_from_parallel_region, reduce_from_parallel_region
+from physicsnemo.distributed.mappings import reduce_from_parallel_region
 
 # get torch_harmonics for spectra
 import torch_harmonics as th
 import torch_harmonics.distributed as thd
+
+import ctypes
+from math import prod
+def as_numpy(tensor, ctype, nptype):
+    pointer = ctypes.cast(tensor.data_ptr(), ctypes.POINTER(ctype))
+    buff = (pointer._type_ * prod(tensor.shape)).from_address(ctypes.addressof(pointer.contents))
+    return np.frombuffer(buff, dtype=nptype).reshape(*tensor.shape)
 
 
 class DataBuffer(object, metaclass=ABCMeta):
@@ -159,6 +166,7 @@ class RolloutBuffer(DataBuffer):
         output_channels: List[str] = [],
         output_file: Optional[str] = None,
         output_memory_buffer_size: Optional[int] = None,
+        enable_gds: Optional[bool] = True,
     ):
         super().__init__(num_rollout_steps, rollout_dt, channel_names, device, scale, bias, output_channels, output_file)
 
@@ -173,6 +181,8 @@ class RolloutBuffer(DataBuffer):
         self.output_channels = output_channels
         self.num_buffered_samples = output_memory_buffer_size if output_memory_buffer_size is not None else num_samples
         self.num_buffered_samples = max(min(self.num_buffered_samples, num_samples), batch_size)
+        self.enable_gds = enable_gds
+        self.streaming_mode = (output_memory_buffer_size is None or output_memory_buffer_size <= 0)
 
         # little hacky but we use this to compute the range where to write the output to
         if comm.is_distributed("batch") and comm.get_size("batch") > 1:
@@ -188,10 +198,14 @@ class RolloutBuffer(DataBuffer):
         self.num_samples_total = self.num_samples_offsets[-1]
 
         # rollout buffer on CPU has dimensions initial_conditions x num_rollout_steps x ensemble_size x num_channels x nlat x nlon
-        pin_memory = self.device.type == "cuda"
-        local_buffer_size = (self.num_buffered_samples, self.num_rollout_steps + 1, self.ensemble_size, self.num_channels, *self.local_shape)
-        self.rollout_data_cpu = torch.zeros(local_buffer_size, dtype=torch.float32, device="cpu", pin_memory=pin_memory)
-        self.timestamp_data_cpu = torch.zeros((self.num_buffered_samples), dtype=torch.float64, device="cpu", pin_memory=pin_memory)
+        if not self.streaming_mode:
+            pin_memory = self.device.type == "cuda"
+            local_buffer_size = (self.num_buffered_samples, self.num_rollout_steps + 1, self.ensemble_size, self.num_channels, *self.local_shape)
+            self.rollout_data = torch.zeros(local_buffer_size, dtype=torch.float32, device="cpu", pin_memory=pin_memory)
+            self.timestamp_data = torch.zeros((self.num_buffered_samples), dtype=torch.float64, device="cpu", pin_memory=pin_memory)
+            if self.enable_gds:
+                self.rollout_data = self.rollout_data.to(device)
+                self.timestamp_data = self.timestamp_data.to(device)
 
         # open output_file
         self.file_handle = None
@@ -212,6 +226,13 @@ class RolloutBuffer(DataBuffer):
         if self.mpi_comm is not None:
             # initialize MPI. This call is collective!
             self.file_handle = h5.File(output_file, "w", driver="mpio", comm=self.mpi_comm)
+        elif self.enable_gds:
+            # switch to default driver for now
+            # and solve it with env variables
+            driver = "gds"
+            self.file_handle = h5.File(output_file, "w", driver=driver)
+            #driver_kwargs["alignment_interval"] = 4096
+            #os.environ["HDF5_DRIVER"] = "gds"
         else:
             self.file_handle = h5.File(output_file, "w")
 
@@ -273,14 +294,54 @@ class RolloutBuffer(DataBuffer):
         """
         set buffers to zero
         """
-
-        with torch.no_grad():
-            self.timestamp_data_cpu.fill_(0.0)
-            self.rollout_data_cpu.fill_(0.0)
+        if not self.streaming_mode:
+            with torch.no_grad():
+                self.timestamp_data.fill_(0.0)
+                self.rollout_data.fill_(0.0)
 
         return
 
-    def _flush_to_disk(self):
+    def _write_to_disk(self, timestamps, data, idt):
+        # determine ranges
+        # batch ranges in file
+        batch_start_file = self.file_offset
+        # the buffer offset represents the current filling level of the local buffer
+        batch_end_file = batch_start_file + data.shape[0]
+        batch_range = slice(batch_start_file, batch_end_file)
+
+        # ensemble range
+        ens_start = self.ensemble_size * comm.get_rank("ensemble")
+        ens_range = slice(ens_start, ens_start + self.ensemble_size)
+
+        # spatial range
+        lat_range = slice(self.local_offset[0], self.local_offset[0] + self.local_shape[0])
+        lon_range = slice(self.local_offset[1], self.local_offset[1] + self.local_shape[1])
+
+        if (idt == 0) and (comm.get_rank("model") == 0) and (comm.get_rank("ensemble") == 0):
+            if not self.enable_gds:
+                timestamps_cpu = timestamps.cpu().numpy()
+            else:
+                timestamps = timestamps.contiguous()
+                timestamps_cpu = as_numpy(timestamps, ctypes.c_double, np.float64)
+                #timestamps_cpu = timestamps
+            self.timestamp_buffer_disk.write_direct(timestamps_cpu, np.s_[:], np.s_[batch_range])
+
+        if not self.enable_gds:
+            data_cpu = data.cpu().numpy()
+        else:
+            data = data.contiguous()
+            data_cpu = as_numpy(data, ctypes.c_float, np.float32)
+            #data_cpu = data
+
+        self.rollout_buffer_disk.write_direct(data_cpu, np.s_[:, :, :, :, :], np.s_[batch_range, idt, ens_range, :, lat_range, lon_range])
+
+        # sync everything
+        torch.cuda.synchronize(device=self.device)
+        
+        return
+
+
+    def _flush_buffer_to_disk(self):
 
         # wait for everything to complete
         torch.cuda.synchronize(device=self.device)
@@ -303,11 +364,22 @@ class RolloutBuffer(DataBuffer):
             lat_range = slice(self.local_offset[0], self.local_offset[0] + self.local_shape[0])
             lon_range = slice(self.local_offset[1], self.local_offset[1] + self.local_shape[1])
 
+            if not self.enable_gds:
+                timestamp_data_cpu = self.timestamp_data.numpy()
+                rollout_data_cpu = self.rollout_data.numpy()
+            else:
+                timestamp_data = self.timestamp_data.contiguous()
+                timestamp_data_cpu = as_numpy(timestamp_data, ctypes.c_double, np.float64)
+                rollout_data = self.rollout_data.contiguous()
+                rollout_data_cpu = as_numpy(rollout_data, ctypes.c_float, np.float32)
+
             # concurrent writing
             if (comm.get_rank("model") == 0) and (comm.get_rank("ensemble") == 0):
-                tarr = self.timestamp_data_cpu.numpy()
-                self.timestamp_buffer_disk[batch_range] = tarr[batch_range_buffer, ...]
-            self.rollout_buffer_disk[batch_range, :, ens_range, :, lat_range, lon_range] = self.rollout_data_cpu.numpy()[batch_range_buffer, ...]
+                #tarr = self.timestamp_data.cpu().numpy()
+                #self.timestamp_buffer_disk[batch_range] = tarr[batch_range_buffer, ...]
+                self.timestamp_buffer_disk.write_direct(timestamp_data_cpu, np.s_[batch_range_buffer], np.s_[batch_range])
+            #self.rollout_buffer_disk[batch_range, :, ens_range, :, lat_range, lon_range] = self.rollout_data.cpu().numpy()[batch_range_buffer, ...]
+            self.rollout_buffer_disk.write_direct(rollout_data_cpu, np.s_[batch_range_buffer, ...], np.s_[batch_range, :, ens_range, :, lat_range, lon_range])
 
         # reset buffers
         self.zero_buffers()
@@ -327,7 +399,7 @@ class RolloutBuffer(DataBuffer):
 
         # check if we can buffer the next element or if we need to flush now
         if (idt == 0) and (self.buffer_offset + current_batch_size > self.num_buffered_samples):
-            self._flush_to_disk()
+            self._flush_buffer_to_disk()
 
         with torch.no_grad():
             predp = self.scale * pred[..., self.channel_mask, :, :] + self.bias
@@ -335,13 +407,16 @@ class RolloutBuffer(DataBuffer):
             batch_start = self.buffer_offset
             batch_end = batch_start + current_batch_size
 
-            if idt == 0:
-                self.timestamp_data_cpu[batch_start:batch_end].copy_(tstamps, non_blocking=True)
-            self.rollout_data_cpu[batch_start:batch_end, idt].copy_(predp, non_blocking=True)
+            if not self.streaming_mode:
+                if idt == 0:
+                    self.timestamp_data[batch_start:batch_end].copy_(tstamps, non_blocking=True)
+                self.rollout_data[batch_start:batch_end, idt].copy_(predp, non_blocking=True)
 
-            # increase buffer pointer if the next one is a new IC
-            if (idt + 1) == (self.num_rollout_steps + 1):
-                self.buffer_offset += current_batch_size
+                # increase buffer pointer if the next one is a new IC
+                if (idt + 1) == (self.num_rollout_steps + 1):
+                    self.buffer_offset += current_batch_size
+            else:
+                self._write_to_disk(tstamps, predp, idt)
 
         return
 
@@ -351,7 +426,8 @@ class RolloutBuffer(DataBuffer):
             dist.barrier(device_ids=[self.device.index])
 
         # write outstanding copies to disk
-        self._flush_to_disk()
+        if not self.streaming_mode:
+            self._flush_buffer_to_disk()
 
         if dist.is_initialized():
             dist.barrier(device_ids=[self.device.index])
