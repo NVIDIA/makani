@@ -23,7 +23,7 @@ import torch
 from torch import nn
 
 from makani.utils import comm
-from makani.utils.grids import GridQuadrature
+from makani.utils.grids import GridQuadrature, BandLimitMask
 from makani.utils.dataloaders.data_helpers import get_data_normalization, get_time_diff_stds
 from physicsnemo.distributed.utils import compute_split_shapes
 from physicsnemo.distributed.mappings import gather_from_parallel_region, reduce_from_parallel_region
@@ -33,7 +33,7 @@ from torch_harmonics.quadrature import clenshaw_curtiss_weights, legendre_gauss_
 
 from .losses import LossType, GeometricLpLoss, SpectralLpLoss, SpectralH1Loss, SpectralAMSELoss
 from .losses import CRPSLoss, SpectralCRPSLoss, GradientCRPSLoss, VortDivCRPSLoss
-from .losses import LpEnergyScoreLoss, H1EnergyScoreLoss
+from .losses import LpEnergyScoreLoss, SobolevEnergyScoreLoss
 from .losses import GaussianMMDLoss
 from .losses import EnsembleNLLLoss
 from .losses import DriftRegularization, HydrostaticBalanceLoss
@@ -265,8 +265,8 @@ class LossHandler(nn.Module):
             loss_handle = GaussianMMDLoss
         elif "energy_score" in loss_type:
             loss_handle = partial(LpEnergyScoreLoss)
-        elif "h1_energy_score" in loss_type:
-            loss_handle = partial(H1EnergyScoreLoss)
+        elif "sobolev_energy_score" in loss_type:
+            loss_handle = partial(SobolevEnergyScoreLoss)
         elif "drift_regularization" in loss_type:
             loss_handle = DriftRegularization
         else:
