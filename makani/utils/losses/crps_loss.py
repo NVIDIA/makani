@@ -176,37 +176,6 @@ def _crps_probability_weighted_moment_kernel(observation: torch.Tensor, forecast
     return crps
 
 
-
-def _crps_independent_skillspread_kernel(observation: torch.Tensor, forecasts: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
-    """
-    CRPS which uses separate samples for the estimation of spread and skill. Only one sample is used for the estimation of the skill
-    """
-
-    observation = observation.unsqueeze(0)
-
-    # get nanmask from the observarions
-    nanmasks = torch.logical_or(torch.isnan(observation), torch.isnan(weights))
-
-    # compute total weights
-    nweights = torch.where(nanmasks, 0.0, weights)
-    total_weight = torch.sum(nweights, dim=0, keepdim=True)
-
-    #  ensemble size
-    num_ensemble = forecasts.shape[0]
-
-    # use broadcasting semantics to compute spread and skill
-    espread = (forecasts[1:].unsqueeze(1) - forecasts[1:].unsqueeze(0)).abs().sum(dim=(0,1)) / float((num_ensemble - 1)*(num_ensemble - 2))
-    eskill = (observation - forecasts[0:1]).abs().mean(dim=0)
-
-    # crps = torch.where(nanmasks.sum(dim=0) != 0, torch.nan, eskill - 0.5 * espread)
-    crps = eskill - 0.5 * espread
-
-    # set to nan for first forecasts nan
-    crps = torch.where(nanmasks.sum(dim=0) != 0, 0.0, crps)
-
-    return crps
-
-
 def _crps_naive_skillspread_kernel(observation: torch.Tensor, forecasts: torch.Tensor, weights: torch.Tensor, alpha: float) -> torch.Tensor:
     """
     alternative fair CRPS variant that uses spread and skill. Uses naive computation which is O(N^2) in the number of ensemble members. Useful for complex
@@ -392,6 +361,14 @@ class CRPSLoss(GeometricBaseLoss):
 
                 # compute score
                 crps = _crps_skillspread_kernel(observations, forecasts, ensemble_weights, self.alpha)
+            elif self.crps_type == "naive skillspread":
+                if self.ensemble_weights is not None:
+                    raise NotImplementedError("currently only constant ensemble weights are supported")
+                else:
+                    ensemble_weights = torch.ones_like(forecasts, device=forecasts.device)
+
+                # compute score
+                crps = _crps_naive_skillspread_kernel(observations, forecasts, ensemble_weights, self.alpha)
             elif self.crps_type == "gauss":
                 if self.ensemble_weights is not None:
                     ensemble_weights = self.ensemble_weights[idx]
@@ -472,8 +449,8 @@ class SpectralCRPSLoss(SpectralBaseLoss):
         # get the local l weights
         lmax = self.sht.lmax
         ls = torch.arange(lmax).reshape(-1, 1)
-        l_weights = 1 / (2*ls+1)
-        # l_weights = torch.ones(lmax).reshape(-1, 1)
+        # l_weights = 1 / (2*ls+1)
+        l_weights = torch.ones(lmax).reshape(-1, 1)
         if comm.get_size("h") > 1:
             l_weights = split_tensor_along_dim(l_weights, dim=-2, num_chunks=comm.get_size("h"))[comm.get_rank("h")]
         self.register_buffer("l_weights", l_weights, persistent=False)

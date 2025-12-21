@@ -198,7 +198,7 @@ class IsotropicGaussianRandomFieldS2(BaseNoiseS2):
         power_spectrum = torch.pow(2 * ls + 1, -alpha)
         norm_factor = torch.sum((2 * ls + 1) * power_spectrum / 4.0 / math.pi)
         sigma_l = sigma * torch.sqrt(power_spectrum / norm_factor)
-        sigma_l = torch.where(ls <= ms, sigma_l, 0.0)
+        sigma_l = torch.where(ms <= ls, sigma_l, 0.0)
 
         # the new shape is B, T, C, L, M
         sigma_l = sigma_l.reshape((1, 1, 1, self.lmax, self.mmax)).to(dtype=torch.float32)
