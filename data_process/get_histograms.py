@@ -34,7 +34,6 @@ from mpi4py.util import dtlib
 import json
 
 # we need that for quadrature
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from makani.utils.grids import GridQuadrature
 
 
