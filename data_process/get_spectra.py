@@ -20,7 +20,6 @@ import socket
 import json
 import numpy as np
 import h5py as h5
-import math
 import argparse as ap
 from itertools import accumulate
 import operator
@@ -34,9 +33,8 @@ import torch
 import torch.distributed as dist
 from torch_harmonics import RealSHT
 
-from .wb2_helpers import DistributedProgressBar
-
-from .data_process_helpers import welford_combine, collective_reduce, binary_reduce
+from wb2_helpers import DistributedProgressBar
+from data_process_helpers import welford_combine, collective_reduce, binary_reduce
 
 def compute_powerspectrum(x, sht):
     coeffs = sht(x).abs().pow(2)
@@ -85,134 +83,33 @@ def get_file_power_spectra(
             # compute sht of data
             power_spectrum = compute_powerspectrum(tdata, sht)
 
-            print(power_spectrum.shape, power_spectrum)
-            sys.exit(1)
-
             # # define counts
-            # counts_time = tdata.shape[0]
-            # valid_count = torch.sum(quadrature(valid_mask), dim=0)
-            # counts_time_space = valid_count
+            counts_time = torch.as_tensor(tdata.shape[0], dtype=torch.float64, device=device)
             
-            # # Basic observables
-            # # compute mean and variance
-            # # the mean needs to be divided by number of valid samples:
-            # tmean = torch.sum(quadrature(tdata_masked), dim=0, keepdim=False).reshape(1, -1, 1, 1) / valid_count[None, :, None, None]
-            # # we compute m2 directly, so we do not need to divide by number of valid samples:
-            # tm2 = torch.sum(quadrature(torch.square(tdata_masked - tmean)), dim=0, keepdim=False).reshape(1, -1, 1, 1)
+            # Basic observables
+            # compute mean and variance
+            # the mean needs to be divided by number of valid samples:
+            power_spectrum_mean = torch.sum(power_spectrum, dim=0, keepdim=False) / counts_time
+            # we compute m2 directly, so we do not need to divide by number of valid samples:
+            power_spectrum_m2 = torch.sum(torch.square(power_spectrum - power_spectrum_mean[None, ...]), dim=0, keepdim=False)
 
-    #         # fill the dict
-    #         tmpstats = dict(
-    #             maxs = {
-    #                 "type": "max",
-    #                 "counts": counts_time_space.clone(),
-    #                 # apparently, torch.max does not support multiple dimensions, so we need to do it in steps
-    #                 "values": torch.max(torch.max(torch.max(tdata, dim=0, keepdim=True).values, dim=2, keepdim=True).values, dim=3, keepdim=True).values,
-    #             },
-    #             mins = {
-    #                 "type": "min",
-    #                 "counts": counts_time_space.clone(),
-    #                 # same for torch.min
-    #                 "values": torch.min(torch.min(torch.min(tdata, dim=0, keepdim=True).values, dim=2, keepdim=True).values, dim=3, keepdim=True).values,
-    #             },
-    #             time_means = {
-    #                 "type": "mean",
-    #                 "counts": float(counts_time) * torch.ones((data.shape[1]), dtype=torch.float64, device=device),
-    #                 "values": torch.mean(tdata, dim=0, keepdim=True),
-    #             },
-    #             global_meanvar = {
-    #                 "type": "meanvar",
-    #                 "counts": valid_count.clone(),
-    #                 "values": torch.stack([tmean, tm2], dim=0).contiguous(),
-    #             }
-    #         )
+            # fill the dict
+            tmpspectra = dict(
+                global_meanvar = {
+                    "type": "meanvar",
+                    "counts": counts_time.clone(),
+                    "values": torch.stack([power_spectrum_mean, power_spectrum_m2], dim=0).contiguous(),
+                }
+            )
 
-    #         # time diffs: read one more sample for these, if possible
-    #         # TODO: tile it for dt < batch_size
-    #         if batch_start >= dt:
-    #             sub_slc_m_dt = slice(batch_start-dt, batch_stop)
-    #             data_m_dt = dset[sub_slc_m_dt, ...]
-    #             tdata_m_dt = torch.from_numpy(data_m_dt).to(device=device, dtype=torch.float64)
-    #             tdiff = tdata_m_dt[dt:, ...] - tdata_m_dt[:-dt, ...]
-    #             counts_timediff = tdiff.shape[0]
-    #             tdiff_masked, tdiff_valid_mask = mask_data(tdiff)
-    #             tdiff_valid_count = torch.sum(quadrature(tdiff_valid_mask), dim=0)
-    #             tdiffmean = torch.sum(quadrature(tdiff_masked), dim=0, keepdim=False).reshape(1, -1, 1, 1) / tdiff_valid_count[None, :, None, None]
-    #             tdiffm2 = torch.sum(quadrature(torch.square(tdiff_masked - tdiffmean)), dim=0, keepdim=False).reshape(1, -1, 1, 1)
-    #         else:
-    #             # skip those for tdiff
-    #             counts_timediff = 0
-    #             tdiff_valid_count = torch.zeros((data.shape[1]), dtype=torch.float64, device=device)
+            if power_spectra is not None:
+                power_spectra = welford_combine(power_spectra, tmpspectra)
+            else:
+                power_spectra = tmpspectra
 
-    #         if counts_timediff != 0:
-    #             tmpstats["time_diff_meanvar"] = {
-    #                 "type": "meanvar",
-    #                 "counts": tdiff_valid_count.clone(),
-    #                 "values": torch.stack([tdiffmean, tdiffm2], dim=0).contiguous(),
-    #             }
-    #         else:
-    #             # we need the shapes
-    #             tshape = tmean.shape
-    #             tmpstats["time_diff_meanvar"] = {
-    #                 "type": "meanvar", 
-    #                 "counts": torch.zeros(data.shape[1], dtype=torch.float64, device=device),
-    #                 "values": torch.stack(
-    #                     [
-    #                         torch.zeros(tshape, dtype=torch.float64, device=device), 
-    #                         torch.zeros(tshape, dtype=torch.float64, device=device)
-    #                     ], 
-    #                     dim=0
-    #                 ).contiguous(),
-    #             }
-
-    #         if wind_indices is not None:
-    #             u_tens = tdata[:, wind_indices[0]]
-    #             v_tens = tdata[:, wind_indices[1]]
-    #             wind_magnitude = torch.sqrt(torch.square(u_tens) + torch.square(v_tens))
-    #             wind_magnitude_masked, wind_valid_mask = mask_data(wind_magnitude)
-    #             wind_valid_count = torch.sum(quadrature(wind_valid_mask), dim=0)
-    #             wind_mean = torch.sum(quadrature(wind_magnitude_masked), dim=0, keepdim=False).reshape(1, -1, 1, 1) / wind_valid_count[None, :, None, None]
-    #             wind_m2 = torch.sum(quadrature(torch.square(wind_magnitude_masked - wind_mean)), dim=0, keepdim=False).reshape(1, -1, 1, 1)
-    #             tmpstats["wind_meanvar"] = {
-    #                 "type": "meanvar",
-    #                 "counts": wind_valid_count.clone(),
-    #                 "values": torch.stack([wind_mean, wind_m2], dim=0).contiguous(),
-    #             }
-
-    #             if counts_timediff != 0:
-    #                 udiff_tens = tdiff[:, wind_indices[0]]
-    #                 vdiff_tens = tdiff[:, wind_indices[1]]
-    #                 winddiff_magnitude = torch.sqrt(torch.square(udiff_tens) + torch.square(vdiff_tens))
-    #                 winddiff_magnitude_masked, winddiff_valid_mask = mask_data(winddiff_magnitude)
-    #                 winddiff_valid_count = torch.sum(quadrature(winddiff_valid_mask), dim=0)
-    #                 winddiff_mean = torch.sum(quadrature(winddiff_magnitude_masked), dim=0, keepdim=False).reshape(1, -1, 1, 1) / winddiff_valid_count[None, :, None, None]
-    #                 winddiff_m2 = torch.sum(quadrature(torch.square(winddiff_magnitude_masked - winddiff_mean)), dim=0, keepdim=False).reshape(1, -1, 1, 1)
-    #                 tmpstats["winddiff_meanvar"] = {
-    #                     "type": "meanvar",
-    #                     "counts": winddiff_valid_count.clone(),
-    #                     "values": torch.stack([winddiff_mean, winddiff_m2], dim=0).contiguous(),
-    #                 }
-    #             else:
-    #                 wdiffshape = wind_mean.shape
-    #                 tmpstats["winddiff_meanvar"] = {
-    #                     "type": "meanvar",
-    #                     "counts": torch.zeros(wdiffshape[1], dtype=torch.float64, device=device),
-    #                     "values": torch.stack(
-    #                         [
-    #                             torch.zeros(wdiffshape, dtype=torch.float64, device=device), 
-    #                             torch.zeros(wdiffshape, dtype=torch.float64, device=device)
-    #                         ],
-    #                         dim=0
-    #                     ).contiguous(),
-    #                 }
-
-    #         if stats is not None:
-    #             stats = welford_combine(stats, tmpstats)
-    #         else:
-    #             stats = tmpstats
-
-    #         if progress is not None:
-    #             progress.update_counter(batch_stop-batch_start)
-    #             progress.update_progress()
+            if progress is not None:
+                progress.update_counter(batch_stop-batch_start)
+                progress.update_progress()
 
     return power_spectra
 
@@ -290,7 +187,6 @@ def get_power_spectra(input_path: str, output_path: str, metadata_file: str,
     filelist = None
     data_shape = None
     num_samples = None
-    wind_channels = None
     channel_names = None
     combined_file = None
     if comm_rank == 0:
@@ -377,7 +273,7 @@ def get_power_spectra(input_path: str, output_path: str, metadata_file: str,
     stats = dict(
         global_meanvar = {
             "type": "meanvar", 
-            "counts": torch.zeros((num_channels, sht.lmax), dtype=torch.float64, device=device), 
+            "counts": torch.as_tensor(0.0, dtype=torch.float64, device=device), 
             "values": torch.zeros((2, num_channels, sht.lmax), dtype=torch.float64, device=device),
         },
     )
