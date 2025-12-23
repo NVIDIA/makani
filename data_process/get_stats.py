@@ -32,17 +32,26 @@ from mpi4py import MPI
 
 import torch
 import torch.distributed as dist
+from torch_harmonics import RealSHT
 from makani.utils.grids import GridQuadrature
 
 from wb2_helpers import DistributedProgressBar
 
 from .data_process_helpers import (
-    mask_data, 
-    welford_combine, 
-    get_wind_channels, 
-    collective_reduce, 
+    mask_data,
+    welford_combine,
+    get_wind_channels,
+    collective_reduce,
     binary_reduce
 )
+
+def compute_powerspectrum(x, sht):
+    coeffs = sht(x).abs().pow(2)
+    # account for hermitian symetry
+    coeffs[..., 1:] *= 2.0
+    power_spectrum = coeffs.sum(dim=-1)
+    return power_spectrum
+
 
 def get_file_stats(filename,
                    file_slice,
@@ -52,7 +61,8 @@ def get_file_stats(filename,
                    dt=1,
                    batch_size=16,
                    device=torch.device("cpu"),
-                   progress=None):
+                   progress=None,
+                   sht=None):
 
     stats = None
     with h5.File(filename, 'r') as f:
@@ -68,7 +78,7 @@ def get_file_stats(filename,
 
         if batch_size is None:
             batch_size = slc_stop - slc_start
-        
+
         for batch_start in range(slc_start, slc_stop, batch_size):
             batch_stop = min(batch_start+batch_size, slc_stop)
             sub_slc = slice(batch_start, batch_stop)
@@ -92,13 +102,32 @@ def get_file_stats(filename,
             counts_time = tdata.shape[0]
             valid_count = torch.sum(quadrature(valid_mask), dim=0)
             counts_time_space = valid_count
-            
+
             # Basic observables
             # compute mean and variance
             # the mean needs to be divided by number of valid samples:
             tmean = torch.sum(quadrature(tdata_masked), dim=0, keepdim=False).reshape(1, -1, 1, 1) / valid_count[None, :, None, None]
             # we compute m2 directly, so we do not need to divide by number of valid samples:
             tm2 = torch.sum(quadrature(torch.square(tdata_masked - tmean)), dim=0, keepdim=False).reshape(1, -1, 1, 1)
+
+            # compute PSD stats
+            psd_stats = None
+            if sht is not None:
+                # compute psd (B, C, L)
+                psd = compute_powerspectrum(tdata_masked, sht)
+                # compute mean and m2 over batch
+                psd_mean = torch.mean(psd, dim=0, keepdim=True) # (1, C, L)
+                psd_m2 = torch.sum(torch.square(psd - psd_mean), dim=0, keepdim=True) # (1, C, L)
+
+                # reshape to (1, C, L, 1) for welford compatibility
+                psd_mean = psd_mean.unsqueeze(-1)
+                psd_m2 = psd_m2.unsqueeze(-1)
+
+                psd_stats = {
+                    "type": "meanvar",
+                    "counts": float(counts_time) * torch.ones((data.shape[1]), dtype=torch.float64, device=device),
+                    "values": torch.stack([psd_mean, psd_m2], dim=0).contiguous()
+                }
 
             # fill the dict
             tmpstats = dict(
@@ -125,6 +154,9 @@ def get_file_stats(filename,
                     "values": torch.stack([tmean, tm2], dim=0).contiguous(),
                 }
             )
+
+            if psd_stats is not None:
+                tmpstats["psd_meanvar"] = psd_stats
 
             # time diffs: read one more sample for these, if possible
             # TODO: tile it for dt < batch_size
@@ -153,13 +185,13 @@ def get_file_stats(filename,
                 # we need the shapes
                 tshape = tmean.shape
                 tmpstats["time_diff_meanvar"] = {
-                    "type": "meanvar", 
+                    "type": "meanvar",
                     "counts": torch.zeros(data.shape[1], dtype=torch.float64, device=device),
                     "values": torch.stack(
                         [
-                            torch.zeros(tshape, dtype=torch.float64, device=device), 
+                            torch.zeros(tshape, dtype=torch.float64, device=device),
                             torch.zeros(tshape, dtype=torch.float64, device=device)
-                        ], 
+                        ],
                         dim=0
                     ).contiguous(),
                 }
@@ -198,7 +230,7 @@ def get_file_stats(filename,
                         "counts": torch.zeros(wdiffshape[1], dtype=torch.float64, device=device),
                         "values": torch.stack(
                             [
-                                torch.zeros(wdiffshape, dtype=torch.float64, device=device), 
+                                torch.zeros(wdiffshape, dtype=torch.float64, device=device),
                                 torch.zeros(wdiffshape, dtype=torch.float64, device=device)
                             ],
                             dim=0
@@ -221,7 +253,7 @@ def get_stats(input_path: str, output_path: str, metadata_file: str,
               dt: int, quadrature_rule: str, wind_angle_aware: bool, fail_on_nan: bool=False,
               batch_size: Optional[int]=16, reduction_group_size: Optional[int]=8):
 
-    """Function to compute various statistics of all variables of a makani HDF5 dataset. 
+    """Function to compute various statistics of all variables of a makani HDF5 dataset.
 
     This function reads data from input_path and computes minimum, maximum, mean and standard deviation
     for all variables in the dataset. This is done globally, meaning averaged over space and time.
@@ -252,7 +284,7 @@ def get_stats(input_path: str, output_path: str, metadata_file: str,
         coords: this is a dictionary which contains two lists, latitude and longitude coordinates in degrees as well as channel names.
         Example: coords = dict(lat=[-90.0, ..., 90.], lon=[0, ..., 360], channel=["t2m", "u500", "v500", ...])
         Note that the number of entries in coords["lat"] has to match dimension -2 of the dataset, and coords["lon"] dimension -1.
-        The length of the channel names has to match dimension -3 (or dimension 1, which is the same) of the dataset. 
+        The length of the channel names has to match dimension -3 (or dimension 1, which is the same) of the dataset.
     dt : int
         The temporal difference for which the temporal means and standard deviations should be computed. Note that this is in units of dhours (see metadata file),
     quadrature_rule : str
@@ -291,14 +323,14 @@ def get_stats(input_path: str, output_path: str, metadata_file: str,
     # init torch distributed
     device = torch.device(f"cuda:{comm_local_rank}") if torch.cuda.is_available() else torch.device("cpu")
     dist.init_process_group(
-        backend="nccl" if torch.cuda.is_available() else "gloo", 
+        backend="nccl" if torch.cuda.is_available() else "gloo",
         init_method="env://",
         world_size=comm_size,
         rank=comm_rank,
         device_id=device,
     )
     mesh = dist.init_device_mesh(
-        device_type=device.type, 
+        device_type=device.type,
         mesh_shape=[reduction_group_size, comm_size // reduction_group_size],
         mesh_dim_names=["reduction", "tree"],
     )
@@ -359,6 +391,16 @@ def get_stats(input_path: str, output_path: str, metadata_file: str,
                                 crop_shape=None, crop_offset=(0, 0),
                                 normalize=False, pole_mask=None).to(device)
 
+    # Initialize SHT
+    grid_type_map = {
+        "naive": "equiangular",
+        "clenshaw-curtiss": "clenshaw-curtiss",
+        "gauss-legendre": "legendre-gauss"
+    }
+    grid_type = grid_type_map[quadrature_rule]
+    sht = RealSHT(height, width, grid=grid_type).to(device)
+    lmax = sht.lmax
+
     if comm_rank == 0:
         print(f"Found {len(filelist)} files with a total of {num_samples_total} samples. Each sample has the shape {num_channels}x{height}x{width} (CxHxW).")
 
@@ -399,50 +441,55 @@ def get_stats(input_path: str, output_path: str, metadata_file: str,
     # initialize arrays
     stats = dict(
         global_meanvar = {
-            "type": "meanvar", 
-            "counts": torch.zeros((num_channels), dtype=torch.float64, device=device), 
+            "type": "meanvar",
+            "counts": torch.zeros((num_channels), dtype=torch.float64, device=device),
             "values": torch.zeros((2, 1, num_channels, 1, 1), dtype=torch.float64, device=device),
         },
         mins = {
-            "type": "min", 
-            "counts": torch.zeros((num_channels), dtype=torch.float64, device=device), 
+            "type": "min",
+            "counts": torch.zeros((num_channels), dtype=torch.float64, device=device),
             "values": torch.full((1, num_channels, 1, 1), torch.inf, dtype=torch.float64, device=device)
         },
         maxs = {
-            "type": "max", 
-            "counts": torch.zeros((num_channels), dtype=torch.float64, device=device), 
+            "type": "max",
+            "counts": torch.zeros((num_channels), dtype=torch.float64, device=device),
             "values": torch.full((1, num_channels, 1, 1), -torch.inf, dtype=torch.float64, device=device)
         },
         time_means = {
-            "type": "mean", 
-            "counts": torch.zeros((num_channels), dtype=torch.float64, device=device), 
+            "type": "mean",
+            "counts": torch.zeros((num_channels), dtype=torch.float64, device=device),
             "values": torch.zeros((1, num_channels, height, width), dtype=torch.float64, device=device)
         },
         time_diff_meanvar = {
-            "type": "meanvar", 
-            "counts": torch.zeros((num_channels), dtype=torch.float64, device=device), 
-            "values": torch.zeros((2, 1, num_channels, 1, 1), dtype=torch.float64, device=device), 
+            "type": "meanvar",
+            "counts": torch.zeros((num_channels), dtype=torch.float64, device=device),
+            "values": torch.zeros((2, 1, num_channels, 1, 1), dtype=torch.float64, device=device),
+        },
+        psd_meanvar = {
+            "type": "meanvar",
+            "counts": torch.zeros((num_channels), dtype=torch.float64, device=device),
+            "values": torch.zeros((2, 1, num_channels, lmax, 1), dtype=torch.float64, device=device),
         }
     )
 
     if wind_channels is not None:
         num_wind_channels = len(wind_channels[0])
         stats["wind_meanvar"] = {
-            "type": "meanvar", 
-            "counts": torch.zeros((num_wind_channels), dtype=torch.float64, device=device), 
-            "values": torch.zeros((2, 1, num_wind_channels, 1, 1), dtype=torch.float64, device=device), 
+            "type": "meanvar",
+            "counts": torch.zeros((num_wind_channels), dtype=torch.float64, device=device),
+            "values": torch.zeros((2, 1, num_wind_channels, 1, 1), dtype=torch.float64, device=device),
         }
         stats["winddiff_meanvar"] = {
-            "type": "meanvar", 
+            "type": "meanvar",
             "counts": torch.zeros((num_wind_channels), dtype=torch.float64, device=device),
-            "values": torch.zeros((2, 1, num_wind_channels, 1, 1), dtype=torch.float64, device=device), 
+            "values": torch.zeros((2, 1, num_wind_channels, 1, 1), dtype=torch.float64, device=device),
         }
 
     # compute local stats
     progress = DistributedProgressBar(num_samples_total, comm)
     start = time.time()
     for filename, index_bounds in mapping.items():
-        tmpstats = get_file_stats(filename, slice(index_bounds[0], index_bounds[1]+1), wind_channels, quadrature, fail_on_nan, dt, batch_size, device, progress)
+        tmpstats = get_file_stats(filename, slice(index_bounds[0], index_bounds[1]+1), wind_channels, quadrature, fail_on_nan, dt, batch_size, device, progress, sht)
         stats = welford_combine(stats, tmpstats)
 
     # wait for everybody else
@@ -483,6 +530,7 @@ def get_stats(input_path: str, output_path: str, metadata_file: str,
         # compute global stds:
         stats["global_meanvar"]["values"][1, ...] = np.sqrt(stats["global_meanvar"]["values"][1, ...] / stats["global_meanvar"]["counts"][None, :, None, None])
         stats["time_diff_meanvar"]["values"][1, ...] = np.sqrt(stats["time_diff_meanvar"]["values"][1, ...] / stats["time_diff_meanvar"]["counts"][None, :, None, None])
+        stats["psd_meanvar"]["values"][1, ...] = np.sqrt(stats["psd_meanvar"]["values"][1, ...] / stats["psd_meanvar"]["counts"][None, :, None, None])
 
         # overwrite the wind channels
         if wind_channels is not None:
@@ -507,6 +555,8 @@ def get_stats(input_path: str, output_path: str, metadata_file: str,
         np.save(os.path.join(output_path, 'time_means.npy'), stats["time_means"]["values"].astype(np.float32))
         np.save(os.path.join(output_path, f'time_diff_means_dt{dt}.npy'), stats["time_diff_meanvar"]["values"][0, ...].astype(np.float32))
         np.save(os.path.join(output_path, f'time_diff_stds_dt{dt}.npy'), stats["time_diff_meanvar"]["values"][1, ...].astype(np.float32))
+        np.save(os.path.join(output_path, 'psd_means.npy'), stats["psd_meanvar"]["values"][0, ..., 0].astype(np.float32))
+        np.save(os.path.join(output_path, 'psd_stds.npy'), stats["psd_meanvar"]["values"][1, ..., 0].astype(np.float32))
 
         duration = time.time() - start
         print(f"Saving stats done. Duration: {duration:.2f}s", flush=True)
