@@ -64,6 +64,8 @@ def get_climatology(params):
     routine for fetching climatology and normalization factors
     """
 
+    subsampling_factor = params.subsampling_factor
+
     # compute climatology
     if params.enable_synthetic_data:
         clim = np.zeros([1, params.N_out_channels, params.img_crop_shape_x, params.img_crop_shape_y], dtype=np.float32)
@@ -84,6 +86,9 @@ def get_climatology(params):
         time_means = time_means[..., params.out_channels, start_x:end_x, start_y:end_y]
         clim = (time_means - bias) / scale
 
+    # apply subsampling
+    clim = clim[:, :, ::subsampling_factor, ::subsampling_factor]
+    
     return clim
 
 

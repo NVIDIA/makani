@@ -166,6 +166,15 @@ class Driver(metaclass=abc.ABCMeta):
         params.img_local_offset_x = dataset.img_local_offset_x
         params.img_local_offset_y = dataset.img_local_offset_y
 
+        params.img_local_shape_x_resampled = dataset.img_local_shape_x_resampled
+        params.img_local_shape_y_resampled = dataset.img_local_shape_y_resampled
+        params.img_shape_x_resampled = dataset.img_shape_x_resampled
+        params.img_shape_y_resampled = dataset.img_shape_y_resampled
+        params.subsampling_factor = dataset.subsampling_factor
+
+        if (params.subsampling_factor > 1) and ((params.img_crop_shape_x != params.img_shape_x) or (params.img_crop_shape_y != params.img_shape_y)):
+            raise ValueError("Image cropping and data subsampling cannot be used together. Please set the crop shape to the image shape or set subsampling factor to 1.")
+
         # derived quantities
         params["N_in_predicted_channels"] = params.N_in_channels
 
