@@ -36,10 +36,11 @@ from torch_harmonics import RealSHT
 from wb2_helpers import DistributedProgressBar
 from data_process_helpers import welford_combine, collective_reduce, binary_reduce
 
+@torch.compile(fullgraph=True)
 def compute_powerspectrum(x, sht):
-    coeffs = sht(x).abs().pow(2)
+    coeffs = torch.square(torch.abs(sht(x)))
     coeffs[..., 1:] *= 2.0
-    power_spectrum = coeffs.sum(dim=-1)
+    power_spectrum = torch.sum(coeffs, dim=-1)
 
     return power_spectrum
 
