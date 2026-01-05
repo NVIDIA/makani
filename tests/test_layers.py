@@ -21,6 +21,8 @@ from parameterized import parameterized
 import torch
 
 from makani.models.networks.pangu import EarthAttention3D
+from makani.models.common.layers import SeededDropout2d
+
 from makani.utils import functions as fn
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
@@ -137,6 +139,20 @@ class TestLayers(unittest.TestCase):
             for (_, ngrad), (skey, sgrad) in zip(ea_naive.named_parameters(), ea_sdpa.named_parameters()):
                 with self.subTest(desc=f"weight gradient {skey}"):
                     self.assertTrue(compare_tensors(f"weight gradient {skey}", sgrad, ngrad, atol=atol, rtol=rtol, verbose=verbose))
+
+
+    def test_seeded_dropout2d_deterministic_mask(self, atol=1e-8, rtol=1e-8, verbose=True):
+        """Two dropout layers with the same seed should produce identical masks."""
+        torch.manual_seed(123)
+        x = torch.randn(2, 3, 4, 4, device=self.device)
+
+        drop1 = SeededDropout2d(drop_prob=0.5, seed=999).to(self.device).train()
+        drop2 = SeededDropout2d(drop_prob=0.5, seed=999).to(self.device).train()
+
+        out1 = drop1(x)
+        out2 = drop2(x)
+
+        self.assertTrue(compare_tensors("output", out1, out2, atol=atol, rtol=rtol, verbose=verbose))
 
 
 if __name__ == "__main__":

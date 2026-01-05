@@ -19,8 +19,10 @@ from torch.nn.modules.container import Sequential
 from torch.utils.checkpoint import checkpoint, checkpoint_sequential
 import math
 
+from makani.utils.context import rng_context
 
-@torch.compile
+
+@torch.compile(fullgraph=False)
 def drop_path(x: torch.Tensor, drop_prob: float = 0.0, training: bool = False) -> torch.Tensor:
     """Drop paths (Stochastic Depth) per sample (when applied in main path of residual blocks).
     This is the same as the DropConnect impl I created for EfficientNet, etc networks, however,
@@ -47,6 +49,27 @@ class DropPath(nn.Module):
 
     def forward(self, x):
         return drop_path(x, self.drop_prob, self.training)
+
+
+class SeededDropout2d(nn.Module):
+    def __init__(self, drop_prob=0.0, seed=333):
+        super(SeededDropout2d, self).__init__()
+        self.drop_prob = drop_prob
+        self.seed = seed
+        self.drop = nn.Dropout2d(p=self.drop_prob)
+
+        # set RNG states
+        self.rng_cpu = torch.Generator(device=torch.device("cpu"))
+        self.rng_cpu.manual_seed(seed)
+        self.rng_gpu = None
+        if torch.cuda.is_available():
+            self.rng_gpu = torch.Generator(device=torch.cuda.current_device())
+            self.rng_gpu.manual_seed(seed)
+
+    def forward(self, x):
+        with rng_context(self.rng_cpu, self.rng_gpu):
+            xdrop = self.drop(x)
+        return xdrop
 
 
 class LayerScale(nn.Module):
