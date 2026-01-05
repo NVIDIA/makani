@@ -22,7 +22,7 @@ import math
 from makani.utils.context import rng_context
 
 
-@torch.compile(fullgraph=True)
+@torch.compile(fullgraph=False)
 def drop_path(x: torch.Tensor, drop_prob: float = 0.0, training: bool = False) -> torch.Tensor:
     """Drop paths (Stochastic Depth) per sample (when applied in main path of residual blocks).
     This is the same as the DropConnect impl I created for EfficientNet, etc networks, however,
