@@ -132,9 +132,13 @@ def welford_combine(stats1, stats2):
         if (s_b["counts"].ndim != 0) and (s_a["counts"].ndim != s_a["values"].ndim):
             n_a = s_a["counts"][None, :, None, None]
             n_b = s_b["counts"][None, :, None, None]
+            reshape = True
         else:
             n_a = s_a["counts"]
             n_b = s_b["counts"]
+            reshape = False
+
+        # combined counts
         n_ab = n_a + n_b
 
         if s_a["type"] == "min":
@@ -157,7 +161,10 @@ def welford_combine(stats1, stats2):
                 ], dim=0
             ).contiguous()
 
-        stats[k] = {"counts": n_ab.reshape(-1),
+        if reshape:
+            n_ab = n_ab.reshape(-1)
+
+        stats[k] = {"counts": n_ab,
                     "type": s_a["type"],
                     "values": values}
 
