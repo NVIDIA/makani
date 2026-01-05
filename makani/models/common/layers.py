@@ -19,10 +19,10 @@ from torch.nn.modules.container import Sequential
 from torch.utils.checkpoint import checkpoint, checkpoint_sequential
 import math
 
-from makani.models.common.context import rng_context
+from makani.utils.context import rng_context
 
 
-@torch.compile
+@torch.compile(fullgraph=True)
 def drop_path(x: torch.Tensor, drop_prob: float = 0.0, training: bool = False) -> torch.Tensor:
     """Drop paths (Stochastic Depth) per sample (when applied in main path of residual blocks).
     This is the same as the DropConnect impl I created for EfficientNet, etc networks, however,

@@ -22,34 +22,34 @@ from contextlib import contextmanager
 def rng_context(cpu_rng: torch.Generator, device_rng: Optional[torch.Generator] = None):
     """
     Context manager for temporarily setting CPU and device RNG states.
-    
+
     This context manager allows you to temporarily set specific RNG states
     for reproducibility, then automatically restore the original global states.
-    
+
     Parameters
     ----------
     cpu_rng_state : torch.Tensor
         CPU RNG state to set temporarily
     device_rng_state : torch.Tensor, optional
         Device (CUDA) RNG state to set temporarily. Uses current device.
-        
+
     Examples
     --------
     >>> # Save current states
     >>> cpu_state = torch.get_rng_state()
     >>> device_state = torch.cuda.get_rng_state()
-    >>> 
+    >>>
     >>> # Later, temporarily use those states
     >>> with rng_context(cpu_state, device_state):
     >>>     # Code here uses the provided RNG states
     >>>     x = torch.randn(10)
     >>> # Original RNG states are restored here
     """
-    
+
     # Backup and set CPU RNG state
     cpu_backup = torch.get_rng_state()
     torch.set_rng_state(cpu_rng.get_state())
-    
+
     # Backup and set device RNG state if provided
     device_backup = None
     if device_rng is not None and torch.cuda.is_available():
