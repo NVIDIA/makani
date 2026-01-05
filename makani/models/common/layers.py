@@ -61,6 +61,7 @@ class SeededDropout2d(nn.Module):
         # set RNG states
         self.rng_cpu = torch.Generator(device=torch.device("cpu"))
         self.rng_cpu.manual_seed(seed)
+        self.rng_gpu = None
         if torch.cuda.is_available():
             self.rng_gpu = torch.Generator(device=torch.cuda.current_device())
             self.rng_gpu.manual_seed(seed)
