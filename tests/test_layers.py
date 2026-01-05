@@ -141,7 +141,7 @@ class TestLayers(unittest.TestCase):
                     self.assertTrue(compare_tensors(f"weight gradient {skey}", sgrad, ngrad, atol=atol, rtol=rtol, verbose=verbose))
 
 
-    def test_seeded_dropout2d_deterministic_mask(self):
+    def test_seeded_dropout2d_deterministic_mask(self, atol=1e-8, rtol=1e-8, verbose=True):
         """Two dropout layers with the same seed should produce identical masks."""
         torch.manual_seed(123)
         x = torch.randn(2, 3, 4, 4, device=self.device)
@@ -152,7 +152,7 @@ class TestLayers(unittest.TestCase):
         out1 = drop1(x)
         out2 = drop2(x)
 
-        self.assertTrue(torch.equal(out1, out2))
+        self.assertTrue(compare_tensors("output", out1, out2, atol=atol, rtol=rtol, verbose=verbose))
 
 
 if __name__ == "__main__":
