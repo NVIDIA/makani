@@ -29,11 +29,11 @@ from physicsnemo.distributed.utils import compute_split_shapes
 from physicsnemo.distributed.mappings import gather_from_parallel_region, reduce_from_parallel_region
 
 from .losses import LossType, GeometricLpLoss, SpectralLpLoss, SpectralH1Loss, SpectralAMSELoss
-from .losses import CRPSLoss, SpectralCRPSLoss, GradientCRPSLoss, VortDivCRPSLoss
-from .losses import LpEnergyScoreLoss, SobolevEnergyScoreLoss
+from .losses import CRPSLoss, SpectralCRPSLoss, GradientCRPSLoss, VortDivCRPSLoss, KernelScoreLoss
+from .losses import L2EnergyScoreLoss, SobolevEnergyScoreLoss, SpectralL2EnergyScoreLoss
 from .losses import GaussianMMDLoss
 from .losses import EnsembleNLLLoss
-from .losses import DriftRegularization, HydrostaticBalanceLoss
+from .losses import DriftRegularization, HydrostaticBalanceLoss, SpectralRegularization
 
 
 class LossHandler(nn.Module):
@@ -269,16 +269,22 @@ class LossHandler(nn.Module):
             loss_handle = partial(VortDivCRPSLoss)
         elif "ensemble_gradient_crps" in loss_type:
             loss_handle = partial(GradientCRPSLoss)
+        elif "ensemble_kernel_score" in loss_type:
+            loss_handle = partial(KernelScoreLoss)
         elif "ensemble_nll" in loss_type:
             loss_handle = EnsembleNLLLoss
         elif "gaussian_mmd" in loss_type:
             loss_handle = GaussianMMDLoss
-        elif "energy_score" in loss_type:
-            loss_handle = partial(LpEnergyScoreLoss)
+        elif "l2_energy_score" in loss_type:
+            loss_handle = partial(L2EnergyScoreLoss)
         elif "sobolev_energy_score" in loss_type:
             loss_handle = partial(SobolevEnergyScoreLoss)
+        elif "spectral_l2_energy_score" in loss_type:
+            loss_handle = partial(SpectralL2EnergyScoreLoss)
         elif "drift_regularization" in loss_type:
             loss_handle = DriftRegularization
+        elif "spectral_regularization" in loss_type:
+            loss_handle = SpectralRegularization
         else:
             raise NotImplementedError(f"Unknown loss function: {loss_type}")
 
