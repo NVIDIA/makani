@@ -20,6 +20,7 @@ import glob
 from itertools import groupby, accumulate
 import operator
 from bisect import bisect_right
+import math
 import datetime as dt
 
 import torch
@@ -58,6 +59,7 @@ class MultifilesDataset(Dataset):
                  enable_s3: Optional[bool]=False,
                  crop_size: Optional[Tuple[int, int]]=(None, None),
                  crop_anchor: Optional[Tuple[int, int]]=(0, 0),
+                 subsampling_factor: Optional[int]=1,
                  io_grid: Optional[List[int]]=[1, 1, 1],
                  io_rank: Optional[List[int]]=[0, 0, 0],
                  enable_logging: Optional[bool]=True,
@@ -105,6 +107,7 @@ class MultifilesDataset(Dataset):
         # crop info
         self.crop_size = crop_size
         self.crop_anchor = crop_anchor
+        self.subsampling_factor = subsampling_factor
 
         # datetime logic
         if self.relative_timestamp:
@@ -141,6 +144,14 @@ class MultifilesDataset(Dataset):
         self.lat_lon_local = (
             latitude[self.read_anchor[0] : self.read_anchor[0] + self.read_shape[0]].tolist(),
             longitude[self.read_anchor[1] : self.read_anchor[1] + self.read_shape[1]].tolist(),
+        )
+
+        # incorporate subsampling factor
+        self.lat_grid_local = self.lat_grid_local[::self.subsampling_factor, ::self.subsampling_factor]
+        self.lon_grid_local = self.lon_grid_local[::self.subsampling_factor, ::self.subsampling_factor]
+        self.lat_lon_local = (
+            self.lat_lon_local[0][::self.subsampling_factor],
+            self.lat_lon_local[1][::self.subsampling_factor],
         )
 
         # grid types
@@ -284,7 +295,8 @@ class MultifilesDataset(Dataset):
         # store the variables
         self.read_anchor = (read_anchor_x, read_anchor_y)
         self.read_shape = (read_shape_x, read_shape_y)
-        self.return_shape = self.read_shape
+        self.return_shape = (math.ceil(self.read_shape[0] / self.subsampling_factor), 
+                             math.ceil(self.read_shape[1] / self.subsampling_factor))
 
         # do some sample indexing gymnastics
         self.file_offsets = list(accumulate(self.n_samples_file, operator.add))[:-1]
@@ -313,10 +325,18 @@ class MultifilesDataset(Dataset):
         self.img_crop_offset_x = self.crop_anchor[0]
         self.img_crop_offset_y = self.crop_anchor[1]
 
-        self.img_local_shape_x = self.return_shape[0]
-        self.img_local_shape_y = self.return_shape[1]
+        self.img_local_shape_x = self.read_shape[0]
+        self.img_local_shape_y = self.read_shape[1]
         self.img_local_offset_x = self.read_anchor[0]
         self.img_local_offset_y = self.read_anchor[1]
+
+        # resampling stuff
+        self.img_shape_resampled = (math.ceil(self.img_shape[0] / self.subsampling_factor), 
+                                    math.ceil(self.img_shape[1] / self.subsampling_factor))
+        self.img_local_shape_x_resampled = self.return_shape[0]
+        self.img_local_shape_y_resampled = self.return_shape[1]
+        self.img_shape_x_resampled = self.img_shape_resampled[0]
+        self.img_shape_y_resampled = self.img_shape_resampled[1]
 
     def _compute_timestamps(self, global_idx, offset_start, offset_end):
         times = self.timestamps[global_idx+offset_start:global_idx+offset_end]
@@ -360,7 +380,12 @@ class MultifilesDataset(Dataset):
             if self.files[file_idx] is None:
                 self._open_file(file_idx)
 
-            data = self.files[file_idx][local_idx : local_idx + 1, self.in_channels_sorted, start_x:end_x, start_y:end_y]
+            data = self.files[file_idx][
+                local_idx : local_idx + 1, 
+                self.in_channels_sorted, 
+                start_x:end_x:self.subsampling_factor, 
+                start_y:end_y:self.subsampling_factor
+            ]
 
             if not self.in_channels_is_sorted:
                 data = data[:, self.in_channels_unsort, :, :]
