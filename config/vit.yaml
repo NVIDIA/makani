@@ -123,3 +123,11 @@ vit_73ch_big:
     embed_dim: 1024
     batch_size: 256
     lr: 1e-3
+
+vit_73ch_stochastic:
+    <<: *BASE_CONFIG
+
+    wandb_group: "svit_73ch"
+    max_epochs: 150
+    nettype: "/opt/makani/makani/models/networks/stochastic_vit.py:StochasticVisionTransformer"
+    
