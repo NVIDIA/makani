@@ -174,22 +174,7 @@ class LossHandler(nn.Module):
         self.register_buffer("num_batches_tracked", torch.LongTensor([0]))
 
         # weighting factor for multistep, by default a uniform weight is used
-        if params.get("multistep_loss_weight", "constant") == "constant":
-            # uniform weighting factor for the case of multistep training
-            multistep_weight = torch.ones(self.n_future + 1, dtype=torch.float32) / float(self.n_future + 1)
-        elif params.get("multistep_loss_weight", "constant") == "balanced":
-            # this tries to balance the loss contributions from each step, accounting for the fact that the n-th gets backpropagated n times
-            multistep_weight = 2.0 * torch.arange(1, self.n_future + 2, dtype=torch.float32) / float((self.n_future + 2) * (self.n_future + 1))
-        elif params.get("multistep_loss_weight", "constant") == "linear":
-            multistep_weight = torch.arange(1, self.n_future + 2, dtype=torch.float32) / float(self.n_future + 1)
-        elif params.get("multistep_loss_weight", "constant") == "last-n":
-            multistep_weight = torch.ones(self.n_future + 1, dtype=torch.float32) / float(self.n_future)
-            multistep_weight[0] = 0.0
-        elif params.get("multistep_loss_weight", "constant") == "last":
-            multistep_weight = torch.zeros(self.n_future + 1, dtype=torch.float32)
-            multistep_weight[-1] = 1.0
-        else:
-            raise ValueError(f"Unknown multistep loss weight type: {params.get('multistep_loss_weight', False)}")
+        multistep_weight = self._compute_multistep_weight(params.get("multistep_loss_weight", "constant"))
 
         # tile multistep_weights in channel_dim, but channel_dim needs to be fastest dim
         multistep_weight = torch.repeat_interleave(multistep_weight.reshape(1, -1), ncw, dim=1)
@@ -202,6 +187,30 @@ class LossHandler(nn.Module):
         if torch.cuda.is_available():
             self.rng_gpu = torch.Generator(device=torch.device(f"cuda:{comm.get_local_rank()}"))
             self.rng_gpu.manual_seed(seed)
+
+    @torch.compiler.disable(recursive=False)
+    def _compute_multistep_weight(self, multistep_weight_type: str) -> torch.Tensor:
+        if multistep_weight_type == "constant":
+            # uniform weighting factor for the case of multistep training
+            multistep_weight = torch.ones(self.n_future + 1, dtype=torch.float32) / float(self.n_future + 1)
+        elif multistep_weight_type == "balanced":
+            # this tries to balance the loss contributions from each step, accounting for the fact that the n-th gets backpropagated n times
+            multistep_weight = 2.0 * torch.arange(1, self.n_future + 2, dtype=torch.float32) / float((self.n_future + 2) * (self.n_future + 1))
+        elif multistep_weight_type == "linear":
+            # linear weighting factor for the case of multistep training
+            multistep_weight = torch.arange(1, self.n_future + 2, dtype=torch.float32) / float(self.n_future + 1)
+        elif multistep_weight_type == "last-n-1":
+            # weighting factor for the last n steps, with the first step weighted 0
+            multistep_weight = torch.ones(self.n_future + 1, dtype=torch.float32) / float(self.n_future)
+            multistep_weight[0] = 0.0
+        elif multistep_weight_type == "last":
+            # weighting factor for the last step, with the first n-1 steps weighted 0
+            multistep_weight = torch.zeros(self.n_future + 1, dtype=torch.float32)
+            multistep_weight[-1] = 1.0
+        else:
+            raise ValueError(f"Unknown multistep loss weight type: {multistep_weight_type}")
+
+        return multistep_weight
 
     @torch.compiler.disable(recursive=False)
     def _parse_loss_type(self, loss_type: str):
