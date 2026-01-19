@@ -159,7 +159,7 @@ class IsotropicGaussianRandomFieldS2(BaseNoiseS2):
         grid_type="equiangular",
         seed=333,
         reflect=False,
-        learnable =False,
+        learnable=False,
         **kwargs,
     ):
         r"""
