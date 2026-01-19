@@ -174,11 +174,23 @@ class LossHandler(nn.Module):
         self.register_buffer("num_batches_tracked", torch.LongTensor([0]))
 
         # weighting factor for multistep, by default a uniform weight is used
-        if params.get("multistep_loss_weight", False):
-            multistep_weight = 2.0 * torch.arange(1, self.n_future + 2, dtype=torch.float32) / float((self.n_future + 2) * (self.n_future + 1))
-        else:
+        if params.get("multistep_loss_weight", "constant") == "constant":
             # uniform weighting factor for the case of multistep training
             multistep_weight = torch.ones(self.n_future + 1, dtype=torch.float32) / float(self.n_future + 1)
+        elif params.get("multistep_loss_weight", "constant") == "balanced":
+            # this tries to balance the loss contributions from each step, accounting for the fact that the n-th gets backpropagated n times
+            multistep_weight = 2.0 * torch.arange(1, self.n_future + 2, dtype=torch.float32) / float((self.n_future + 2) * (self.n_future + 1))
+        elif params.get("multistep_loss_weight", "constant") == "linear":
+            multistep_weight = torch.arange(1, self.n_future + 2, dtype=torch.float32) / float(self.n_future + 1)
+        elif params.get("multistep_loss_weight", "constant") == "last-n":
+            multistep_weight = torch.ones(self.n_future + 1, dtype=torch.float32) / float(self.n_future)
+            multistep_weight[0] = 0.0
+        elif params.get("multistep_loss_weight", "constant") == "last":
+            multistep_weight = torch.zeros(self.n_future + 1, dtype=torch.float32)
+            multistep_weight[-1] = 1.0
+        else:
+            raise ValueError(f"Unknown multistep loss weight type: {params.get('multistep_loss_weight', False)}")
+
         # tile multistep_weights in channel_dim, but channel_dim needs to be fastest dim
         multistep_weight = torch.repeat_interleave(multistep_weight.reshape(1, -1), ncw, dim=1)
         self.register_buffer("multistep_weight", multistep_weight)
