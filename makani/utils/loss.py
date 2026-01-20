@@ -30,7 +30,7 @@ from physicsnemo.distributed.mappings import gather_from_parallel_region, reduce
 
 from .losses import LossType, GeometricLpLoss, SpectralLpLoss, SpectralH1Loss, SpectralAMSELoss
 from .losses import CRPSLoss, SpectralCRPSLoss, GradientCRPSLoss, VortDivCRPSLoss, KernelScoreLoss
-from .losses import L2EnergyScoreLoss, SobolevEnergyScoreLoss, SpectralL2EnergyScoreLoss
+from .losses import L2EnergyScoreLoss, SobolevEnergyScoreLoss, SpectralL2EnergyScoreLoss, SpectralCoherenceLoss
 from .losses import GaussianMMDLoss
 from .losses import EnsembleNLLLoss
 from .losses import DriftRegularization, HydrostaticBalanceLoss, SpectralRegularization
@@ -210,6 +210,7 @@ class LossHandler(nn.Module):
             # linear weighting factor for the case of multistep training
             multistep_weight = torch.arange(1, self.n_future + 2, dtype=torch.float32) / float(self.n_future + 1)
         elif multistep_weight_type == "last-n-1":
+            print(f"using last n-1")
             # weighting factor for the last n steps, with the first step weighted 0
             multistep_weight = torch.ones(self.n_future + 1, dtype=torch.float32) / float(self.n_future)
             multistep_weight[0] = 0.0
@@ -281,6 +282,8 @@ class LossHandler(nn.Module):
             loss_handle = partial(SobolevEnergyScoreLoss)
         elif "spectral_l2_energy_score" in loss_type:
             loss_handle = partial(SpectralL2EnergyScoreLoss)
+        elif "spectral_coherence_loss" in loss_type:
+            loss_handle = partial(SpectralCoherenceLoss)
         elif "drift_regularization" in loss_type:
             loss_handle = DriftRegularization
         elif "spectral_regularization" in loss_type:

@@ -546,3 +546,159 @@ class SpectralL2EnergyScoreLoss(SpectralBaseLoss):
         loss = (eskill - 0.5 * espread)
 
         return loss
+
+class SpectralCoherenceLoss(SpectralBaseLoss):
+
+    def __init__(
+        self,
+        img_shape: Tuple[int, int],
+        crop_shape: Tuple[int, int],
+        crop_offset: Tuple[int, int],
+        channel_names: List[str],
+        grid_type: str,
+        lmax: Optional[int] = None,
+        spatial_distributed: Optional[bool] = False,
+        ensemble_distributed: Optional[bool] = False,
+        ensemble_weights: Optional[torch.Tensor] = None,
+        alpha: Optional[float] = 1.0,
+        eps: Optional[float] = 1.0e-6,
+        **kwargs,
+    ):
+
+        super().__init__(
+            img_shape=img_shape,
+            crop_shape=crop_shape,
+            crop_offset=crop_offset,
+            channel_names=channel_names,
+            grid_type=grid_type,
+            lmax=lmax,
+            spatial_distributed=spatial_distributed,
+        )
+
+        self.spatial_distributed = spatial_distributed and comm.is_distributed("spatial")
+        self.ensemble_distributed = ensemble_distributed and comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1)
+        self.eps = eps
+
+        if ensemble_weights is not None:
+            self.register_buffer("ensemble_weights", ensemble_weights, persistent=False)
+        else:
+            self.ensemble_weights = ensemble_weights
+
+        # prep ls and ms for broadcasting
+        ls = torch.arange(self.sht.lmax).reshape(-1, 1)
+        ms = torch.arange(self.sht.mmax).reshape(1, -1)
+
+        lm_weights = torch.ones((self.sht.lmax, self.sht.mmax))
+        lm_weights[:, 1:] *= 2.0
+        lm_weights = torch.where(ms > ls, 0.0, lm_weights)
+        if comm.get_size("h") > 1:
+            lm_weights = split_tensor_along_dim(lm_weights, dim=-2, num_chunks=comm.get_size("h"))[comm.get_rank("h")]
+        if comm.get_size("w") > 1:
+            lm_weights = split_tensor_along_dim(lm_weights, dim=-1, num_chunks=comm.get_size("w"))[comm.get_rank("w")]
+        self.register_buffer("lm_weights", lm_weights, persistent=False)
+
+    @property
+    def type(self):
+        return LossType.Probabilistic
+
+    @property
+    def n_channels(self):
+        return 1
+
+    @torch.compiler.disable(recursive=False)
+    def compute_channel_weighting(self, channel_weight_type: str, time_diff_scale: str) -> torch.Tensor:
+        return torch.ones(1)
+
+    def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, ensemble_weights: Optional[torch.Tensor] = None) -> torch.Tensor:
+
+        # sanity checks
+        if forecasts.dim() != 5:
+            raise ValueError(f"Error, forecasts tensor expected to have 5 dimensions but found {forecasts.dim()}.")
+
+        # get the data type before stripping amp types
+        dtype = forecasts.dtype
+
+
+        # before anything else compute the transform
+        # as the CDF definition doesn't generalize well to more than one-dimensional variables, we treat complex and imaginary part as the same
+        with amp.autocast(device_type="cuda", enabled=False):
+            # TODO: check 4 pi normalization
+            forecasts = self.sht(forecasts.float()) / math.sqrt(4.0 * math.pi)
+            observations = self.sht(observations.float()) / math.sqrt(4.0 * math.pi)
+
+        # we assume the following shapes:
+        # forecasts: batch, ensemble, channels, mmax, lmax
+        # observations: batch, channels, mmax, lmax
+        B, E, C, H, W = forecasts.shape
+
+        # transpose the forecasts to ensemble, batch, channels, lat, lon and then do distributed transpose into ensemble direction.
+        # ideally we split spatial dims
+        forecasts = torch.moveaxis(forecasts, 1, 0)
+        if self.ensemble_distributed:
+            ensemble_shapes = [forecasts.shape[0] for _ in range(comm.get_size("ensemble"))]
+            forecasts = distributed_transpose.apply(forecasts, (-1, 0), ensemble_shapes, "ensemble")        # for correct spatial reduction we need to do the same with spatial weights
+
+        if self.ensemble_distributed:
+            lm_weights_split = scatter_to_parallel_region(self.lm_weights, -1, "ensemble")
+
+        # observations does not need a transpose, but just a split and broadcast to ensemble dimension
+        observations = observations.unsqueeze(0)
+        if self.ensemble_distributed:
+            observations = scatter_to_parallel_region(observations, -1, "ensemble")
+
+        num_ensemble = forecasts.shape[0]
+
+        # compute power spectral densities of forecasts and observations
+        psd_forecasts = (lm_weights_split * forecasts.abs().square()).sum(dim=-1)
+        psd_observations = (lm_weights_split * observations.abs().square()).sum(dim=-1)
+
+        # reduce over ensemble parallel region and m spatial dimensions
+        if self.ensemble_distributed:
+            psd_forecasts = reduce_from_parallel_region(psd_forecasts, "ensemble")
+            psd_observations = reduce_from_parallel_region(psd_observations, "ensemble")
+
+        if self.spatial_distributed:
+            psd_forecasts = reduce_from_parallel_region(psd_forecasts, "w")
+            psd_observations = reduce_from_parallel_region(psd_observations, "w")
+
+
+        # compute coherence between forecasts and observations
+        coherence_forecasts = (lm_weights_split * (forecasts.unsqueeze(0).conj() * forecasts.unsqueeze(1)).real).sum(dim=-1)
+        coherence_observations = (lm_weights_split * (forecasts.conj() * observations).real).sum(dim=-1)
+
+        # reduce over ensemble parallel region and m spatial dimensions
+        if self.ensemble_distributed:
+            coherence_forecasts = reduce_from_parallel_region(coherence_forecasts, "ensemble")
+            coherence_observations = reduce_from_parallel_region(coherence_observations, "ensemble")
+
+        if self.spatial_distributed:
+            coherence_forecasts = reduce_from_parallel_region(coherence_forecasts, "w")
+            coherence_observations = reduce_from_parallel_region(coherence_observations, "w")
+
+        # divide the coherence by the product of the norms
+        coherence_observations = coherence_observations / torch.sqrt(psd_forecasts * psd_observations)
+        coherence_forecasts = coherence_forecasts / torch.sqrt(psd_observations.unsqueeze(0) * psd_observations.unsqueeze(1))
+
+        # compute the error in the power spectral density
+        psd_skill = (torch.sqrt(psd_forecasts) - torch.sqrt(psd_observations)).square()
+        psd_skill = psd_skill.sum(dim=0) / float(num_ensemble)
+
+        # compute the coherence skill and spread
+        coherence_skill = (1.0 - coherence_observations).sum(dim=0) / float(num_ensemble)
+
+        # mask the diagonal of coherence_spread with 0.0
+        coherence_spread = torch.where(torch.eye(num_ensemble, device=coherence_forecasts.device).bool().reshape(num_ensemble, num_ensemble, 1, 1, 1), 0.0, 1.0 - coherence_forecasts)
+        coherence_spread = coherence_spread.sum(dim=(0, 1)) / float(num_ensemble * (num_ensemble - 1))
+
+        # compute the loss
+        loss = psd_skill + 2.0 * psd_observations.squeeze(0) * (coherence_skill - 0.5 * coherence_spread)
+
+        # reduce the loss over the l dimensions
+        loss = loss.sum(dim=-1)
+        if self.spatial_distributed:
+            loss = reduce_from_parallel_region(loss, "h")
+
+        # reduce over the channel dimension
+        loss = loss.sum(dim=-1)
+
+        return loss
