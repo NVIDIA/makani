@@ -558,11 +558,13 @@ class Trainer(Driver):
 
             if (self.params.print_timings_frequency > 0) and (self.iters % self.params.print_timings_frequency == 0) and self.log_to_screen:
                 running_train_time = time.perf_counter_ns() - train_start
+                print("\n")
                 print(f"Average step time after step {self.iters}: {running_train_time / float(train_steps) * 10**(-6):.1f} ms")
                 print(
                     f"Average effective io rate after step {self.iters}: {total_data_bytes * float(comm.get_world_size()) / (float(running_train_time) * 10**(-9) * 1024. * 1024. * 1024.):.2f} GB/s"
                 )
                 print(f"Current loss {loss.item()}")
+                print("\n")
 
             # if logging of weights and grads during training is enabled, write them out at the first step of each epoch
             if (self.params.dump_weights_and_grads > 0) and ((self.iters - 1) % self.params.dump_weights_and_grads == 0):
