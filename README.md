@@ -163,6 +163,7 @@ Makani requires a metadata file named `data.json`, which describes important pro
 ```
 
 The ERA5 dataset can be downloaded [here](https://cds.climate.copernicus.eu/cdsapp#!/dataset/reanalysis-era5-single-levels?tab=overview).
+For details on obtaining datasets, converting them to Makani format, concatenating yearly files, and computing statistics, see the data processing guide in [`data_process/Readme.md`](data_process/Readme.md).
 
 ### Checkpoints and restarting
 
