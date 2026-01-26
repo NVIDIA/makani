@@ -231,9 +231,9 @@ class EnsembleTrainer(Trainer):
 
         # visualization wrapper:
         with Timer() as timer:
-            plot_channel = "sst"
-            # plot_index = self.params.channel_names.index(plot_channel)
-            plot_index = 0
+            plot_channel = "q50"
+            plot_index = self.params.channel_names.index(plot_channel)
+            # plot_index = 0
             plot_list = [{"name": plot_channel, "functor": f"lambda x: x[{plot_index}, ...]", "diverging": False}]
             out_bias, out_scale = self.train_dataloader.get_output_normalization()
             self.visualizer = visualize.VisualizationWrapper(
