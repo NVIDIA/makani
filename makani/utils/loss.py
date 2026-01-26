@@ -442,8 +442,6 @@ class LossHandler(nn.Module):
                     loss_vals.append(lfn(prd, tar, wgt))
         all_losses = torch.cat(loss_vals, dim=-1)
 
-        # print(all_losses)
-
         if self.training and self.track_running_stats:
             self._update_running_stats(all_losses.clone())
 
