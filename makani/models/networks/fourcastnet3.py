@@ -16,7 +16,6 @@
 import math
 import torch
 import torch.nn as nn
-import torch.special as special
 import torch.amp as amp
 from torch.utils.checkpoint import checkpoint
 
@@ -160,13 +159,16 @@ class DiscreteContinuousEncoder(nn.Module):
                 input_format="nchw",
             )
 
-    def forward(self, x):
+    def _conv_forward(self, x):
         dtype = x.dtype
-
         with amp.autocast(device_type="cuda", enabled=False):
             x = x.float()
             x = self.conv(x)
             x = x.to(dtype=dtype)
+        return x
+
+    def forward(self, x):
+        x = self._conv_forward(x)
 
         if hasattr(self, "act"):
             x = self.act(x)
@@ -189,6 +191,7 @@ class DiscreteContinuousDecoder(nn.Module):
         kernel_shape=(3, 3),
         basis_type="morlet",
         basis_norm_mode="nodal",
+        theta_cutoff_factor=1.0,
         lmax=240,
         use_mlp=False,
         mlp_ratio=2.0,
@@ -229,7 +232,7 @@ class DiscreteContinuousDecoder(nn.Module):
 
         # heuristic for finding theta_cutoff
         # nto entirely clear if out or in shape should be used here with a non-conv method for upsampling
-        theta_cutoff = _compute_cutoff_radius(lmax=lmax, kernel_shape=kernel_shape, basis_type=basis_type)
+        theta_cutoff = theta_cutoff_factor * _compute_cutoff_radius(lmax=lmax, kernel_shape=kernel_shape, basis_type=basis_type)
 
         # set up DISCO convolution
         conv_handle = thd.DistributedDiscreteContinuousConvS2 if comm.get_size("spatial") > 1 else th.DiscreteContinuousConvS2
@@ -254,6 +257,17 @@ class DiscreteContinuousDecoder(nn.Module):
                 self.conv.bias.is_shared_mp = ["spatial"]
                 self.conv.bias.sharded_dims_mp = [None]
 
+    def _conv_forward(self, x):
+        dtype = x.dtype
+
+        with amp.autocast(device_type="cuda", enabled=False):
+            x = x.float()
+            x = self.upsample(x)
+            x = self.conv(x)
+            x = x.to(dtype=dtype)
+
+        return x
+
     def forward(self, x):
         dtype = x.dtype
 
@@ -263,11 +277,7 @@ class DiscreteContinuousDecoder(nn.Module):
         if hasattr(self, "mlp"):
             x = self.mlp(x)
 
-        with amp.autocast(device_type="cuda", enabled=False):
-            x = x.float()
-            x = self.upsample(x)
-            x = self.conv(x)
-            x = x.to(dtype=dtype)
+        x = self._conv_forward(x)
 
         return x
 
@@ -415,15 +425,20 @@ class NeuralOperatorBlock(nn.Module):
             self.rng_gpu = torch.Generator(device=torch.device(f"cuda:{comm.get_local_rank()}"))
             self.rng_gpu.manual_seed(seed)
 
+    def _conv_forward(self, x):
+        if hasattr(self, "global_conv"):
+            dx, _ = self.global_conv(x)
+        elif hasattr(self, "local_conv"):
+            dx = self.local_conv(x)
+        
+        return dx
+
     def forward(self, x):
         """
         Updated NO block
         """
 
-        if hasattr(self, "global_conv"):
-            dx, _ = self.global_conv(x)
-        elif hasattr(self, "local_conv"):
-            dx = self.local_conv(x)
+        dx = self._conv_forward(x)
 
         if hasattr(self, "bias_std"):
             n = torch.zeros_like(self.bias_std)
@@ -591,6 +606,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
             kernel_shape=kernel_shape,
             basis_type=filter_basis_type,
             basis_norm_mode=filter_basis_norm_mode,
+            theta_cutoff_factor=0.5,
             activation_function=activation_function,
             groups=math.gcd(self.n_chans, self.embed_dim),
             bias=encoder_bias,
