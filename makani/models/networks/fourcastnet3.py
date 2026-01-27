@@ -294,6 +294,7 @@ class NeuralOperatorBlock(nn.Module):
         basis_norm_mode="nodal",
         checkpointing_level=0,
         bias=False,
+        stochastic_bias=False,
         seed=333,
     ):
         super().__init__()
@@ -357,10 +358,11 @@ class NeuralOperatorBlock(nn.Module):
             raise ValueError(f"Unknown convolution type {conv_type}")
 
         # stochastic bias
-        self.bias_std = nn.Parameter(torch.zeros(inp_chans if use_mlp else out_chans, 1, 1))
-        scale = math.sqrt(gain_factor / self.bias_std.shape[0] / 2)
-        nn.init.normal_(self.bias_std, mean=0.0, std=scale)
-        self.bias_std.is_shared_mp = ["spatial"]
+        if stochastic_bias:
+            self.bias_std = nn.Parameter(torch.zeros(inp_chans if use_mlp else out_chans, 1, 1))
+            scale = math.sqrt(gain_factor / self.bias_std.shape[0] / 2)
+            nn.init.normal_(self.bias_std, mean=0.0, std=scale)
+            self.bias_std.is_shared_mp = ["spatial"]
 
         # norm layer
         self.norm = norm_layer()
@@ -497,6 +499,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         freeze_processor=False,
         normalization_means=None,
         normalization_stds=None,
+        stochastic_bias=False,
         seed=333,
         **kwargs,
     ):
@@ -638,6 +641,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
                 basis_norm_mode=filter_basis_norm_mode,
                 checkpointing_level=checkpointing_level,
                 bias=bias,
+                stochastic_bias=stochastic_bias,
                 seed=seed,
             )
 
