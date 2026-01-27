@@ -100,11 +100,11 @@ def get_default_parameters():
 
 
 def init_dataset(
-    path: str, 
-    num_samples_per_year: Optional[int] = 365, 
-    num_channels: Optional[int] = NUM_CHANNELS, 
-    img_size_h: Optional[int] = IMG_SIZE_H, 
-    img_size_w: Optional[int] = IMG_SIZE_W, 
+    path: str,
+    num_samples_per_year: Optional[int] = 365,
+    num_channels: Optional[int] = NUM_CHANNELS,
+    img_size_h: Optional[int] = IMG_SIZE_H,
+    img_size_w: Optional[int] = IMG_SIZE_W,
     nan_fraction: Optional[float] = 0.0,
     annotate: Optional[bool] = True
 ):
@@ -312,3 +312,16 @@ def compare_arrays(msg, array1, array2, atol=1e-8, rtol=1e-5, verbose=False):
             print(f"Worst allclose condition violation: {diff_bad} <= {atol} + {rtol} * {array2_abs_bad} = {atol + rtol * array2_abs_bad}")
 
     return allclose
+
+def disable_tf32():
+    # the api for this was changed lately in pytorch
+    if torch.cuda.is_available():
+        if version.parse(torch.__version__) >= version.parse("2.9.0"):
+            torch.backends.cuda.matmul.fp32_precision = "ieee"
+            torch.backends.cudnn.fp32_precision = "ieee"
+            torch.backends.cudnn.conv.fp32_precision = "ieee"
+            torch.backends.cudnn.rnn.fp32_precision = "ieee"
+        else:
+            torch.backends.cuda.matmul.allow_tf32 = False
+            torch.backends.cudnn.allow_tf32 = False
+    return
