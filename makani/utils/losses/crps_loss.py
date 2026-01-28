@@ -451,33 +451,15 @@ class SpectralCRPSLoss(SpectralBaseLoss):
         self.absolute = absolute
 
         # get the local l weights
-        lmax = self.sht.lmax
-        ls = torch.arange(lmax).reshape(-1, 1)
-        # l_weights = 1 / (2*ls+1)
-        l_weights = torch.ones(lmax).reshape(-1, 1)
-        if comm.get_size("h") > 1:
-            l_weights = split_tensor_along_dim(l_weights, dim=-2, num_chunks=comm.get_size("h"))[comm.get_rank("h")]
-        self.register_buffer("l_weights", l_weights, persistent=False)
-
-        # get the local m weights
-        mmax = self.sht.mmax
-        m_weights = 2 * torch.ones(mmax)#.reshape(1, -1)
-        m_weights[0] = 1.0
-
-        # get meshgrid of weights:
-        l_weights, m_weights = torch.meshgrid(l_weights, m_weights, indexing="ij")
-
-        # use the product weights
-        lm_weights = l_weights * m_weights
-
-        # split the tensors along all dimensions:
-        lm_weights = l_weights * m_weights
+        ls = torch.arange(self.sht.lmax, dtype=torch.float32).reshape(-1, 1)
+        ms = torch.arange(self.sht.mmax, dtype=torch.float32).reshape(1, -1)
+        lm_weights = torch.ones((self.sht.lmax, self.sht.mmax), dtype=torch.float32)
+        lm_weights[:, 1:] *= 2.0
+        lm_weights = torch.where(ms > ls, 0.0, lm_weights)
         if spatial_distributed and comm.get_size("h") > 1:
             lm_weights = split_tensor_along_dim(lm_weights, dim=-2, num_chunks=comm.get_size("h"))[comm.get_rank("h")]
         if spatial_distributed and comm.get_size("w") > 1:
             lm_weights = split_tensor_along_dim(lm_weights, dim=-1, num_chunks=comm.get_size("w"))[comm.get_rank("w")]
-
-        # register
         self.register_buffer("lm_weights", lm_weights, persistent=False)
 
     @property
