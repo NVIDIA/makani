@@ -451,15 +451,29 @@ class SpectralCRPSLoss(SpectralBaseLoss):
         self.absolute = absolute
 
         # get the local l weights
-        ls = torch.arange(self.sht.lmax, dtype=torch.float32).reshape(-1, 1)
-        ms = torch.arange(self.sht.mmax, dtype=torch.float32).reshape(1, -1)
-        lm_weights = torch.ones((self.sht.lmax, self.sht.mmax), dtype=torch.float32)
-        lm_weights[:, 1:] *= 2.0
-        lm_weights = torch.where(ms > ls, 0.0, lm_weights)
+        lmax = self.sht.lmax
+        # l_weights = 1 / (2*ls+1)
+        l_weights = torch.ones(lmax)
+
+        # get the local m weights
+        mmax = self.sht.mmax
+        m_weights = 2 * torch.ones(mmax)#.reshape(1, -1)
+        m_weights[0] = 1.0
+
+        # get meshgrid of weights:
+        l_weights, m_weights = torch.meshgrid(l_weights, m_weights, indexing="ij")
+
+        # use the product weights
+        lm_weights = l_weights * m_weights
+
+        # split the tensors along all dimensions:
+        lm_weights = l_weights * m_weights
         if spatial_distributed and comm.get_size("h") > 1:
             lm_weights = split_tensor_along_dim(lm_weights, dim=-2, num_chunks=comm.get_size("h"))[comm.get_rank("h")]
         if spatial_distributed and comm.get_size("w") > 1:
             lm_weights = split_tensor_along_dim(lm_weights, dim=-1, num_chunks=comm.get_size("w"))[comm.get_rank("w")]
+
+        # register
         self.register_buffer("lm_weights", lm_weights, persistent=False)
 
     @property
@@ -484,12 +498,12 @@ class SpectralCRPSLoss(SpectralBaseLoss):
         forecasts = forecasts.float()
         observations = observations.float()
         with amp.autocast(device_type="cuda", enabled=False):
-            forecasts = self.sht(forecasts.float()) / math.sqrt(4.0 * math.pi)
-            observations = self.sht(observations.float()) / math.sqrt(4.0 * math.pi)
+            forecasts = self.sht(forecasts) / math.sqrt(4.0 * math.pi)
+            observations = self.sht(observations) / math.sqrt(4.0 * math.pi)
 
         if self.absolute:
-            forecasts = torch.abs(forecasts)
-            observations = torch.abs(observations)
+            forecasts = torch.abs(forecasts).to(dtype)
+            observations = torch.abs(observations).to(dtype)
         else:
             # since the other kernels require sorting, this approach only works with the naive CRPS kernel
             assert self.crps_type == "skillspread"
