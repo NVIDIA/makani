@@ -34,7 +34,7 @@ from makani.utils.losses import CRPSLoss, EnsembleNLLLoss, SpectralCRPSLoss
 # Add parent directory to path for testutils import
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 from .distributed_helpers import split_helper, gather_helper
-from ..testutils import compare_tensors
+from ..testutils import compare_tensors, disable_tf32
 
 class TestDistributedLoss(unittest.TestCase):
 
@@ -367,6 +367,10 @@ class TestDistributedLoss(unittest.TestCase):
         ], skip_on_empty=True
     )
     def test_distributed_spectral_crps(self, nlat, nlon, batch_size, num_chan, ens_size, loss_type, absolute, tol, verbose=True):
+
+        # disable tf32
+        disable_tf32()
+
         B, E, C, H, W = batch_size, ens_size, num_chan, nlat, nlon
 
         # generate gauss random distributed around 1, with sigma=2
