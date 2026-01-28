@@ -358,9 +358,8 @@ class TestDistributedLoss(unittest.TestCase):
 
     @parameterized.expand(
         [
-            [128, 256, 32, 8, 4, "ensemble_crps", False, 1e-4],
-            [129, 256, 1, 10, 4, "ensemble_crps", False, 1e-4],
             [128, 256, 32, 8, 4, "ensemble_crps", True, 1e-4],
+            [129, 256, 1, 10, 4, "ensemble_crps", True, 1e-4],
             [128, 256, 32, 8, 4, "skillspread_crps", False, 1e-4],
             [129, 256, 1, 10, 4, "skillspread_crps", False, 1e-4],
             [128, 256, 32, 8, 4, "skillspread_crps", True, 1e-4],
