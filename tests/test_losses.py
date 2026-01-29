@@ -27,7 +27,7 @@ from makani.utils import LossHandler
 from makani.utils.losses import CRPSLoss
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from .testutils import get_default_parameters, compare_tensors, compare_arrays
+from .testutils import get_default_parameters, compare_tensors, compare_arrays, disable_tf32
 
 from properscoring import crps_ensemble, crps_gaussian
 
@@ -343,4 +343,5 @@ class TestLosses(unittest.TestCase):
 
 
 if __name__ == "__main__":
+    disable_tf32()
     unittest.main()
