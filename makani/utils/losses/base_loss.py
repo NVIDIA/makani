@@ -28,6 +28,7 @@ import torch_harmonics.distributed as thd
 from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature
 from makani.utils import comm
 from makani.utils.features import get_wind_channels
+from physicsnemo.distributed.utils import compute_split_shapes, split_tensor_along_dim
 
 
 def _compute_channel_weighting_helper(channel_names: List[str], channel_weight_type: str, time_diff_scale: torch.Tensor = None) -> torch.Tensor:
@@ -343,6 +344,28 @@ class SpectralBaseLoss(nn.Module, metaclass=ABCMeta):
             self.sht = thd.DistributedRealSHT(*img_shape, lmax=lmax, mmax=lmax, grid=grid_type)
         else:
             self.sht = th.RealSHT(*img_shape, lmax=lmax, mmax=lmax, grid=grid_type).float()
+
+        # get the local l weights
+        l_weights = torch.ones(self.sht.lmax)
+        m_weights = 2 * torch.ones(self.sht.mmax)
+        m_weights[0] = 1.0
+
+        # get meshgrid of weights:
+        l_weights, m_weights = torch.meshgrid(l_weights, m_weights, indexing="ij")
+
+        # use the product weights
+        lm_weights = l_weights * m_weights
+
+        # split the tensors along all dimensions:
+        lm_weights = l_weights * m_weights
+        if self.spatial_distributed and comm.get_size("h") > 1:
+            lm_weights = split_tensor_along_dim(lm_weights, dim=-2, num_chunks=comm.get_size("h"))[comm.get_rank("h")]
+        if self.spatial_distributed and comm.get_size("w") > 1:
+            lm_weights = split_tensor_along_dim(lm_weights, dim=-1, num_chunks=comm.get_size("w"))[comm.get_rank("w")]
+        lm_weights = lm_weights.contiguous()
+
+        # register
+        self.register_buffer("lm_weights", lm_weights, persistent=False)
 
     @property
     def type(self):
