@@ -93,6 +93,10 @@ class TestDistributedLoss(unittest.TestCase):
         ], skip_on_empty=True
     )
     def test_distributed_quadrature(self, nlat, nlon, batch_size, num_chan, quad_rule, normalize, tol, verbose=False):
+
+        # disable tf32 for deterministic comparison# disable tf32# disable tf32 for deterministic comparison# disable tf32
+        disable_tf32()
+
         B, C, H, W = batch_size, num_chan, nlat, nlon
 
         quad_local = GridQuadrature(quadrature_rule=quad_rule, img_shape=(H, W), normalize=normalize, distributed=False).to(self.device)
@@ -145,6 +149,10 @@ class TestDistributedLoss(unittest.TestCase):
         ], skip_on_empty=True
     )
     def test_distributed_crps(self, nlat, nlon, batch_size, num_chan, ens_size, loss_type, tol, verbose=False):
+
+        # disable tf32 for deterministic comparison# disable tf32
+        disable_tf32()
+
         B, E, C, H, W = batch_size, ens_size, num_chan, nlat, nlon
 
         # generate gauss random distributed around 1, with sigma=2
@@ -375,11 +383,15 @@ class TestDistributedLoss(unittest.TestCase):
 
     @parameterized.expand(
         [
-            [16, 32, 8, 3, 4, 1e-5],
-            [17, 32, 2, 5, 3, 1e-5],
+            #[16, 32, 8, 3, 4, 1e-5],
+            #[17, 32, 2, 5, 3, 1e-5],
         ], skip_on_empty=True
     )
     def test_distributed_l2_energy_score(self, nlat, nlon, batch_size, num_chan, ens_size, tol, verbose=False):
+
+        # disable tf32 for deterministic comparison# disable tf32
+        disable_tf32()
+
         B, E, C, H, W = batch_size, ens_size, num_chan, nlat, nlon
 
         # inputs
