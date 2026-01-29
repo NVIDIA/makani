@@ -35,8 +35,8 @@ from makani.utils.losses import (
 
 # Add parent directory to path for testutils import
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-from .distributed_helpers import init_grid, split_helper, gather_helper
-from ..testutils import compare_tensors, disable_tf32
+from tests.distributed.distributed_helpers import init_grid, split_helper, gather_helper
+from tests.testutils import compare_tensors, disable_tf32
 
 class TestDistributedLoss(unittest.TestCase):
 
@@ -383,8 +383,8 @@ class TestDistributedLoss(unittest.TestCase):
 
     @parameterized.expand(
         [
-            #[16, 32, 8, 3, 4, 1e-5],
-            #[17, 32, 2, 5, 3, 1e-5],
+            [128, 256, 8, 3, 4, 1e-4],
+            [129, 256, 2, 5, 4, 1e-4],
         ], skip_on_empty=True
     )
     def test_distributed_l2_energy_score(self, nlat, nlon, batch_size, num_chan, ens_size, tol, verbose=False):
@@ -479,8 +479,8 @@ class TestDistributedLoss(unittest.TestCase):
 
     @parameterized.expand(
         [
-            #[128, 256, 8, 3, 4, 1e-4],
-            #[129, 256, 2, 5, 3, 1e-4],
+            [128, 256, 8, 3, 4, 1e-4],
+            [129, 256, 2, 5, 4, 1e-4],
         ], skip_on_empty=True
     )
     def test_distributed_spectral_l2_energy_score(self, nlat, nlon, batch_size, num_chan, ens_size, tol, verbose=True):

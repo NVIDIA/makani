@@ -472,6 +472,7 @@ class SpectralCRPSLoss(SpectralBaseLoss):
             lm_weights = split_tensor_along_dim(lm_weights, dim=-2, num_chunks=comm.get_size("h"))[comm.get_rank("h")]
         if spatial_distributed and comm.get_size("w") > 1:
             lm_weights = split_tensor_along_dim(lm_weights, dim=-1, num_chunks=comm.get_size("w"))[comm.get_rank("w")]
+        lm_weights = lm_weights.contiguous()
 
         # register
         self.register_buffer("lm_weights", lm_weights, persistent=False)
