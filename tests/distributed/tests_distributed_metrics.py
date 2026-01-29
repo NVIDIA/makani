@@ -33,7 +33,7 @@ from physicsnemo.distributed.utils import compute_split_shapes
 from makani.utils import MetricsHandler
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-from .distributed_helpers import split_helper, get_default_parameters
+from .distributed_helpers import init_grid, split_helper, get_default_parameters
 from ..testutils import compare_arrays
 
 # because of physicsnemo/NCCL tear down issues, we can only run one test at a time
@@ -72,6 +72,7 @@ class TestDistributedMetricHandler(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.tmpdir.cleanup()
+        cls.mpi_comm.finalize()
 
     def _init_comms(self):
         
