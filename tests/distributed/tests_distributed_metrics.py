@@ -66,16 +66,17 @@ class TestDistributedMetricHandler(unittest.TestCase):
 
         # create temporary directory
         cls.tmpdir = tempfile.TemporaryDirectory(dir=path)
-        
+
         return
 
     @classmethod
     def tearDownClass(cls):
         cls.tmpdir.cleanup()
+        cls.mpi_comm.finalize()
 
 
     def _init_comms(self):
-        
+
         # set up distributed
         self.grid_size_h = int(os.getenv("GRID_H", 1))
         self.grid_size_w = int(os.getenv("GRID_W", 1))
@@ -125,7 +126,7 @@ class TestDistributedMetricHandler(unittest.TestCase):
             tensor_local = split_helper(tensor_local, dim=1, group=self.b_group)
 
         return tensor_local
-        
+
     def setUp(self):
 
         disable_tf32()
@@ -144,7 +145,7 @@ class TestDistributedMetricHandler(unittest.TestCase):
         self.params.img_crop_offset_y = 0
 
         return
-    
+
     @parameterized.expand(_metric_handler_params, skip_on_empty=True)
     def test_metric_handler_aggregation(self, grid_type, batch_size, ensemble_size, num_rollout_steps, bred, verbose=False):
         # create dummy climatology
@@ -161,7 +162,7 @@ class TestDistributedMetricHandler(unittest.TestCase):
         # set batch size and ensemble size:
         self.params.batch_size = batch_size
         self.params.ensemble_size = ensemble_size
-        
+
         metric_handler_local = MetricsHandler(self.params,
                                               clim,
                                               num_rollout_steps,
@@ -189,7 +190,7 @@ class TestDistributedMetricHandler(unittest.TestCase):
 
                 # dummy loss
                 loss = torch.tensor(1., dtype=torch.float32, device=self.device)
-                
+
                 # update metric handler
                 metric_handler_local.update(inpp, tarp, loss, idt)
 
@@ -208,7 +209,7 @@ class TestDistributedMetricHandler(unittest.TestCase):
         h_off = [0] + np.cumsum(h_shapes).tolist()[:-1]
         w_shapes = compute_split_shapes(self.params.img_shape_y, comm.get_size("w"))
         w_off =	[0] + np.cumsum(w_shapes).tolist()[:-1]
-        
+
         self.params.img_local_shape_x = h_shapes[comm.get_rank("h")]
         self.params.img_local_offset_x = h_off[comm.get_rank("h")]
         self.params.img_local_shape_y = w_shapes[comm.get_rank("w")]

@@ -19,32 +19,25 @@ import unittest
 from parameterized import parameterized
 
 import torch
-import torch_harmonics.distributed as thd
-
 from makani.models.common import RealFFT1, InverseRealFFT1, RealFFT2, InverseRealFFT2, RealFFT3, InverseRealFFT3
-
-from makani.utils import comm
 from makani.mpu.fft import DistributedRealFFT1, DistributedInverseRealFFT1, DistributedRealFFT2, DistributedInverseRealFFT2, DistributedRealFFT3, DistributedInverseRealFFT3
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 from .distributed_helpers import split_helper, gather_helper
-from ..testutils import disable_tf32, compare_tensors
+from ..testutils import init_grid, disable_tf32, compare_tensors
 
 class TestDistributedRealFFT(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        init_grid(cls)
 
-        # set up distributed
-        cls.grid_size_h = int(os.getenv('GRID_H', 1))
-        cls.grid_size_w = int(os.getenv('GRID_W', 1))
-        cls.world_size = cls.grid_size_h * cls.grid_size_w
 
         # init groups
         comm.init(model_parallel_sizes=[cls.grid_size_h, cls.grid_size_w, 1, 1],
                   model_parallel_names=["h", "w", "fin", "fout"])
         cls.world_rank = comm.get_world_rank()
-        
+
         if torch.cuda.is_available():
             if cls.world_rank == 0:
                 print("Running test on GPU")
@@ -84,7 +77,7 @@ class TestDistributedRealFFT(unittest.TestCase):
     def _gather_helper(self, tensor):
         tensor_gather = gather_helper(tensor, dim=-2, group=self.h_group)
         tensor_gather =	gather_helper(tensor_gather, dim=-1, group=self.w_group)
-        
+
         return tensor_gather
 
     @parameterized.expand(
@@ -115,11 +108,11 @@ class TestDistributedRealFFT(unittest.TestCase):
         with torch.no_grad():
             # create full grad
             ograd_full = torch.randn_like(out_full)
-            
+
         # BWD pass
         out_full.backward(ograd_full)
         igrad_full = inp_full.grad.clone()
-        
+
         #############################################################
         # distributed transform
         #############################################################
@@ -133,7 +126,7 @@ class TestDistributedRealFFT(unittest.TestCase):
         out_local = forward_transform_dist(inp_local)
         out_local.backward(ograd_local)
         igrad_local = inp_local.grad.clone()
-        
+
         #############################################################
         # evaluate FWD pass
         #############################################################
@@ -200,7 +193,7 @@ class TestDistributedRealFFT(unittest.TestCase):
         out_local = backward_transform_dist(inp_local)
         out_local.backward(ograd_local)
         igrad_local = inp_local.grad.clone()
-        
+
         #############################################################
         # evaluate FWD pass
         #############################################################
@@ -253,11 +246,11 @@ class TestDistributedRealFFT(unittest.TestCase):
         with torch.no_grad():
             # create full grad
             ograd_full = torch.randn_like(out_full)
-            
+
         # BWD pass
         out_full.backward(ograd_full)
         igrad_full = inp_full.grad.clone()
-        
+
         #############################################################
         # distributed transform
         #############################################################
@@ -271,7 +264,7 @@ class TestDistributedRealFFT(unittest.TestCase):
         out_local = forward_transform_dist(inp_local)
         out_local.backward(ograd_local)
         igrad_local = inp_local.grad.clone()
-        
+
         #############################################################
         # evaluate FWD pass
         #############################################################
@@ -349,7 +342,7 @@ class TestDistributedRealFFT(unittest.TestCase):
         out_local = backward_transform_dist(inp_local)
         out_local.backward(ograd_local)
         igrad_local = inp_local.grad.clone()
-        
+
         #############################################################
         # evaluate FWD pass
         #############################################################
@@ -364,5 +357,5 @@ class TestDistributedRealFFT(unittest.TestCase):
             igrad_gather_full = self._gather_helper(igrad_local)
             self.assertTrue(compare_tensors("input gradients", igrad_gather_full, igrad_full, tol, tol, verbose=verbose))
 
-if __name__ == '__main__':    
+if __name__ == '__main__':
     unittest.main()
