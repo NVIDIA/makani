@@ -501,8 +501,6 @@ class SpectralCRPSLoss(SpectralBaseLoss):
             forecasts = self.sht(forecasts) / math.sqrt(4.0 * math.pi)
             observations = self.sht(observations) / math.sqrt(4.0 * math.pi)
 
-        print(f"observations after sht", observations)
-
         if self.absolute:
             forecasts = torch.abs(forecasts).to(dtype)
             observations = torch.abs(observations).to(dtype)
