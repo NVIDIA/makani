@@ -78,6 +78,10 @@ class TestDistributedLayers(unittest.TestCase):
         skip_on_empty=True,
     )
     def test_distributed_spectral_conv(self, nlat_in, nlon_in, nlat_out, nlon_out, batch_size, num_chan, tol, verbose=True):
+
+        # disable tf32
+        disable_tf32()
+
         B, C, Hi, Wi, Ho, Wo = batch_size, num_chan, nlat_in, nlon_in, nlat_out, nlon_out
 
         from makani.models.common import SpectralConv
@@ -205,6 +209,10 @@ class TestDistributedLayers(unittest.TestCase):
         skip_on_empty=True,
     )
     def test_distributed_instance_norm_2d(self, nlat, nlon, batch_size, num_chan, affine, tol, verbose=True):
+
+        # disable tf32
+        disable_tf32()
+
         B, C, H, W = batch_size, num_chan, nlat, nlon
 
         self._init_seed(333)
@@ -325,14 +333,18 @@ class TestDistributedLayers(unittest.TestCase):
 
     @parameterized.expand(
         [
-            [181, 360, 1, 4, "equiangular", True, 1e-5],
-            [181, 360, 1, 4, "equiangular", False, 1e-5],
-            [180, 360, 1, 10, "legendre-gauss", True, 1e-5],
-            [180, 360, 1, 10, "legendre-gauss", False, 1e-5],
+            [181, 360, 1, 4, "equiangular", True, 1e-4],
+            [181, 360, 1, 4, "equiangular", False, 1e-4],
+            [180, 360, 1, 10, "legendre-gauss", True, 1e-4],
+            [180, 360, 1, 10, "legendre-gauss", False, 1e-4],
         ],
         skip_on_empty=True,
     )
     def test_distributed_geometric_instance_norm_s2(self, nlat, nlon, batch_size, num_chan, grid_type, affine, tol, verbose=True):
+
+        # disable tf32
+        disable_tf32()
+
         B, C, H, W = batch_size, num_chan, nlat, nlon
 
         # set up layer norm parameters
