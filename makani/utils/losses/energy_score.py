@@ -42,6 +42,7 @@ class L2EnergyScoreLoss(GeometricBaseLoss):
         spatial_distributed: Optional[bool] = False,
         ensemble_distributed: Optional[bool] = False,
         ensemble_weights: Optional[torch.Tensor] = None,
+        channel_reduction: Optional[bool] = True,
         alpha: Optional[float] = 1.0,
         beta: Optional[float] = 1.0,
         eps: Optional[float] = 1.0e-5,
@@ -60,6 +61,7 @@ class L2EnergyScoreLoss(GeometricBaseLoss):
 
         self.spatial_distributed = comm.is_distributed("spatial") and spatial_distributed
         self.ensemble_distributed = comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1) and ensemble_distributed
+        self.channel_reduction = channel_reduction
         self.alpha = alpha
         self.beta = beta
         self.eps = eps
@@ -167,8 +169,9 @@ class L2EnergyScoreLoss(GeometricBaseLoss):
 
         # do the channel reduction while ignoring NaNs
         # if channel weights are required they should be added here to the reduction
-        espread = espread.sum(dim=-1, keepdim=True)
-        eskill = eskill.sum(dim=-1, keepdim=True)
+        if self.channel_reduction:
+            espread = espread.sum(dim=-1, keepdim=True)
+            eskill = eskill.sum(dim=-1, keepdim=True)
 
         # just to be sure, mask the diagonal of espread with self.eps
         espread = torch.where(torch.eye(num_ensemble, device=espread.device).bool().reshape(num_ensemble, num_ensemble, 1, 1), self.eps, espread)
@@ -207,6 +210,7 @@ class SobolevEnergyScoreLoss(SpectralBaseLoss):
         spatial_distributed: Optional[bool] = False,
         ensemble_distributed: Optional[bool] = False,
         ensemble_weights: Optional[torch.Tensor] = None,
+        channel_reduction: Optional[bool] = True,
         alpha: Optional[float] = 1.0,
         beta: Optional[float] = 1.0,
         offset: Optional[float] = 1.0,
@@ -227,6 +231,7 @@ class SobolevEnergyScoreLoss(SpectralBaseLoss):
 
         self.spatial_distributed = spatial_distributed and comm.is_distributed("spatial")
         self.ensemble_distributed = ensemble_distributed and comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1)
+        self.channel_reduction = channel_reduction
         self.alpha = alpha
         self.beta = beta
         self.fraction = fraction
@@ -239,14 +244,14 @@ class SobolevEnergyScoreLoss(SpectralBaseLoss):
             self.ensemble_weights = ensemble_weights
 
         # get the local l weights
-        l_weights = torch.arange(self.sht.lmax, dtype=torch.float32).reshape(-1, 1)
-        m_weights = 2 * torch.ones(self.sht.mmax)
+        l_weights = torch.arange(self.sht.lmax, dtype=torch.float32)
+        m_weights = 2 * torch.ones(self.sht.mmax, dtype=torch.float32)
         m_weights[0] = 1.0
         # get meshgrid of weights:
         l_weights, m_weights = torch.meshgrid(l_weights, m_weights, indexing="ij")
 
         # use the product weights
-        lm_weights = (self.offset + l_weights * (l_weights + 1)).pow(self.fraction).tile(1, self.sht.mmax) * m_weights
+        lm_weights = (self.offset + l_weights * (l_weights + 1)).pow(self.fraction) * m_weights
 
         # split the tensors along all dimensions:
         lm_weights = l_weights * m_weights
@@ -264,7 +269,7 @@ class SobolevEnergyScoreLoss(SpectralBaseLoss):
 
     @property
     def n_channels(self):
-        return 1
+        return 1 if self.channel_reduction else len(self.channel_names)
 
     @torch.compiler.disable(recursive=False)
     def compute_channel_weighting(self, channel_weight_type: str, time_diff_scale: str) -> torch.Tensor:
@@ -322,8 +327,9 @@ class SobolevEnergyScoreLoss(SpectralBaseLoss):
         eskill = torch.where(nanmasks.sum(dim=0) != 0, 0.0, eskill)
 
         # do the channel reduction first
-        espread = espread.sum(dim=-2, keepdim=True)
-        eskill = eskill.sum(dim=-2, keepdim=True)
+        if self.channel_reduction:
+            espread = espread.sum(dim=-2, keepdim=True)
+            eskill = eskill.sum(dim=-2, keepdim=True)
 
         # do the spatial reduction
         espread = espread.sum(dim=-1, keepdim=False)
@@ -374,6 +380,7 @@ class SpectralL2EnergyScoreLoss(SpectralBaseLoss):
         spatial_distributed: Optional[bool] = False,
         ensemble_distributed: Optional[bool] = False,
         ensemble_weights: Optional[torch.Tensor] = None,
+        channel_reduction: Optional[bool] = True,
         alpha: Optional[float] = 1.0,
         eps: Optional[float] = 1.0e-3,
         **kwargs,
@@ -391,6 +398,7 @@ class SpectralL2EnergyScoreLoss(SpectralBaseLoss):
 
         self.spatial_distributed = spatial_distributed and comm.is_distributed("spatial")
         self.ensemble_distributed = ensemble_distributed and comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1)
+        self.channel_reduction = channel_reduction
         self.alpha = alpha
         self.eps = eps
 
@@ -405,7 +413,7 @@ class SpectralL2EnergyScoreLoss(SpectralBaseLoss):
 
     @property
     def n_channels(self):
-        return 1
+        return 1 if self.channel_reduction else len(self.channel_names)
 
     @torch.compiler.disable(recursive=False)
     def compute_channel_weighting(self, channel_weight_type: str, time_diff_scale: str) -> torch.Tensor:
@@ -465,8 +473,9 @@ class SpectralL2EnergyScoreLoss(SpectralBaseLoss):
         eskill = torch.where(nanmasks.sum(dim=0) != 0, 0.0, eskill)
 
         # do the channel reduction first
-        espread = espread.sum(dim=-3, keepdim=True)
-        eskill = eskill.sum(dim=-3, keepdim=True)
+        if self.channel_reduction:
+            espread = espread.sum(dim=-3, keepdim=True)
+            eskill = eskill.sum(dim=-3, keepdim=True)
 
         # do the spatial m reduction
         espread = espread.sum(dim=-1, keepdim=False)
