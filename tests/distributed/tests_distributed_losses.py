@@ -31,6 +31,7 @@ from makani.utils.losses import (
     SpectralCRPSLoss,
     L2EnergyScoreLoss,
     SpectralL2EnergyScoreLoss,
+    SobolevEnergyScoreLoss,
 )
 
 # Add parent directory to path for testutils import
@@ -521,6 +522,102 @@ class TestDistributedLoss(unittest.TestCase):
             spatial_distributed=(comm.is_distributed("spatial") and (comm.get_size("spatial") > 1)),
             ensemble_distributed=(comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1)),
             ensemble_weights=None,
+        ).to(self.device)
+
+        #############################################################
+        # local loss
+        #############################################################
+        forecasts_full.requires_grad = True
+        obs_full.requires_grad = True
+        loss_full = loss_fn_local(forecasts_full, obs_full)
+
+        with torch.no_grad():
+            ograd_full = torch.randn_like(loss_full)
+            ograd_local = ograd_full.clone()
+
+        loss_full.backward(ograd_full)
+        fgrad_full = forecasts_full.grad.clone()
+        obsgrad_full = obs_full.grad.clone()
+
+        #############################################################
+        # distributed loss
+        #############################################################
+        forecasts_local = self._split_helper(forecasts_full.clone())
+        obs_local = self._split_helper(obs_full.clone())
+        forecasts_local.requires_grad = True
+        obs_local.requires_grad = True
+
+        loss_local = loss_fn_dist(forecasts_local, obs_local)
+        loss_local.backward(ograd_local)
+        fgrad_local = forecasts_local.grad.clone()
+        obsgrad_local = obs_local.grad.clone()
+
+        #############################################################
+        # evaluate FWD pass
+        #############################################################
+        with self.subTest(desc="outputs"):
+            self.assertTrue(compare_tensors("outputs", loss_local, loss_full, tol, tol, verbose=verbose))
+
+        #############################################################
+        # evaluate BWD pass
+        #############################################################
+        with self.subTest(desc="forecast gradients"):
+            fgrad_gather_full = self._gather_helper_bwd(fgrad_local, True)
+            self.assertTrue(compare_tensors("forecast gradients", fgrad_gather_full, fgrad_full, tol, tol, verbose=verbose))
+
+        with self.subTest(desc="observation gradients"):
+            obsgrad_gather_full = self._gather_helper_bwd(obsgrad_local, False)
+            self.assertTrue(compare_tensors("observation gradients", obsgrad_gather_full, obsgrad_full, tol, tol, verbose=verbose))
+
+
+    @parameterized.expand(
+        [
+            [128, 256, 8, 3, 4, 1.0, 1.0, 1.0, 1.0, 1e-5],
+            [129, 256, 2, 2, 4, 0.8, 1.2, 0.5, 0.7, 1e-5],
+        ], skip_on_empty=True
+    )
+    def test_distributed_sobolev_energy_score(self, nlat, nlon, batch_size, num_chan, ens_size, alpha, beta, offset, fraction, tol, verbose=True):
+
+        disable_tf32()
+
+        B, E, C, H, W = batch_size, ens_size, num_chan, nlat, nlon
+
+        mean, sigma = (0.3, 1.1)
+        forecasts_full = torch.randn((B, E, C, H, W), dtype=torch.float32, device=self.device) * sigma + mean
+        obs_full = torch.randn((B, C, H, W), dtype=torch.float32, device=self.device) * sigma * 0.05 + mean
+
+        # local loss
+        loss_fn_local = SobolevEnergyScoreLoss(
+            img_shape=(H, W),
+            crop_shape=None,
+            crop_offset=(0, 0),
+            channel_names=(),
+            grid_type="equiangular",
+            spatial_distributed=False,
+            ensemble_distributed=False,
+            ensemble_weights=None,
+            alpha=alpha,
+            beta=beta,
+            offset=offset,
+            fraction=fraction,
+            eps=1.0e-6,
+        ).to(self.device)
+
+        # distributed loss
+        loss_fn_dist = SobolevEnergyScoreLoss(
+            img_shape=(H, W),
+            crop_shape=None,
+            crop_offset=(0, 0),
+            channel_names=(),
+            grid_type="equiangular",
+            spatial_distributed=(comm.is_distributed("spatial") and (comm.get_size("spatial") > 1)),
+            ensemble_distributed=(comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1)),
+            ensemble_weights=None,
+            alpha=alpha,
+            beta=beta,
+            offset=offset,
+            fraction=fraction,
+            eps=1.0e-6,
         ).to(self.device)
 
         #############################################################
