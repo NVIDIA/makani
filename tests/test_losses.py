@@ -345,4 +345,5 @@ class TestLosses(unittest.TestCase):
 
 
 if __name__ == "__main__":
+    disable_tf32()
     unittest.main()
