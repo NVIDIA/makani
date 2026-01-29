@@ -112,6 +112,7 @@ class L2EnergyScoreLoss(GeometricBaseLoss):
         # ideally we split spatial dims
         forecasts = torch.moveaxis(forecasts, 1, 0)
         forecasts = forecasts.reshape(E, B, C, H * W)
+
         if self.ensemble_distributed:
             ensemble_shapes = [forecasts.shape[0] for _ in range(comm.get_size("ensemble"))]
             forecasts = distributed_transpose.apply(forecasts, (-1, 0), ensemble_shapes, "ensemble")
@@ -237,15 +238,29 @@ class SobolevEnergyScoreLoss(SpectralBaseLoss):
         else:
             self.ensemble_weights = ensemble_weights
 
-        ls = torch.arange(self.sht.lmax, dtype=torch.float32).reshape(-1, 1)
-        ms = torch.arange(self.sht.mmax, dtype=torch.float32).reshape(1, -1)
-        lm_weights = (self.offset + ls * (ls + 1)).pow(self.fraction).tile(1, self.sht.mmax)
-        lm_weights[:, 1:] *= 2.0
-        lm_weights = torch.where(ms > ls, 0.0, lm_weights)
-        if comm.get_size("h") > 1:
+       # get the local l weights
+        lmax = self.sht.lmax
+        # l_weights = 1 / (2*ls+1)
+        l_weights = torch.ones(lmax)
+
+        # get the local m weights
+        mmax = self.sht.mmax
+        m_weights = 2 * torch.ones(mmax)#.reshape(1, -1)
+        m_weights[0] = 1.0
+
+        # get meshgrid of weights:
+        l_weights, m_weights = torch.meshgrid(l_weights, m_weights, indexing="ij")
+
+        # use the product weights
+        lm_weights = l_weights * m_weights
+
+        # split the tensors along all dimensions:
+        lm_weights = l_weights * m_weights
+        if spatial_distributed and comm.get_size("h") > 1:
             lm_weights = split_tensor_along_dim(lm_weights, dim=-2, num_chunks=comm.get_size("h"))[comm.get_rank("h")]
-        if comm.get_size("w") > 1:
+        if spatial_distributed and comm.get_size("w") > 1:
             lm_weights = split_tensor_along_dim(lm_weights, dim=-1, num_chunks=comm.get_size("w"))[comm.get_rank("w")]
+
         self.register_buffer("lm_weights", lm_weights, persistent=False)
 
     @property
@@ -390,16 +405,30 @@ class SpectralL2EnergyScoreLoss(SpectralBaseLoss):
             self.ensemble_weights = ensemble_weights
 
         # prep ls and ms for broadcasting
-        ls = torch.arange(self.sht.lmax, dtype=torch.float32).reshape(-1, 1)
-        ms = torch.arange(self.sht.mmax, dtype=torch.float32).reshape(1, -1)
+        # get the local l weights
+        lmax = self.sht.lmax
+        # l_weights = 1 / (2*ls+1)
+        l_weights = torch.ones(lmax)
 
-        lm_weights = torch.ones((self.sht.lmax, self.sht.mmax))
-        lm_weights[:, 1:] *= 2.0
-        lm_weights = torch.where(ms > ls, 0.0, lm_weights)
-        if comm.get_size("h") > 1:
+        # get the local m weights
+        mmax = self.sht.mmax
+        m_weights = 2 * torch.ones(mmax)#.reshape(1, -1)
+        m_weights[0] = 1.0
+
+        # get meshgrid of weights:
+        l_weights, m_weights = torch.meshgrid(l_weights, m_weights, indexing="ij")
+
+        # use the product weights
+        lm_weights = l_weights * m_weights
+
+        # split the tensors along all dimensions:
+        lm_weights = l_weights * m_weights
+        if spatial_distributed and comm.get_size("h") > 1:
             lm_weights = split_tensor_along_dim(lm_weights, dim=-2, num_chunks=comm.get_size("h"))[comm.get_rank("h")]
-        if comm.get_size("w") > 1:
+        if spatial_distributed and comm.get_size("w") > 1:
             lm_weights = split_tensor_along_dim(lm_weights, dim=-1, num_chunks=comm.get_size("w"))[comm.get_rank("w")]
+        lm_weights = lm_weights.contiguous()
+
         self.register_buffer("lm_weights", lm_weights, persistent=False)
 
     @property
@@ -425,10 +454,15 @@ class SpectralL2EnergyScoreLoss(SpectralBaseLoss):
 
         # before anything else compute the transform
         # as the CDF definition doesn't generalize well to more than one-dimensional variables, we treat complex and imaginary part as the same
+        forecasts = forecasts.float()
+        observations = observations.float()
         with amp.autocast(device_type="cuda", enabled=False):
             # TODO: check 4 pi normalization
-            forecasts = self.sht(forecasts.float()) / math.sqrt(4.0 * math.pi)
-            observations = self.sht(observations.float()) / math.sqrt(4.0 * math.pi)
+            forecasts = self.sht(forecasts) / math.sqrt(4.0 * math.pi)
+            observations = self.sht(observations) / math.sqrt(4.0 * math.pi)
+
+        forecasts = forecasts.to(dtype)
+        observations = observations.to(dtype)
 
         # we assume the following shapes:
         # forecasts: batch, ensemble, channels, mmax, lmax
@@ -494,6 +528,7 @@ class SpectralL2EnergyScoreLoss(SpectralBaseLoss):
 
         return loss
 
+
 class SpectralCoherenceLoss(SpectralBaseLoss):
 
     def __init__(
@@ -544,6 +579,8 @@ class SpectralCoherenceLoss(SpectralBaseLoss):
             lm_weights = split_tensor_along_dim(lm_weights, dim=-2, num_chunks=comm.get_size("h"))[comm.get_rank("h")]
         if comm.get_size("w") > 1:
             lm_weights = split_tensor_along_dim(lm_weights, dim=-1, num_chunks=comm.get_size("w"))[comm.get_rank("w")]
+        lm_weights = lm_weights.contiguous()
+        
         self.register_buffer("lm_weights", lm_weights, persistent=False)
 
     @property
