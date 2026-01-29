@@ -20,68 +20,29 @@ import unittest
 from parameterized import parameterized
 
 import torch
-import torch.nn.functional as F
 import torch.distributed as dist
 
-import torch_harmonics.distributed as thd
-
 from makani.utils import comm
-from makani.utils import functions as fn
 
 from makani.utils.grids import GridQuadrature
-from makani.utils.losses import CRPSLoss, EnsembleNLLLoss, SpectralCRPSLoss
+from makani.utils.losses import (
+    CRPSLoss,
+    EnsembleNLLLoss,
+    SpectralCRPSLoss,
+    L2EnergyScoreLoss,
+    SpectralL2EnergyScoreLoss,
+)
 
 # Add parent directory to path for testutils import
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-from .distributed_helpers import split_helper, gather_helper
+from .distributed_helpers import init_grid, split_helper, gather_helper
 from ..testutils import compare_tensors, disable_tf32
 
 class TestDistributedLoss(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-
-        # set up distributed
-        cls.grid_size_h = int(os.getenv("GRID_H", 1))
-        cls.grid_size_w = int(os.getenv("GRID_W", 1))
-        cls.grid_size_e = int(os.getenv("GRID_E", 1))
-        cls.world_size = cls.grid_size_h * cls.grid_size_w * cls.grid_size_e
-
-        # init groups
-        comm.init(
-            model_parallel_sizes=[cls.grid_size_h, cls.grid_size_w, 1, 1],
-            model_parallel_names=["h", "w", "fin", "fout"],
-            data_parallel_sizes=[cls.grid_size_e, -1],
-            data_parallel_names=["ensemble", "batch"],
-        )
-        cls.world_rank = comm.get_world_rank()
-
-        if torch.cuda.is_available():
-            if cls.world_rank == 0:
-                print("Running test on GPU")
-            local_rank = comm.get_local_rank()
-            cls.device = torch.device(f"cuda:{local_rank}")
-            torch.cuda.set_device(cls.device)
-            torch.cuda.manual_seed(333)
-        else:
-            if cls.world_rank == 0:
-                print("Running test on CPU")
-            cls.device = torch.device("cpu")
-        torch.manual_seed(333)
-
-        # store comm group parameters
-        cls.wrank = comm.get_rank("w")
-        cls.hrank = comm.get_rank("h")
-        cls.erank = comm.get_rank("ensemble")
-        cls.w_group = comm.get_group("w")
-        cls.h_group = comm.get_group("h")
-        cls.e_group = comm.get_group("ensemble")
-
-        # initializing sht process groups just to be sure
-        thd.init(cls.h_group, cls.w_group)
-
-        if cls.world_rank == 0:
-            print(f"Running distributed tests on grid H x W x E = {cls.grid_size_h} x {cls.grid_size_w} x {cls.grid_size_e}")
+        init_grid(cls)
 
     def _split_helper(self, tensor):
         with torch.no_grad():
@@ -409,6 +370,190 @@ class TestDistributedLoss(unittest.TestCase):
             obsgrad_gather_full = self._gather_helper_bwd(obsgrad_local, False)
             if self.world_rank == 0:
                 print("obsgrad_gather_full", obsgrad_gather_full[0, 0, ...], "obsgrad_full", obsgrad_full[0, 0, ...])
+            self.assertTrue(compare_tensors("observation gradients", obsgrad_gather_full, obsgrad_full, tol, tol, verbose=verbose))
+
+
+    @parameterized.expand(
+        [
+            [16, 32, 8, 3, 4, 1e-5],
+            [17, 32, 2, 5, 3, 1e-5],
+        ], skip_on_empty=True
+    )
+    def test_distributed_l2_energy_score(self, nlat, nlon, batch_size, num_chan, ens_size, tol, verbose=False):
+        B, E, C, H, W = batch_size, ens_size, num_chan, nlat, nlon
+
+        # inputs
+        mean, sigma = (1.0, 2.0)
+        forecasts_full = torch.randn((B, E, C, H, W), dtype=torch.float32, device=self.device) * sigma + mean
+        obs_full = torch.randn((B, C, H, W), dtype=torch.float32, device=self.device) * sigma * 0.01 + mean
+
+        # local loss
+        loss_fn_local = L2EnergyScoreLoss(
+            img_shape=(H, W),
+            crop_shape=None,
+            crop_offset=(0, 0),
+            channel_names=(),
+            grid_type="equiangular",
+            pole_mask=0,
+            alpha=1.0,
+            beta=1.0,
+            eps=1.0e-5,
+            spatial_distributed=False,
+            ensemble_distributed=False,
+            ensemble_weights=None,
+        ).to(self.device)
+
+        # distributed loss
+        loss_fn_dist = L2EnergyScoreLoss(
+            img_shape=(H, W),
+            crop_shape=None,
+            crop_offset=(0, 0),
+            channel_names=(),
+            grid_type="equiangular",
+            pole_mask=0,
+            alpha=1.0,
+            beta=1.0,
+            eps=1.0e-5,
+            spatial_distributed=(comm.is_distributed("spatial") and (comm.get_size("spatial") > 1)),
+            ensemble_distributed=(comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1)),
+            ensemble_weights=None,
+        ).to(self.device)
+
+        #############################################################
+        # local loss
+        #############################################################
+        forecasts_full.requires_grad = True
+        obs_full.requires_grad = True
+        loss_full = loss_fn_local(forecasts_full, obs_full)
+
+        with torch.no_grad():
+            ograd_full = torch.randn_like(loss_full)
+            ograd_local = ograd_full.clone()
+
+        loss_full.backward(ograd_full)
+        fgrad_full = forecasts_full.grad.clone()
+        obsgrad_full = obs_full.grad.clone()
+
+        #############################################################
+        # distributed loss
+        #############################################################
+        forecasts_local = self._split_helper(forecasts_full.clone())
+        obs_local = self._split_helper(obs_full.clone())
+        forecasts_local.requires_grad = True
+        obs_local.requires_grad = True
+
+        loss_local = loss_fn_dist(forecasts_local, obs_local)
+        loss_local.backward(ograd_local)
+        fgrad_local = forecasts_local.grad.clone()
+        obsgrad_local = obs_local.grad.clone()
+
+        #############################################################
+        # evaluate FWD pass
+        #############################################################
+        with self.subTest(desc="outputs"):
+            self.assertTrue(compare_tensors("outputs", loss_local, loss_full, tol, tol, verbose=verbose))
+
+        #############################################################
+        # evaluate BWD pass
+        #############################################################
+        with self.subTest(desc="forecast gradients"):
+            fgrad_gather_full = self._gather_helper_bwd(fgrad_local, True)
+            self.assertTrue(compare_tensors("forecast gradients", fgrad_gather_full, fgrad_full, tol, tol, verbose=verbose))
+
+        with self.subTest(desc="observation gradients"):
+            obsgrad_gather_full = self._gather_helper_bwd(obsgrad_local, False)
+            self.assertTrue(compare_tensors("observation gradients", obsgrad_gather_full, obsgrad_full, tol, tol, verbose=verbose))
+
+
+    @parameterized.expand(
+        [
+            #[128, 256, 8, 3, 4, 1e-4],
+            #[129, 256, 2, 5, 3, 1e-4],
+        ], skip_on_empty=True
+    )
+    def test_distributed_spectral_l2_energy_score(self, nlat, nlon, batch_size, num_chan, ens_size, tol, verbose=True):
+
+        # disable tf32 for deterministic comparison
+        disable_tf32()
+
+        # shapes
+        B, E, C, H, W = batch_size, ens_size, num_chan, nlat, nlon
+
+        mean, sigma = (1.0, 2.0)
+        forecasts_full = torch.randn((B, E, C, H, W), dtype=torch.float32, device=self.device) * sigma + mean
+        obs_full = torch.randn((B, C, H, W), dtype=torch.float32, device=self.device) * sigma * 0.01 + mean
+
+        # local loss
+        loss_fn_local = SpectralL2EnergyScoreLoss(
+            img_shape=(H, W),
+            crop_shape=None,
+            crop_offset=(0, 0),
+            channel_names=(),
+            grid_type="equiangular",
+            alpha=1.0,
+            eps=1.0e-3,
+            spatial_distributed=False,
+            ensemble_distributed=False,
+            ensemble_weights=None,
+        ).to(self.device)
+
+        # distributed loss
+        loss_fn_dist = SpectralL2EnergyScoreLoss(
+            img_shape=(H, W),
+            crop_shape=None,
+            crop_offset=(0, 0),
+            channel_names=(),
+            grid_type="equiangular",
+            alpha=1.0,
+            eps=1.0e-3,
+            spatial_distributed=(comm.is_distributed("spatial") and (comm.get_size("spatial") > 1)),
+            ensemble_distributed=(comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1)),
+            ensemble_weights=None,
+        ).to(self.device)
+
+        #############################################################
+        # local loss
+        #############################################################
+        forecasts_full.requires_grad = True
+        obs_full.requires_grad = True
+        loss_full = loss_fn_local(forecasts_full, obs_full)
+
+        with torch.no_grad():
+            ograd_full = torch.randn_like(loss_full)
+            ograd_local = ograd_full.clone()
+
+        loss_full.backward(ograd_full)
+        fgrad_full = forecasts_full.grad.clone()
+        obsgrad_full = obs_full.grad.clone()
+
+        #############################################################
+        # distributed loss
+        #############################################################
+        forecasts_local = self._split_helper(forecasts_full.clone())
+        obs_local = self._split_helper(obs_full.clone())
+        forecasts_local.requires_grad = True
+        obs_local.requires_grad = True
+
+        loss_local = loss_fn_dist(forecasts_local, obs_local)
+        loss_local.backward(ograd_local)
+        fgrad_local = forecasts_local.grad.clone()
+        obsgrad_local = obs_local.grad.clone()
+
+        #############################################################
+        # evaluate FWD pass
+        #############################################################
+        with self.subTest(desc="outputs"):
+            self.assertTrue(compare_tensors("outputs", loss_local, loss_full, tol, tol, verbose=verbose))
+
+        #############################################################
+        # evaluate BWD pass
+        #############################################################
+        with self.subTest(desc="forecast gradients"):
+            fgrad_gather_full = self._gather_helper_bwd(fgrad_local, True)
+            self.assertTrue(compare_tensors("forecast gradients", fgrad_gather_full, fgrad_full, tol, tol, verbose=verbose))
+
+        with self.subTest(desc="observation gradients"):
+            obsgrad_gather_full = self._gather_helper_bwd(obsgrad_local, False)
             self.assertTrue(compare_tensors("observation gradients", obsgrad_gather_full, obsgrad_full, tol, tol, verbose=verbose))
 
 

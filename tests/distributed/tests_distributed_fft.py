@@ -19,58 +19,20 @@ import unittest
 from parameterized import parameterized
 
 import torch
-import torch_harmonics.distributed as thd
-
 from makani.models.common import RealFFT1, InverseRealFFT1, RealFFT2, InverseRealFFT2, RealFFT3, InverseRealFFT3
-
-from makani.utils import comm
 from makani.mpu.fft import DistributedRealFFT1, DistributedInverseRealFFT1, DistributedRealFFT2, DistributedInverseRealFFT2, DistributedRealFFT3, DistributedInverseRealFFT3
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-from .distributed_helpers import split_helper, gather_helper
+from .distributed_helpers import init_grid, split_helper, gather_helper
 from ..testutils import compare_tensors
 
 class TestDistributedRealFFT(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        init_grid(cls)
 
-        # set up distributed
-        cls.grid_size_h = int(os.getenv('GRID_H', 1))
-        cls.grid_size_w = int(os.getenv('GRID_W', 1))
-        cls.world_size = cls.grid_size_h * cls.grid_size_w
 
-        # init groups
-        comm.init(model_parallel_sizes=[cls.grid_size_h, cls.grid_size_w, 1, 1],
-                  model_parallel_names=["h", "w", "fin", "fout"])
-        cls.world_rank = comm.get_world_rank()
-        
-        if torch.cuda.is_available():
-            if cls.world_rank == 0:
-                print("Running test on GPU")
-            local_rank = comm.get_local_rank()
-            cls.device = torch.device(f"cuda:{local_rank}")
-            torch.cuda.set_device(cls.device)
-            torch.cuda.manual_seed(333)
-        else:
-            if cls.world_rank == 0:
-                print("Running test on CPU")
-            cls.device = torch.device('cpu')
-        torch.manual_seed(333)
-
-        # store comm group parameters
-        cls.wrank = comm.get_rank("w")
-        cls.hrank = comm.get_rank("h")
-        cls.w_group = comm.get_group("w")
-        cls.h_group = comm.get_group("h")
-
-        # initializing sht process groups
-        thd.init(cls.h_group, cls.w_group)
-
-        if cls.world_rank == 0:
-            print(f"Running distributed tests on grid H x W = {cls.grid_size_h} x {cls.grid_size_w}")
-
-        
     def _split_helper(self, tensor):
         tensor_local = split_helper(tensor, dim=-1, group=self.w_group)
         tensor_local = split_helper(tensor_local, dim=-2, group=self.h_group)

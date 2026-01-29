@@ -13,9 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 
 import torch
 import torch.distributed as dist
+
+import torch_harmonics.distributed as thd
+
+from makani.utils import comm
 
 from physicsnemo.distributed.utils import split_tensor_along_dim
 from physicsnemo.distributed.mappings import gather_from_parallel_region, scatter_to_parallel_region, \
@@ -79,6 +84,52 @@ def get_default_parameters():
     params.log_to_wandb = False
 
     return params
+
+
+def init_grid(cls):
+    # set up distributed
+    cls.grid_size_h = int(os.getenv("GRID_H", 1))
+    cls.grid_size_w = int(os.getenv("GRID_W", 1))
+    cls.grid_size_e = int(os.getenv("GRID_E", 1))
+    cls.world_size = cls.grid_size_h * cls.grid_size_w * cls.grid_size_e
+
+    # init groups
+    comm.init(
+        model_parallel_sizes=[cls.grid_size_h, cls.grid_size_w, 1, 1],
+        model_parallel_names=["h", "w", "fin", "fout"],
+        data_parallel_sizes=[cls.grid_size_e, -1],
+        data_parallel_names=["ensemble", "batch"],
+    )
+    cls.world_rank = comm.get_world_rank()
+
+    if torch.cuda.is_available():
+        if cls.world_rank == 0:
+            print("Running test on GPU")
+        local_rank = comm.get_local_rank()
+        cls.device = torch.device(f"cuda:{local_rank}")
+        torch.cuda.set_device(cls.device)
+        torch.cuda.manual_seed(333)
+    else:
+        if cls.world_rank == 0:
+            print("Running test on CPU")
+        cls.device = torch.device("cpu")
+    torch.manual_seed(333)
+
+    # store comm group parameters
+    cls.wrank = comm.get_rank("w")
+    cls.hrank = comm.get_rank("h")
+    cls.erank = comm.get_rank("ensemble")
+    cls.w_group = comm.get_group("w")
+    cls.h_group = comm.get_group("h")
+    cls.e_group = comm.get_group("ensemble")
+
+    # initializing sht process groups just to be sure
+    thd.init(cls.h_group, cls.w_group)
+
+    if cls.world_rank == 0:
+        print(f"Running distributed tests on grid H x W x E = {cls.grid_size_h} x {cls.grid_size_w} x {cls.grid_size_e}")
+
+    return
 
 
 def split_helper(tensor, dim=None, group=None):
