@@ -386,8 +386,8 @@ class TestDistributedLoss(unittest.TestCase):
 
     @parameterized.expand(
         [
-            #[16, 32, 8, 3, 4, 1e-5],
-            #[17, 32, 2, 5, 3, 1e-5],
+            [128, 256, 8, 3, 4, 1e-4],
+            [129, 256, 2, 5, 4, 1e-4],
         ], skip_on_empty=True
     )
     def test_distributed_l2_energy_score(self, nlat, nlon, batch_size, num_chan, ens_size, tol, verbose=False):
@@ -482,8 +482,8 @@ class TestDistributedLoss(unittest.TestCase):
 
     @parameterized.expand(
         [
-            #[128, 256, 8, 3, 4, 1e-4],
-            #[129, 256, 2, 5, 3, 1e-4],
+            [128, 256, 8, 3, 4, 1e-4],
+            [129, 256, 2, 5, 4, 1e-4],
         ], skip_on_empty=True
     )
     def test_distributed_spectral_l2_energy_score(self, nlat, nlon, batch_size, num_chan, ens_size, tol, verbose=True):
