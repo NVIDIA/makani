@@ -374,6 +374,8 @@ class TestDistributedLoss(unittest.TestCase):
         # disable tf32
         disable_tf32()
 
+        # set seed
+
         B, E, C, H, W = batch_size, ens_size, num_chan, nlat, nlon
 
         # generate gauss random distributed around 1, with sigma=2
@@ -518,6 +520,8 @@ class TestDistributedLoss(unittest.TestCase):
         # observation grads
         with self.subTest(desc="observation gradients"):
             obsgrad_gather_full = self._gather_helper_bwd(obsgrad_local, False)
+            if self.world_rank == 0:
+                print("obsgrad_gather_full", obsgrad_gather_full[0, 0, ...], "obsgrad_full", obsgrad_full[0, 0, ...])
             self.assertTrue(compare_tensors("observation gradients", obsgrad_gather_full, obsgrad_full, tol, tol, verbose=verbose))
 
 
