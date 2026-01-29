@@ -171,16 +171,16 @@ class TestDistributedLoss(unittest.TestCase):
 
     @parameterized.expand(
         [
-            [128, 256, 32, 8, 4, "ensemble_crps", 1e-5],
-            [129, 256, 1, 10, 4, "ensemble_crps", 1e-5],
-            [128, 256, 32, 8, 4, "ensemble_crps", 1e-5],
-            [129, 256, 1, 10, 4, "ensemble_crps", 1e-5],
-            [128, 256, 32, 8, 4, "skillspread_crps", 1e-5],
-            [129, 256, 1, 10, 4, "skillspread_crps", 1e-5],
-            [128, 256, 32, 8, 4, "gauss_crps", 1e-5],
-            [129, 256, 1, 10, 4, "gauss_crps", 1e-5],
-            [128, 256, 32, 8, 4, "ensemble_nll", 1e-5],
-            [129, 256, 1, 10, 4, "ensemble_nll", 1e-5],
+            [128, 256, 32, 8, 4, "cdf", 1e-5],
+            [129, 256, 1, 10, 4, "cdf", 1e-5],
+            [128, 256, 32, 8, 4, "cdf", 1e-5],
+            [129, 256, 1, 10, 4, "cdf", 1e-5],
+            [128, 256, 32, 8, 4, "skillspread", 1e-5],
+            [129, 256, 1, 10, 4, "skillspread", 1e-5],
+            [128, 256, 32, 8, 4, "gauss", 1e-5],
+            [129, 256, 1, 10, 4, "gauss", 1e-5],
+            [128, 256, 32, 8, 4, "nll", 1e-5],
+            [129, 256, 1, 10, 4, "nll", 1e-5],
         ], skip_on_empty=True
     )
     def test_distributed_crps(self, nlat, nlon, batch_size, num_chan, ens_size, loss_type, tol, verbose=False):
@@ -191,7 +191,7 @@ class TestDistributedLoss(unittest.TestCase):
         inp_full = torch.randn((B, E, C, H, W), dtype=torch.float32, device=self.device) * sigma + mean
         obs_full = torch.full((B, C, H, W), fill_value=mean, dtype=torch.float32, device=self.device)
 
-        if loss_type == "ensemble_crps":
+        if loss_type != "nll":
             # local loss
             loss_fn_local = CRPSLoss(
                 img_shape=(H, W),
@@ -200,7 +200,8 @@ class TestDistributedLoss(unittest.TestCase):
                 channel_names=(),
                 grid_type="equiangular",
                 pole_mask=0,
-                crps_type="cdf",
+                crps_type=loss_type,
+                eps=1.0e-5,
                 spatial_distributed=False,
                 ensemble_distributed=False,
                 ensemble_weights=None,
@@ -214,68 +215,13 @@ class TestDistributedLoss(unittest.TestCase):
                 channel_names=(),
                 grid_type="equiangular",
                 pole_mask=0,
-                crps_type="cdf",
+                crps_type=loss_type,
+                eps=1.0e-5,
                 spatial_distributed=(comm.is_distributed("spatial") and (comm.get_size("spatial") > 1)),
                 ensemble_distributed=(comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1)),
                 ensemble_weights=None,
             ).to(self.device)
-        elif loss_type == "gauss_crps":
-            # local loss
-            loss_fn_local = CRPSLoss(
-                img_shape=(H, W),
-                crop_shape=None,
-                crop_offset=(0, 0),
-                channel_names=(),
-                grid_type="equiangular",
-                pole_mask=0,
-                crps_type="gauss",
-                spatial_distributed=False,
-                ensemble_distributed=False,
-                eps=1.0e-5,
-            ).to(self.device)
-
-            # distributed loss
-            loss_fn_dist = CRPSLoss(
-                img_shape=(H, W),
-                crop_shape=None,
-                crop_offset=(0, 0),
-                channel_names=(),
-                grid_type="equiangular",
-                pole_mask=0,
-                crps_type="gauss",
-                spatial_distributed=(comm.is_distributed("spatial") and (comm.get_size("spatial") > 1)),
-                ensemble_distributed=(comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1)),
-                eps=1.0e-5,
-            ).to(self.device)
-        elif loss_type == "skillspread_crps":
-            # local loss
-            loss_fn_local = CRPSLoss(
-                img_shape=(H, W),
-                crop_shape=None,
-                crop_offset=(0, 0),
-                channel_names=(),
-                grid_type="equiangular",
-                pole_mask=0,
-                crps_type="skillspread",
-                spatial_distributed=False,
-                ensemble_distributed=False,
-                eps=1.0e-5,
-            ).to(self.device)
-
-            # distributed loss
-            loss_fn_dist = CRPSLoss(
-                img_shape=(H, W),
-                crop_shape=(H, W),
-                crop_offset=(0, 0),
-                channel_names=(),
-                grid_type="equiangular",
-                pole_mask=0,
-                crps_type="skillspread",
-                spatial_distributed=(comm.is_distributed("spatial") and (comm.get_size("spatial") > 1)),
-                ensemble_distributed=(comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1)),
-                eps=1.0e-5,
-            ).to(self.device)
-        elif loss_type == "ensemble_nll":
+        else:
             # local loss
             loss_fn_local = EnsembleNLLLoss(
                 img_shape=(H, W),
@@ -358,12 +304,12 @@ class TestDistributedLoss(unittest.TestCase):
 
     @parameterized.expand(
         [
-            [128, 256, 32, 8, 4, "ensemble_crps", True, 1e-4],
-            [129, 256, 1, 10, 4, "ensemble_crps", True, 1e-4],
-            [128, 256, 32, 8, 4, "skillspread_crps", False, 1e-4],
-            [129, 256, 1, 10, 4, "skillspread_crps", False, 1e-4],
-            [128, 256, 32, 8, 4, "skillspread_crps", True, 1e-4],
-            [129, 256, 1, 10, 4, "skillspread_crps", True, 1e-4],
+            [128, 256, 32, 8, 4, "cdf", True, 1e-4],
+            [129, 256, 1, 10, 4, "cdf", True, 1e-4],
+            [128, 256, 32, 8, 4, "skillspread", False, 1e-4],
+            [129, 256, 1, 10, 4, "skillspread", False, 1e-4],
+            [128, 256, 32, 8, 4, "skillspread", True, 1e-4],
+            [129, 256, 1, 10, 4, "skillspread", True, 1e-4],
         ], skip_on_empty=True
     )
     def test_distributed_spectral_crps(self, nlat, nlon, batch_size, num_chan, ens_size, loss_type, absolute, tol, verbose=True):
@@ -371,8 +317,7 @@ class TestDistributedLoss(unittest.TestCase):
         # disable tf32
         disable_tf32()
 
-        # set seed
-
+        # extract shapes
         B, E, C, H, W = batch_size, ens_size, num_chan, nlat, nlon
 
         # generate gauss random distributed around 1, with sigma=2
@@ -380,90 +325,35 @@ class TestDistributedLoss(unittest.TestCase):
         inp_full = torch.randn((B, E, C, H, W), dtype=torch.float32, device=self.device) * sigma + mean
         obs_full = torch.randn((B, C, H, W), dtype=torch.float32, device=self.device) * sigma * 0.01 + mean
 
-        if loss_type == "ensemble_crps":
-            # local loss
-            loss_fn_local = SpectralCRPSLoss(
-                img_shape=(H, W),
-                crop_shape=None,
-                crop_offset=(0, 0),
-                channel_names=(),
-                grid_type="equiangular",
-                crps_type="cdf",
-                spatial_distributed=False,
-                ensemble_distributed=False,
-                ensemble_weights=None,
-                absolute=absolute,
-            ).to(self.device)
+        # local loss
+        loss_fn_local = SpectralCRPSLoss(
+            img_shape=(H, W),
+            crop_shape=None,
+            crop_offset=(0, 0),
+            channel_names=(),
+            grid_type="equiangular",
+            crps_type=loss_type,
+            spatial_distributed=False,
+            ensemble_distributed=False,
+            ensemble_weights=None,
+            eps=1.0e-5,
+            absolute=absolute,
+        ).to(self.device)
 
-            # distributed loss
-            loss_fn_dist = SpectralCRPSLoss(
-                img_shape=(H, W),
-                crop_shape=None,
-                crop_offset=(0, 0),
-                channel_names=(),
-                grid_type="equiangular",
-                crps_type="cdf",
-                spatial_distributed=(comm.is_distributed("spatial") and (comm.get_size("spatial") > 1)),
-                ensemble_distributed=(comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1)),
-                ensemble_weights=None,
-                absolute=absolute,
-            ).to(self.device)
-        elif loss_type == "gauss_crps":
-            # local loss
-            loss_fn_local = SpectralCRPSLoss(
-                img_shape=(H, W),
-                crop_shape=None,
-                crop_offset=(0, 0),
-                channel_names=(),
-                grid_type="equiangular",
-                crps_type="gauss",
-                spatial_distributed=False,
-                ensemble_distributed=False,
-                eps=1.0e-5,
-                absolute=absolute,
-            ).to(self.device)
-
-            # distributed loss
-            loss_fn_dist = SpectralCRPSLoss(
-                img_shape=(H, W),
-                crop_shape=None,
-                crop_offset=(0, 0),
-                channel_names=(),
-                grid_type="equiangular",
-                crps_type="gauss",
-                spatial_distributed=(comm.is_distributed("spatial") and (comm.get_size("spatial") > 1)),
-                ensemble_distributed=(comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1)),
-                eps=1.0e-5,
-                absolute=absolute,
-            ).to(self.device)
-        elif loss_type == "skillspread_crps":
-            # local loss
-            loss_fn_local = SpectralCRPSLoss(
-                img_shape=(H, W),
-                crop_shape=None,
-                crop_offset=(0, 0),
-                channel_names=(),
-                grid_type="equiangular",
-                crps_type="skillspread",
-                spatial_distributed=False,
-                ensemble_distributed=False,
-                eps=1.0e-5,
-                absolute=absolute,
-            ).to(self.device)
-
-            # distributed loss
-            loss_fn_dist = SpectralCRPSLoss(
-                img_shape=(H, W),
-                crop_shape=None,
-                crop_offset=(0, 0),
-                channel_names=(),
-                grid_type="equiangular",
-                crps_type="skillspread",
-                spatial_distributed=(comm.is_distributed("spatial") and (comm.get_size("spatial") > 1)),
-                ensemble_distributed=(comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1)),
-                eps=1.0e-5,
-                absolute=absolute,
-            ).to(self.device)
+        # distributed loss
+        loss_fn_dist = SpectralCRPSLoss(
+            img_shape=(H, W),
+            crop_shape=None,
+            crop_offset=(0, 0),
+            channel_names=(),
+            grid_type="equiangular",
+            crps_type=loss_type,
+            spatial_distributed=(comm.is_distributed("spatial") and (comm.get_size("spatial") > 1)),
+            ensemble_distributed=(comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1)),
+            ensemble_weights=None,
+            eps=1.0e-5,
+            absolute=absolute,
+        ).to(self.device)
 
         #############################################################
         # local loss
