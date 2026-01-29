@@ -371,12 +371,14 @@ class TestDistributedLoss(unittest.TestCase):
         # disable tf32
         disable_tf32()
 
+        # set seed
+
         B, E, C, H, W = batch_size, ens_size, num_chan, nlat, nlon
 
         # generate gauss random distributed around 1, with sigma=2
         mean, sigma = (1.0, 2.0)
         inp_full = torch.randn((B, E, C, H, W), dtype=torch.float32, device=self.device) * sigma + mean
-        obs_full = torch.full((B, C, H, W), fill_value=mean, dtype=torch.float32, device=self.device)
+        obs_full = torch.randn((B, C, H, W), dtype=torch.float32, device=self.device) * sigma * 0.01 + mean
 
         if loss_type == "ensemble_crps":
             # local loss
@@ -515,6 +517,8 @@ class TestDistributedLoss(unittest.TestCase):
         # observation grads
         with self.subTest(desc="observation gradients"):
             obsgrad_gather_full = self._gather_helper_bwd(obsgrad_local, False)
+            if self.world_rank == 0:
+                print("obsgrad_gather_full", obsgrad_gather_full[0, 0, ...], "obsgrad_full", obsgrad_full[0, 0, ...])
             self.assertTrue(compare_tensors("observation gradients", obsgrad_gather_full, obsgrad_full, tol, tol, verbose=verbose))
 
 
