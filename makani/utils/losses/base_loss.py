@@ -346,8 +346,8 @@ class SpectralBaseLoss(nn.Module, metaclass=ABCMeta):
             self.sht = th.RealSHT(*img_shape, lmax=lmax, mmax=lmax, grid=grid_type).float()
 
         # get the local l weights
-        l_weights = torch.ones(self.sht.lmax)
-        m_weights = 2 * torch.ones(self.sht.mmax)
+        l_weights = torch.ones(self.sht.lmax, dtype=torch.float32)
+        m_weights = 2 * torch.ones(self.sht.mmax, dtype=torch.float32)
         m_weights[0] = 1.0
 
         # get meshgrid of weights:
