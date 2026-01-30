@@ -357,7 +357,6 @@ class SpectralBaseLoss(nn.Module, metaclass=ABCMeta):
         lm_weights = l_weights * m_weights
 
         # split the tensors along all dimensions:
-        lm_weights = l_weights * m_weights
         if self.spatial_distributed and comm.get_size("h") > 1:
             lm_weights = split_tensor_along_dim(lm_weights, dim=-2, num_chunks=comm.get_size("h"))[comm.get_rank("h")]
         if self.spatial_distributed and comm.get_size("w") > 1:

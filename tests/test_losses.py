@@ -25,6 +25,7 @@ import torch
 
 from makani.utils import LossHandler
 from makani.utils.losses import CRPSLoss
+from makani.utils.losses.energy_score import SobolevEnergyScoreLoss
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from .testutils import get_default_parameters, compare_tensors, compare_arrays, disable_tf32
@@ -340,6 +341,82 @@ class TestLosses(unittest.TestCase):
                 result_proper = np.sum(result_proper * quad_weight_arr, axis=(2, 3))
 
                 self.assertTrue(compare_arrays("output", result, result_proper))
+
+    @parameterized.expand([
+        # (beta, alpha, offset, fraction, channel_reduction)
+        (0.5, 1.0, 1.0, 1.0, True),
+        (1.0, 1.0, 1.0, 1.0, True),
+        (2.0, 1.0, 1.0, 1.0, True),
+        (1.0, 0.5, 1.0, 1.0, True),
+        (1.0, 2.0, 1.0, 1.0, True),
+        (1.0, 1.0, 0.5, 1.0, True),
+        (1.0, 1.0, 2.0, 1.0, True),
+        (1.0, 1.0, 1.0, 0.5, True),
+        (1.0, 1.0, 1.0, 2.0, True),
+        (1.0, 1.0, 1.0, 1.0, False),
+        (0.5, 0.5, 0.5, 0.5, True),
+        (2.0, 2.0, 2.0, 2.0, True),
+    ])
+    def test_sobolev_energy_score(self, beta, alpha, offset, fraction, channel_reduction):
+        """
+        Tests SobolevEnergyScoreLoss for different parameter combinations,
+        verifying that output and gradients are not NaN or inf.
+        """
+        sobolev_loss = SobolevEnergyScoreLoss(
+            img_shape=(self.params.img_shape_x, self.params.img_shape_y),
+            crop_shape=(self.params.img_shape_x, self.params.img_shape_y),
+            crop_offset=(0, 0),
+            channel_names=self.params.channel_names,
+            grid_type=self.params.model_grid_type,
+            lmax=None,
+            spatial_distributed=False,
+            ensemble_distributed=False,
+            channel_reduction=channel_reduction,
+            alpha=alpha,
+            beta=beta,
+            offset=offset,
+            fraction=fraction,
+        ).to(self.device)
+
+        for ensemble_size in [2, 5]:
+            with self.subTest(desc=f"beta={beta}, alpha={alpha}, offset={offset}, fraction={fraction}, channel_reduction={channel_reduction}, ensemble_size={ensemble_size}"):
+                # Generate forecast tensor: (batch, ensemble, channels, lat, lon)
+                forecasts = torch.randn(
+                    self.params.batch_size,
+                    ensemble_size,
+                    self.params.N_in_channels,
+                    self.params.img_shape_x,
+                    self.params.img_shape_y,
+                    device=self.device,
+                    dtype=torch.float32,
+                    requires_grad=True,
+                )
+
+                # Generate observation tensor: (batch, channels, lat, lon)
+                observations = torch.randn(
+                    self.params.batch_size,
+                    self.params.N_in_channels,
+                    self.params.img_shape_x,
+                    self.params.img_shape_y,
+                    device=self.device,
+                    dtype=torch.float32,
+                )
+
+                # Forward pass
+                result = sobolev_loss(forecasts, observations)
+
+                # Check output is not NaN or inf
+                self.assertFalse(torch.isnan(result).any(), f"Output contains NaN values")
+                self.assertFalse(torch.isinf(result).any(), f"Output contains inf values")
+
+                # Backward pass
+                loss = result.sum()
+                loss.backward()
+
+                # Check gradients are not NaN or inf
+                self.assertIsNotNone(forecasts.grad, "Gradients are None")
+                self.assertFalse(torch.isnan(forecasts.grad).any(), f"Gradients contain NaN values")
+                self.assertFalse(torch.isinf(forecasts.grad).any(), f"Gradients contain inf values")
 
 
 if __name__ == "__main__":
