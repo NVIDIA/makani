@@ -197,6 +197,7 @@ class L2EnergyScoreLoss(GeometricBaseLoss):
 
         return loss
 
+
 class SobolevEnergyScoreLoss(SpectralBaseLoss):
 
     def __init__(
