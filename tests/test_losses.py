@@ -378,7 +378,7 @@ class TestLosses(unittest.TestCase):
             fraction=fraction,
         ).to(self.device)
 
-        for ensemble_size in [2, 5]:
+        for ensemble_size in [2, 6]:
             with self.subTest(desc=f"beta={beta}, alpha={alpha}, offset={offset}, fraction={fraction}, channel_reduction={channel_reduction}, ensemble_size={ensemble_size}"):
                 # Generate forecast tensor: (batch, ensemble, channels, lat, lon)
                 forecasts = torch.randn(
