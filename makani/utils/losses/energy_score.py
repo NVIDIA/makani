@@ -174,7 +174,14 @@ class L2EnergyScoreLoss(GeometricBaseLoss):
             eskill = eskill.sum(dim=-1, keepdim=True)
 
         # just to be sure, mask the diagonal of espread with self.eps
-        espread = torch.where(torch.eye(num_ensemble, device=espread.device).bool().reshape(num_ensemble, num_ensemble, 1, 1), self.eps, espread)
+        #espread = torch.where(torch.eye(num_ensemble, device=espread.device).bool().reshape(num_ensemble, num_ensemble, 1, 1), self.eps, espread)
+        # get the masks
+        espread_mask = torch.where(espread < self.eps, True, False)
+        eskill_mask = torch.where(eskill < self.eps, True, False)
+
+        # mask the data
+        espread = torch.where(espread_mask, self.eps, espread)
+        eskill = torch.where(eskill_mask, self.eps, eskill)
 
         with amp.autocast(device_type="cuda", enabled=False):
 
@@ -185,8 +192,10 @@ class L2EnergyScoreLoss(GeometricBaseLoss):
             espread = torch.sqrt(espread).pow(self.beta)
             eskill = torch.sqrt(eskill).pow(self.beta)
 
-        # mask the diagonal of espread and sum
-        espread = torch.where(torch.eye(num_ensemble, device=espread.device).bool().reshape(num_ensemble, num_ensemble, 1, 1), 0.0, espread)
+        # mask espread and sum
+        espread = torch.where(espread_mask, 0.0, espread)
+        eskill = torch.where(eskill_mask, 0.0, eskill)
+        #espread = torch.where(torch.eye(num_ensemble, device=espread.device).bool().reshape(num_ensemble, num_ensemble, 1, 1), 0.0, espread)
         espread = espread.sum(dim=(0,1)) * (float(num_ensemble) - 1.0 + self.alpha) / float(num_ensemble * num_ensemble * (num_ensemble - 1))
 
         # sum over ensemble
@@ -326,8 +335,9 @@ class SobolevEnergyScoreLoss(SpectralBaseLoss):
         eskill = lm_weights_split * (observations - forecasts).abs().square()
 
         # perform masking before any reduction
-        espread = torch.where(nanmasks.sum(dim=0) != 0, 0.0, espread)
-        eskill = torch.where(nanmasks.sum(dim=0) != 0, 0.0, eskill)
+        nanmask_bool = nanmasks.sum(dim=0) != 0
+        espread = torch.where(nanmask_bool, 0.0, espread)
+        eskill = torch.where(nanmask_bool, 0.0, eskill)
 
         # do the channel reduction first
         if self.channel_reduction:
@@ -349,7 +359,14 @@ class SobolevEnergyScoreLoss(SpectralBaseLoss):
             eskill = reduce_from_parallel_region(eskill, "spatial")
 
         # just to be sure, mask the diagonal of espread with self.eps
-        espread = torch.where(torch.eye(num_ensemble, device=espread.device).bool().reshape(num_ensemble, num_ensemble, 1, 1), self.eps, espread)
+        #espread = torch.where(torch.eye(num_ensemble, device=espread.device).bool().reshape(num_ensemble, num_ensemble, 1, 1), self.eps, espread)
+        # get the masks
+        espread_mask = torch.where(espread < self.eps, True, False)
+        eskill_mask = torch.where(eskill < self.eps, True, False)
+
+        # mask the data
+        espread = torch.where(espread_mask, self.eps, espread)
+        eskill = torch.where(eskill_mask, self.eps, eskill)
 
         with amp.autocast(device_type="cuda", enabled=False):
 
@@ -360,8 +377,10 @@ class SobolevEnergyScoreLoss(SpectralBaseLoss):
             espread = torch.sqrt(espread).pow(self.beta)
             eskill = torch.sqrt(eskill).pow(self.beta)
 
-        # mask the diagonal of espread and sum
-        espread = torch.where(torch.eye(num_ensemble, device=espread.device).bool().reshape(num_ensemble, num_ensemble, 1, 1), 0.0, espread)
+        # mask espread and sum
+        espread = torch.where(espread_mask, 0.0, espread)
+        eskill = torch.where(eskill_mask, 0.0, eskill)
+        #espread = torch.where(torch.eye(num_ensemble, device=espread.device).bool().reshape(num_ensemble, num_ensemble, 1, 1), 0.0, espread)
         espread = espread.sum(dim=(0,1)) * (float(num_ensemble) - 1.0 + self.alpha) / float(num_ensemble * num_ensemble * (num_ensemble - 1))
 
         # compute the skill term
