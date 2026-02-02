@@ -216,6 +216,7 @@ class SobolevEnergyScoreLoss(SpectralBaseLoss):
         beta: Optional[float] = 1.0,
         offset: Optional[float] = 1.0,
         fraction: Optional[float] = 1.0,
+        relative_weight: Optional[float] = 1.0,
         eps: Optional[float] = 1.0e-6,
         **kwargs,
     ):
@@ -237,6 +238,7 @@ class SobolevEnergyScoreLoss(SpectralBaseLoss):
         self.beta = beta
         self.fraction = fraction
         self.offset = offset
+        self.relative_weight = relative_weight
         self.eps = eps
 
         if ensemble_weights is not None:
@@ -252,7 +254,7 @@ class SobolevEnergyScoreLoss(SpectralBaseLoss):
         l_weights, m_weights = torch.meshgrid(l_weights, m_weights, indexing="ij")
 
         # use the product weights
-        lm_weights = (self.offset + l_weights * (l_weights + 1)).pow(self.fraction) * m_weights
+        lm_weights = (self.offset + self.relative_weight * l_weights * (l_weights + 1)).pow(self.fraction) * m_weights
 
         # split the tensors along all dimensions:
         lm_weights = l_weights * m_weights
