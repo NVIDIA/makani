@@ -499,7 +499,8 @@ class EnsembleTrainer(Trainer):
         train_steps = 0
         train_start = time.perf_counter_ns()
         self.model_train.zero_grad(set_to_none=True)
-        for data in tqdm(self.train_dataloader, desc=f"Training progress epoch {self.epoch}", disable=not self.log_to_screen):
+        progress_bar = tqdm(self.train_dataloader, desc=f"Training progress epoch {self.epoch}", disable=not self.log_to_screen)
+        for data in progress_bar:
             train_steps += 1
             self.iters += 1
 
@@ -541,13 +542,17 @@ class EnsembleTrainer(Trainer):
             accumulated_loss[0] += loss.detach().clone() * inp.shape[0]
             accumulated_loss[1] += inp.shape[0]
 
+            # log the loss
+            pbar_postfix = {"loss": loss.item()}
+
             # perform weight update if requested
             if do_update:
                 if self.max_grad_norm > 0.0:
                     self.gscaler.unscale_(self.model_optimizer)
-                    grad_norm = clip_grads(self.model_train, self.max_grad_norm)
+                    grad_norm = clip_grads(self.model_train, self.max_grad_norm, verbose=self.log_to_screen)
                     accumulated_grad_norm[0] += grad_norm.detach()
                     accumulated_grad_norm[1] += 1.0
+                    pbar_postfix["grad norm"] = grad_norm.item()
 
                 self.gscaler.step(self.model_optimizer)
                 self.gscaler.update()
@@ -569,6 +574,9 @@ class EnsembleTrainer(Trainer):
                 if self.log_to_screen:
                     self.logger.info(f"Dumping weights and gradients to {weights_and_grads_path}")
                 self.dump_weights_and_grads(weights_and_grads_path, self.model, step=(self.epoch * self.params.num_samples_per_epoch + self.iters))
+
+            # set progress bar prefix
+            progress_bar.set_postfix(**pbar_postfix)
 
             torch.cuda.nvtx.range_pop()
 
@@ -636,7 +644,8 @@ class EnsembleTrainer(Trainer):
             with torch.no_grad():
 
                 eval_steps = 0
-                for data in tqdm(self.valid_dataloader, desc=f"Validation progress epoch {self.epoch}", disable=not self.log_to_screen):
+                progress_bar = tqdm(self.valid_dataloader, desc=f"Validation progress epoch {self.epoch}", disable=not self.log_to_screen)
+                for data in progress_bar:
                     eval_steps += 1
 
                     if torch.cuda.is_available():
@@ -697,6 +706,9 @@ class EnsembleTrainer(Trainer):
                             # concatenate
                             pred = torch.stack(predlist, dim=1)
                             loss = self.loss_obj(pred, targ)
+
+                            # log the loss
+                            progress_bar.set_postfix({"loss": loss.item()})
 
                         # TODO: move all of this into the visualization handler
                         if (eval_steps <= 1) and visualize:
