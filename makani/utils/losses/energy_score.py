@@ -404,6 +404,7 @@ class SpectralL2EnergyScoreLoss(SpectralBaseLoss):
         ensemble_weights: Optional[torch.Tensor] = None,
         channel_reduction: Optional[bool] = True,
         alpha: Optional[float] = 1.0,
+        beta: Optional[float] = 1.0,
         eps: Optional[float] = 1.0e-3,
         **kwargs,
     ):
@@ -422,6 +423,7 @@ class SpectralL2EnergyScoreLoss(SpectralBaseLoss):
         self.ensemble_distributed = ensemble_distributed and comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1)
         self.channel_reduction = channel_reduction
         self.alpha = alpha
+        self.beta = beta
         self.eps = eps
 
         if ensemble_weights is not None:
@@ -512,6 +514,27 @@ class SpectralL2EnergyScoreLoss(SpectralBaseLoss):
         if self.spatial_distributed:
             espread = reduce_from_parallel_region(espread, "w")
             eskill = reduce_from_parallel_region(eskill, "w")
+
+        # get the masks
+        espread_mask = torch.where(espread < self.eps, True, False)
+        eskill_mask = torch.where(eskill < self.eps, True, False)
+
+        # mask the data
+        espread = torch.where(espread_mask, self.eps, espread)
+        eskill = torch.where(eskill_mask, self.eps, eskill)
+
+        with amp.autocast(device_type="cuda", enabled=False):
+
+            espread = espread.float()
+            eskill = eskill.float()
+
+            # This is according to the definition in Gneiting et al. 2005
+            espread = torch.sqrt(espread).pow(self.beta)
+            eskill = torch.sqrt(eskill).pow(self.beta)
+
+        # mask espread and sum
+        espread = torch.where(espread_mask, 0.0, espread)
+        eskill = torch.where(eskill_mask, 0.0, eskill)
 
         # now we have reduced everything and need to sum appropriately (B, C, H)
         espread = espread.sum(dim=(0,1)) * (float(num_ensemble) - 1.0 + self.alpha) / float(num_ensemble * num_ensemble * (num_ensemble - 1))
