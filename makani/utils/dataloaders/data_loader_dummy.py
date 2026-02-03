@@ -101,6 +101,9 @@ class DummyLoader(object):
             latitude = latitude[::-1]
             self.lat_lon = (latitude.tolist(), longitude.tolist())
 
+        # get local lat lon
+        self.lat_lon_local = (self.lat_lon[0][self.crop_anchor[0] : self.crop_anchor[0] + self.crop_shape[0]], self.lat_lon[1][self.crop_anchor[1] : self.crop_anchor[1] + self.crop_shape[1]])
+
         # zenith angle yes or no?
         self.add_zenith = add_zenith
         if self.add_zenith:
@@ -110,8 +113,8 @@ class DummyLoader(object):
         self.grid_converter = GridConverter(
             data_grid_type,
             model_grid_type,
-            torch.deg2rad(torch.tensor(self.lat_lon[0][self.crop_anchor[0] : self.crop_anchor[0] + self.crop_shape[0]])).to(torch.float32),
-            torch.deg2rad(torch.tensor(self.lat_lon[1][self.crop_anchor[1] : self.crop_anchor[1] + self.crop_shape[1]])).to(torch.float32),
+            torch.deg2rad(self.lat_lon_local[0]).to(torch.float32),
+            torch.deg2rad(self.lat_lon_local[1]).to(torch.float32),
         )
 
     def _get_files_stats(self):
@@ -201,6 +204,9 @@ class DummyLoader(object):
         self.img_local_shape_y_resampled = self.return_shape[1]
         self.img_shape_x_resampled = self.img_shape_resampled[0]
         self.img_shape_y_resampled = self.img_shape_resampled[1]
+
+        # lat lon coords
+        self.lat_lon_local = (self.lat_lon[0][self.read_anchor[0] : self.read_anchor[0] + self.read_shape[0]], self.lat_lon[1][self.read_anchor[1] : self.read_anchor[1] + self.read_shape[1]])
 
         # sharding
         self.n_samples_total = self.n_samples_per_epoch
