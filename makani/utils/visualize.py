@@ -24,8 +24,6 @@ import wandb
 
 import torch
 
-from makani.utils import comm
-
 
 def plot_comparison(
     pred,
