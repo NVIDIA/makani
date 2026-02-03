@@ -261,6 +261,9 @@ class ERA5DaliESDataloader(object):
         self.img_local_shape_x_resampled = self.extsource.return_shape[0]
         self.img_local_shape_y_resampled = self.extsource.return_shape[1]
 
+        # lat lon coords
+        self.lat_lon_local = self.extsource.lat_lon_local
+
         # num steps
         self.num_steps_per_epoch = self.extsource.num_steps_per_epoch
 

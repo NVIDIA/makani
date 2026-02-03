@@ -233,6 +233,22 @@ fcn3_sc2_edim45_layers10_pretrain1:
     n_train_samples_per_epoch: 26880
     n_eval_samples: 256
 
+fcn3_sc2_edim45_layers10_pretrain1_subsample2:
+    <<: *ENSEMBLE_BASE
+    wandb_group: "fcn3_sc2_edim45_layers10_pretrain1"
+
+    # data parameters
+    subsampling_factor: 2
+
+    # main hyper parameters
+    ensemble_size: 16
+    batch_size: 16
+    lr: 5E-4
+
+    # artificial epochs with reduced size
+    n_train_samples_per_epoch: 26880
+    n_eval_samples: 256
+
 # second pretraining stage which switches to fair CRPS to get better calibration
 # also uses 4 step rollouts to get good autoregressive rollouts. This requires a
 # model-parallelism of h=2, w=4 to fit into memory on 80GB GPUs
