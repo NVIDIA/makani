@@ -181,6 +181,7 @@ def get_dataloader(params, files_pattern, device, mode="train"):
             img_shape_x_resampled=dataloader.img_shape_resampled[0],
             img_shape_y_resampled=dataloader.img_shape_resampled[1],
             subsampling_factor=dataloader.subsampling_factor,
+            lat_lon_local=dataloader.lat_lon_local,
         )
 
         # not needed for the no multifiles case
@@ -212,6 +213,7 @@ def get_dataloader(params, files_pattern, device, mode="train"):
             img_shape_x_resampled=dataloader.img_shape_x_resampled,
             img_shape_y_resampled=dataloader.img_shape_y_resampled,
             subsampling_factor=dataloader.subsampling_factor,
+            lat_lon_local=dataloader.lat_lon_local,
         )
 
         if params.enable_benchy and (mode == "train"):
