@@ -754,7 +754,10 @@ class Inferencer(Driver):
         # log parameters
         if self.log_to_screen:
             # log memory usage so far
-            all_mem_gb = pynvml.nvmlDeviceGetMemoryInfo(self.nvml_handle).used / (1024.0 * 1024.0 * 1024.0)
+            try:
+                all_mem_gb = pynvml.nvmlDeviceGetMemoryInfo(self.nvml_handle).used / (1024.0 * 1024.0 * 1024.0)
+            except pynvml.NVMLError:
+                all_mem_gb = 0.0  # Not supported on unified memory systems
             max_mem_gb = torch.cuda.max_memory_allocated(device=self.device) / (1024.0 * 1024.0 * 1024.0)
             self.logger.info(f"Scaffolding memory high watermark: {all_mem_gb} GB ({max_mem_gb} GB for pytorch)")
             # announce training start
