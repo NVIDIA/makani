@@ -19,6 +19,14 @@ import torch.distributed as dist
 from makani.utils import comm
 
 
+def get_memory_usage(device):
+    free_mem, total_mem = torch.cuda.mem_get_info(device=device)
+    allocated_mem_gb = (total_mem - free_mem) / (1024.0 * 1024.0 * 1024.0)
+    torch_mem_gb = torch.cuda.max_memory_allocated(device=device) / (1024.0 * 1024.0 * 1024.0)
+
+    return allocated_mem_gb, torch_mem_gb
+
+
 def normalize_weights(model, eps=1e-5):
     for param in model.parameters():
         # numel = torch.tensor(param.numel(), dtype=torch.long, device=param.device)
