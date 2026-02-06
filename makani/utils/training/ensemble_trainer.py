@@ -21,9 +21,6 @@ from typing import Optional
 import numpy as np
 from tqdm import tqdm
 
-# gpu info
-import pynvml
-
 # torch
 import torch
 from torch import amp
@@ -34,9 +31,6 @@ import wandb
 
 # timers
 from makani.utils.profiling import Timer
-
-# for the manipulation of state dict
-from collections import OrderedDict
 
 # makani depenedencies
 from makani.utils import LossHandler, MetricsHandler
@@ -64,7 +58,7 @@ from physicsnemo.distributed.mappings import reduce_from_parallel_region
 from makani.utils.checkpoint_helpers import get_latest_checkpoint_version
 
 # weight normalizing helper
-from makani.utils.training.training_helpers import clip_grads
+from makani.utils.training.training_helpers import get_memory_usage, clip_grads
 
 class EnsembleTrainer(Trainer):
     """
@@ -90,11 +84,6 @@ class EnsembleTrainer(Trainer):
                 tens = torch.ones(1, device=self.device)
                 dist.all_reduce(tens, group=comm.get_group("data"))
         self.timers["nccl init"] = timer.time
-
-        # nvml stuff
-        if self.log_to_screen:
-            pynvml.nvmlInit()
-            self.nvml_handle = pynvml.nvmlDeviceGetHandleByIndex(self.device.index)
 
         # set amp_parameters
         if hasattr(self.params, "amp_mode") and (self.params.amp_mode != "none"):
@@ -367,11 +356,12 @@ class EnsembleTrainer(Trainer):
         # log parameters
         if self.log_to_screen:
             # log memory usage so far
-            all_mem_gb = pynvml.nvmlDeviceGetMemoryInfo(self.nvml_handle).used / (1024.0 * 1024.0 * 1024.0)
-            max_mem_gb = torch.cuda.max_memory_allocated(device=self.device) / (1024.0 * 1024.0 * 1024.0)
-            self.logger.info(f"Scaffolding memory high watermark: {all_mem_gb} GB ({max_mem_gb} GB for pytorch)")
+            all_mem_gb, max_mem_gb = get_memory_usage(self.device)
+            self.logger.info(f"Scaffolding memory high watermark: {all_mem_gb:.2f} GB ({max_mem_gb:.2f} GB for pytorch)")
             # announce training start
             self.logger.info("Starting Ensemble Training Loop...")
+
+        sys.exit()
 
         # perform a barrier here to make sure everybody is ready
         if dist.is_initialized():
@@ -776,7 +766,7 @@ class EnsembleTrainer(Trainer):
             self.logger.info(f"Performance Parameters:")
             self.logger.info(print_prefix + "training steps: {}".format(train_logs["train_steps"]))
             self.logger.info(print_prefix + "validation steps: {}".format(valid_logs["base"]["validation steps"]))
-            all_mem_gb = pynvml.nvmlDeviceGetMemoryInfo(self.nvml_handle).used / (1024.0 * 1024.0 * 1024.0)
+            all_mem_gb, _ = get_memory_usage(self.device)
             self.logger.info(print_prefix + f"memory footprint [GB]: {all_mem_gb:.2f}")
             for key in timing_logs.keys():
                 self.logger.info(print_prefix + key + ": {:.2f}".format(timing_logs[key]))

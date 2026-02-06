@@ -58,7 +58,6 @@ dependencies = [
     "wandb>=0.13.7",
     "numba",
     "tqdm>=4.60.0",
-    "pynvml>=10.0.0",
     "jsbeautifier",
     "more-itertools",
     "importlib-metadata",
