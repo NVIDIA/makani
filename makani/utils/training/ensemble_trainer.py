@@ -361,8 +361,6 @@ class EnsembleTrainer(Trainer):
             # announce training start
             self.logger.info("Starting Ensemble Training Loop...")
 
-        sys.exit()
-
         # perform a barrier here to make sure everybody is ready
         if dist.is_initialized():
             dist.barrier(device_ids=[self.device.index])
