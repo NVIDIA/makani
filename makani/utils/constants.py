@@ -13,6 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# GRAVITATIONAL ACCELERATION: [m / s^2]
+GRAVITATIONAL_ACCELERATION = 9.80665
+
 # gas constant for dry air: [J / (kg * K)]
 R_DRY_AIR = 287.052874247
 Q_CORRECTION_MOIST_AIR = 0.6078

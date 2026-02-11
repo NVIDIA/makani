@@ -20,21 +20,37 @@ def get_matching_channels_pl(channel_names, prefix1, prefix2, p_min, p_max, reve
     # we better use regexp
     import re
 
-    # analyse list of channel names, extract geopotential and temperatures:
+    # analyse list of channel names, extract according to prefix 1 and 2:
     p1_pat = re.compile(r"^" + prefix1 + r"\d{1,}$")
     p2_pat = re.compile(r"^" + prefix2 + r"\d{1,}$")
     p1_chans = [x for x in channel_names if (p1_pat.match(x) is not None)]
     p2_chans = [x for x in channel_names if (p2_pat.match(x) is not None)]
 
-    # extract common pressure levels
+    # extract common pressure levels: first extract individually
     p1_pressures = [int(x.replace(prefix1, "")) for x in p1_chans]
     p2_pressures = [int(x.replace(prefix2, "")) for x in p2_chans]
 
     # check which are the common pressure levels:
     pressures = sorted([x for x in p1_pressures if ((x in p2_pressures) and (x >= p_min) and (x <= p_max))], reverse=revert)
 
-    # create an indexlist for z-channels
+    # create an indexlist for all matching channels
     p1_idx = [channel_names.index(f"{prefix1}{p}") for p in pressures]
     p2_idx = [channel_names.index(f"{prefix2}{p}") for p in pressures]
 
     return p1_idx, p2_idx, pressures
+
+
+def get_channels_pl(channel_names, prefix, p_min, p_max, revert=True):
+    # we better use regexp
+    import re
+
+    # analyse list of channel names, extract geopotential and temperatures:
+    pat = re.compile(r"^" + prefix + r"\d{1,}$")
+    chans = [x for x in channel_names if (pat.match(x) is not None)]
+    pressures = [int(x.replace(prefix, "")) for x in chans]
+    pressures = sorted([x for x in pressures if ((x >= p_min) and (x <= p_max))], reverse=revert)
+
+    # create an indexlist for the channels
+    chans_idx = [channel_names.index(f"{prefix}{p}") for p in pressures]
+
+    return chans_idx, pressures

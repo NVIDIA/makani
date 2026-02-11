@@ -22,7 +22,7 @@ import torch.nn.functional as F
 import makani.utils.constants as const
 
 
-class _HydrostaticBalanceWrapper(nn.Module):
+class HydrostaticBalanceWrapper(nn.Module):
     def __init__(self, channel_names, bias, scale, p_min=50, p_max=900, use_moist_air_formula=False):
         super().__init__()
 
@@ -211,6 +211,66 @@ class _HydrostaticBalanceWrapper(nn.Module):
         return out
 
 
+class TotalWaterPathWrapper(nn.Module):
+    def __init__(self, channel_names, bias, scale):
+        super().__init__()
+
+        # we need the matching routine:
+        from makani.utils.constraints import get_channels_pl
+
+        # get q-channels
+        q_idx, p_tmp = get_channels_pl(channel_names, "q", "t", 0, np.inf, revert=False)
+        pressures = torch.as_tensor(p_tmp, dtype=torch.float32).reshape(1, -1, 1, 1)
+        self.register_buffer("pressures", pressures, persistent=False)
+
+        # get surface pressure channel
+        self.sp_idx = channel_names.index("sp")
+
+        self.register_buffer("q_idx", q_idx, persistent=False)
+        self.register_buffer("p_tmp", p_tmp, persistent=False)
+
+        if bias is not None:
+            q_bias = bias[:, self.q_idx, ...]
+            sp_bias = bias[:, self.sp_idx, ...]
+        else:
+            q_bias = torch.zeros([1, len(self.q_idx), 1, 1], dtype=torch.float32)
+            sp_bias = torch.zeros([1, 1, 1, 1], dtype=torch.float32)
+
+        if scale is not None:
+            q_scale = scale[:, self.q_idx, ...]
+            sp_scale = scale[:, self.sp_idx, ...]
+        else:
+            q_scale = torch.ones([1, len(self.q_idx), 1, 1], dtype=torch.float32)
+            sp_scale = torch.ones([1, len(self.sp_idx), 1, 1], dtype=torch.float32)
+
+        self.register_buffer("q_scale", q_scale, persistent=False)
+        self.register_buffer("q_bias", q_bias, persistent=True)
+        self.register_buffer("sp_scale", sp_scale, persistent=True)
+        self.register_buffer("sp_bias", sp_bias, persistent=True)
+
+    def forward(self, inp: torch.Tensor) -> torch.Tensor:
+        qvals =  inp[:, self.q_idx, ...]
+        spvals = inp[:, self.sp_idx, ...].unsqueeze(1)
+
+        # convert to physical units:
+        qvals = qvals * self.q_scale + self.q_bias
+        spvals = spvals * self.sp_scale + self.sp_bias
+
+        # concatenate with pressures:
+        with torch.no_grad():
+            pressures_expand = torch.tile(self.pressures, (inp.shape[0], 1, inp.shape[-2], inp.shape[-1]))
+
+        # concatenate with surface pressures and compute differences:
+        pdiff = torch.diff(torch.cat([pressures_expand, spvals], dim=1), dim=1)
+
+        # compute total water path integral:
+        # humidity is in g/kg and pressure in hPa. so the units are 
+        # hPa / (m / s^2) = kg / (m s^2) / (m / s^2) = kg / m^2
+        tpw = torch.sum(qvals * pdiff, dim=1) / const.GRAVITATIONAL_ACCELERATION
+
+        return tpw
+
+
 # constraints is a list of dicts with variables, e.g.:
 # constraints = [{type: hydrostatic_balance,
 #                 options: {specific options}]
@@ -228,7 +288,7 @@ class ConstraintsWrapper(nn.Module):
         self.constraint_list = nn.ModuleList()
         for constraint in constraints:
             if constraint["type"] == "hydrostatic_balance":
-                self.constraint_list.append(_HydrostaticBalanceWrapper(**constraint["options"], channel_names=channel_names, bias=bias, scale=scale))
+                self.constraint_list.append(HydrostaticBalanceWrapper(**constraint["options"], channel_names=channel_names, bias=bias, scale=scale))
                 self.N_in_channels = self.constraint_list[-1].mapping.shape[1]
             else:
                 raise NotImplementedError(f"Error, constraints different from hydrostatic balance are not yet implemented.")
