@@ -161,12 +161,13 @@ def get_model(params: ParamsBase, use_stochastic_interpolation: bool = False, mu
 
     model_handle = _model_registry.get(params.nettype)
     if model_handle is not None:
+        print(type(model_handle))
         if isinstance(model_handle, EntryPoint):
             model_handle = model_handle.load()
 
         model_handle = partial(model_handle, inp_shape=inp_shape, out_shape=out_shape, inp_chans=inp_chans, out_chans=out_chans, **params.to_dict())
     else:
-        raise KeyError(f"No model is registered under the name {name}")
+        raise KeyError(f"No model is registered under the name {params.nettype}")
 
     # use the constraint wrapper
     if hasattr(params, "constraints"):
