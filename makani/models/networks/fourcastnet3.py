@@ -52,9 +52,10 @@ def _compute_cutoff_radius(nlat, kernel_shape, basis_type):
 # commenting out torch.compile due to long intiial compile times
 # @torch.compile
 def _soft_clamp(x: torch.Tensor, offset: float = 0.0):
+    xtype = x.dtype
     x = x + offset
     y = torch.where(x > 0.0, x**2, 0.0)
-    y = torch.where(x >= 0.5, x - 0.25, y)
+    y = torch.where(x >= 0.5, x - 0.25, y).to(dtype=xtype)
     return y
 
 
@@ -120,12 +121,8 @@ class DiscreteContinuousEncoder(nn.Module):
             )
 
     def forward(self, x):
-        dtype = x.dtype
 
-        with amp.autocast(device_type="cuda", enabled=False):
-            x = x.float()
-            x = self.conv(x)
-            x = x.to(dtype=dtype)
+        x = self.conv(x)
 
         if hasattr(self, "act"):
             x = self.act(x)
@@ -213,7 +210,6 @@ class DiscreteContinuousDecoder(nn.Module):
                 self.conv.bias.sharded_dims_mp = [None]
 
     def forward(self, x):
-        dtype = x.dtype
 
         if hasattr(self, "act"):
             x = self.act(x)
@@ -221,11 +217,8 @@ class DiscreteContinuousDecoder(nn.Module):
         if hasattr(self, "mlp"):
             x = self.mlp(x)
 
-        with amp.autocast(device_type="cuda", enabled=False):
-            x = x.float()
-            x = self.upsample(x)
-            x = self.conv(x)
-            x = x.to(dtype=dtype)
+        x = self.upsample(x)
+        x = self.conv(x)
 
         return x
 
