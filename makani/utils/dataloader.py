@@ -202,11 +202,6 @@ def get_dataloader(params, files_pattern, device, mode="train"):
             img_local_offset_y=dataloader.img_local_offset_y,
         )
 
-        if params.enable_benchy and (mode == "train"):
-            from benchy.torch import BenchmarkGenericIteratorWrapper
-
-            dataloader = BenchmarkGenericIteratorWrapper(dataloader, params.batch_size)
-
         # not needed for the no multifiles case
         sampler = None
 

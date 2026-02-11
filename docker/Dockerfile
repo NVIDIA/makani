@@ -57,7 +57,7 @@ RUN pip install more_itertools zarr xarray pandas gcsfs boto3
 RUN pip install moviepy imageio
 
 # other python stuff
-RUN pip install --upgrade wandb ruamel.yaml tqdm progressbar2 jsbeautifier
+RUN pip install --upgrade wandb ruamel.yaml tqdm progressbar2
 
 # numba
 RUN pip install numba
@@ -65,9 +65,6 @@ ENV NUMBA_DISABLE_CUDA=1
 
 # scoring tools
 RUN pip install xskillscore properscoring
-
-# benchy
-RUN pip install git+https://github.com/romerojosh/benchy.git
 
 # some useful scripts from mlperf
 RUN pip install --ignore-installed "git+https://github.com/NVIDIA/mlperf-common.git"
