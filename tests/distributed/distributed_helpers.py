@@ -46,7 +46,6 @@ def get_default_parameters():
     params.resuming = False
     params.amp_mode = "none"
     params.jit_mode = "none"
-    params.enable_benchy = False
     params.disable_ddp = False
     params.checkpointing_level = 0
     params.enable_synthetic_data = False

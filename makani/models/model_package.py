@@ -20,7 +20,6 @@ perform inference and its interface is compatible with earth2mip
 import os
 import shutil
 import json
-import jsbeautifier
 import numpy as np
 import torch
 from makani.utils.YParams import ParamsBase
@@ -180,11 +179,9 @@ def save_model_package(params):
     """
     # save out the current state of the parameters, make it human readable
     config_path = os.path.join(params.experiment_dir, "config.json")
-    jsopts = jsbeautifier.default_options()
-    jsopts.indent_size = 2
 
     with open(config_path, "w") as f:
-        msg = jsbeautifier.beautify(json.dumps(params.to_dict()), jsopts)
+        msg = json.dumps(params.to_dict(), indent=4, sort_keys=True)
         f.write(msg)
 
     if params.get("add_orography", False):
@@ -211,7 +208,7 @@ def save_model_package(params):
         "entrypoint": {"name": f"{LocalPackage.THIS_MODULE}:load_time_loop"},
     }
     with open(os.path.join(params.experiment_dir, "metadata.json"), "w") as f:
-        msg = jsbeautifier.beautify(json.dumps(fcn_mip_data), jsopts)
+        msg = json.dumps(fcn_mip_data, indent=4, sort_keys=True)
         f.write(msg)
 
 

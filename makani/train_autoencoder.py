@@ -117,7 +117,6 @@ if __name__ == "__main__":
     params["n_future"] = args.multistep_count - 1  # note that n_future counts only the additional samples
 
     # debug:
-    params["enable_benchy"] = args.enable_benchy
     params["disable_ddp"] = args.disable_ddp
     params["enable_grad_anomaly_detection"] = args.enable_grad_anomaly_detection
 
