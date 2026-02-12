@@ -99,6 +99,13 @@ class GeometricBaseMetric(nn.Module, metaclass=ABCMeta):
     def type(self):
         return LossType.Deterministic
 
+    def compute_counts(self, inp: torch.Tensor, weight: Optional[torch.Tensor] = None) -> torch.Tensor:
+        if weight is not None:
+            counts = torch.sum(self.quadrature(weight), dim=0)
+        else:
+            counts = torch.full((inp.shape[1]), fill_value=inp.shape[0], device=inp.device, dtype=inp.dtype)
+        return counts
+
     def combine(self, vals: torch.Tensor, counts: torch.Tensor, dim: Optional[int]=0) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Defines how to combine multiple metrics result using Welford.

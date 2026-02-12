@@ -349,6 +349,13 @@ class GeometricSpread(GeometricBaseMetric):
     @property
     def type(self):
         return LossType.Probabilistic
+
+    def compute_counts(self, inp: torch.Tensor, weight: Optional[torch.Tensor] = None) -> torch.Tensor:
+        if weight is not None:
+            counts = torch.sum(self.quadrature(weight), dim=(0, 1))
+        else:
+            counts = torch.full((inp.shape[2]), fill_value=inp.shape[0], device=inp.device, dtype=inp.dtype)
+        return counts
     
     def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, weight: Optional[torch.Tensor] = None) -> torch.Tensor:
 
@@ -429,6 +436,13 @@ class GeometricSSR(GeometricBaseMetric):
     @property
     def type(self):
         return LossType.Probabilistic
+
+    def compute_counts(self, inp: torch.Tensor, weight: Optional[torch.Tensor] = None) -> torch.Tensor:
+        if weight is not None:
+            counts = torch.sum(self.quadrature(weight), dim=(0, 1))
+        else:
+            counts = torch.full((inp.shape[2]), fill_value=inp.shape[0], device=inp.device, dtype=inp.dtype)
+        return counts
 
     def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, weight: Optional[torch.Tensor] = None) -> torch.Tensor:
 
@@ -518,6 +532,13 @@ class GeometricCRPS(torch.nn.Module):
     def type(self):
         return self.metric_func.type
 
+    def compute_counts(self, inp: torch.Tensor, weight: Optional[torch.Tensor] = None) -> torch.Tensor:
+        if weight is not None:
+            counts = torch.sum(self.quadrature(weight), dim=(0, 1))
+        else:
+            counts = torch.full((inp.shape[2]), fill_value=inp.shape[0], device=inp.device, dtype=inp.dtype)
+        return counts
+
     def combine(self, vals, counts, dim=0):
         vals, counts = _sanitize_shapes(vals, counts, dim=dim)
         vals_res, counts_res = _welford_reduction_helper(vals, counts, self.batch_reduction, dim=dim)
@@ -583,6 +604,13 @@ class GeometricRankHistogram(GeometricBaseMetric):
     @property
     def type(self):
         return LossType.Probabilistic
+
+    def compute_counts(self, inp: torch.Tensor, weight: Optional[torch.Tensor] = None) -> torch.Tensor:
+        if weight is not None:
+            counts = torch.sum(self.quadrature(weight), dim=(0, 1))
+        else:
+            counts = torch.full((inp.shape[2]), fill_value=inp.shape[0], device=inp.device, dtype=inp.dtype)
+        return counts
 
     def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, spatial_weights: Optional[torch.Tensor] = None) -> torch.Tensor:
 

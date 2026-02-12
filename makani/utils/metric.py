@@ -69,7 +69,7 @@ class MetricRollout:
         else:
             data_shape = (self.num_rollout_steps, self.num_channels, *self.aux_shape)
         self.rollout_curve = torch.zeros(data_shape, dtype=torch.float32, device=self.device)
-        self.rollout_counter = torch.zeros((self.num_rollout_steps), dtype=torch.float32, device=self.device)
+        self.rollout_counter = torch.zeros((self.num_rollout_steps, self.num_channels), dtype=torch.float32, device=self.device)
 
         # CPU buffers
         pin_memory = self.device.type == "cuda"
@@ -113,11 +113,15 @@ class MetricRollout:
         if hasattr(self, "scale"):
             metric = metric * self.scale
 
+        # compute counts
+        counts_new = self.metric_func.compute_counts(inpp, wgt)
+
+        # stack with previous values and counts
         vals = torch.stack([self.rollout_curve[idt, ...], metric], dim=0)
-        counts = torch.stack([self.rollout_counter[idt], torch.tensor(inp.shape[0], device=self.rollout_counter.device, dtype=self.rollout_counter.dtype)], dim=0)
+        counts = torch.stack([self.rollout_counter[idt, :], counts_new], dim=0)
         vals, counts = self.metric_func.combine(vals, counts, dim=0)
         self.rollout_curve[idt, ...].copy_(vals)
-        self.rollout_counter[idt].copy_(counts)
+        self.rollout_counter[idt, :].copy_(counts)
 
         return
 
@@ -125,9 +129,9 @@ class MetricRollout:
         vals = torch.stack(vallist, dim=0).contiguous()
         counts = torch.stack(countlist, dim=0).contiguous()
         for idt in range(self.num_rollout_steps):
-            vtmp, ctmp = self.metric_func.combine(vals[:, idt, ...], counts[:, idt], dim=0)
+            vtmp, ctmp = self.metric_func.combine(vals[:, idt, ...], counts[:, idt, ...], dim=0)
             self.rollout_curve[idt, ...].copy_(vtmp)
-            self.rollout_counter[idt].copy_(ctmp)
+            self.rollout_counter[idt, ...].copy_(ctmp)
 
     def reduce(self, non_blocking=False):
         # sum here
