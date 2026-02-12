@@ -480,14 +480,14 @@ class MetricsHandler:
 
         if self.rh_var_names:
             handle = partial(
-	        GeometricRankHistogram,
-	        grid_type=grid_type,
-	        img_shape=self.img_shape,
-	        crop_shape=self.crop_shape,
-	        crop_offset=self.crop_offset,
+                GeometricRankHistogram,
+                grid_type=grid_type,
+                img_shape=self.img_shape,
+                crop_shape=self.crop_shape,
+                crop_offset=self.crop_offset,
                 normalize=True,
                 channel_reduction="none",
-		batch_reduction="sum",
+                batch_reduction="mean",
                 spatial_distributed=self.spatial_distributed,
                 ensemble_distributed=self.ensemble_distributed,
             )
