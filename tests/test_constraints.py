@@ -21,7 +21,8 @@ import numpy as np
 import torch
 
 from makani.utils.losses.hydrostatic_loss import HydrostaticBalanceLoss
-from makani.models.parametrizations import ConstraintsWrapper
+from makani.models.parametrizations import ConstraintsWrapper, TotalWaterPathWrapper
+import makani.utils.constants as const
 
 class TestConstraints(unittest.TestCase):
 
@@ -36,9 +37,9 @@ class TestConstraints(unittest.TestCase):
         data = np.load(os.path.join(data_dir, "sample_30km_equator.npz"))
 
         # fields
-        self.data = torch.from_numpy(data["data"].astype(np.float32))
-        self.bias = torch.from_numpy(data["bias"].astype(np.float32))
-        self.scale = torch.from_numpy(data["scale"].astype(np.float32))
+        self.data = torch.as_tensor(data["data"].astype(np.float32))
+        self.bias = torch.as_tensor(data["bias"].astype(np.float32))
+        self.scale = torch.as_tensor(data["scale"].astype(np.float32))
         self.data = ((self.data - self.bias) / self.scale).to(self.device)
         # metadata
         self.channel_names = data["channel_names"].tolist()
@@ -123,6 +124,7 @@ class TestConstraints(unittest.TestCase):
                                                             self.data[:, cwrap.constraint_list[0].aux_idx, ...]).item()
                 self.assertTrue(aux_loss_val <= 1e-6)
 
+
     def test_hydrostatic_balance_constraint_wrapper_random(self):
         for use_moist_air_formula in [False, True]:
             with self.subTest(f"moist air formula: {use_moist_air_formula}"):
@@ -169,6 +171,57 @@ class TestConstraints(unittest.TestCase):
                 aux_loss_val = torch.nn.functional.mse_loss(data_map[:, cwrap.constraint_list[0].aux_idx, ...],
                                                             data_short[:, off_idx:, ...]).item()
                 self.assertTrue(aux_loss_val <= 1e-6)
+
+
+    def test_total_water_path_wrapper(self):
+        """Total water path from random positive q and sp on 16x32 grid; print value at center."""
+        
+        # data shape
+        B, C, H, W = self.data.shape
+
+        print(self.data.shape, self.bias.shape, self.scale.shape)
+
+        # use real input data
+        inp = self.data.clone().to(self.device)
+
+        twp_wrapper = TotalWaterPathWrapper(channel_names=self.channel_names, bias=self.bias, scale=self.scale).to(self.device)
+        twp = twp_wrapper(inp)
+
+        print(twp_wrapper.pressures.shape, twp_wrapper.q_idx, twp_wrapper.sp_idx, self.channel_names)
+
+        self.assertEqual(twp.shape, (B, H, W))
+        center_twp_val = twp[0, H // 2, W // 2].item()
+
+        # now compute the value manually:
+        qvals = inp[0, twp_wrapper.q_idx, H//2, W//2].cpu().numpy()
+        spval = inp[0, twp_wrapper.sp_idx, H//2, W//2].item()
+
+        # rescale q-vals:
+        qvals_rs = qvals * twp_wrapper.q_scale[0, :, 0, 0].cpu().numpy() + twp_wrapper.q_bias[0, :, 0, 0].cpu().numpy()
+
+        # rescale SP:
+        spval_rs = spval * twp_wrapper.sp_scale[0, 0, 0, 0].item() + twp_wrapper.sp_bias[0, 0, 0, 0].item()
+
+        # concatenate pressures: everything should be in units Pa now:
+        pressures = sorted(twp_wrapper.pressures[0, :, 0, 0].cpu().numpy().tolist() + [spval_rs])
+
+        # now do a cumsum over q vals and pressure differences, stopping at spval:
+        integral = 0.0
+        for i in range(len(pressures)-1):
+
+            # stop if we reached the upper integration boundary
+            if pressures[i] >= spval_rs:
+                break
+
+            # perform riemann sum
+            dp = pressures[i+1] - pressures[i]
+            qv = qvals_rs[i]
+            integral += qv * dp
+        
+        # normalize by gravitational acceleration
+        center_twp_val_manual = integral / const.GRAVITATIONAL_ACCELERATION
+
+        self.assertTrue(np.abs(center_twp_val - center_twp_val_manual) < 1e-6)
 
 
 if __name__ == '__main__':

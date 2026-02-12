@@ -219,26 +219,26 @@ class TotalWaterPathWrapper(nn.Module):
         from makani.utils.constraints import get_channels_pl
 
         # get q-channels
-        q_idx, p_tmp = get_channels_pl(channel_names, "q", "t", 0, np.inf, revert=False)
+        self.q_idx, p_tmp = get_channels_pl(channel_names, "q", 0, np.inf, revert=False)
         pressures = torch.as_tensor(p_tmp, dtype=torch.float32).reshape(1, -1, 1, 1)
+        # we need to convert pressures from hPa to Pa:
+        pressures = pressures * 100.0
         self.register_buffer("pressures", pressures, persistent=False)
 
         # get surface pressure channel
         self.sp_idx = channel_names.index("sp")
 
-        self.register_buffer("q_idx", q_idx, persistent=False)
-        self.register_buffer("p_tmp", p_tmp, persistent=False)
 
         if bias is not None:
             q_bias = bias[:, self.q_idx, ...]
-            sp_bias = bias[:, self.sp_idx, ...]
+            sp_bias = bias[:, self.sp_idx, ...].unsqueeze(1)
         else:
             q_bias = torch.zeros([1, len(self.q_idx), 1, 1], dtype=torch.float32)
             sp_bias = torch.zeros([1, 1, 1, 1], dtype=torch.float32)
 
         if scale is not None:
             q_scale = scale[:, self.q_idx, ...]
-            sp_scale = scale[:, self.sp_idx, ...]
+            sp_scale = scale[:, self.sp_idx, ...].unsqueeze(1)
         else:
             q_scale = torch.ones([1, len(self.q_idx), 1, 1], dtype=torch.float32)
             sp_scale = torch.ones([1, len(self.sp_idx), 1, 1], dtype=torch.float32)
@@ -258,15 +258,18 @@ class TotalWaterPathWrapper(nn.Module):
 
         # concatenate with pressures:
         with torch.no_grad():
-            pressures_expand = torch.tile(self.pressures, (inp.shape[0], 1, inp.shape[-2], inp.shape[-1]))
+            pressures_expand = torch.tile(self.pressures, (spvals.shape[0], 1, spvals.shape[-2], spvals.shape[-1]))
 
-        # concatenate with surface pressures and compute differences:
-        pdiff = torch.diff(torch.cat([pressures_expand, spvals], dim=1), dim=1)
+        # now we need to sort according to sp:
+        pressures_sorted, _ = torch.sort(torch.cat([pressures_expand, spvals], dim=1), dim=1, stable=True)
+        pdiff_sorted = torch.diff(pressures_sorted, dim=1)
+        # now we mask out the q-values tht are below the surface pressure
+        qvals_sorted = torch.where(pressures_expand <= spvals, qvals, 0.0)
 
         # compute total water path integral:
         # humidity is in g/kg and pressure in hPa. so the units are 
-        # hPa / (m / s^2) = kg / (m s^2) / (m / s^2) = kg / m^2
-        tpw = torch.sum(qvals * pdiff, dim=1) / const.GRAVITATIONAL_ACCELERATION
+        # Pa / (m / s^2) = kg / (m s^2) / (m / s^2) = kg / m^2
+        tpw = torch.sum(qvals_sorted * pdiff_sorted, dim=1) / const.GRAVITATIONAL_ACCELERATION
 
         return tpw
 
