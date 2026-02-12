@@ -161,6 +161,19 @@ class Preprocessor2D(nn.Module):
                     num_channels=noise_channels,
                     num_time_steps=self.n_history + 1,
                 )
+            elif noise_params["type"] == "stochastic":
+                from makani.models.noise import GaussianVectorNoise
+
+                self.noise_base_seed = 333 + comm.get_rank("data")
+
+                self.input_noise = GaussianVectorNoise(
+                    img_shape=self.img_shape,
+                    batch_size=params.batch_size,
+                    num_channels=noise_channels,
+                    num_time_steps=self.n_history + 1,
+                    sigma=noise_params.get("sigma", 1.0),
+                    seed=self.noise_base_seed,
+                )
             else:
                 raise NotImplementedError(f'Error, input noise type {noise_params["type"]} not supported.')
 
@@ -258,6 +271,14 @@ class Preprocessor2D(nn.Module):
         # this routine also adds noise every time a channel gets appended
         if hasattr(self, "input_noise"):
             n = self.input_noise()
+
+            # expand spatial dimensions if necessary (e.g. for vector noise)
+            # n is expected to be (B, T, C, H, W) or (B, T, C, 1, 1)
+            # For concatenation, we must expand explicitly if dimensions match but size doesn't
+            if (n.dim() == 5) and (n.shape[-2] == 1) and (n.shape[-1] == 1):
+                if (x.shape[-2] != 1) or (x.shape[-1] != 1):
+                    n = n.expand(-1, -1, -1, x.shape[-2], x.shape[-1])
+
             if self.input_noise_mode == "concatenate":
                 xc = torch.cat([xc, n], dim=2)
             elif self.input_noise_mode == "perturb":
