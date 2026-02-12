@@ -21,7 +21,7 @@ import numpy as np
 import torch
 
 from makani.utils.losses.hydrostatic_loss import HydrostaticBalanceLoss
-from makani.models.parametrizations import ConstraintsWrapper, TotalWaterPathWrapper
+from makani.models.parametrizations import ConstraintsWrapper, TotalWaterPath
 import makani.utils.constants as const
 
 class TestConstraints(unittest.TestCase):
@@ -179,16 +179,14 @@ class TestConstraints(unittest.TestCase):
         # data shape
         B, C, H, W = self.data.shape
 
-        print(self.data.shape, self.bias.shape, self.scale.shape)
-
         # use real input data
         inp = self.data.clone().to(self.device)
 
-        twp_wrapper = TotalWaterPathWrapper(channel_names=self.channel_names, bias=self.bias, scale=self.scale).to(self.device)
+        # compute total water path
+        twp_wrapper = TotalWaterPath(channel_names=self.channel_names, bias=self.bias, scale=self.scale).to(self.device)
         twp = twp_wrapper(inp)
 
-        print(twp_wrapper.pressures.shape, twp_wrapper.q_idx, twp_wrapper.sp_idx, self.channel_names)
-
+        # ensure that shapes are correct
         self.assertEqual(twp.shape, (B, H, W))
         center_twp_val = twp[0, H // 2, W // 2].item()
 

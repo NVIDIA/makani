@@ -20,6 +20,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import makani.utils.constants as const
+from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature
 
 
 class HydrostaticBalanceWrapper(nn.Module):
@@ -188,6 +189,17 @@ class HydrostaticBalanceWrapper(nn.Module):
         self.register_buffer("out_bias", out_bias, persistent=True)
 
     def forward(self, inp: torch.Tensor) -> torch.Tensor:
+
+        # if input tensor is 5D, fold first two dimensions into one:
+        # T can be ensemble or time dim, but it is expected to be a time dim for other constraints
+        if inp.ndim == 5:
+            B, T, C, H, W = inp.shape
+            inp = inp.reshape(B*T, C, H, W)
+            reshape = True
+        else:
+            B, C, H, W = inp.shape
+            reshape = False
+
         # undo normalization
         inp_un = inp * self.inp_scale + self.inp_bias
 
@@ -208,10 +220,14 @@ class HydrostaticBalanceWrapper(nn.Module):
         # undo normalization
         out = (out_un - self.out_bias) / self.out_scale
 
+        # reshape if necessary
+        if reshape:
+            out = out.reshape(B, T, -1, H, W)
+
         return out
 
 
-class TotalWaterPathWrapper(nn.Module):
+class TotalWaterPath(nn.Module):
     def __init__(self, channel_names, bias, scale):
         super().__init__()
 
@@ -227,7 +243,6 @@ class TotalWaterPathWrapper(nn.Module):
 
         # get surface pressure channel
         self.sp_idx = channel_names.index("sp")
-
 
         if bias is not None:
             q_bias = bias[:, self.q_idx, ...]
@@ -249,6 +264,13 @@ class TotalWaterPathWrapper(nn.Module):
         self.register_buffer("sp_bias", sp_bias, persistent=True)
 
     def forward(self, inp: torch.Tensor) -> torch.Tensor:
+        """
+        Compute total water path from input tensor: TWP = ∫ q dp / g
+        Args:
+            inp: Input tensor of shape (B, C, H, W)
+        Returns:
+            twp: Total water path tensor of shape (B, H, W)
+        """
         qvals =  inp[:, self.q_idx, ...]
         spvals = inp[:, self.sp_idx, ...].unsqueeze(1)
 
@@ -263,15 +285,79 @@ class TotalWaterPathWrapper(nn.Module):
         # now we need to sort according to sp:
         pressures_sorted, _ = torch.sort(torch.cat([pressures_expand, spvals], dim=1), dim=1, stable=True)
         pdiff_sorted = torch.diff(pressures_sorted, dim=1)
-        # now we mask out the q-values tht are below the surface pressure
+        # now we mask out the q-values that are above the surface pressure
         qvals_sorted = torch.where(pressures_expand <= spvals, qvals, 0.0)
 
         # compute total water path integral:
         # humidity is in g/kg and pressure in hPa. so the units are 
         # Pa / (m / s^2) = kg / (m s^2) / (m / s^2) = kg / m^2
-        tpw = torch.sum(qvals_sorted * pdiff_sorted, dim=1) / const.GRAVITATIONAL_ACCELERATION
+        twp = torch.sum(qvals_sorted * pdiff_sorted, dim=1) / const.GRAVITATIONAL_ACCELERATION
 
-        return tpw
+        return twp
+
+
+class DryAirSurfacePressure(nn.Module):
+    def __init__(self, channel_names, bias, scale):
+        super().__init__()
+        self.twp = TotalWaterPath(channel_names, bias, scale)
+
+    def forward(self, inp: torch.Tensor) -> torch.Tensor:
+        """
+        Computes dry air pressure defined as:
+        sp_dry = sp - g * TWP
+        Args:
+            inp: Input tensor of shape (B, C, H, W), containing q and sp channels
+        Returns:
+            out: Total water path tensor of shape (B, H, W) with corrected sp channel
+        """
+        gtwp = self.twp(inp).unsqueeze(1) * const.GRAVITATIONAL_ACCELERATION
+
+        # normalize the correction using sp normalizations
+        gtwp_normalized = (gtwp - self.twp.sp_bias) / self.twp.sp_scale
+            
+        out = inp[:, self.sp_idx, ...] - gtwp_normalized[:, 0, ...]
+
+        return out.unsqueeze(1)
+
+
+class SurfacePressureBalanceWrapper(nn.Module):
+    def __init__(self, img_shape, grid_type, channel_names, bias, scale, distributed=False):
+        super().__init__()
+
+        # we need the dry air calculator
+        self.dasp = DryAirSurfacePressure(channel_names, bias, scale)
+
+        # we need the quadrature rule
+        self.quadrature = GridQuadrature(
+            quadrature_rule=grid_to_quadrature_rule(grid_type), 
+            img_shape=img_shape, 
+            normalize=True,
+            distributed=distributed
+        )
+
+    def forward(self, inp: torch.Tensor) -> torch.Tensor:
+
+        if inp.ndim != 5:
+            raise ValueError("Input tensor must be 5D with dimensions B, T, C, H, W")
+
+        B, T, C, H, W = inp.shape
+
+        # compute dry air pressure
+        sp_dry = self.dasp(inp.reshape(B*T, C, H, W)).reshape(B, T, 1, H, W)
+        # compute differences: we DO NOT negate the difference to compute P(t-delta t) - P(t)
+        # since P(t-delta t) vomes before P(t) in the buffer
+        dsp_dry = torch.diff(sp_dry, dim=1).reshape(B*(T-1), 1, H, W).contiguous()
+
+        # compute the balance:
+        balance = self.quadrature(dsp_dry).reshape(B, T-1, 1, H, W)
+
+        # compute balanced surface pressure:
+        # note we add sp_balance since we need to subtract <P(t) - P(t-delta t)> from P(t)
+        # but we computed the one with the opposite sign.
+        # we can only return the last T-1 elements since this is computed with a derivative
+        balanced_sp = inp[:, 1:, self.sp_idx, ...] + balance
+
+        return balanced_sp.unsqueeze(2)
 
 
 # constraints is a list of dicts with variables, e.g.:
