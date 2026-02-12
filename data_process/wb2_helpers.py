@@ -32,8 +32,9 @@ surface_variables = {
     "tp" : "total_precipitation_6hr",
     "sp" : "surface_pressure",
     "msl" : "mean_sea_level_pressure",
-    "tcwv": "total_column_water_vapour",
-    "sst": "sea_surface_temperature",
+    "tcwv" : "total_column_water_vapour",
+    "sst" : "sea_surface_temperature",
+    "mslhfl" : "mean_surface_latent_heat_flux",
 }
 
 atmospheric_variables = {

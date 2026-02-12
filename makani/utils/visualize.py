@@ -127,9 +127,6 @@ def plot_rollout_metrics(metric_curves, var_names, score_path=None, file_prefix=
         # write out the plot
         if score_path is not None:
             fig.savefig(os.path.join(score_path, file_prefix + "_" + var_name + ".png"))
-        # # push to wandb
-        # if params.log_to_wandb:
-        #     wandb.log({metric + "_" + var_name: wandb.Image(fig)}, step=epoch)
 
 
 def visualize_field(tag, func_string, prediction, target, lat, lon, scale, bias, diverging):
