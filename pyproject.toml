@@ -74,10 +74,12 @@ version = {attr = "makani.__version__"}
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=6.0.0",
     "black>=22.10.0",
     "coverage>=6.5.0",
     "nvidia_dali_cuda110>=1.16.0",
+]
+
+test = [
     "pytest>=6.0.0",
     "parameterized",
     "properscoring",
@@ -91,6 +93,10 @@ data_process = [
     "gcsfs",
     "dask",
     "progressbar2",
+]
+
+legacy_data_process = [
+    "cdsapi>=0.7.2"
 ]
 
 vis = [
