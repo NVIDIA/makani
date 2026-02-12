@@ -300,6 +300,7 @@ class DryAirSurfacePressure(nn.Module):
     def __init__(self, channel_names, bias, scale):
         super().__init__()
         self.twp = TotalWaterPath(channel_names, bias, scale)
+        self.sp_idx = self.twp.sp_idx
 
     def forward(self, inp: torch.Tensor) -> torch.Tensor:
         """
@@ -312,12 +313,16 @@ class DryAirSurfacePressure(nn.Module):
         """
         gtwp = self.twp(inp).unsqueeze(1) * const.GRAVITATIONAL_ACCELERATION
 
-        # normalize the correction using sp normalizations
-        gtwp_normalized = (gtwp - self.twp.sp_bias) / self.twp.sp_scale
-            
-        out = inp[:, self.sp_idx, ...] - gtwp_normalized[:, 0, ...]
+        # translate sp to physical units:
+        sp = inp[:, self.sp_idx, ...].unsqueeze(1) * self.twp.sp_scale + self.twp.sp_bias
 
-        return out.unsqueeze(1)
+        # perform subtraction
+        out = sp - gtwp
+
+        # translate back to normalized units
+        out = (out - self.twp.sp_bias) / self.twp.sp_scale
+
+        return out
 
 
 class SurfacePressureBalanceWrapper(nn.Module):
@@ -326,6 +331,7 @@ class SurfacePressureBalanceWrapper(nn.Module):
 
         # we need the dry air calculator
         self.dasp = DryAirSurfacePressure(channel_names, bias, scale)
+        self.sp_idx = self.dasp.sp_idx
 
         # we need the quadrature rule
         self.quadrature = GridQuadrature(

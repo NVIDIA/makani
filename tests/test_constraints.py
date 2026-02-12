@@ -21,7 +21,12 @@ import numpy as np
 import torch
 
 from makani.utils.losses.hydrostatic_loss import HydrostaticBalanceLoss
-from makani.models.parametrizations import ConstraintsWrapper, TotalWaterPath
+from makani.models.parametrizations import (
+    ConstraintsWrapper,
+    TotalWaterPath,
+    DryAirSurfacePressure,
+    SurfacePressureBalanceWrapper,
+)
 import makani.utils.constants as const
 
 class TestConstraints(unittest.TestCase):
@@ -173,7 +178,7 @@ class TestConstraints(unittest.TestCase):
                 self.assertTrue(aux_loss_val <= 1e-6)
 
 
-    def test_total_water_path_wrapper(self):
+    def test_total_water_path(self):
         """Total water path from random positive q and sp on 16x32 grid; print value at center."""
         
         # data shape
@@ -220,6 +225,35 @@ class TestConstraints(unittest.TestCase):
         center_twp_val_manual = integral / const.GRAVITATIONAL_ACCELERATION
 
         self.assertTrue(np.abs(center_twp_val - center_twp_val_manual) < 1e-6)
+
+
+    def test_dry_air_surface_pressure(self):
+        """Shape check for DryAirSurfacePressure: (B, C, H, W) -> (B, 1, H, W)."""
+        B, C, H, W = self.data.shape
+
+        # init parametrization:
+        dasp = DryAirSurfacePressure(
+            channel_names=self.channel_names,
+            bias=self.bias,
+            scale=self.scale,
+        ).to(self.device)
+
+        # get input from data
+        inp = self.data.to(self.device)
+
+        # compute corrected pressure
+        out = dasp(inp)
+
+        # shape test
+        self.assertEqual(out.ndim, 4, "Output should be 4D (B, 1, H, W)")
+        self.assertEqual(out.shape[0], B)
+        self.assertEqual(out.shape[1], 1)
+        self.assertEqual(out.shape[2], H)
+        self.assertEqual(out.shape[3], W)
+
+        # numerical constraint is that the corrected pressure is <= than the original pressure, since TWP
+        # is subtracted and TWP has to be strictly non-negative:
+        self.assertTrue(torch.all(out[:, 0, ...] <= inp[:, dasp.sp_idx, ...]))
 
 
 if __name__ == '__main__':
