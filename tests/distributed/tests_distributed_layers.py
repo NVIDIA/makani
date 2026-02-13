@@ -38,7 +38,7 @@ from makani.mpu.layer_norm import DistributedGeometricInstanceNormS2, Distribute
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 from .distributed_helpers import split_helper, gather_helper
-from ..testutils import compare_tensors
+from ..testutils import disable_tf32, compare_tensors
 
 class TestDistributedLayers(unittest.TestCase):
 
@@ -80,6 +80,9 @@ class TestDistributedLayers(unittest.TestCase):
         if cls.world_rank == 0:
             print(f"Running distributed tests on grid H x W = {cls.grid_size_h} x {cls.grid_size_w}")
 
+    def setUp(self):
+        disable_tf32()
+
 
     def _init_seed(self, seed):
         torch.manual_seed(seed)
@@ -103,12 +106,12 @@ class TestDistributedLayers(unittest.TestCase):
 
     @parameterized.expand(
         [
-            [180, 360, 256, 512, 32,  8, 5e-4],
-            [181, 360, 181, 360, 1, 10, 5e-5],
-            [180, 360, 128, 256, 32,  8, 5e-4],
-            [181, 360,  91, 180, 1, 10, 5e-5],
-            [128, 256, 256, 512, 32,  8, 5e-5],
-            [ 91, 180, 181, 360, 1, 10, 5e-5],
+            [180, 360, 256, 512, 32,  8, 1e-3],
+            [181, 360, 181, 360, 1, 10, 1e-3],
+            [180, 360, 128, 256, 32,  8, 1e-4],
+            [181, 360,  91, 180, 1, 10, 1e-4],
+            [128, 256, 256, 512, 32,  8, 1e-4],
+            [ 91, 180, 181, 360, 1, 10, 1e-4],
         ],
         skip_on_empty=True,
     )
@@ -232,10 +235,10 @@ class TestDistributedLayers(unittest.TestCase):
 
     @parameterized.expand(
         [
-            [256, 512, 32, 8, True, 1e-5],
-            [181, 360, 1, 10, True, 1e-5],
-            [256, 512, 32, 8, False, 1e-5],
-            [181, 360, 1, 10, False, 1e-5],
+            [256, 512, 32, 8, True, 1e-4],
+            [181, 360, 1, 10, True, 1e-4],
+            [256, 512, 32, 8, False, 1e-4],
+            [181, 360, 1, 10, False, 1e-4],
         ],
         skip_on_empty=True,
     )

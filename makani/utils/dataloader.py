@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import importlib.util
 import types
 import math
 
@@ -73,9 +74,8 @@ def get_dataloader(params, files_pattern, device, mode="train"):
 
     # sanity check
     if not params.get("multifiles", False):
-        try:
-            import nvidia.dali
-        except:
+        _have_dali = importlib.util.find_spec("nvidia.dali") is not None
+        if not _have_dali:
             raise ImportError("Setting multifiles to False requires nvidia-dali, but module was not found.")
 
     if params.get("multifiles", False):

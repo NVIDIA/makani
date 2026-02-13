@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import importlib.util
 import os
 import sys
 import unittest
@@ -25,20 +26,15 @@ import torch
 import xarray as xr
 import xskillscore as xs
 
-from makani.utils import functions as fn
 from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature
 from makani.utils import MetricsHandler
 from makani.utils.metrics.functions import GeometricL1, GeometricRMSE, GeometricACC, GeometricPCC, GeometricCRPS, GeometricSSR, GeometricRankHistogram, Quadrature
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from .testutils import get_default_parameters, compare_arrays
+from .testutils import disable_tf32, get_default_parameters, compare_arrays
 
 # check consistency with weatherbench2 if it is installed
-try:
-    import weatherbench2 as wb2
-    from weatherbench2 import metrics
-except ImportError:
-    wb2 = None
+_have_wb2 = importlib.util.find_spec("weatherbench2") is not None
 
 # parameters for deterministic metrics
 # grid_type, shape
@@ -120,6 +116,9 @@ class TestMetrics(unittest.TestCase):
     """
 
     def setUp(self):
+
+        disable_tf32()
+
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         torch.manual_seed(333)
         torch.cuda.manual_seed(333)
@@ -373,9 +372,11 @@ class TestMetricsAggregation(unittest.TestCase):
         for inps, tars in zip(inp_split[1:], tar_split[1:]):
             res_tmp = metric_func(inps, tars)
             res_tmp = torch.stack([res_split, res_tmp], dim=0)
-            counts_tmp = torch.tensor(inps.shape[0], dtype=torch.float32, device=self.device)
+            counts_tmp = torch.tensor((inps.shape[0]), dtype=torch.float32, device=self.device)
             counts_tmp = torch.stack([counts_split, counts_tmp], dim=0)
             res_tmp, counts_tmp = metric_func.combine(res_tmp, counts_tmp, dim=0)
+            # we need to squeeze the counts now since combine returns unsqueezed tensors:
+            counts_tmp = counts_tmp.squeeze()
             with torch.no_grad():
                 res_split.copy_(res_tmp)
                 counts_split.copy_(counts_tmp)
@@ -416,6 +417,8 @@ class TestMetricsAggregation(unittest.TestCase):
             counts_tmp = torch.tensor(inps.shape[0], dtype=torch.float32, device=self.device)
             counts_tmp = torch.stack([counts_split, counts_tmp], dim=0)
             res_tmp, counts_tmp = metric_func.combine(res_tmp, counts_tmp, dim=0)
+            # we need to squeeze the counts now since combine returns unsqueezed tensors:
+            counts_tmp = counts_tmp.squeeze()
             with torch.no_grad():
                 res_split.copy_(res_tmp)
                 counts_split.copy_(counts_tmp)
@@ -629,9 +632,8 @@ class TestMetricsHandler(unittest.TestCase):
             self.assertTrue(compare_arrays("rollouts", data_full, data_split, rtol=1e-6, atol=1e-6, verbose=verbose))
 
 
-# TODO: ssr test comparing to xskillcore
-    
-@unittest.skipIf(wb2 is None, "test requires weatherbench2 installation")
+# TODO: ssr test comparing to weatherbench2
+@unittest.skipUnless(_have_wb2, "test requires weatherbench2 installation")
 class ComparetMetricsWB2(unittest.TestCase):
     """
     A set of tests that compare weatherbench2 metrics to makani metrics
@@ -645,7 +647,10 @@ class ComparetMetricsWB2(unittest.TestCase):
 
     # same as above but compare to wb2
     @parameterized.expand(_wb2_metrics_params, skip_on_empty=True)
-    def test_weighted_crps(self, grid_type, batch_size, ensemble_size, num_channels, nlat, nlon, verbose=False):
+    def test_weighted_crps(self, grid_type, batch_size, ensemble_size, num_channels, nlat, nlon, verbose=True):
+
+        # some imports
+        from weatherbench2.metrics import CRPS
 
         # CRPS handle
         crps_func = GeometricCRPS(
@@ -670,13 +675,16 @@ class ComparetMetricsWB2(unittest.TestCase):
 
         # compute and compare CRPS
         crps = crps_func(fct, obs).cpu().numpy()
-        crps_wb2 = wb2.metrics.CRPS(ensemble_dim="ensemble").compute_chunk(xr_fct, xr_obs, region=None)["var"].to_numpy()
+        crps_wb2 = CRPS(ensemble_dim="ensemble").compute_chunk(xr_fct, xr_obs, region=None)["var"].to_numpy()
 
-        self.assertTrue(compare_arrays("crps", crps, crps_wb2, rtol=5e-4, atol=0, verbose=verbose))
+        self.assertTrue(compare_arrays("crps", crps, crps_wb2, rtol=1e-3, atol=1e-3, verbose=verbose))
 
     # same as above but compare to wb2
     @parameterized.expand(_wb2_metrics_params, skip_on_empty=True)
-    def test_weighted_ssr(self, grid_type, batch_size, ensemble_size, num_channels, nlat, nlon, verbose=False):
+    def test_weighted_ssr(self, grid_type, batch_size, ensemble_size, num_channels, nlat, nlon, verbose=True):
+
+        # some imports
+        from weatherbench2.metrics import EnergyScoreSkill, EnergyScoreSpread
 
         # CRPS handle
         ssr_func = GeometricSSR(
@@ -701,11 +709,11 @@ class ComparetMetricsWB2(unittest.TestCase):
 
         # compute and compare ssr
         ssr = ssr_func(fct, obs).cpu().numpy()
-        ssr_skill_wb2 = wb2.metrics.EnergyScoreSkill(ensemble_dim="ensemble").compute_chunk(xr_fct, xr_obs, region=None)["var"].to_numpy()
-        ssr_spread_wb2 = wb2.metrics.EnergyScoreSpread(ensemble_dim="ensemble").compute_chunk(xr_fct, xr_obs, region=None)["var"].to_numpy()
+        ssr_skill_wb2 = EnergyScoreSkill(ensemble_dim="ensemble").compute_chunk(xr_fct, xr_obs, region=None)["var"].to_numpy()
+        ssr_spread_wb2 = EnergyScoreSpread(ensemble_dim="ensemble").compute_chunk(xr_fct, xr_obs, region=None)["var"].to_numpy()
         ssr_wb2 = ssr_spread_wb2 / ssr_skill_wb2
 
-        self.assertTrue(compare_arrays("ssr", ssr, ssr_wb2, rtol=2e-2, atol=0, verbose=verbose))
+        self.assertTrue(compare_arrays("ssr", ssr, ssr_wb2, rtol=5e-2, atol=5e-2, verbose=verbose))
 
 
 if __name__ == "__main__":

@@ -98,7 +98,6 @@ class GeometricRMSE(GeometricBaseMetric):
         vals, counts = _sanitize_shapes(vals, counts, dim=dim)
         vals_res, counts_res = _welford_reduction_helper(torch.square(vals), counts, self.batch_reduction, dim=dim)
         vals_res = torch.sqrt(vals_res)
-        counts_res = counts_res.squeeze()
         return vals_res, counts_res
 
     def finalize(self, vals, counts):
@@ -349,6 +348,13 @@ class GeometricSpread(GeometricBaseMetric):
     @property
     def type(self):
         return LossType.Probabilistic
+
+    def compute_counts(self, inp: torch.Tensor, weight: Optional[torch.Tensor] = None) -> torch.Tensor:
+        if weight is not None:
+            counts = torch.sum(self.quadrature(weight), dim=(0, 1))
+        else:
+            counts = torch.full(size=(inp.shape[2],), fill_value=inp.shape[0], device=inp.device, dtype=inp.dtype)
+        return counts
     
     def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, weight: Optional[torch.Tensor] = None) -> torch.Tensor:
 
@@ -429,6 +435,13 @@ class GeometricSSR(GeometricBaseMetric):
     @property
     def type(self):
         return LossType.Probabilistic
+
+    def compute_counts(self, inp: torch.Tensor, weight: Optional[torch.Tensor] = None) -> torch.Tensor:
+        if weight is not None:
+            counts = torch.sum(self.quadrature(weight), dim=(0, 1))
+        else:
+            counts = torch.full(size=(inp.shape[2],), fill_value=inp.shape[0], device=inp.device, dtype=inp.dtype)
+        return counts
 
     def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, weight: Optional[torch.Tensor] = None) -> torch.Tensor:
 
@@ -518,10 +531,16 @@ class GeometricCRPS(torch.nn.Module):
     def type(self):
         return self.metric_func.type
 
+    def compute_counts(self, inp: torch.Tensor, weight: Optional[torch.Tensor] = None) -> torch.Tensor:
+        if weight is not None:
+            counts = torch.sum(self.quadrature(weight), dim=(0, 1))
+        else:
+            counts = torch.full(size=(inp.shape[2],), fill_value=inp.shape[0], device=inp.device, dtype=inp.dtype)
+        return counts
+
     def combine(self, vals, counts, dim=0):
         vals, counts = _sanitize_shapes(vals, counts, dim=dim)
         vals_res, counts_res = _welford_reduction_helper(vals, counts, self.batch_reduction, dim=dim)
-        counts_res = counts_res.squeeze()
         return vals_res, counts_res
 
     def finalize(self, vals, counts):
@@ -584,6 +603,14 @@ class GeometricRankHistogram(GeometricBaseMetric):
     def type(self):
         return LossType.Probabilistic
 
+    def compute_counts(self, inp: torch.Tensor, weight: Optional[torch.Tensor] = None) -> torch.Tensor:
+        # We need an extra 1 dim for buckets dim:
+        if weight is not None:
+            counts = torch.sum(self.quadrature(weight), dim=(0, 1)).unsqueeze(-1)
+        else:
+            counts = torch.full(size=(inp.shape[2], 1), fill_value=inp.shape[0], device=inp.device, dtype=inp.dtype)
+        return counts
+
     def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, spatial_weights: Optional[torch.Tensor] = None) -> torch.Tensor:
 
         # sanity checks
@@ -605,7 +632,7 @@ class GeometricRankHistogram(GeometricBaseMetric):
 
         if self.ensemble_distributed:
             ensemble_shapes = [E for _ in range(comm.get_size("ensemble"))]
-            forecasts = distributed_transpose.apply(forecasts, (-1, 1), ensemble_shapes, "ensemble")
+            forecasts = distributed_transpose(forecasts, (-1, 1), ensemble_shapes, "ensemble")
             ensemble_size = E * comm.get_size("ensemble")
         else:
             ensemble_size = E
@@ -615,7 +642,7 @@ class GeometricRankHistogram(GeometricBaseMetric):
             observations = scatter_to_parallel_region(observations, -1, "ensemble")
         if spatial_weights is not None:
             spatial_weights_split = spatial_weights.flatten(start_dim=-2, end_dim=-1)
-            spatial_weights_split = scatter_to_parallel_region(spatial_weight_splits, -1, "ensemble")
+            spatial_weights_split = scatter_to_parallel_region(spatial_weights_split, -1, "ensemble")
 
         # we need to have ensemble dim innermost
         forecasts = torch.moveaxis(forecasts, 1, -1)
