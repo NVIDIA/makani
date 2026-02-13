@@ -34,7 +34,7 @@ from makani.utils import MetricsHandler
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 from .distributed_helpers import split_helper, get_default_parameters
-from ..testutils import compare_arrays
+from ..testutils import disable_tf32, compare_arrays
 
 # because of physicsnemo/NCCL tear down issues, we can only run one test at a time
 _metric_handler_params = [
@@ -130,6 +130,9 @@ class TestDistributedMetricHandler(unittest.TestCase):
         return tensor_local
         
     def setUp(self):
+
+        disable_tf32()
+
         self.params = get_default_parameters()
         self.params["dhours"] = 1
 
@@ -301,9 +304,6 @@ class TestDistributedMetricHandler(unittest.TestCase):
         # wait for everything to finish
         self.mpi_comm.Barrier()
 
-        self._destroy_comms()
-        
-        
 
 if __name__ == "__main__":
     unittest.main()

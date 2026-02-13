@@ -632,7 +632,7 @@ class GeometricRankHistogram(GeometricBaseMetric):
 
         if self.ensemble_distributed:
             ensemble_shapes = [E for _ in range(comm.get_size("ensemble"))]
-            forecasts = distributed_transpose.apply(forecasts, (-1, 1), ensemble_shapes, "ensemble")
+            forecasts = distributed_transpose(forecasts, (-1, 1), ensemble_shapes, "ensemble")
             ensemble_size = E * comm.get_size("ensemble")
         else:
             ensemble_size = E
