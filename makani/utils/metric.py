@@ -275,8 +275,8 @@ class MetricsHandler:
         self.num_rollout_steps = num_rollout_steps
 
         # store shapes
-        self.img_shape = (params.img_shape_x, params.img_shape_y)
-        self.crop_shape = (params.img_crop_shape_x, params.img_crop_shape_y)
+        self.img_shape = (params.img_shape_x_resampled, params.img_shape_y_resampled)
+        self.crop_shape = (params.img_shape_x_resampled, params.img_shape_y_resampled)
         self.crop_offset = (params.img_crop_offset_x, params.img_crop_offset_y)
 
         # grid extraction
