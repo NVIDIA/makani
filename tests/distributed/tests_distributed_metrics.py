@@ -38,8 +38,8 @@ from ..testutils import disable_tf32, compare_arrays
 
 # because of physicsnemo/NCCL tear down issues, we can only run one test at a time
 _metric_handler_params = [
-    #("equiangular", 4, 16, 3, "mean"),
-    ("equiangular", 4, 16, 3, "sum"),
+    ("equiangular", 4, 16, 3, "mean"),
+    #("equiangular", 4, 16, 3, "sum"),
 ]
 
 class TestDistributedMetricHandler(unittest.TestCase):
@@ -72,6 +72,7 @@ class TestDistributedMetricHandler(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.tmpdir.cleanup()
+        cls.mpi_comm.Finalize()
 
     def _init_comms(self):
         
@@ -106,10 +107,6 @@ class TestDistributedMetricHandler(unittest.TestCase):
         if self.world_rank == 0:
             print(f"Running distributed tests on grid H x W x E x B = {self.grid_size_h} x {self.grid_size_w} x {self.grid_size_e} x {self.grid_size_b}")
 
-        return
-
-    def _destroy_comms(self):
-        comm.cleanup()
         return
 
     def _split_helper(self, tensor):
