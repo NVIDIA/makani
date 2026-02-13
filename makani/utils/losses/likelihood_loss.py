@@ -15,10 +15,7 @@
 
 from typing import Optional, Tuple, List
 
-import numpy as np
-
 import torch
-import torch.nn as nn
 
 from makani.utils.losses.base_loss import GeometricBaseLoss, LossType
 from makani.utils import comm
@@ -103,7 +100,7 @@ class EnsembleNLLLoss(GeometricBaseLoss):
         forecasts = forecasts.reshape(B, E, C, H * W)
         if self.ensemble_distributed:
             ensemble_shapes = [forecasts.shape[1] for _ in range(comm.get_size("ensemble"))]
-            forecasts = distributed_transpose.apply(forecasts, (-1, 1), ensemble_shapes, "ensemble")
+            forecasts = distributed_transpose(forecasts, (-1, 1), ensemble_shapes, "ensemble")
         # observations does not need a transpose, but just a split
         observations = observations.reshape(B, C, H * W)
         if self.ensemble_distributed:
