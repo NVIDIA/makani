@@ -38,7 +38,7 @@ from makani.mpu.layer_norm import DistributedGeometricInstanceNormS2, Distribute
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 from .distributed_helpers import split_helper, gather_helper
-from ..testutils import compare_tensors
+from ..testutils import disable_tf32, compare_tensors
 
 class TestDistributedLayers(unittest.TestCase):
 
@@ -79,6 +79,9 @@ class TestDistributedLayers(unittest.TestCase):
 
         if cls.world_rank == 0:
             print(f"Running distributed tests on grid H x W = {cls.grid_size_h} x {cls.grid_size_w}")
+
+    def setUp(self):
+        disable_tf32()
 
 
     def _init_seed(self, seed):

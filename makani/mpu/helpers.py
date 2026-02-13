@@ -14,9 +14,7 @@
 # limitations under the License.
 
 import torch
-import torch.nn.functional as F
 import torch.distributed as dist
-from torch._utils import _flatten_dense_tensors
 
 from physicsnemo.distributed.utils import split_tensor_along_dim
 from makani.utils import comm
