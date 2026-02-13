@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import importlib.util
 import os
 import sys
 import glob
@@ -30,15 +31,11 @@ import h5py as h5
 from makani.utils.dataloader import get_dataloader
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from .testutils import get_default_parameters, init_dataset
+from .testutils import disable_tf32, get_default_parameters, init_dataset
 from .testutils import H5_PATH, NUM_CHANNELS, IMG_SIZE_H, IMG_SIZE_W
 
 _multifiles_params = [True]
-_have_dali = True
-try:
-    import nvidia.dali
-except:
-    _have_dali = False
+_have_dali = importlib.util.find_spec("nvidia.dali") is not None
 
 if _have_dali:
     _multifiles_params.append(False)
@@ -119,6 +116,7 @@ class TestDataLoader(unittest.TestCase):
 
 
     def setUp(self):
+        disable_tf32()
 
         self.params = init_dataset_params(self.train_path, self.valid_path, self.stats_path, batch_size=2, n_history=0, n_future=0, normalization="zscore", num_data_workers=1)
 
