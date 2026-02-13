@@ -34,7 +34,7 @@ import torch
 import torch.distributed as dist
 from makani.utils.grids import GridQuadrature
 
-from wb2_helpers import DistributedProgressBar
+from .wb2_helpers import DistributedProgressBar
 
 from .data_process_helpers import (
     mask_data, 
