@@ -72,7 +72,7 @@ class TestDistributedMetricHandler(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.tmpdir.cleanup()
-        cls.mpi_comm.Finalize()
+
 
     def _init_comms(self):
         
