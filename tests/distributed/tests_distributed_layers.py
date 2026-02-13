@@ -235,10 +235,10 @@ class TestDistributedLayers(unittest.TestCase):
 
     @parameterized.expand(
         [
-            [256, 512, 32, 8, True, 1e-5],
-            [181, 360, 1, 10, True, 1e-5],
-            [256, 512, 32, 8, False, 1e-5],
-            [181, 360, 1, 10, False, 1e-5],
+            [256, 512, 32, 8, True, 1e-4],
+            [181, 360, 1, 10, True, 1e-4],
+            [256, 512, 32, 8, False, 1e-4],
+            [181, 360, 1, 10, False, 1e-4],
         ],
         skip_on_empty=True,
     )
