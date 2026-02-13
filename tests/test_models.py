@@ -26,11 +26,14 @@ from makani.utils import functions as fn
 from makani.utils import LossHandler
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from .testutils import get_default_parameters, compare_tensors
+from .testutils import disable_tf32, get_default_parameters, compare_tensors
 
 class TestModels(unittest.TestCase):
 
     def setUp(self):
+
+        disable_tf32()
+
         self.params = get_default_parameters()
 
         self.params.history_normalization_mode = "none"

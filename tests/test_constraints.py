@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import os
+import sys
 import unittest
 
 import numpy as np
@@ -23,9 +24,14 @@ import torch
 from makani.utils.losses.hydrostatic_loss import HydrostaticBalanceLoss
 from makani.models.parametrizations import ConstraintsWrapper
 
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+from .testutils import disable_tf32
+
 class TestConstraints(unittest.TestCase):
 
     def setUp(self):
+
+        disable_tf32()
 
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         torch.manual_seed(333)

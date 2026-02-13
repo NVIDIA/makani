@@ -29,7 +29,7 @@ from makani.utils.dataloaders.data_helpers import get_data_normalization
 from makani.utils.losses import LossType
 from makani.utils.metrics.functions import GeometricL1, GeometricRMSE, GeometricACC, GeometricSpread, GeometricSSR, GeometricCRPS, GeometricRankHistogram, Quadrature
 import torch.distributed as dist
-from physicsnemo.distributed.utils import compute_split_shapes, split_tensor_along_dim
+from physicsnemo.distributed.utils import compute_split_shapes
 from physicsnemo.distributed.mappings import gather_from_parallel_region, reduce_from_parallel_region
 
 
@@ -66,10 +66,12 @@ class MetricRollout:
         self.num_channels = len(self.metric_channels)
         if self.aux_shape is None:
             data_shape = (self.num_rollout_steps, self.num_channels)
+            counter_shape = (self.num_rollout_steps, self.num_channels)
         else:
             data_shape = (self.num_rollout_steps, self.num_channels, *self.aux_shape)
+            counter_shape = (self.num_rollout_steps, self.num_channels, *(1 for _ in range(len(self.aux_shape))))
         self.rollout_curve = torch.zeros(data_shape, dtype=torch.float32, device=self.device)
-        self.rollout_counter = torch.zeros((self.num_rollout_steps, self.num_channels), dtype=torch.float32, device=self.device)
+        self.rollout_counter = torch.zeros(counter_shape, dtype=torch.float32, device=self.device)
 
         # CPU buffers
         pin_memory = self.device.type == "cuda"
@@ -118,10 +120,10 @@ class MetricRollout:
 
         # stack with previous values and counts
         vals = torch.stack([self.rollout_curve[idt, ...], metric], dim=0)
-        counts = torch.stack([self.rollout_counter[idt, :], counts_new], dim=0)
+        counts = torch.stack([self.rollout_counter[idt, ...], counts_new], dim=0)
         vals, counts = self.metric_func.combine(vals, counts, dim=0)
         self.rollout_curve[idt, ...].copy_(vals)
-        self.rollout_counter[idt, :].copy_(counts)
+        self.rollout_counter[idt, ...].copy_(counts)
 
         return
 
@@ -160,12 +162,7 @@ class MetricRollout:
 
         # sum here
         with torch.no_grad():
-            # normalize, this depends on the internal logic on the metric function and whether we kept
-            # track of the mean or the sum and counts
-            cshape = [1 for _ in range(self.rollout_curve.dim())]
-            cshape[0] = -1
-            counts = self.rollout_counter.reshape(cshape)
-            rollout_curve_normalized = self.metric_func.finalize(self.rollout_curve, counts)
+            rollout_curve_normalized = self.metric_func.finalize(self.rollout_curve, self.rollout_counter)
 
             # copy to host
             self.rollout_curve_cpu.copy_(rollout_curve_normalized, non_blocking=non_blocking)

@@ -13,16 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional, Tuple, List
-from dataclasses import dataclass
+from typing import Optional, Tuple
 
 from abc import ABCMeta, abstractmethod
 
 import torch
 import torch.nn as nn
-
-import torch_harmonics as th
-import torch_harmonics.distributed as thd
 
 from makani.utils.losses.base_loss import LossType
 from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature
@@ -33,6 +29,17 @@ def _sanitize_shapes(vals, counts, dim):
     """
     Helper routine to ensure that counts is correctly broadcasted to vals.
     """
+
+    # if vals and counts have the same number of dimensions, we can return them as is
+    if vals.dim() == counts.dim():
+        # make sure the shapes match or are one
+        for vdim, cdim in zip(vals.shape, counts.shape):
+            if vdim != cdim and vdim != 1 and cdim != 1:
+                raise ValueError("The shape of vals and counts have to match or be one")
+
+        return vals, counts
+
+    # if counts is not a singleton, we need to broadcast it to the shape of vals
     if counts.dim() != 1:
         raise ValueError("The shape of counts has to be exactly 1")
     cshape = [1 for _ in range(vals.dim())]
@@ -103,7 +110,7 @@ class GeometricBaseMetric(nn.Module, metaclass=ABCMeta):
         if weight is not None:
             counts = torch.sum(self.quadrature(weight), dim=0)
         else:
-            counts = torch.full((inp.shape[1]), fill_value=inp.shape[0], device=inp.device, dtype=inp.dtype)
+            counts = torch.full(size=(inp.shape[1],), fill_value=inp.shape[0], device=inp.device, dtype=inp.dtype)
         return counts
 
     def combine(self, vals: torch.Tensor, counts: torch.Tensor, dim: Optional[int]=0) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -132,7 +139,6 @@ class GeometricBaseMetric(nn.Module, metaclass=ABCMeta):
         """
         vals, counts = _sanitize_shapes(vals, counts, dim=dim)
         vals_res, counts_res = _welford_reduction_helper(vals, counts, self.batch_reduction, dim=dim)
-        counts_res = counts_res.squeeze()
         return vals_res, counts_res
 
     def finalize(self, vals: torch.Tensor, counts: torch.Tensor) -> torch.Tensor:
@@ -151,6 +157,7 @@ class GeometricBaseMetric(nn.Module, metaclass=ABCMeta):
         vals_res : torch.Tensor 
             Values with correct averaging over counts.
         """
+        print(f"vals.shape: {vals.shape}, counts.shape: {counts.shape}")
         if self.batch_reduction == "mean":
             return vals
         else:

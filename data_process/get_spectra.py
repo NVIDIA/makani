@@ -34,10 +34,9 @@ import torch
 import torch.distributed as dist
 from torch_harmonics import RealSHT
 
-sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+from .wb2_helpers import DistributedProgressBar
+from .data_process_helpers import welford_combine, collective_reduce, binary_reduce
 
-from wb2_helpers import DistributedProgressBar
-from data_process_helpers import welford_combine, collective_reduce, binary_reduce
 
 @torch.compile(fullgraph=True)
 def compute_powerspectrum(x, sht):
