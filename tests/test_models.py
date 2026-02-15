@@ -26,7 +26,7 @@ from makani.utils import functions as fn
 from makani.utils import LossHandler
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from .testutils import get_default_parameters, compare_tensors
+from .testutils import get_default_parameters, compare_tensors, disable_tf32
 
 class TestModels(unittest.TestCase):
 
@@ -190,4 +190,5 @@ class TestModels(unittest.TestCase):
 
 
 if __name__ == "__main__":
+    disable_tf32()
     unittest.main()

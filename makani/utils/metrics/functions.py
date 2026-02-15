@@ -22,7 +22,7 @@ from physicsnemo.distributed.mappings import scatter_to_parallel_region, reduce_
 from physicsnemo.distributed.utils import split_tensor_along_dim
 from makani.mpu.mappings import distributed_transpose
 
-from makani.utils.losses import EnsembleCRPSLoss, LossType
+from makani.utils.losses import CRPSLoss, LossType
 from makani.utils.metrics.base_metric import _sanitize_shapes, _welford_reduction_helper, GeometricBaseMetric
 
 class GeometricL1(GeometricBaseMetric):
@@ -197,7 +197,7 @@ class GeometricACC(GeometricBaseMetric):
             # stack along dim -1:
             # we form the ratio in the finalization step
             acc = torch.stack([cov_xy, var_x, var_y], dim=-1)
-        
+
         # reduce
         if self.channel_reduction == "mean":
             acc = torch.mean(acc, dim=1)
@@ -252,12 +252,12 @@ class GeometricPCC(GeometricBaseMetric):
     def combine(self, vals, counts, dim=0):
         # sanitize shapes
         vals, counts = _sanitize_shapes(vals, counts, dim=dim)
-        
+
         # extract parameters
         covs = vals[..., 0].unsqueeze(-1)
         m2s = vals[..., 1:3]
         means = vals[..., 3:5]
-        
+
         # counts are: n = sum_k n_k
         counts_agg = torch.sum(counts, dim=0)
         # means are: mu = sum_i n_i * mu_i / n
@@ -280,7 +280,7 @@ class GeometricPCC(GeometricBaseMetric):
         return vals[..., 0] / torch.sqrt(vals[..., 1] * vals[..., 2])
 
     def forward(self, x: torch.Tensor, y: torch.Tensor, weight: Optional[torch.Tensor] = None) -> torch.Tensor:
-        
+
         if hasattr(self, "bias"):
             x = x - self.bias
             y = y - self.bias
@@ -349,7 +349,7 @@ class GeometricSpread(GeometricBaseMetric):
     @property
     def type(self):
         return LossType.Probabilistic
-    
+
     def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, weight: Optional[torch.Tensor] = None) -> torch.Tensor:
 
         # sanity checks
@@ -498,7 +498,7 @@ class GeometricCRPS(torch.nn.Module):
     ):
         super().__init__()
 
-        self.metric_func = EnsembleCRPSLoss(
+        self.metric_func = CRPSLoss(
             img_shape=img_shape,
             crop_shape=crop_shape,
             crop_offset=crop_offset,

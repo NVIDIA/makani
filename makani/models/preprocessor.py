@@ -53,13 +53,7 @@ class Preprocessor2D(nn.Module):
         self.history_eps = 1e-6
 
         # residual normalization
-        self.learn_residual = params.target == "residual"
-        if self.learn_residual and (params.normalize_residual):
-            with torch.no_grad():
-                residual_scale = torch.as_tensor(np.load(params.time_diff_stds_path)).to(torch.float32)
-                self.register_buffer("residual_scale", residual_scale, persistent=False)
-        else:
-            self.residual_scale = None
+        self.residual_scale = None
 
         # image shape
         self.img_shape = [params.img_shape_x, params.img_shape_y]
@@ -176,20 +170,6 @@ class Preprocessor2D(nn.Module):
         if x.dim() == 4:
             b_, ct_, h_, w_ = x.shape
             x = torch.reshape(x, (b_, nhist, ct_ // nhist, h_, w_))
-        return x
-
-    def add_residual(self, x, dx):
-        if self.learn_residual:
-            if self.residual_scale is not None:
-                dx = dx * self.residual_scale
-
-            # add residual: deal with history
-            x = self.expand_history(x, nhist=self.n_history + 1)
-            x[:, -1, ...] = x[:, -1, ...] + dx
-            x = self.flatten_history(x)
-        else:
-            x = dx
-
         return x
 
     def add_static_features(self, x):

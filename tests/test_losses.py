@@ -24,10 +24,11 @@ import numpy as np
 import torch
 
 from makani.utils import LossHandler
-from makani.utils.losses import EnsembleCRPSLoss
+from makani.utils.losses import CRPSLoss
+from makani.utils.losses.energy_score import SobolevEnergyScoreLoss
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from .testutils import get_default_parameters, compare_tensors, compare_arrays
+from .testutils import get_default_parameters, compare_tensors, compare_arrays, disable_tf32
 
 from properscoring import crps_ensemble, crps_gaussian
 
@@ -139,7 +140,7 @@ class TestLosses(unittest.TestCase):
 
         # test initialization of loss object
         loss_obj = LossHandler(self.params)
-        
+
         shape = (self.params.batch_size, self.params.N_out_channels, self.params.img_shape_x, self.params.img_shape_y)
 
         inp = torch.randn(*shape)
@@ -158,7 +159,7 @@ class TestLosses(unittest.TestCase):
         """
         Tests initialization of loss, as well as the forward and backward pass
         """
-        
+
         self.params.losses = losses
         self.params.uncertainty_weighting = uncertainty_weighting
 
@@ -180,7 +181,7 @@ class TestLosses(unittest.TestCase):
 
         # compute weighted loss
         out_weighted = loss_obj(tar, inp, wgt)
-        
+
         self.assertTrue(compare_tensors("loss", out, out_weighted))
 
 
@@ -252,7 +253,7 @@ class TestLosses(unittest.TestCase):
             self.assertTrue(compare_tensors("var", var, expected_var))
 
     def test_ensemble_crps(self):
-        crps_func = EnsembleCRPSLoss(
+        crps_func = CRPSLoss(
             img_shape=(self.params.img_shape_x, self.params.img_shape_y),
             crop_shape=(self.params.img_shape_x, self.params.img_shape_y),
             crop_offset=(0, 0),
@@ -264,7 +265,7 @@ class TestLosses(unittest.TestCase):
             ensemble_distributed=False,
             ensemble_weights=None,
         )
-    
+
         for ensemble_size in [1, 10]:
             with self.subTest(desc=f"ensemble size {ensemble_size}"):
                 # generate input tensor
@@ -293,15 +294,15 @@ class TestLosses(unittest.TestCase):
                 result_proper = crps_ensemble(tar_arr, inp_arr, weights=None, issorted=False, axis=axis)
                 quad_weight_arr = crps_func.quadrature.quad_weight.cpu().numpy()
                 result_proper = np.sum(result_proper * quad_weight_arr, axis=(2, 3))
-    
+
                 self.assertTrue(compare_arrays("output", result, result_proper))
 
     def test_gauss_crps(self):
-    
+
         # protext against sigma=0
         eps = 1.0e-5
-    
-        crps_func = EnsembleCRPSLoss(
+
+        crps_func = CRPSLoss(
             img_shape=(self.params.img_shape_x, self.params.img_shape_y),
             crop_shape=(self.params.img_shape_x, self.params.img_shape_y),
             crop_offset=(0, 0),
@@ -313,34 +314,111 @@ class TestLosses(unittest.TestCase):
             ensemble_distributed=False,
             eps=eps,
         )
-    
+
         for ensemble_size in [1, 10]:
             with self.subTest(desc=f"ensemble size {ensemble_size}"):
                 # generate input tensor
                 inp = torch.empty((self.params.batch_size, ensemble_size, self.params.N_in_channels, self.params.img_shape_x, self.params.img_shape_y), dtype=torch.float32)
                 with torch.no_grad():
                     inp.normal_(1.0, 1.0)
-    
+
                 # target tensor
                 tar = torch.ones((self.params.batch_size, self.params.N_in_channels, self.params.img_shape_x, self.params.img_shape_y), dtype=torch.float32)
-    
+
                 # torch result
                 result = crps_func(inp, tar).cpu().numpy()
-    
+
                 # properscoring result
                 tar_arr = tar.cpu().numpy()
                 inp_arr = inp.cpu().numpy()
-    
+
                 # compute mu, sigma, guard against underflows
                 mu = np.mean(inp_arr, axis=1)
                 sigma = np.maximum(np.sqrt(np.var(inp_arr, axis=1)), eps)
-    
+
                 result_proper = crps_gaussian(tar_arr, mu, sigma, grad=False)
                 quad_weight_arr = crps_func.quadrature.quad_weight.cpu().numpy()
                 result_proper = np.sum(result_proper * quad_weight_arr, axis=(2, 3))
-    
+
                 self.assertTrue(compare_arrays("output", result, result_proper))
+
+    @parameterized.expand([
+        # (beta, alpha, offset, fraction, channel_reduction)
+        (0.5, 1.0, 1.0, 1.0, True),
+        (1.0, 1.0, 1.0, 1.0, True),
+        (2.0, 1.0, 1.0, 1.0, True),
+        (1.0, 0.5, 1.0, 1.0, True),
+        (1.0, 2.0, 1.0, 1.0, True),
+        (1.0, 1.0, 0.5, 1.0, True),
+        (1.0, 1.0, 2.0, 1.0, True),
+        (1.0, 1.0, 1.0, 0.5, True),
+        (1.0, 1.0, 1.0, 2.0, True),
+        (1.0, 1.0, 1.0, 1.0, False),
+        (0.5, 0.5, 0.5, 0.5, True),
+        (2.0, 2.0, 2.0, 2.0, True),
+    ])
+    def test_sobolev_energy_score(self, beta, alpha, offset, fraction, channel_reduction):
+        """
+        Tests SobolevEnergyScoreLoss for different parameter combinations,
+        verifying that output and gradients are not NaN or inf.
+        """
+        sobolev_loss = SobolevEnergyScoreLoss(
+            img_shape=(self.params.img_shape_x, self.params.img_shape_y),
+            crop_shape=(self.params.img_shape_x, self.params.img_shape_y),
+            crop_offset=(0, 0),
+            channel_names=self.params.channel_names,
+            grid_type=self.params.model_grid_type,
+            lmax=None,
+            spatial_distributed=False,
+            ensemble_distributed=False,
+            channel_reduction=channel_reduction,
+            alpha=alpha,
+            beta=beta,
+            offset=offset,
+            fraction=fraction,
+        ).to(self.device)
+
+        for ensemble_size in [2, 6]:
+            with self.subTest(desc=f"beta={beta}, alpha={alpha}, offset={offset}, fraction={fraction}, channel_reduction={channel_reduction}, ensemble_size={ensemble_size}"):
+                # Generate forecast tensor: (batch, ensemble, channels, lat, lon)
+                forecasts = torch.randn(
+                    self.params.batch_size,
+                    ensemble_size,
+                    self.params.N_in_channels,
+                    self.params.img_shape_x,
+                    self.params.img_shape_y,
+                    device=self.device,
+                    dtype=torch.float32,
+                    requires_grad=True,
+                )
+
+                # Generate observation tensor: (batch, channels, lat, lon)
+                observations = torch.randn(
+                    self.params.batch_size,
+                    self.params.N_in_channels,
+                    self.params.img_shape_x,
+                    self.params.img_shape_y,
+                    device=self.device,
+                    dtype=torch.float32,
+                )
+
+                # Forward pass
+                result = sobolev_loss(forecasts, observations)
+
+                # Check output is not NaN or inf
+                self.assertFalse(torch.isnan(result).any(), f"Output contains NaN values")
+                self.assertFalse(torch.isinf(result).any(), f"Output contains inf values")
+
+                # Backward pass
+                loss = result.sum()
+                loss.backward()
+
+                # Check gradients are not NaN or inf
+                self.assertIsNotNone(forecasts.grad, "Gradients are None")
+                self.assertFalse(torch.isnan(forecasts.grad).any(), f"Gradients contain NaN values")
+                self.assertFalse(torch.isinf(forecasts.grad).any(), f"Gradients contain inf values")
 
 
 if __name__ == "__main__":
+    disable_tf32()
     unittest.main()
