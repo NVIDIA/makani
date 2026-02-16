@@ -510,7 +510,8 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         self._precompute_channel_groups(channel_names, aux_channel_names, n_history)
 
         # compute the total number of internal groups
-        self.n_chans = self.n_atmo_groups * self.n_atmo_chans + self.n_surf_chans
+        self.n_out_chans = self.n_atmo_groups * self.n_atmo_chans + self.n_surf_chans
+        self.n_in_chans = (self.n_atmo_groups * self.n_atmo_chans + self.n_surf_chans) * (self.n_history + 1)
         self.total_aux_embed_dim = self.aux_embed_dim + self.pos_embed_dim
 
         # convert kernel shape to tuple
@@ -528,11 +529,20 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         else:
             raise ValueError(f"Unknown activation function {activation_function}")
 
+        # sst imputation in the case of SST channels
+        if self.sst_channels_in.shape[0] > 0:
+            self.sst_imputation = MLPImputation(
+                inp_chans=self.n_in_chans + self.n_aux_chans,
+                inpute_chans=self.sst_channels_in,
+                mlp_ratio=mlp_ratio,
+                activation_function=activation_function,
+            )
+
         # encoder for the atmospheric and surface channels
         self.encoder = DiscreteContinuousEncoder(
             inp_shape=inp_shape,
             out_shape=(self.h, self.w),
-            inp_chans=self.n_chans * (self.n_history + 1),
+            inp_chans=self.n_in_chans,
             out_chans=self.embed_dim,
             grid_in=model_grid_type,
             grid_out=sht_grid_type,
@@ -541,18 +551,10 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
             basis_norm_mode=filter_basis_norm_mode,
             lmax=self.lmax,
             activation_function=activation_function,
-            groups=math.gcd(self.n_chans, self.embed_dim),
+            groups=math.gcd(self.n_in_chans, self.embed_dim),
             bias=encoder_bias,
             use_mlp=encoder_mlp,
         )
-
-        if self.sst_channels_in.shape[0] > 0:
-            self.sst_imputation = MLPImputation(
-                inp_chans=self.n_chans * (self.n_history + 1),
-                out_chans=self.sst_channels_in.shape[0],
-                mlp_ratio=mlp_ratio,
-                activation_function=activation_function,
-            )
 
         # encoder for the auxiliary channels
         if self.n_aux_chans > 0:
@@ -579,7 +581,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
             inp_shape=(self.h, self.w),
             out_shape=out_shape,
             inp_chans=self.embed_dim,
-            out_chans=self.n_chans,
+            out_chans=self.n_out_chans,
             grid_in=sht_grid_type,
             grid_out=model_grid_type,
             kernel_shape=kernel_shape,
@@ -587,7 +589,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
             basis_norm_mode=filter_basis_norm_mode,
             lmax=self.lmax,
             activation_function=activation_function,
-            groups=math.gcd(self.n_chans, self.embed_dim),
+            groups=math.gcd(self.n_out_chans, self.embed_dim),
             bias=encoder_bias,
             use_mlp=encoder_mlp,
             upsample_sht=upsample_sht,
@@ -809,18 +811,29 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
 
         return
 
+    def impute_sst_channels(self, x):
+        """
+        Impute the SST channels if applicable
+        """
+
+        # start by imputing the SST channels if applicable
+        if hasattr(self, "sst_imputation"):
+            if self.land_mask_channels.nelement() > 0:
+                # get a land mask that is broadcastable to the input shape
+                mask = x[..., self.land_mask_channels, :, :]
+            else:
+                mask = None
+            x[..., self.sst_channels_in, :, :] = self.sst_imputation(x, mask=mask)
+
+        return x
+
     def encode(self, x):
         """
         forward pass for the encoder
         """
-        batchdims = x.shape[:-3]
 
-        x = x[..., self.in_channels, :, :].reshape(-1, 1 + self.n_history, self.n_chans, *x.shape[-2:])
-        # move the history backwards and fold it into the channel dimension
-        x = x.transpose(-3,-4).reshape(-1, self.n_chans * (1 + self.n_history), *x.shape[-2:]).contiguous()
+        x = x[..., self.in_channels, :, :].contiguous()
         x = self.encoder(x)
-
-        x = x.reshape(*batchdims, self.embed_dim, *x.shape[-2:])
 
         return x
 
@@ -828,14 +841,12 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         """
         returns the embedded auxiliary channels
         """
-        batchdims = x.shape[:-3]
 
         aux_tensors = []
 
         if hasattr(self, "aux_encoder"):
             x_aux = x[..., self.aux_channels, :, :].contiguous()
             x_aux = self.aux_encoder(x_aux)
-            x_aux = x_aux.reshape(*batchdims, self.aux_embed_dim, *x_aux.shape[-2:])
             aux_tensors.append(x_aux)
 
         if hasattr(self, "pos_embed"):
@@ -854,13 +865,10 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         forward pass for the decoder
         """
 
-        batchdims = x.shape[:-3]
-
         x = x[..., : self.embed_dim, :, :]
         x = self.decoder(x)
-        x_out = torch.zeros(*batchdims, self.n_chans, *x.shape[-2:], dtype=x.dtype, device=x.device)
-        x_out[..., self.pred_channels, :, :] = x.reshape(*batchdims, -1, *x.shape[-2:])
-        return x_out
+
+        return x
 
     def processor_blocks(self, x, x_aux):
         # maybe clean the padding just in case
@@ -881,7 +889,10 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         return x
 
     def clamp_water_channels(self, x):
-        """clamp water channes with a smooth, positive activation function"""
+        """
+        clamp water channes with a smooth, positive activation function
+        """
+
         if hasattr(self, "water_channels"):
             if hasattr(self, "normalization_means") and hasattr(self, "normalization_stds"):
                 means = self.normalization_means[self.water_channels].view(1, -1, 1, 1)
@@ -898,14 +909,8 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
 
     def forward(self, x):
 
-        # start by imputing the SST channels if applicable
-        if hasattr(self, "sst_imputation"):
-            if self.land_mask_channels.nelement() > 0:
-                # get a land mask that is broadcastable to the input shape
-                mask = x[..., self.land_mask_channels, :, :].unsqueeze(-3)
-            else:
-                mask = None
-            x[..., self.sst_channels_in, :, :] = self.sst_imputation(x, mask=mask)
+        # sst imputation
+        x = self.impute_sst_channels(x)
 
         # save big skip
         if self.big_skip:
