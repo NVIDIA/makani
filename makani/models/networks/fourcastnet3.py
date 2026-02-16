@@ -14,16 +14,16 @@
 # limitations under the License.
 
 import math
+from functools import partial
+from typing import Optional
+
 import torch
 import torch.nn as nn
 import torch.amp as amp
 from torch.utils.checkpoint import checkpoint
 
-from functools import partial
-from itertools import groupby
-
 # helpers
-from makani.models.common import DropPath, LayerScale, MLP, EncoderDecoder, SpectralConv, LearnablePositionEmbedding
+from makani.models.common import DropPath, LayerScale, MLP, EncoderDecoder, SpectralConv, LearnablePositionEmbedding, ConstantImputation, MLPImputation
 from makani.utils.features import get_water_channels, get_channel_groups
 from makani.utils.grids import compute_spherical_bandlimit
 
@@ -45,7 +45,7 @@ from physicsnemo.models.meta import ModelMetaData
 # heuristic for finding theta_cutoff
 def _compute_cutoff_radius(lmax, kernel_shape, basis_type):
     margin_factor = {"piecewise linear": 1.0, "morlet": 1.0, "harmonic": 1.0, "zernike": 1.0}
-    return margin_factor[basis_type] * kernel_shape[0] * math.pi / float(lmax)
+    return margin_factor[basis_type] * (kernel_shape[0] + 0.25) * math.pi / float(lmax)
 
 # commenting out torch.compile due to long intiial compile times
 # @torch.compile
@@ -55,47 +55,10 @@ def _soft_clamp(x: torch.Tensor, offset: float = 0.0):
     y = torch.where(x >= 0.5, x - 0.25, y)
     return y
 
-# helper module to handle imputation of SST
-# class MLPImputer(nn.Module):
-#     def __init__(
-#         self,
-#         inp_chans = 2,
-#         out_chans = 2,
-#         mlp_ratio = 2.0,
-#         activation_function=nn.GELU,
-#     ):
-
-#     self.mlp = EncoderDecoder(
-#         num_layers=1,
-#         input_dim=inp_chans,
-#         output_dim=out_chans,
-#         hidden_dim=int(mlp_ratio * out_chans),
-#         act_layer=activation_function,
-#         input_format="nchw",
-#     )
-
-#     def forward(self, inp, out):
-#         return torch.where(torch.isnan(out), self.mlp(inp), out)
-
-class ConstantImputation(nn.Module):
-    def __init__(
-        self,
-        inp_chans = 2,
-    ):
-        super().__init__()
-
-        self.weight = nn.Parameter(torch.randn(inp_chans, 1, 1))
-
-        if comm.get_size("spatial") > 1:
-            self.weight.is_shared_mp = ["spatial"]
-            self.weight.sharded_dims_mp = [None, None, None]
-
-    def forward(self, x, mask = None):
-        if mask is None:
-            mask = torch.isnan(x)
-        else:
-            mask = torch.logical_or(mask, torch.isnan(x))
-        return torch.where(mask, self.weight, x)
+# heper function to be able to pass Sin as an activation function
+class Sin(nn.Module):
+    def forward(self, x):
+        return torch.sin(x)
 
 class DiscreteContinuousEncoder(nn.Module):
     def __init__(
@@ -302,6 +265,7 @@ class NeuralOperatorBlock(nn.Module):
         kernel_shape=(3, 3),
         basis_type="morlet",
         basis_norm_mode="nodal",
+        lmax=240,
         checkpointing_level=0,
         bias=False,
         stochastic_bias=False,
@@ -325,7 +289,7 @@ class NeuralOperatorBlock(nn.Module):
         if conv_type == "local":
 
             # heuristic for finding theta_cutoff
-            theta_cutoff = _compute_cutoff_radius(lmax=forward_transform.lmax, kernel_shape=kernel_shape, basis_type=basis_type)
+            theta_cutoff = _compute_cutoff_radius(lmax=lmax, kernel_shape=kernel_shape, basis_type=basis_type)
 
             conv_handle = thd.DistributedDiscreteContinuousConvS2 if comm.get_size("spatial") > 1 else th.DiscreteContinuousConvS2
             self.local_conv = conv_handle(
@@ -432,7 +396,7 @@ class NeuralOperatorBlock(nn.Module):
             dx, _ = self.global_conv(x)
         elif hasattr(self, "local_conv"):
             dx = self.local_conv(x)
-        
+
         return dx
 
     def forward(self, x):
@@ -443,7 +407,7 @@ class NeuralOperatorBlock(nn.Module):
         dx = self._conv_forward(x)
 
         if hasattr(self, "bias_std"):
-            n = torch.zeros_like(self.bias_std)
+            n = torch.zeros(*dx.shape[:-2], 1, 1, device=dx.device, dtype=dx.dtype)
             n.normal_(mean=0.0, std=1.0, generator=self.rng_gpu if n.is_cuda else self.rng_cpu)
             dx = dx + self.bias_std * n
 
@@ -503,6 +467,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         mlp_drop_rate=0.0,
         normalization_layer="none",
         hard_thresholding_fraction=0.25,
+        scale_factor=8,
         lmax=None,
         sfno_block_frequency=2,
         big_skip=False,
@@ -529,6 +494,10 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         self.checkpointing_level = checkpointing_level
         self.n_history = n_history
 
+        # compute the downscaled image size
+        self.h = int(self.inp_shape[0] // scale_factor)
+        self.w = int(self.inp_shape[1] // scale_factor)
+
         if normalization_means is not None:
             self.register_buffer("normalization_means", torch.as_tensor(normalization_means))
         if normalization_stds is not None:
@@ -554,6 +523,8 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
             activation_function = nn.GELU
         elif activation_function == "silu":
             activation_function = nn.SiLU
+        elif activation_function == "sin":
+            activation_function = Sin
         else:
             raise ValueError(f"Unknown activation function {activation_function}")
 
@@ -568,6 +539,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
             kernel_shape=kernel_shape,
             basis_type=filter_basis_type,
             basis_norm_mode=filter_basis_norm_mode,
+            lmax=self.lmax,
             activation_function=activation_function,
             groups=math.gcd(self.n_chans, self.embed_dim),
             bias=encoder_bias,
@@ -575,8 +547,11 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         )
 
         if self.sst_channels_in.shape[0] > 0:
-            self.sst_imputation = ConstantImputation(
-                inp_chans=self.sst_channels_in.shape[0],
+            self.sst_imputation = MLPImputation(
+                inp_chans=self.n_chans * (self.n_history + 1),
+                out_chans=self.sst_channels_in.shape[0],
+                mlp_ratio=mlp_ratio,
+                activation_function=activation_function,
             )
 
         # encoder for the auxiliary channels
@@ -591,6 +566,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
                 kernel_shape=kernel_shape,
                 basis_type=filter_basis_type,
                 basis_norm_mode=filter_basis_norm_mode,
+                lmax=self.lmax,
                 activation_function=activation_function,
                 groups=math.gcd(self.n_aux_chans, self.aux_embed_dim),
                 bias=encoder_bias,
@@ -609,7 +585,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
             kernel_shape=kernel_shape,
             basis_type=filter_basis_type,
             basis_norm_mode=filter_basis_norm_mode,
-            theta_cutoff_factor=0.5,
+            lmax=self.lmax,
             activation_function=activation_function,
             groups=math.gcd(self.n_chans, self.embed_dim),
             bias=encoder_bias,
@@ -655,6 +631,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
                 kernel_shape=kernel_shape,
                 basis_type=filter_basis_type,
                 basis_norm_mode=filter_basis_norm_mode,
+                lmax=self.lmax,
                 checkpointing_level=checkpointing_level,
                 bias=bias,
                 stochastic_bias=stochastic_bias,
@@ -705,14 +682,14 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
             lmax = int(lmax * hard_thresholding_fraction)
         self.lmax = lmax
 
-        if sht_grid_type == "equiangular":
-            self.h = 2 * self.lmax + 1
-            self.w = 2 * self.lmax
-        elif sht_grid_type == "legendre-gauss":
-            self.h = self.lmax + 1
-            self.w = 2 * self.lmax
-        else:
-            raise ValueError(f"Unknown SHT grid type {sht_grid_type}")
+        # if sht_grid_type == "equiangular":
+        #     self.h = self.lmax + 1
+        #     self.w = 2 * self.lmax
+        # elif sht_grid_type == "legendre-gauss":
+        #     self.h = self.lmax + 1
+        #     self.w = 2 * self.lmax
+        # else:
+        #     raise ValueError(f"Unknown SHT grid type {sht_grid_type}")
 
         sht_handle = th.RealSHT
         isht_handle = th.InverseRealSHT
@@ -816,7 +793,6 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
             dyn_aux_chans += [(c + ih*n_dyn_chans) for c in dyn_aux_chans]
         # account for the history offset in the static aux channels
         stat_aux_chans = [c + n_history*n_dyn_chans for c in stat_aux_chans]
-        lsml_chans = [c + n_history*n_dyn_chans for c in lsml_chans]
 
         self.register_buffer("atmo_channels_in", torch.LongTensor(atmo_chans_in), persistent=False)
         self.register_buffer("atmo_channels_out", torch.LongTensor(atmo_chans), persistent=False)
@@ -838,13 +814,6 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         forward pass for the encoder
         """
         batchdims = x.shape[:-3]
-
-        if hasattr(self, "sst_imputation"):
-            if self.land_mask_channels.nelement() > 0:
-                mask = x[..., self.land_mask_channels, :, :]
-            else:
-                mask = None
-            x[..., self.sst_channels_in, :, :] = self.sst_imputation(x[..., self.sst_channels_in, :, :], mask=mask)
 
         x = x[..., self.in_channels, :, :].reshape(-1, 1 + self.n_history, self.n_chans, *x.shape[-2:])
         # move the history backwards and fold it into the channel dimension
@@ -928,6 +897,15 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         return x
 
     def forward(self, x):
+
+        # start by imputing the SST channels if applicable
+        if hasattr(self, "sst_imputation"):
+            if self.land_mask_channels.nelement() > 0:
+                # get a land mask that is broadcastable to the input shape
+                mask = x[..., self.land_mask_channels, :, :].unsqueeze(-3)
+            else:
+                mask = None
+            x[..., self.sst_channels_in, :, :] = self.sst_imputation(x, mask=mask)
 
         # save big skip
         if self.big_skip:
