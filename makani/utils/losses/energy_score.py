@@ -84,11 +84,15 @@ class L2EnergyScoreLoss(GeometricBaseLoss):
 
     @property
     def n_channels(self):
-        return 1
+        return 1 if self.channel_reduction else len(self.channel_names)
 
     @torch.compiler.disable(recursive=False)
     def compute_channel_weighting(self, channel_weight_type: str, time_diff_scale: str) -> torch.Tensor:
-        return torch.ones(1)
+        if self.channel_reduction:
+            chw = torch.ones(1)
+        else:
+            chw = super().compute_channel_weighting(channel_weight_type, time_diff_scale)
+        return chw
 
     def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, spatial_weights: Optional[torch.Tensor] = None) -> torch.Tensor:
 
@@ -266,7 +270,6 @@ class SobolevEnergyScoreLoss(SpectralBaseLoss):
         lm_weights = (self.offset + self.relative_weight * l_weights * (l_weights + 1)).pow(self.fraction) * m_weights
 
         # split the tensors along all dimensions:
-        lm_weights = l_weights * m_weights
         if self.spatial_distributed and comm.get_size("h") > 1:
             lm_weights = split_tensor_along_dim(lm_weights, dim=-2, num_chunks=comm.get_size("h"))[comm.get_rank("h")]
         if self.spatial_distributed and comm.get_size("w") > 1:
@@ -285,7 +288,11 @@ class SobolevEnergyScoreLoss(SpectralBaseLoss):
 
     @torch.compiler.disable(recursive=False)
     def compute_channel_weighting(self, channel_weight_type: str, time_diff_scale: str) -> torch.Tensor:
-        return torch.ones(1)
+        if self.channel_reduction:
+            chw = torch.ones(1)
+        else:
+            chw = super().compute_channel_weighting(channel_weight_type, time_diff_scale)
+        return chw
 
     def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, ensemble_weights: Optional[torch.Tensor] = None) -> torch.Tensor:
 
@@ -441,7 +448,11 @@ class SpectralL2EnergyScoreLoss(SpectralBaseLoss):
 
     @torch.compiler.disable(recursive=False)
     def compute_channel_weighting(self, channel_weight_type: str, time_diff_scale: str) -> torch.Tensor:
-        return torch.ones(1)
+        if self.channel_reduction:
+            chw = torch.ones(1)
+        else:
+            chw = super().compute_channel_weighting(channel_weight_type, time_diff_scale)
+        return chw
 
     def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, ensemble_weights: Optional[torch.Tensor] = None) -> torch.Tensor:
 
@@ -611,11 +622,15 @@ class SpectralCoherenceLoss(SpectralBaseLoss):
 
     @property
     def n_channels(self):
-        return 1
+        return 1 if self.channel_reduction else len(self.channel_names)
 
     @torch.compiler.disable(recursive=False)
     def compute_channel_weighting(self, channel_weight_type: str, time_diff_scale: str) -> torch.Tensor:
-        return torch.ones(1)
+        if self.channel_reduction:
+            chw = torch.ones(1)
+        else:
+            chw = super().compute_channel_weighting(channel_weight_type, time_diff_scale)
+        return chw
 
     def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, ensemble_weights: Optional[torch.Tensor] = None) -> torch.Tensor:
 

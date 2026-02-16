@@ -139,6 +139,7 @@ class LossHandler(nn.Module):
             self.loss_fn.append(loss_fn)
             self.loss_requires_input.append(requires_input)
 
+            # TODO: the entire channel weighting logic should be moved to the loss function base class
             # determine channel weighting
             if "channel_weights" not in loss.keys():
                 channel_weight_type = "constant"
