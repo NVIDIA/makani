@@ -25,29 +25,39 @@ class MLPImputation(nn.Module):
     def __init__(
         self,
         inp_chans: int = 2,
-        out_chans: int = 2,
+        inpute_chans: torch.Tensor = torch.tensor([0]),
         mlp_ratio: float = 2.0,
         activation_function: nn.Module = nn.GELU,
     ):
         super().__init__()
 
+        self.inp_chans = inp_chans
+        self.inpute_chans = inpute_chans
+        self.out_chans = inpute_chans.shape[0]
+
         self.mlp = EncoderDecoder(
             num_layers=1,
-            input_dim=inp_chans,
-            output_dim=out_chans,
-            hidden_dim=int(mlp_ratio * out_chans),
+            input_dim=self.inp_chans,
+            output_dim=self.out_chans,
+            hidden_dim=int(mlp_ratio * self.out_chans),
             act_layer=activation_function,
             input_format="nchw",
         )
 
     def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None):
         if mask is None:
-            mask = torch.isnan(x)
+            mask = torch.isnan(x[..., self.inpute_chans, :, :])
         else:
-            mask = torch.logical_or(mask, torch.isnan(x))
+            mask = torch.logical_or(mask, torch.isnan(x[..., self.inpute_chans, :, :]))
 
-        x = torch.where(mask, 0.0, x)
-        x = torch.where(mask, self.mlp(x), x)
+        x[..., self.inpute_chans, :, :] = torch.where(mask, 0.0, x[..., self.inpute_chans, :, :])
+
+        # flatten extra batch dims for Conv2d compatibility
+        batch_shape = x.shape[:-3]
+        x_flat = x.reshape(-1, *x.shape[-3:])
+        mlp_out = self.mlp(x_flat).reshape(*batch_shape, self.out_chans, *x_flat.shape[-2:])
+
+        x[..., self.inpute_chans, :, :] = torch.where(mask, mlp_out, x[..., self.inpute_chans, :, :])
 
         return x
 
