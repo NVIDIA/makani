@@ -114,6 +114,8 @@ class MetricRollout:
 
         if wgt is not None:
             wgtt = wgt[..., self.channel_mask, :, :]
+        else:
+            wgtt = None
 
         # compute metric
         metric = self.metric_func(inpp, tarp, wgtt)
