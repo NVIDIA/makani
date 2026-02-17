@@ -55,6 +55,9 @@ class MetricRollout:
         self.metric_type = self.metric_func.type
         #self.metric_func = torch.compile(self.metric_func, mode="max-autotune-no-cudagraphs")
 
+        if self.metric_func.batch_reduction == "none":
+            raise ValueError(f"Batch reduction mode 'none' is not supported for rollout handlers")
+
         # get mapping from channels to all channels
         self.channel_mask = [channel_names.index(c) for c in metric_channels]
 

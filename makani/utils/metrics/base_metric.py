@@ -108,9 +108,23 @@ class GeometricBaseMetric(nn.Module, metaclass=ABCMeta):
 
     def compute_counts(self, inp: torch.Tensor, weight: Optional[torch.Tensor] = None) -> torch.Tensor:
         if weight is not None:
-            counts = torch.sum(self.quadrature(weight), dim=0)
+            if self.batch_reduction == "mean":
+                raise ValueError(f"Batch reduction mode 'mean' is not supported when weights are provided. Use 'sum' instead.")
+            elif self.batch_reduction == "sum":
+                counts = torch.sum(self.quadrature(weight), dim=0)
+            else:
+                raise ValueError(f"Batch reduction mode '{self.batch_reduction}' is not supported")
         else:
-            counts = torch.full(size=(inp.shape[1],), fill_value=inp.shape[0], device=inp.device, dtype=inp.dtype)
+            if self.batch_reduction == "mean":
+                counts = torch.ones(size=(inp.shape[1],), device=inp.device, dtype=inp.dtype)
+            elif self.batch_reduction == "sum":
+                counts = torch.full(size=(inp.shape[1],), fill_value=inp.shape[0], device=inp.device, dtype=inp.dtype)
+
+        if self.channel_reduction == "mean":
+            counts = torch.mean(counts, dim=0)
+        elif self.channel_reduction == "sum":
+            counts = torch.sum(counts, dim=0)
+
         return counts
 
     def combine(self, vals: torch.Tensor, counts: torch.Tensor, dim: Optional[int]=0) -> Tuple[torch.Tensor, torch.Tensor]:
