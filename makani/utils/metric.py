@@ -49,10 +49,14 @@ class MetricRollout:
         # it will be inserted after the channels dim
         self.aux_shape = aux_shape
         self.aux_shape_finalized = aux_shape_finalized
+        self.num_welford_steps = 0
 
         # instantiate handle
         self.metric_func = metric_handle().to(self.device)
         self.metric_type = self.metric_func.type
+
+        if self.metric_func.batch_reduction == "none":
+            raise ValueError(f"Batch reduction 'none' is not supported for rollout handlers")
         #self.metric_func = torch.compile(self.metric_func, mode="max-autotune-no-cudagraphs")
 
         # get mapping from channels to all channels
@@ -101,6 +105,7 @@ class MetricRollout:
             self.rollout_counter.fill_(0.0)
             if self.integrate:
                 self.rollout_integral.fill_(0.0)
+        self.num_welford_steps = 0
         return
 
     def update(self, inp: torch.Tensor, tar: torch.Tensor, idt: int, wgt: Optional[torch.Tensor] = None):
@@ -122,6 +127,7 @@ class MetricRollout:
         vals = torch.stack([self.rollout_curve[idt, ...], metric], dim=0)
         counts = torch.stack([self.rollout_counter[idt, ...], counts_new], dim=0)
         vals, counts = self.metric_func.combine(vals, counts, dim=0)
+        self.num_welford_steps += 1
         self.rollout_curve[idt, ...].copy_(vals)
         self.rollout_counter[idt, ...].copy_(counts)
 
@@ -163,6 +169,8 @@ class MetricRollout:
         # sum here
         with torch.no_grad():
             rollout_curve_normalized = self.metric_func.finalize(self.rollout_curve, self.rollout_counter)
+            if self.metric_func.batch_reduction == "mean":
+                rollout_curve_normalized = rollout_curve_normalized * float(self.num_welford_steps)
 
             # copy to host
             self.rollout_curve_cpu.copy_(rollout_curve_normalized, non_blocking=non_blocking)

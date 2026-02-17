@@ -38,9 +38,18 @@ from ..testutils import disable_tf32, compare_arrays
 
 # because of physicsnemo/NCCL tear down issues, we can only run one test at a time
 _metric_handler_params = [
-    ("equiangular", 4, 16, 3, "mean"),
-    #("equiangular", 4, 16, 3, "sum"),
+    #("equiangular", 4, 16, 3, "mean"),
+    ("equiangular", 4, 16, 3, "sum"),
 ]
+
+def setUpModule():
+    from mpi4py import MPI
+    return
+
+def tearDownModule():
+    from mpi4py import MPI
+    MPI.Finalize() #is called in finalize_mpi_session (tearDownClass)
+    return
 
 class TestDistributedMetricHandler(unittest.TestCase):
 
@@ -72,7 +81,6 @@ class TestDistributedMetricHandler(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.tmpdir.cleanup()
-
 
     def _init_comms(self):
         

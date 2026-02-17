@@ -56,10 +56,10 @@ def _welford_reduction_helper(vals, counts, batch_reduction, dim):
     elif batch_reduction == "sum":
         # results were sum reduced
         vals_res = torch.sum(vals, dim=dim)
-    else:
-        # results were not reduced
-        vals_res = vals
-        counts_res = counts
+    elif batch_reduction == "none":
+        # results were not reduced, so just flatten the tensors
+        vals_res = vals.flatten(0, 1)
+        counts_res = counts.flatten(0, 1)
 
     return vals_res, counts_res
 
@@ -107,10 +107,27 @@ class GeometricBaseMetric(nn.Module, metaclass=ABCMeta):
         return LossType.Deterministic
 
     def compute_counts(self, inp: torch.Tensor, weight: Optional[torch.Tensor] = None) -> torch.Tensor:
+
+        # input shape should be B,C,H,W
+
+        # we always do spatial reduction
         if weight is not None:
-            counts = torch.sum(self.quadrature(weight), dim=0)
+            counts = self.quadrature(weight)
         else:
-            counts = torch.full(size=(inp.shape[1],), fill_value=inp.shape[0], device=inp.device, dtype=inp.dtype)
+            counts = torch.ones(size=(inp.shape[0], inp.shape[1]), device=inp.device, dtype=inp.dtype)
+
+        # do batch reduction
+        if self.batch_reduction == "sum":
+            counts = torch.sum(counts, dim=0)
+        elif self.batch_reduction == "mean":
+            counts = torch.mean(counts, dim=0)
+
+        # do channel reduction
+        if self.channel_reduction == "sum":
+            counts = torch.sum(counts, dim=-1)
+        elif self.channel_reduction == "mean":
+            counts = torch.mean(counts, dim=-1)
+
         return counts
 
     def combine(self, vals: torch.Tensor, counts: torch.Tensor, dim: Optional[int]=0) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -141,7 +158,7 @@ class GeometricBaseMetric(nn.Module, metaclass=ABCMeta):
         vals_res, counts_res = _welford_reduction_helper(vals, counts, self.batch_reduction, dim=dim)
         return vals_res, counts_res
 
-    def finalize(self, vals: torch.Tensor, counts: torch.Tensor) -> torch.Tensor:
+    def finalize(self, vals: torch.Tensor, counts: torch.Tensor, num_welford_steps: int) -> torch.Tensor:
         """
         Defines how to compute a final average from vals and counts.
 
@@ -150,18 +167,21 @@ class GeometricBaseMetric(nn.Module, metaclass=ABCMeta):
         vals : torch.Tensor
             Tensor containing values.
         counts : torch.Tensor
-            Singleton tensor containing counts.
+            Tensor containing counts.
 
         Returns
         -------
         vals_res : torch.Tensor 
             Values with correct averaging over counts.
         """
-        print(f"vals.shape: {vals.shape}, counts.shape: {counts.shape}")
         if self.batch_reduction == "mean":
-            return vals
+            fact = float(num_welford_steps)
         else:
-            return vals / counts
+            fact = 1.0
+
+        result =  vals * fact / counts
+        
+        return result
 
     @abstractmethod
     def forward(self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None) -> torch.Tensor:
