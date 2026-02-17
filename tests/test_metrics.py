@@ -28,7 +28,15 @@ import xskillscore as xs
 
 from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature
 from makani.utils import MetricsHandler
-from makani.utils.metrics.functions import GeometricL1, GeometricRMSE, GeometricACC, GeometricCRPS, GeometricSSR, GeometricRankHistogram
+from makani.utils.metrics.functions import (
+    GeometricL1, 
+    GeometricRMSE, 
+    GeometricACC, 
+    GeometricSpread, 
+    GeometricCRPS, 
+    GeometricSSR, 
+    GeometricRankHistogram,
+)
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from .testutils import disable_tf32, get_default_parameters, compare_arrays
@@ -118,6 +126,13 @@ _probabilistic_metric_aggregation_params = [
     (GeometricCRPS, "equiangular", *(4, 16, 21, 17, 32), "sum", "sum"),
     (GeometricCRPS, "equiangular", *(4, 16, 21, 17, 32), "none", "mean"),
     (GeometricCRPS, "equiangular", *(4, 16, 21, 17, 32), "none", "sum"),
+    # Geometric Spread
+    (GeometricSpread, "equiangular", *(4, 16, 21, 17, 32), "mean", "mean"),
+    (GeometricSpread, "equiangular", *(4, 16, 21, 17, 32), "mean", "sum"),
+    (GeometricSpread, "equiangular", *(4, 16, 21, 17, 32), "sum", "mean"),
+    (GeometricSpread, "equiangular", *(4, 16, 21, 17, 32), "sum", "sum"),
+    (GeometricSpread, "equiangular", *(4, 16, 21, 17, 32), "none", "mean"),
+    (GeometricSpread, "equiangular", *(4, 16, 21, 17, 32), "none", "sum"),
     # Geometric SSR
     (GeometricSSR, "equiangular", *(4, 16, 21, 17, 32), "mean", "mean"),
     (GeometricSSR, "equiangular", *(4, 16, 21, 17, 32), "mean", "sum"),
@@ -131,6 +146,25 @@ _probabilistic_metric_aggregation_params = [
     (GeometricRankHistogram, "equiangular", *(4, 16, 21, 17, 32), "sum", "mean"),
     (GeometricRankHistogram, "equiangular", *(4, 16, 21, 17, 32), "sum", "sum"),
     (GeometricRankHistogram, "equiangular", *(4, 16, 21, 17, 32), "none", "mean"),
+    (GeometricRankHistogram, "equiangular", *(4, 16, 21, 17, 32), "none", "sum"),
+]
+
+_probabilistic_metric_weighted_aggregation_params = [
+    # Geometric CRPS
+    (GeometricCRPS, "equiangular", *(4, 16, 21, 17, 32), "mean", "sum"),
+    (GeometricCRPS, "equiangular", *(4, 16, 21, 17, 32), "sum", "sum"),
+    (GeometricCRPS, "equiangular", *(4, 16, 21, 17, 32), "none", "sum"),
+    # Geometric Spread
+    (GeometricSpread, "equiangular", *(4, 16, 21, 17, 32), "mean", "sum"),
+    (GeometricSpread, "equiangular", *(4, 16, 21, 17, 32), "sum", "sum"),
+    (GeometricSpread, "equiangular", *(4, 16, 21, 17, 32), "none", "sum"),
+    # Geometric SSR
+    (GeometricSSR, "equiangular", *(4, 16, 21, 17, 32), "mean", "sum"),
+    (GeometricSSR, "equiangular", *(4, 16, 21, 17, 32), "sum", "sum"),
+    (GeometricSSR, "equiangular", *(4, 16, 21, 17, 32), "none", "sum"),
+    # Geometric Rank Histogram
+    (GeometricRankHistogram, "equiangular", *(4, 16, 21, 17, 32), "mean", "sum"),
+    (GeometricRankHistogram, "equiangular", *(4, 16, 21, 17, 32), "sum", "sum"),
     (GeometricRankHistogram, "equiangular", *(4, 16, 21, 17, 32), "none", "sum"),
 ]
 
@@ -467,6 +501,44 @@ class TestMetricsAggregation(unittest.TestCase):
 
         # compare
         self.assertTrue(compare_arrays("probabilistic aggregation", res_full.cpu().numpy(), res_split.cpu().numpy(), rtol=1e-6, atol=1e-6, verbose=verbose))
+
+    @parameterized.expand(_probabilistic_metric_weighted_aggregation_params, skip_on_empty=True)
+    def test_probabilistic_aggregation_weighted(self, metric_handle, grid_type, batch_size, ensemble_size, num_channels, nlat, nlon, cred, bred, verbose=False):
+        """Same as test_probabilistic_aggregation but with a spatial weight tensor (0/1 mask) at every step."""
+        num_rollout_steps = 10
+        batch_size_nsteps = num_rollout_steps * batch_size
+
+        metric_func = metric_handle(grid_type=grid_type, img_shape=(nlat, nlon), crop_shape=(nlat, nlon), crop_offset=(0, 0), crps_type="skillspread", normalize=True, channel_reduction=cred, batch_reduction=bred).to(self.device)
+
+        inp = torch.randn((batch_size_nsteps, ensemble_size, num_channels, nlat, nlon), dtype=torch.float32, device=self.device)
+        tar = torch.randn((batch_size_nsteps, num_channels, nlat, nlon), dtype=torch.float32, device=self.device)
+
+        # spatial weight: 0/1 mask, same ndim as observations (no ensemble dim)
+        weight_full = (torch.rand(batch_size_nsteps, num_channels, nlat, nlon, device=self.device, dtype=torch.float32) > 0.5)
+
+        res_full = metric_func(inp, tar, weight=weight_full)
+        counts_full = metric_func.compute_counts(inp, weight=weight_full)
+        res_full = metric_func.finalize(res_full, counts_full)
+
+        inp_split = torch.split(inp, batch_size, dim=0)
+        tar_split = torch.split(tar, batch_size, dim=0)
+        weight_split = torch.split(weight_full, batch_size, dim=0)
+
+        res_split = metric_func(inp_split[0], tar_split[0], weight=weight_split[0])
+        counts_split = metric_func.compute_counts(inp_split[0], weight=weight_split[0])
+        print("res_split.shape: ", res_split.shape, "counts_split.shape: ", counts_split.shape)
+        for inps, tars, weights in zip(inp_split[1:], tar_split[1:], weight_split[1:]):
+            res_tmp = metric_func(inps, tars, weight=weights)
+            res_tmp = torch.stack([res_split, res_tmp], dim=0)
+            counts_tmp = metric_func.compute_counts(inps, weight=weights)
+            print("res_tmp.shape: ", res_tmp.shape, "counts_tmp.shape: ", counts_tmp.shape)
+            counts_tmp = torch.stack([counts_split, counts_tmp], dim=0)
+            res_split, counts_split = metric_func.combine(res_tmp, counts_tmp, dim=0)
+            print("after combine: res_split.shape: ", res_split.shape, "counts_split.shape: ", counts_split.shape)
+
+        res_split = metric_func.finalize(res_split, counts_split)
+
+        self.assertTrue(compare_arrays("probabilistic aggregation weighted", res_full.cpu().numpy(), res_split.cpu().numpy(), rtol=1e-6, atol=1e-6, verbose=verbose))
 
         
 class TestMetricsHandler(unittest.TestCase):
