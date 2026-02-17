@@ -113,16 +113,16 @@ class MetricRollout:
         tarp = tar[..., self.channel_mask, :, :]
 
         if wgt is not None:
-            wgt = wgt[..., self.channel_mask, :, :]
+            wgtt = wgt[..., self.channel_mask, :, :]
 
         # compute metric
-        metric = self.metric_func(inpp, tarp, wgt)
+        metric = self.metric_func(inpp, tarp, wgtt)
 
         if hasattr(self, "scale"):
             metric = metric * self.scale
 
         # compute counts
-        counts_new = self.metric_func.compute_counts(inpp, wgt)
+        counts_new = self.metric_func.compute_counts(inpp, wgtt)
 
         # stack with previous values and counts
         vals = torch.stack([self.rollout_curve[idt, ...], metric], dim=0)
