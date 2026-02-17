@@ -171,7 +171,6 @@ class GeometricBaseMetric(nn.Module, metaclass=ABCMeta):
         vals_res : torch.Tensor 
             Values with correct averaging over counts.
         """
-        print(f"vals.shape: {vals.shape}, counts.shape: {counts.shape}")
         if self.batch_reduction == "mean":
             return vals
         else:

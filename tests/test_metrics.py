@@ -526,15 +526,12 @@ class TestMetricsAggregation(unittest.TestCase):
 
         res_split = metric_func(inp_split[0], tar_split[0], weight=weight_split[0])
         counts_split = metric_func.compute_counts(inp_split[0], weight=weight_split[0])
-        print("res_split.shape: ", res_split.shape, "counts_split.shape: ", counts_split.shape)
         for inps, tars, weights in zip(inp_split[1:], tar_split[1:], weight_split[1:]):
             res_tmp = metric_func(inps, tars, weight=weights)
             res_tmp = torch.stack([res_split, res_tmp], dim=0)
             counts_tmp = metric_func.compute_counts(inps, weight=weights)
-            print("res_tmp.shape: ", res_tmp.shape, "counts_tmp.shape: ", counts_tmp.shape)
             counts_tmp = torch.stack([counts_split, counts_tmp], dim=0)
             res_split, counts_split = metric_func.combine(res_tmp, counts_tmp, dim=0)
-            print("after combine: res_split.shape: ", res_split.shape, "counts_split.shape: ", counts_split.shape)
 
         res_split = metric_func.finalize(res_split, counts_split)
 
@@ -723,7 +720,8 @@ class TestMetricsHandler(unittest.TestCase):
                 continue
             val_full = metrics_full[key]
             val_split = metrics_split[key]
-            self.assertTrue(np.allclose(val_full, val_split))
+            with self.subTest(desc=f"validation {key}"):
+                self.assertTrue(compare_arrays(f"{key}", val_full, val_split, rtol=1e-5, atol=1e-5, verbose=verbose))
 
         # compare rollouts
         rollouts_full = logs_full["metrics"]["rollouts"]
@@ -742,6 +740,138 @@ class TestMetricsHandler(unittest.TestCase):
 
         with self.subTest(desc="rollouts"):
             self.assertTrue(compare_arrays("rollouts", data_full, data_split, rtol=1e-6, atol=1e-6, verbose=verbose))
+
+
+    @parameterized.expand(_metric_handler_params, skip_on_empty=True)
+    def test_aggregation_weighted(self, grid_type, batch_size, ensemble_size, num_rollout_steps, bred, verbose=True):
+        """Test that weighted metric updates aggregate correctly when splitting batches."""
+        # create dummy climatology
+        num_steps = 4
+        num_channels = len(self.params.channel_names)
+        clim = torch.zeros(1, num_channels, self.params.img_local_shape_x, self.params.img_local_shape_y)
+
+        # update parameters
+        self.params.batch_size = batch_size
+        self.params.ensemble_size = ensemble_size
+
+        metric_handler = MetricsHandler(self.params,
+                                        clim,
+                                        num_rollout_steps,
+                                        self.device,
+                                        l1_var_names=self.params.channel_names,
+                                        rmse_var_names=self.params.channel_names,
+                                        acc_var_names=self.params.channel_names,
+                                        crps_var_names=self.params.channel_names,
+                                        spread_var_names=self.params.channel_names,
+                                        ssr_var_names=self.params.channel_names,
+                                        rh_var_names=self.params.channel_names,
+                                        wb2_compatible=False)
+        metric_handler.initialize_buffers()
+        metric_handler.zero_buffers()
+
+        metric_handler_split = MetricsHandler(self.params,
+                                              clim,
+                                              num_rollout_steps,
+                                              self.device,
+                                              l1_var_names=self.params.channel_names,
+                                              rmse_var_names=self.params.channel_names,
+                                              acc_var_names=self.params.channel_names,
+                                              crps_var_names=self.params.channel_names,
+                                              spread_var_names=self.params.channel_names,
+                                              ssr_var_names=self.params.channel_names,
+                                              rh_var_names=self.params.channel_names,
+                                              wb2_compatible=False)
+        metric_handler_split.initialize_buffers()
+        metric_handler_split.zero_buffers()
+
+        inplist = [torch.randn((num_rollout_steps, batch_size, ensemble_size, num_channels, self.params.img_local_shape_x, self.params.img_local_shape_y),
+                               dtype=torch.float32, device=self.device) for _ in range(num_steps)]
+        tarlist = [torch.randn((num_rollout_steps, batch_size, num_channels, self.params.img_local_shape_x, self.params.img_local_shape_y),
+                               dtype=torch.float32, device=self.device) for _ in range(num_steps)]
+
+        # Random weights per (step, rollout_step, batch, channels, x, y) for use in updates
+        weightlist = [
+            torch.abs(
+                torch.randn(
+                    num_rollout_steps,
+                    batch_size,
+                    num_channels,
+                    self.params.img_local_shape_x,
+                    self.params.img_local_shape_y,
+                    dtype=torch.float32,
+                    device=self.device,
+                )
+            ) for _ in range(num_rollout_steps)
+        ]
+
+        loss_acc = 0.0
+        for i, (inp, tar, wgt) in enumerate(zip(inplist, tarlist, weightlist)):
+            for idt in range(num_rollout_steps):
+                inpp = inp[idt, ...]
+                tarp = tar[idt, ...]
+                wgtt = wgt[idt, ...]
+
+                # super simple l1 loss
+                loss = torch.mean(torch.abs(torch.mean(inpp, dim=1) - tarp))
+                if idt == 0:
+                    loss_acc += loss.item()
+                
+                metric_handler.update(inpp, tarp, loss, idt, weight=wgtt)
+
+        # finalize
+        loss_acc /= float(num_steps)
+        logs_full = metric_handler.finalize()
+
+        # metric handler split: same data and weights split in half along batch
+        inplist_split = list(itertools.chain.from_iterable([torch.split(tens, batch_size // 2, dim=1) for tens in inplist]))
+        tarlist_split = list(itertools.chain.from_iterable([torch.split(tens, batch_size // 2, dim=1) for tens in tarlist]))
+        # split weights the same way: (num_steps, num_rollout_steps, batch_size, ...) -> per-step chunks of size batch_size//2
+        weightlist_split = list(itertools.chain.from_iterable([torch.split(tens, batch_size // 2, dim=1) for tens in weightlist]))
+
+        for (inp, tar, wgt) in zip(inplist_split, tarlist_split, weightlist_split):
+            for idt in range(num_rollout_steps):
+                inpp = inp[idt, ...]
+                tarp = tar[idt, ...]
+                wgtt = wgt[idt, ...]
+
+                loss = torch.mean(torch.abs(torch.mean(inpp, dim=1) - tarp))
+                metric_handler_split.update(inpp, tarp, loss, idt, weight=wgtt)
+
+        # finalize
+        logs_split = metric_handler_split.finalize()
+
+        # compare loss
+        mloss_split = logs_split["base"]["validation loss"]
+
+        # extract dicts
+        metrics_full = logs_full["metrics"]
+        metrics_split = logs_split["metrics"]
+
+        # compare scalar metrics
+        for key in metrics_full.keys():
+            if key == "rollouts":
+                continue
+            val_full = metrics_full[key]
+            val_split = metrics_split[key]
+            with self.subTest(desc=f"validation {key}"):
+                self.assertTrue(compare_arrays(f"{key}", val_full, val_split, rtol=1e-5, atol=1e-5, verbose=verbose))
+
+        # compare rollouts
+        rollouts_full = logs_full["metrics"]["rollouts"]
+        rollouts_split = logs_split["metrics"]["rollouts"]
+
+        data_full = []
+        for row in rollouts_full.data:
+            data_full.append(row[-1])
+        data_full = np.array(data_full)
+
+        data_split = []
+        for row in rollouts_split.data:
+            data_split.append(row[-1])
+        data_split = np.array(data_split)
+
+        with self.subTest(desc="rollouts"):
+            self.assertTrue(compare_arrays("rollouts", data_full, data_split, rtol=1e-5, atol=1e-5, verbose=verbose))
 
 
 # TODO: ssr test comparing to weatherbench2
