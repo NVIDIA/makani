@@ -99,8 +99,8 @@ class AutoencoderTrainer(Driver):
         self.valid_dataloader, self.valid_dataset, self.valid_sampler = get_dataloader(self.params, self.params.valid_data_path, mode="eval", device=self.device)
         self._set_data_shapes(self.params, self.valid_dataset)
         # obtain the true lon lat grid after cropping and resampling
-        self.lat_global = torch.as_tensor(self.valid_dataloader.dataset.lat_lon_local[0]).to(self.device)
-        self.lon_global = torch.as_tensor(self.valid_dataloader.dataset.lat_lon_local[1]).to(self.device)
+        self.lat_global = torch.as_tensor(self.valid_dataset.lat_lon_local[0]).to(self.device)
+        self.lon_global = torch.as_tensor(self.valid_dataset.lat_lon_local[1]).to(self.device)
         if comm.get_size("h") > 1:
             self.lat_global = gather_uneven(self.lat_global, 0, "h")
         if comm.get_size("w") > 1:
