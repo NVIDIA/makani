@@ -28,7 +28,7 @@ import xskillscore as xs
 
 from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature
 from makani.utils import MetricsHandler
-from makani.utils.metrics.functions import GeometricL1, GeometricRMSE, GeometricACC, GeometricPCC, GeometricCRPS, GeometricSSR, GeometricRankHistogram, Quadrature
+from makani.utils.metrics.functions import GeometricL1, GeometricRMSE, GeometricACC, GeometricCRPS, GeometricSSR, GeometricRankHistogram
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from .testutils import disable_tf32, get_default_parameters, compare_arrays
@@ -72,36 +72,65 @@ _wb2_metrics_params = [
 ]
 
 _deterministic_metric_aggregation_params = [
+    # GeometricL1
     (GeometricL1, "equiangular", *(4, 21, 17, 32), "mean", "mean"),
+    (GeometricL1, "equiangular", *(4, 21, 17, 32), "mean", "sum"),
+    (GeometricL1, "equiangular", *(4, 21, 17, 32), "sum", "mean"),
+    (GeometricL1, "equiangular", *(4, 21, 17, 32), "sum", "sum"),
     (GeometricL1, "equiangular", *(4, 21, 17, 32), "none", "mean"),
+    (GeometricL1, "equiangular", *(4, 21, 17, 32), "none", "sum"),
+    # GeometricRMSE
+    (GeometricRMSE, "equiangular", *(4, 21, 17, 32), "mean", "mean"),
+    (GeometricRMSE, "equiangular", *(4, 21, 17, 32), "mean", "sum"),
+    (GeometricRMSE, "equiangular", *(4, 21, 17, 32), "sum", "mean"),
+    (GeometricRMSE, "equiangular", *(4, 21, 17, 32), "sum", "sum"),
+    (GeometricRMSE, "equiangular", *(4, 21, 17, 32), "none", "mean"),
+    (GeometricRMSE, "equiangular", *(4, 21, 17, 32), "none", "sum"),
+    # ACC
+    (GeometricACC, "equiangular", *(4, 21, 17, 32), "mean", "mean"),
+    (GeometricACC, "equiangular", *(4, 21, 17, 32), "mean", "sum"),
+    (GeometricACC, "equiangular", *(4, 21, 17, 32), "sum", "mean"),
+    (GeometricACC, "equiangular", *(4, 21, 17, 32), "sum", "sum"),
+    (GeometricACC, "equiangular", *(4, 21, 17, 32), "none", "mean"),
+    (GeometricACC, "equiangular", *(4, 21, 17, 32), "none", "sum"),
+]
+
+_deterministic_metric_weighted_aggregation_params = [
+    # GeometricL1
+    (GeometricL1, "equiangular", *(4, 21, 17, 32), "mean", "sum"),
     (GeometricL1, "equiangular", *(4, 21, 17, 32), "sum", "sum"),
     (GeometricL1, "equiangular", *(4, 21, 17, 32), "none", "sum"),
-    (GeometricRMSE, "equiangular", *(4, 21, 17, 32), "mean", "mean"),
-    (GeometricRMSE, "equiangular", *(4, 21, 17, 32), "none", "mean"),
+    # # GeometricRMSE
+    (GeometricRMSE, "equiangular", *(4, 21, 17, 32), "mean", "sum"),
     (GeometricRMSE, "equiangular", *(4, 21, 17, 32), "sum", "sum"),
     (GeometricRMSE, "equiangular", *(4, 21, 17, 32), "none", "sum"),
-    (GeometricACC, "equiangular", *(4, 21, 17, 32), "mean", "mean"),
-    (GeometricACC, "equiangular", *(4, 21, 17, 32), "none", "mean"),
+    # ACC
+    (GeometricACC, "equiangular", *(4, 21, 17, 32), "mean", "sum"),
     (GeometricACC, "equiangular", *(4, 21, 17, 32), "sum", "sum"),
     (GeometricACC, "equiangular", *(4, 21, 17, 32), "none", "sum"),
-    (GeometricPCC, "equiangular", *(4, 21, 17, 32), "mean", "mean"),
-    (GeometricPCC, "equiangular", *(4, 21, 17, 32), "none", "mean"),
-    (GeometricPCC, "equiangular", *(4, 21, 17, 32), "sum", "sum"),
-    (GeometricPCC, "equiangular", *(4, 21, 17, 32), "none", "sum"),
 ]
 
 _probabilistic_metric_aggregation_params = [
+    # Geometric CRPS
     (GeometricCRPS, "equiangular", *(4, 16, 21, 17, 32), "mean", "mean"),
-    (GeometricCRPS, "equiangular", *(4, 16, 21, 17, 32), "none", "mean"),
+    (GeometricCRPS, "equiangular", *(4, 16, 21, 17, 32), "mean", "sum"),
+    (GeometricCRPS, "equiangular", *(4, 16, 21, 17, 32), "sum", "mean"),
     (GeometricCRPS, "equiangular", *(4, 16, 21, 17, 32), "sum", "sum"),
+    (GeometricCRPS, "equiangular", *(4, 16, 21, 17, 32), "none", "mean"),
     (GeometricCRPS, "equiangular", *(4, 16, 21, 17, 32), "none", "sum"),
+    # Geometric SSR
     (GeometricSSR, "equiangular", *(4, 16, 21, 17, 32), "mean", "mean"),
-    (GeometricSSR, "equiangular", *(4, 16, 21, 17, 32), "none", "mean"),
+    (GeometricSSR, "equiangular", *(4, 16, 21, 17, 32), "mean", "sum"),
+    (GeometricSSR, "equiangular", *(4, 16, 21, 17, 32), "sum", "mean"),
     (GeometricSSR, "equiangular", *(4, 16, 21, 17, 32), "sum", "sum"),
+    (GeometricSSR, "equiangular", *(4, 16, 21, 17, 32), "none", "mean"),
     (GeometricSSR, "equiangular", *(4, 16, 21, 17, 32), "none", "sum"),
+    # Geometric Rank Histogram
     (GeometricRankHistogram, "equiangular", *(4, 16, 21, 17, 32), "mean", "mean"),
-    (GeometricRankHistogram, "equiangular", *(4, 16, 21, 17, 32), "none", "mean"),
+    (GeometricRankHistogram, "equiangular", *(4, 16, 21, 17, 32), "mean", "sum"),
+    (GeometricRankHistogram, "equiangular", *(4, 16, 21, 17, 32), "sum", "mean"),
     (GeometricRankHistogram, "equiangular", *(4, 16, 21, 17, 32), "sum", "sum"),
+    (GeometricRankHistogram, "equiangular", *(4, 16, 21, 17, 32), "none", "mean"),
     (GeometricRankHistogram, "equiangular", *(4, 16, 21, 17, 32), "none", "sum"),
 ]
 
@@ -229,36 +258,6 @@ class TestMetrics(unittest.TestCase):
 
         self.assertTrue(compare_arrays("acc micro", acc, acc_xskillscore, rtol=5e-5, atol=0))
 
-    @parameterized.expand(_deterministic_metrics_params, skip_on_empty=True)
-    def test_weighted_pcc(self, grid_type, batch_size, num_channels, nlat, nlon):
-
-        # PCC handle
-        pcc_func = GeometricPCC(grid_type, img_shape=(nlat, nlon), normalize=True, channel_reduction="none", batch_reduction="mean").to(self.device)
-
-        # generate toy data
-        A = torch.randn(batch_size, num_channels, nlat, nlon, device=self.device)
-        B = torch.randn(batch_size, num_channels, nlat, nlon, device=self.device)
-
-        # compute means
-        A_mean = pcc_func.quadrature(A).mean(dim=0).reshape(1, num_channels, 1, 1)
-        B_mean = pcc_func.quadrature(B).mean(dim=0).reshape(1, num_channels, 1, 1)
-
-        # compute score using makani
-        pcc = pcc_func(A, B).cpu().numpy()
-        # finalize score
-        pcc = pcc[..., 0] / np.sqrt(pcc[..., 1] * pcc[..., 2])
-
-        # we need to ensure that the weights have the correct dimensions
-        lwf = torch.tile(torch.squeeze(pcc_func.quadrature.quad_weight).unsqueeze(0), (batch_size, 1, 1)).cpu().numpy()
-        lwf = xr.DataArray(lwf, dims=["batch", "lat", "lon"])
-        A = xr.DataArray(A.cpu(), dims=["batch", "channels", "lat", "lon"])
-        B = xr.DataArray(B.cpu(), dims=["batch", "channels", "lat", "lon"])
-
-        # compute score using xskillscore
-        pcc_xskillscore = xs.pearson_r(A, B, weights=lwf, dim=["batch", "lat", "lon"]).to_numpy()
-
-        self.assertTrue(compare_arrays("pcc", pcc, pcc_xskillscore, rtol=5e-5, atol=0))
-
     @parameterized.expand(_probabilistic_metrics_params, skip_on_empty=True)
     def test_weighted_crps(self, grid_type, batch_size, ensemble_size, num_channels, nlat, nlon):
 
@@ -349,14 +348,15 @@ class TestMetricsAggregation(unittest.TestCase):
     def test_deterministic_aggregation(self, metric_handle, grid_type, batch_size, num_channels, nlat, nlon, cred, bred, verbose=False):
 
         # inflate batch size
-        batch_size = 4 * batch_size
+        num_rollout_steps = 10
+        batch_size_nsteps = num_rollout_steps * batch_size
                 
         # metric handle
         metric_func = metric_handle(grid_type, img_shape=(nlat, nlon), normalize=True, channel_reduction=cred, batch_reduction=bred).to(self.device)
 
         # input and target:
-        inp = torch.randn((batch_size, num_channels, nlat, nlon), dtype=torch.float32, device=self.device)
-        tar = torch.randn((batch_size, num_channels, nlat, nlon), dtype=torch.float32, device=self.device)
+        inp = torch.randn((batch_size_nsteps, num_channels, nlat, nlon), dtype=torch.float32, device=self.device)
+        tar = torch.randn((batch_size_nsteps, num_channels, nlat, nlon), dtype=torch.float32, device=self.device)
         
         # full metric
         res_full = metric_func(inp, tar)
@@ -364,8 +364,8 @@ class TestMetricsAggregation(unittest.TestCase):
         res_full = metric_func.finalize(res_full, counts_full)
         
         # split and compute metrics stepwise
-        inp_split = torch.split(inp, batch_size // 4, dim=0)
-        tar_split = torch.split(tar, batch_size // 4, dim=0)
+        inp_split = torch.split(inp, batch_size, dim=0)
+        tar_split = torch.split(tar, batch_size, dim=0)
         
         res_split = metric_func(inp_split[0], tar_split[0])
         counts_split = torch.tensor(inp_split[0].shape[0], dtype=torch.float32, device=self.device)
@@ -386,19 +386,59 @@ class TestMetricsAggregation(unittest.TestCase):
         # compare
         self.assertTrue(compare_arrays("deterministic aggregation", res_full.cpu().numpy(), res_split.cpu().numpy(), rtol=1e-6, atol=1e-6, verbose=verbose))
 
+    @parameterized.expand(_deterministic_metric_weighted_aggregation_params, skip_on_empty=True)
+    def test_deterministic_aggregation_weighted(self, metric_handle, grid_type, batch_size, num_channels, nlat, nlon, cred, bred, verbose=True):
+        """Same as test_deterministic_aggregation but with a spatial weight tensor (0/1 mask) at every step."""
+        # inflate batch size
+        num_rollout_steps = 10
+        batch_size_nsteps = num_rollout_steps * batch_size
+
+        # metric handle
+        metric_func = metric_handle(grid_type, img_shape=(nlat, nlon), normalize=True, channel_reduction=cred, batch_reduction=bred).to(self.device)
+
+        # input and target
+        inp = torch.randn((batch_size_nsteps, num_channels, nlat, nlon), dtype=torch.float32, device=self.device)
+        tar = torch.randn((batch_size_nsteps, num_channels, nlat, nlon), dtype=torch.float32, device=self.device)
+
+        # spatial weight: random 0/1 mask (same for all steps so full vs split aggregation are comparable)
+        weight_full = torch.where(torch.rand(batch_size_nsteps, num_channels, nlat, nlon, device=self.device, dtype=torch.float32) > 0.5, 1.0, 0.0)
+
+        # full metric with weight
+        res_full = metric_func(inp, tar, weight=weight_full)
+        counts_full = metric_func.compute_counts(inp, weight=weight_full)
+        res_full = metric_func.finalize(res_full, counts_full)
+
+        # split and compute metrics stepwise, passing the same spatial weight at each step
+        inp_split = torch.split(inp, batch_size, dim=0)
+        tar_split = torch.split(tar, batch_size, dim=0)
+        weight_split = torch.split(weight_full, batch_size, dim=0)
+
+        res_split = metric_func(inp_split[0], tar_split[0], weight=weight_split[0])
+        counts_split = metric_func.compute_counts(inp_split[0], weight=weight_split[0])
+        for inps, tars, weights in zip(inp_split[1:], tar_split[1:], weight_split[1:]):
+            res_tmp = metric_func(inps, tars, weight=weights)
+            res_tmp = torch.stack([res_split, res_tmp], dim=0)
+            counts_tmp = metric_func.compute_counts(inps, weight=weights)
+            counts_tmp = torch.stack([counts_split, counts_tmp], dim=0)
+            res_split, counts_split = metric_func.combine(res_tmp, counts_tmp, dim=0)
+
+        res_split = metric_func.finalize(res_split, counts_split)
+
+        self.assertTrue(compare_arrays("deterministic aggregation weighted", res_full.cpu().numpy(), res_split.cpu().numpy(), rtol=1e-6, atol=1e-6, verbose=verbose))
 
     @parameterized.expand(_probabilistic_metric_aggregation_params, skip_on_empty=True)
     def test_probabilistic_aggregation(self, metric_handle, grid_type, batch_size, ensemble_size, num_channels, nlat, nlon, cred, bred, verbose=False):
 
         # inflate batch size
-        batch_size = 4 * batch_size
+        num_rollout_steps = 10
+        batch_size_nsteps = num_rollout_steps * batch_size
 
         # metric handle
         metric_func = metric_handle(grid_type=grid_type, img_shape=(nlat, nlon), crop_shape=(nlat, nlon), crop_offset=(0, 0), crps_type="skillspread", normalize=True, channel_reduction=cred, batch_reduction=bred).to(self.device)
 
         # input and target:
-        inp = torch.randn((batch_size, ensemble_size, num_channels, nlat, nlon), dtype=torch.float32, device=self.device)
-        tar = torch.randn((batch_size, num_channels, nlat, nlon), dtype=torch.float32, device=self.device)
+        inp = torch.randn((batch_size_nsteps, ensemble_size, num_channels, nlat, nlon), dtype=torch.float32, device=self.device)
+        tar = torch.randn((batch_size_nsteps, num_channels, nlat, nlon), dtype=torch.float32, device=self.device)
 
         # full metric
         res_full = metric_func(inp, tar)
@@ -406,8 +446,8 @@ class TestMetricsAggregation(unittest.TestCase):
         res_full = metric_func.finalize(res_full, counts_full)
 
         # split and compute metrics stepwise
-        inp_split = torch.split(inp, batch_size // 4, dim=0)
-        tar_split = torch.split(tar, batch_size // 4, dim=0)
+        inp_split = torch.split(inp, batch_size, dim=0)
+        tar_split = torch.split(tar, batch_size, dim=0)
 
         res_split = metric_func(inp_split[0], tar_split[0])
         counts_split = torch.tensor(inp_split[0].shape[0], dtype=torch.float32, device=self.device)

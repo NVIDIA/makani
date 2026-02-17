@@ -168,6 +168,12 @@ class GeometricACC(GeometricBaseMetric):
                 bias = split_tensor_along_dim(bias, dim=-2, num_chunks=comm.get_size("h"))[comm.get_rank("h")]
             self.register_buffer("bias", bias)
 
+    def compute_counts(self, inp: torch.Tensor, weight: Optional[torch.Tensor] = None) -> torch.Tensor:
+        counts = super().compute_counts(inp, weight)
+        if self.method == "micro":
+            counts = counts.unsqueeze(-1)
+        return counts
+
     def finalize(self, vals, counts):
         if self.method == "micro":
             return vals[..., 0] / torch.sqrt(vals[..., 1] * vals[..., 2])
@@ -209,115 +215,6 @@ class GeometricACC(GeometricBaseMetric):
             acc = torch.sum(acc, dim=0)
 
         return acc
-
-
-class GeometricPCC(GeometricBaseMetric):
-    def __init__(
-        self,
-        grid_type: str,
-        img_shape: Tuple[int, int],
-        crop_shape: Optional[Tuple[int, int]] = None,
-        crop_offset: Optional[Tuple[int, int]] = (0, 0),
-        normalize: Optional[bool] = False,
-        channel_reduction: Optional[str] = "mean",
-        batch_reduction: Optional[str] = "mean",
-        bias: Optional[torch.Tensor] = None,
-        eps: Optional[float] = 1e-8,
-        spatial_distributed: Optional[bool] = False,
-        **kwargs,
-    ):
-        super().__init__(
-            grid_type=grid_type,
-            img_shape=img_shape,
-            crop_shape=crop_shape,
-            crop_offset=crop_offset,
-            normalize=normalize,
-            channel_reduction=channel_reduction,
-            batch_reduction=batch_reduction,
-            spatial_distributed=spatial_distributed
-        )
-        """
-        This metric is similat to ACC but here we subtract the individual means from prediction and target as well.
-        """
-        self.eps = eps
-
-        if bias is not None:
-            if comm.get_size("w") > 1:
-                bias = split_tensor_along_dim(bias, dim=-1, num_chunks=comm.get_size("w"))[comm.get_rank("w")]
-            if comm.get_size("h") > 1:
-                bias = split_tensor_along_dim(bias, dim=-2, num_chunks=comm.get_size("h"))[comm.get_rank("h")]
-            self.register_buffer("bias", bias)
-
-    def combine(self, vals, counts, dim=0):
-        # sanitize shapes
-        vals, counts = _sanitize_shapes(vals, counts, dim=dim)
-        
-        # extract parameters
-        covs = vals[..., 0].unsqueeze(-1)
-        m2s = vals[..., 1:3]
-        means = vals[..., 3:5]
-        
-        # counts are: n = sum_k n_k
-        counts_agg = torch.sum(counts, dim=0)
-        # means are: mu = sum_i n_i * mu_i / n
-        means_agg = torch.sum(means * counts, dim=0) / counts_agg
-        # m2s are: sum_i m2_i + sum_i n_i * (mu_i - mu)^2
-        m2s_agg = torch.sum(m2s, dim=0)
-        deltas_agg = torch.sum(torch.square(means - means_agg.unsqueeze(0)) * counts, dim=0)
-        m2s_agg = m2s_agg + deltas_agg
-        # covs are: sum_i cov_i + sum_i n_i * (mu_i-mu) * (nu_i-nu)
-        covs_agg = torch.sum(covs, dim=0)
-        cdeltas_agg = torch.sum( torch.prod(means - means_agg.unsqueeze(0), dim=-1).unsqueeze(-1) * counts, dim=0)
-        covs_agg = covs_agg + cdeltas_agg
-        # update
-        vals_agg = torch.cat([covs_agg, m2s_agg, means_agg], dim=-1)
-        counts_agg = counts_agg.squeeze()
-
-        return vals_agg, counts_agg
-
-    def finalize(self, vals, counts):
-        return vals[..., 0] / torch.sqrt(vals[..., 1] * vals[..., 2])
-
-    def forward(self, x: torch.Tensor, y: torch.Tensor, weight: Optional[torch.Tensor] = None) -> torch.Tensor:
-        
-        if hasattr(self, "bias"):
-            x = x - self.bias
-            y = y - self.bias
-
-        # compute means first
-        if weight is not None:
-            mean_x = self.quadrature(x * weight)
-            mean_y = self.quadrature(y * weight)
-        else:
-            mean_x = self.quadrature(x)
-            mean_y = self.quadrature(y)
-        mean_x = mean_x.unsqueeze(-1).unsqueeze(-1)
-        mean_y = mean_y.unsqueeze(-1).unsqueeze(-1)
-
-        if self.batch_reduction != "none":
-            mean_x = torch.mean(mean_x, dim=0, keepdim=True)
-            mean_y = torch.mean(mean_y, dim=0, keepdim=True)
-
-        if weight is not None:
-            cov_xy = self.quadrature((x-mean_x) * (y-mean_y) * weight)
-            var_x = self.quadrature(torch.square(x-mean_x) * weight)
-            var_y = self.quadrature(torch.square(y-mean_y) * weight)
-        else:
-            cov_xy = self.quadrature((x-mean_x) * (y-mean_y))
-            var_x = self.quadrature(torch.square(x-mean_x))
-            var_y = self.quadrature(torch.square(y-mean_y))
-
-        if self.batch_reduction != "none":
-            cov_xy = torch.sum(cov_xy, dim=0)
-            var_x = torch.sum(var_x, dim=0)
-            var_y = torch.sum(var_y, dim=0)
-            mean_x = mean_x.squeeze(0).squeeze(-1).squeeze(-1)
-            mean_y = mean_y.squeeze(0).squeeze(-1).squeeze(-1)
-
-        # we need to store all components individually
-        pcc = torch.stack([cov_xy, var_x, var_y, mean_x, mean_y], dim=-1)
-
-        return pcc
 
 
 class GeometricSpread(GeometricBaseMetric):
