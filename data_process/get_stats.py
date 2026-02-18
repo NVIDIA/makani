@@ -36,7 +36,7 @@ from makani.utils.grids import GridQuadrature
 
 from wb2_helpers import DistributedProgressBar
 
-from makani.data_process.data_process_helpers import (
+from data_process_helpers import (
     mask_data, 
     welford_combine, 
     get_wind_channels, 
