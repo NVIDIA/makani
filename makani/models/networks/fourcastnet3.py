@@ -823,7 +823,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
                 mask = x[..., self.land_mask_channels, :, :]
             else:
                 mask = None
-            x[..., self.sst_channels_in, :, :] = self.sst_imputation(x, mask=mask)
+            x = self.sst_imputation(x, mask=mask).clone()
 
         return x
 

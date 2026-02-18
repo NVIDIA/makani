@@ -141,16 +141,21 @@ class L2EnergyScoreLoss(GeometricBaseLoss):
         #  ensemble size
         num_ensemble = forecasts.shape[0]
 
-        # get nanmask from the observarions
+        # get nanmask from observations and forecasts
         nanmasks = torch.logical_or(torch.isnan(observations), torch.isnan(ensemble_weights))
+        nanmask_bool = nanmasks.sum(dim=0) != 0
+
+        # impute NaN before computation to avoid 0 * NaN = NaN in backward pass
+        observations = torch.where(torch.isnan(observations), 0.0, observations)
+        forecasts = torch.where(torch.isnan(forecasts), 0.0, forecasts)
 
         # use broadcasting semantics to compute spread and skill and sum over channels (vector norm)
         espread = (forecasts.unsqueeze(1) - forecasts.unsqueeze(0)).abs().square()
         eskill = (observations - forecasts).abs().square()
 
-        # perform masking before any reduction
-        espread = torch.where(nanmasks.sum(dim=0) != 0, 0.0, espread)
-        eskill = torch.where(nanmasks.sum(dim=0) != 0, 0.0, eskill)
+        # zero out masked positions
+        espread = torch.where(nanmask_bool, 0.0, espread)
+        eskill = torch.where(nanmask_bool, 0.0, eskill)
 
         # do the spatial reduction
         if spatial_weights is not None:
@@ -334,15 +339,19 @@ class SobolevEnergyScoreLoss(SpectralBaseLoss):
 
         num_ensemble = forecasts.shape[0]
 
-        # get nanmask from the observarions
+        # get nanmask from observations and forecasts
         nanmasks = torch.logical_or(torch.isnan(observations), torch.isnan(forecasts))
+        nanmask_bool = nanmasks.sum(dim=0) != 0
+
+        # impute NaN before computation to avoid 0 * NaN = NaN in backward pass
+        observations = torch.where(torch.isnan(observations), 0.0, observations)
+        forecasts = torch.where(torch.isnan(forecasts), 0.0, forecasts)
 
         # compute the individual distances
         espread = lm_weights_split * (forecasts.unsqueeze(1) - forecasts.unsqueeze(0)).abs().square()
         eskill = lm_weights_split * (observations - forecasts).abs().square()
 
-        # perform masking before any reduction
-        nanmask_bool = nanmasks.sum(dim=0) != 0
+        # zero out masked positions
         espread = torch.where(nanmask_bool, 0.0, espread)
         eskill = torch.where(nanmask_bool, 0.0, eskill)
 
@@ -497,15 +506,20 @@ class SpectralL2EnergyScoreLoss(SpectralBaseLoss):
 
         num_ensemble = forecasts.shape[0]
 
-        # get nanmask from the observarions
+        # get nanmask from observations and forecasts
         nanmasks = torch.logical_or(torch.isnan(observations), torch.isnan(forecasts))
+        nanmask_bool = nanmasks.sum(dim=0) != 0
+
+        # impute NaN before computation to avoid 0 * NaN = NaN in backward pass
+        observations = torch.where(torch.isnan(observations), 0.0, observations)
+        forecasts = torch.where(torch.isnan(forecasts), 0.0, forecasts)
 
         espread = lm_weights_split * (forecasts.unsqueeze(1) - forecasts.unsqueeze(0)).abs().square()
         eskill = lm_weights_split * (observations - forecasts).abs().square()
 
-        # perform masking before any reduction
-        espread = torch.where(nanmasks.sum(dim=0) != 0, 0.0, espread)
-        eskill = torch.where(nanmasks.sum(dim=0) != 0, 0.0, eskill)
+        # zero out masked positions
+        espread = torch.where(nanmask_bool, 0.0, espread)
+        eskill = torch.where(nanmask_bool, 0.0, eskill)
 
         # do the channel reduction first
         if self.channel_reduction:
