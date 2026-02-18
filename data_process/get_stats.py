@@ -75,18 +75,14 @@ def get_file_stats(filename,
 
             # get slice
             data = dset[sub_slc, ...]
-            tdata = torch.from_numpy(data).to(device=device, dtype=torch.float64)
+            tdata = torch.as_tensor(data).to(device=device, dtype=torch.float64)
 
             # check for NaNs
-            if torch.isnan(tdata).any():
-                if fail_on_nan:
-                    raise ValueError(f"NaN values encountered in {filename}.")
-                else:
-                    # create mask of NaNs and mask data
-                    tdata_masked, valid_mask = mask_data(tdata)
-            else:
-                tdata_masked = tdata
-                valid_mask = torch.ones_like(tdata)
+            if fail_on_nan and torch.isnan(tdata).any():
+                raise ValueError(f"NaN values encountered in {filename}.")
+
+            # get imputed valid data and valid mask
+            tdata_masked, valid_mask = mask_data(tdata)
 
             # define counts
             counts_time = tdata.shape[0]
