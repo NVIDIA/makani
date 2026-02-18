@@ -873,6 +873,127 @@ class TestMetricsHandler(unittest.TestCase):
         with self.subTest(desc="rollouts"):
             self.assertTrue(compare_arrays("rollouts", data_full, data_split, rtol=1e-5, atol=1e-5, verbose=verbose))
 
+    @parameterized.expand(_metric_handler_params, skip_on_empty=True)
+    def test_aggregation_weighted_vs_unweighted(self, grid_type, batch_size, ensemble_size, num_rollout_steps, bred, verbose=False):
+        """Unit weights should yield the same result as no weights if weighting is implemented correctly."""
+        num_steps = 4
+        num_channels = len(self.params.channel_names)
+        clim = torch.zeros(1, num_channels, self.params.img_local_shape_x, self.params.img_local_shape_y)
+
+        self.params.batch_size = batch_size
+        self.params.ensemble_size = ensemble_size
+
+        handler_unweighted = MetricsHandler(
+            self.params,
+            clim,
+            num_rollout_steps,
+            self.device,
+            l1_var_names=self.params.channel_names,
+            rmse_var_names=self.params.channel_names,
+            acc_var_names=self.params.channel_names,
+            crps_var_names=self.params.channel_names,
+            spread_var_names=self.params.channel_names,
+            ssr_var_names=self.params.channel_names,
+            rh_var_names=self.params.channel_names,
+            wb2_compatible=False,
+        )
+        handler_unweighted.initialize_buffers()
+        handler_unweighted.zero_buffers()
+
+        handler_unit_weights = MetricsHandler(
+            self.params,
+            clim,
+            num_rollout_steps,
+            self.device,
+            l1_var_names=self.params.channel_names,
+            rmse_var_names=self.params.channel_names,
+            acc_var_names=self.params.channel_names,
+            crps_var_names=self.params.channel_names,
+            spread_var_names=self.params.channel_names,
+            ssr_var_names=self.params.channel_names,
+            rh_var_names=self.params.channel_names,
+            wb2_compatible=False,
+        )
+        handler_unit_weights.initialize_buffers()
+        handler_unit_weights.zero_buffers()
+
+        inplist = [
+            torch.randn(
+                (
+                    num_rollout_steps,
+                    batch_size,
+                    ensemble_size,
+                    num_channels,
+                    self.params.img_local_shape_x,
+                    self.params.img_local_shape_y,
+                ),
+                dtype=torch.float32,
+                device=self.device,
+            )
+            for _ in range(num_steps)
+        ]
+        tarlist = [
+            torch.randn(
+                (
+                    num_rollout_steps,
+                    batch_size,
+                    num_channels,
+                    self.params.img_local_shape_x,
+                    self.params.img_local_shape_y,
+                ),
+                dtype=torch.float32,
+                device=self.device,
+            )
+            for _ in range(num_steps)
+        ]
+
+        unit_weight = torch.ones(
+            batch_size,
+            num_channels,
+            self.params.img_local_shape_x,
+            self.params.img_local_shape_y,
+            dtype=torch.float32,
+            device=self.device,
+        )
+
+        for inp, tar in zip(inplist, tarlist):
+            for idt in range(num_rollout_steps):
+                inpp = inp[idt, ...]
+                tarp = tar[idt, ...]
+                loss = torch.mean(torch.abs(torch.mean(inpp, dim=1) - tarp))
+
+                handler_unweighted.update(inpp, tarp, loss, idt)
+                handler_unit_weights.update(inpp, tarp, loss, idt, weight=unit_weight)
+
+        logs_unweighted = handler_unweighted.finalize()
+        logs_unit_weights = handler_unit_weights.finalize()
+
+        metrics_unweighted = logs_unweighted["metrics"]
+        metrics_unit_weights = logs_unit_weights["metrics"]
+
+        for key in metrics_unweighted.keys():
+            if key == "rollouts":
+                continue
+            val_u = metrics_unweighted[key]
+            val_w = metrics_unit_weights[key]
+            with self.subTest(desc=f"validation {key}"):
+                self.assertTrue(
+                    compare_arrays(key, val_u, val_w, rtol=1e-5, atol=1e-5, verbose=verbose),
+                    msg=f"Unit-weight and unweighted results differ for '{key}'",
+                )
+
+        rollouts_u = logs_unweighted["metrics"]["rollouts"]
+        rollouts_w = logs_unit_weights["metrics"]["rollouts"]
+
+        data_u = np.array([row[-1] for row in rollouts_u.data])
+        data_w = np.array([row[-1] for row in rollouts_w.data])
+
+        with self.subTest(desc="rollouts"):
+            self.assertTrue(
+                compare_arrays("rollouts", data_u, data_w, rtol=1e-5, atol=1e-5, verbose=verbose),
+                msg="Unit-weight and unweighted rollouts differ",
+            )
+
 
 # TODO: ssr test comparing to weatherbench2
 @unittest.skipUnless(_have_wb2, "test requires weatherbench2 installation")
