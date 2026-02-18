@@ -122,8 +122,12 @@ def _crps_skillspread_kernel(observation: torch.Tensor, forecasts: torch.Tensor,
 
     observation = observation.unsqueeze(0)
 
-    # get nanmask from the observarions
+    # get nanmask from observations and forecasts
     nanmasks = torch.logical_or(torch.isnan(observation), torch.isnan(weights))
+    nanmask_bool = nanmasks.sum(dim=0) != 0
+
+    # impute NaN before computation to avoid 0 * NaN = NaN in backward pass
+    observation = torch.where(torch.isnan(observation), 0.0, observation)
 
     # compute total weights
     nweights = torch.where(nanmasks, 0.0, weights)
@@ -139,7 +143,7 @@ def _crps_skillspread_kernel(observation: torch.Tensor, forecasts: torch.Tensor,
     espread = 2 * torch.mean((2 * rank - num_ensemble - 1) * forecasts, dim=0) * (float(num_ensemble) - 1.0 + alpha) / float(num_ensemble * (num_ensemble - 1))
     eskill = (observation - forecasts).abs().mean(dim=0)
 
-    crps = torch.where(nanmasks.sum(dim=0) != 0, 0.0, eskill - 0.5 * espread)
+    crps = torch.where(nanmask_bool, 0.0, eskill - 0.5 * espread)
 
     return crps
 
@@ -153,8 +157,12 @@ def _crps_probability_weighted_moment_kernel(observation: torch.Tensor, forecast
 
     observation = observation.unsqueeze(0)
 
-    # get nanmask from the observarions
+    # get nanmask from observations and forecasts
     nanmasks = torch.logical_or(torch.isnan(observation), torch.isnan(weights))
+    nanmask_bool = nanmasks.sum(dim=0) != 0
+
+    # impute NaN before computation to avoid 0 * NaN = NaN in backward pass
+    observation = torch.where(torch.isnan(observation), 0.0, observation)
 
     # compute total weights
     nweights = torch.where(nanmasks, 0.0, weights)
@@ -171,11 +179,10 @@ def _crps_probability_weighted_moment_kernel(observation: torch.Tensor, forecast
     beta1 = (rank * forecasts).sum(dim=0) / float(num_ensemble * (num_ensemble - 1))
     eskill = (observation - forecasts).abs().mean(dim=0)
 
-    # crps = torch.where(nanmasks.sum(dim=0) != 0, torch.nan, eskill - 0.5 * espread)
     crps = eskill + beta0 - 2 * beta1
 
-    # set to nan for first forecasts nan
-    crps = torch.where(nanmasks.sum(dim=0) != 0, 0.0, crps)
+    # zero out masked positions
+    crps = torch.where(nanmask_bool, 0.0, crps)
 
     return crps
 
@@ -187,8 +194,12 @@ def _crps_naive_skillspread_kernel(observation: torch.Tensor, forecasts: torch.T
 
     observation = observation.unsqueeze(0)
 
-    # get nanmask from the observarions
+    # get nanmask from observations and forecasts
     nanmasks = torch.logical_or(torch.isnan(observation), torch.isnan(weights))
+    nanmask_bool = nanmasks.sum(dim=0) != 0
+
+    # impute NaN before computation to avoid 0 * NaN = NaN in backward pass
+    observation = torch.where(torch.isnan(observation), 0.0, observation)
 
     # compute total weights
     nweights = torch.where(nanmasks, 0.0, weights)
@@ -201,11 +212,10 @@ def _crps_naive_skillspread_kernel(observation: torch.Tensor, forecasts: torch.T
     espread = (forecasts.unsqueeze(1) - forecasts.unsqueeze(0)).abs().sum(dim=(0,1)) * (float(num_ensemble) - 1.0 + alpha) / float(num_ensemble * num_ensemble * (num_ensemble - 1))
     eskill = (observation - forecasts).abs().mean(dim=0)
 
-    # crps = torch.where(nanmasks.sum(dim=0) != 0, torch.nan, eskill - 0.5 * espread)
     crps = eskill - 0.5 * espread
 
-    # set to nan for first forecasts nan
-    crps = torch.where(nanmasks.sum(dim=0) != 0, 0.0, crps)
+    # zero out masked positions
+    crps = torch.where(nanmask_bool, 0.0, crps)
 
     return crps
 

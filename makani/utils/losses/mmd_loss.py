@@ -149,16 +149,21 @@ class GaussianMMDLoss(GeometricBaseLoss):
         #  ensemble size
         num_ensemble = forecasts.shape[0]
 
-        # get nanmask from the observarions
-        nanmasks = torch.logical_or(torch.isnan(observations), torch.isnan(ensemble_weights))
+        # get nanmask from observations and forecasts
+        nanmasks = torch.logical_or(torch.isnan(observations), torch.isnan(forecasts))
+        nanmask_bool = nanmasks.sum(dim=0) != 0
+
+        # impute NaN before computation to avoid 0 * NaN = NaN in backward pass
+        observations = torch.where(torch.isnan(observations), 0.0, observations)
+        forecasts = torch.where(torch.isnan(forecasts), 0.0, forecasts)
 
         # use broadcasting semantics to compute spread and skill and sum over channels (vector norm)
         espread = (forecasts.unsqueeze(1) - forecasts.unsqueeze(0)).abs().pow(self.beta)
         eskill = (observations - forecasts).abs().pow(self.beta)
 
-        # perform masking before any reduction
-        espread = torch.where(nanmasks.sum(dim=0) != 0, 0.0, espread)
-        eskill = torch.where(nanmasks.sum(dim=0) != 0, 0.0, eskill)
+        # zero out masked positions
+        espread = torch.where(nanmask_bool, 0.0, espread)
+        eskill = torch.where(nanmask_bool, 0.0, eskill)
 
         # do the spatial reduction
         if spatial_weights is not None:
