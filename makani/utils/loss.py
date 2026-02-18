@@ -23,13 +23,8 @@ import torch
 from torch import nn
 
 from makani.utils import comm
-from makani.utils.grids import GridQuadrature
 from makani.utils.dataloaders.data_helpers import get_data_normalization
-from physicsnemo.distributed.utils import compute_split_shapes
 from physicsnemo.distributed.mappings import gather_from_parallel_region, reduce_from_parallel_region
-
-import torch_harmonics as harmonics
-from torch_harmonics.quadrature import clenshaw_curtiss_weights, legendre_gauss_weights
 
 from .losses import LossType, GeometricLpLoss, SpectralH1Loss, SpectralAMSELoss, HydrostaticBalanceLoss
 from .losses import EnsembleCRPSLoss, EnsembleSpectralCRPSLoss, EnsembleNLLLoss, EnsembleMMDLoss
