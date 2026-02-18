@@ -18,7 +18,7 @@ import torch
 
 import torch.amp as amp
 
-from torch_harmonics.quadrature import legendre_gauss_weights, clenshaw_curtiss_weights, _precompute_latitudes
+from torch_harmonics.quadrature import legendre_gauss_weights, clenshaw_curtiss_weights, precompute_latitudes
 
 from makani.utils import comm
 from physicsnemo.distributed.utils import compute_split_shapes, split_tensor_along_dim
@@ -211,7 +211,7 @@ class BandLimitMask(torch.nn.Module):
         elif self.type == "fft":
 
             # get the cutoff frequency in m for each latitude
-            lats, _ = _precompute_latitudes(self.img_shape[0], grid=self.grid_type)
+            lats, _ = precompute_latitudes(self.img_shape[0], grid=self.grid_type)
             # get the grid spacing at the equator
             delta_equator = 2 * torch.pi / (self.lmax-1)
             mlim = torch.ceil(2 * torch.pi * torch.sin(lats) / delta_equator).reshape(self.img_shape[0], 1)
