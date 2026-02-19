@@ -14,13 +14,13 @@
 # limitations under the License.
 
 import os
+import sys
 from typing import Optional
 import time
 import socket
 import json
 import numpy as np
 import h5py as h5
-import math
 import argparse as ap
 from itertools import accumulate
 import operator
@@ -34,9 +34,11 @@ import torch
 import torch.distributed as dist
 from makani.utils.grids import GridQuadrature
 
-from wb2_helpers import DistributedProgressBar
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
-from data_process_helpers import (
+from data_process.wb2_helpers import DistributedProgressBar
+
+from data_process.data_process_helpers import (
     mask_data, 
     welford_combine, 
     get_wind_channels, 
@@ -92,9 +94,14 @@ def get_file_stats(filename,
             # Basic observables
             # compute mean and variance
             # the mean needs to be divided by number of valid samples:
-            tmean = torch.sum(quadrature(tdata_masked), dim=0, keepdim=False).reshape(1, -1, 1, 1) / valid_count[None, :, None, None]
+            tmean = torch.sum(quadrature(tdata_masked * valid_mask), dim=0, keepdim=False).reshape(1, -1, 1, 1) / valid_count[None, :, None, None]
             # we compute m2 directly, so we do not need to divide by number of valid samples:
-            tm2 = torch.sum(quadrature(torch.square(tdata_masked - tmean)), dim=0, keepdim=False).reshape(1, -1, 1, 1)
+            tm2 = torch.sum(quadrature(torch.square(tdata_masked - tmean) * valid_mask), dim=0, keepdim=False).reshape(1, -1, 1, 1)
+            # for max and mins, make sure we only take from the valid samples
+            tdata_masked_max = torch.where(valid_mask > 0.0, tdata, -torch.inf)
+            tmax = torch.max(torch.max(torch.max(tdata_masked_max, dim=0, keepdim=True).values, dim=2, keepdim=True).values, dim=3, keepdim=True)
+            tdata_masked_min = torch.where(valid_mask > 0.0, tdata, torch.inf)
+            tmin = torch.min(torch.min(torch.min(tdata_masked_min, dim=0, keepdim=True).values, dim=2, keepdim=True).values, dim=3, keepdim=True)
 
             # fill the dict
             tmpstats = dict(
@@ -102,14 +109,15 @@ def get_file_stats(filename,
                     "type": "max",
                     "counts": counts_time_space.clone(),
                     # apparently, torch.max does not support multiple dimensions, so we need to do it in steps
-                    "values": torch.max(torch.max(torch.max(tdata, dim=0, keepdim=True).values, dim=2, keepdim=True).values, dim=3, keepdim=True).values,
+                    "values": tmax.values,
                 },
                 mins = {
                     "type": "min",
                     "counts": counts_time_space.clone(),
                     # same for torch.min
-                    "values": torch.min(torch.min(torch.min(tdata, dim=0, keepdim=True).values, dim=2, keepdim=True).values, dim=3, keepdim=True).values,
+                    "values": tmin.values,
                 },
+                # use tdata here, since this means nan stay nan since they are localized in time:
                 time_means = {
                     "type": "mean",
                     "counts": float(counts_time) * torch.ones((data.shape[1]), dtype=torch.float64, device=device),
@@ -132,8 +140,8 @@ def get_file_stats(filename,
                 counts_timediff = tdiff.shape[0]
                 tdiff_masked, tdiff_valid_mask = mask_data(tdiff)
                 tdiff_valid_count = torch.sum(quadrature(tdiff_valid_mask), dim=0)
-                tdiffmean = torch.sum(quadrature(tdiff_masked), dim=0, keepdim=False).reshape(1, -1, 1, 1) / tdiff_valid_count[None, :, None, None]
-                tdiffm2 = torch.sum(quadrature(torch.square(tdiff_masked - tdiffmean)), dim=0, keepdim=False).reshape(1, -1, 1, 1)
+                tdiffmean = torch.sum(quadrature(tdiff_masked * tdiff_valid_mask), dim=0, keepdim=False).reshape(1, -1, 1, 1) / tdiff_valid_count[None, :, None, None]
+                tdiffm2 = torch.sum(quadrature(torch.square(tdiff_masked - tdiffmean) * tdiff_valid_mask), dim=0, keepdim=False).reshape(1, -1, 1, 1)
             else:
                 # skip those for tdiff
                 counts_timediff = 0
@@ -164,10 +172,10 @@ def get_file_stats(filename,
                 u_tens = tdata[:, wind_indices[0]]
                 v_tens = tdata[:, wind_indices[1]]
                 wind_magnitude = torch.sqrt(torch.square(u_tens) + torch.square(v_tens))
-                wind_magnitude_masked, wind_valid_mask = mask_data(wind_magnitude)
+                wind_masked, wind_valid_mask = mask_data(wind_magnitude)
                 wind_valid_count = torch.sum(quadrature(wind_valid_mask), dim=0)
-                wind_mean = torch.sum(quadrature(wind_magnitude_masked), dim=0, keepdim=False).reshape(1, -1, 1, 1) / wind_valid_count[None, :, None, None]
-                wind_m2 = torch.sum(quadrature(torch.square(wind_magnitude_masked - wind_mean)), dim=0, keepdim=False).reshape(1, -1, 1, 1)
+                wind_mean = torch.sum(quadrature(wind_masked * wind_valid_mask), dim=0, keepdim=False).reshape(1, -1, 1, 1) / wind_valid_count[None, :, None, None]
+                wind_m2 = torch.sum(quadrature(torch.square(wind_masked - wind_mean) * wind_valid_mask), dim=0, keepdim=False).reshape(1, -1, 1, 1)
                 tmpstats["wind_meanvar"] = {
                     "type": "meanvar",
                     "counts": wind_valid_count.clone(),
@@ -178,10 +186,10 @@ def get_file_stats(filename,
                     udiff_tens = tdiff[:, wind_indices[0]]
                     vdiff_tens = tdiff[:, wind_indices[1]]
                     winddiff_magnitude = torch.sqrt(torch.square(udiff_tens) + torch.square(vdiff_tens))
-                    winddiff_magnitude_masked, winddiff_valid_mask = mask_data(winddiff_magnitude)
+                    winddiff_masked, winddiff_valid_mask = mask_data(winddiff_magnitude)
                     winddiff_valid_count = torch.sum(quadrature(winddiff_valid_mask), dim=0)
-                    winddiff_mean = torch.sum(quadrature(winddiff_magnitude_masked), dim=0, keepdim=False).reshape(1, -1, 1, 1) / winddiff_valid_count[None, :, None, None]
-                    winddiff_m2 = torch.sum(quadrature(torch.square(winddiff_magnitude_masked - winddiff_mean)), dim=0, keepdim=False).reshape(1, -1, 1, 1)
+                    winddiff_mean = torch.sum(quadrature(winddiff_masked * winddiff_valid_mask), dim=0, keepdim=False).reshape(1, -1, 1, 1) / winddiff_valid_count[None, :, None, None]
+                    winddiff_m2 = torch.sum(quadrature(torch.square(winddiff_masked - winddiff_mean) * winddiff_valid_mask), dim=0, keepdim=False).reshape(1, -1, 1, 1)
                     tmpstats["winddiff_meanvar"] = {
                         "type": "meanvar",
                         "counts": winddiff_valid_count.clone(),
@@ -507,10 +515,12 @@ def get_stats(input_path: str, output_path: str, metadata_file: str,
         duration = time.time() - start
         print(f"Saving stats done. Duration: {duration:.2f}s", flush=True)
 
-        print("means: ", stats["global_meanvar"]["values"][0, ...])
-        print("stds: ", stats["global_meanvar"]["values"][1, ...])
-        print(f"time_diff_means (dt={dt}): ", stats["time_diff_meanvar"]["values"][0, ...])
-        print(f"time_diff_stds (dt={dt}): ", stats["time_diff_meanvar"]["values"][1, ...])
+        print("mins: ", stats["mins"]["values"][0, :, 0, 0])
+        print("maxs: ", stats["maxs"]["values"][0, :, 0, 0])
+        print("means: ", stats["global_meanvar"]["values"][0, :, 0, 0])
+        print("stds: ", stats["global_meanvar"]["values"][1, :, 0, 0])
+        print(f"time_diff_means (dt={dt}): ", stats["time_diff_meanvar"]["values"][0, :, 0 ,0])
+        print(f"time_diff_stds (dt={dt}): ", stats["time_diff_meanvar"]["values"][1, :, 0, 0])
 
 
     # wait for rank 0 to finish
