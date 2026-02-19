@@ -189,28 +189,20 @@ class Trainer(Driver):
         # gradient clipping
         self.max_grad_norm = self.params.get("optimizer_max_grad_norm", -1.0)
 
-        # we need this further down
+        # Initialize gradient reduction (DDP-like) hooks on the default stream so that
+        # AccumulateGrad nodes use the same stream as training forward/backward.
         with Timer() as timer:
-            capture_stream = None
             if dist.is_initialized() and not self.params.disable_ddp:
-                if self.device.type == "cuda":
-                    capture_stream = torch.Stream(device="cuda")
-
-                with torch.cuda.stream(capture_stream):
-                    self.model = init_gradient_reduction_hooks(
-                        self.model,
-                        device=self.device,
-                        reduction_buffer_count=self.params.parameters_reduction_buffer_count,
-                        broadcast_buffers=False,
-                        find_unused_parameters=self.params["enable_grad_anomaly_detection"],
-                        gradient_as_bucket_view=True,
-                        static_graph=False,
-                        verbose=True,
-                    )
-
-                # capture stream sync
-                if capture_stream is not None:
-                    capture_stream.synchronize()
+                self.model = init_gradient_reduction_hooks(
+                    self.model,
+                    device=self.device,
+                    reduction_buffer_count=self.params.parameters_reduction_buffer_count,
+                    broadcast_buffers=False,
+                    find_unused_parameters=self.params["enable_grad_anomaly_detection"],
+                    gradient_as_bucket_view=True,
+                    static_graph=False,
+                    verbose=True,
+                )
         self.timers["reduction hooks init"] = timer.time
 
         # lets get one sample from the dataloader:
