@@ -192,7 +192,11 @@ class SobolevEnergyScoreLoss(SpectralBaseLoss):
         alpha: Optional[float] = 1.0,
         beta: Optional[float] = 2.0,
         fraction: Optional[float] = 1.0,
-        eps: Optional[float] = 1.0e-5,
+        eps: Optional[float] = 1.0e-3,
+        psd_normalization: Optional[bool] = False,
+        bias: Optional[torch.Tensor] = None,
+        scale: Optional[torch.Tensor] = None,
+        psd_means: Optional[torch.Tensor] = None,
         **kwargs,
     ):
 
@@ -219,9 +223,32 @@ class SobolevEnergyScoreLoss(SpectralBaseLoss):
             self.ensemble_weights = ensemble_weights
 
         # get the local lm weights
+        if psd_normalization and psd_means is not None and scale is not None:
+
+            # ensure shapes match for broadcasting
+            if psd_means.dim() == 3:
+                psd_means = psd_means.unsqueeze(-1)
+
+            # normalize PSD
+            # Since PSD scales with square of signal, we divide by scale^2
+            norm_psd = psd_means / (scale.reshape(1, -1, 1, 1)**2)
+
+            # fix the 0-th component using the bias
+            normalized_bias_sq = (bias.reshape(1, -1) / scale.reshape(1, -1))**2
+            norm_psd = norm_psd / (4.0 * math.pi)
+            norm_psd[..., 0, 0] = torch.clamp(norm_psd[..., 0, 0] - normalized_bias_sq, min=0.0)
+
+            # Compute spectral weights: 1/sqrt(PSD)
+            # Add epsilon for numerical stability
+            psd_weights = 1.0 / (norm_psd + self.eps**2)
+        else:
+            psd_weights = torch.ones((1, 1, self.sht.lmax, 1))
+
         ls = torch.arange(self.sht.lmax).reshape(-1, 1)
         ms = torch.arange(self.sht.mmax).reshape(1, -1)
         lm_weights = (1 + ls * (ls + 1)).pow(self.fraction).tile(1, self.sht.mmax)
+        # account for the 4 pi normalization coming from the SHT
+        lm_weights = psd_weights * lm_weights / 4.0 / math.pi
         lm_weights[:, 1:] *= 2.0
         lm_weights = torch.where(ms > ls, 0.0, lm_weights)
         if comm.get_size("h") > 1:
@@ -255,8 +282,8 @@ class SobolevEnergyScoreLoss(SpectralBaseLoss):
         # as the CDF definition doesn't generalize well to more than one-dimensional variables, we treat complex and imaginary part as the same
         with amp.autocast(device_type="cuda", enabled=False):
             # TODO: check 4 pi normalization
-            forecasts = self.sht(forecasts.float()) / 4.0 / math.pi
-            observations = self.sht(observations.float()) / 4.0 / math.pi
+            forecasts = self.sht(forecasts.float())
+            observations = self.sht(observations.float())
 
             # cast back to original dtype
             forecasts = forecasts.to(dtype=dtype)
@@ -276,7 +303,8 @@ class SobolevEnergyScoreLoss(SpectralBaseLoss):
             forecasts = distributed_transpose.apply(forecasts, (-1, 0), ensemble_shapes, "ensemble")        # for correct spatial reduction we need to do the same with spatial weights
 
         lm_weights_split = self.lm_weights.flatten(start_dim=-2, end_dim=-1)
-        lm_weights_split = scatter_to_parallel_region(lm_weights_split, -1, "ensemble")
+        if self.ensemble_distributed:
+            lm_weights_split = scatter_to_parallel_region(lm_weights_split, -1, "ensemble")
 
         # observations does not need a transpose, but just a split
         observations = observations.reshape(1, B, C, H * W)

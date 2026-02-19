@@ -366,6 +366,7 @@ def get_stats(input_path: str, output_path: str, metadata_file: str,
     height, width = (data_shape[2], data_shape[3])
 
     # quadrature:
+    # we normalize the quadrature rule to 4pi
     quadrature = GridQuadrature(quadrature_rule, (height, width),
                                 crop_shape=None, crop_offset=(0, 0),
                                 normalize=False, pole_mask=None).to(device)

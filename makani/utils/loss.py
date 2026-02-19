@@ -24,7 +24,8 @@ from torch import nn
 
 from makani.utils import comm
 from makani.utils.grids import GridQuadrature, BandLimitMask
-from makani.utils.dataloaders.data_helpers import get_data_normalization, get_time_diff_stds
+from makani.utils.dataloaders.data_helpers import get_data_normalization, get_time_diff_stds, get_psd_stats
+from physicsnemo.distributed.utils import compute_split_shapes
 from physicsnemo.distributed.mappings import gather_from_parallel_region, reduce_from_parallel_region
 
 from .losses import LossType, GeometricLpLoss, SpectralLpLoss, SpectralH1Loss, SpectralAMSELoss
@@ -87,6 +88,17 @@ class LossHandler(nn.Module):
         else:
             scale = torch.ones((1, len(params.out_channels), 1, 1), dtype=torch.float32)
 
+        # load PSD stats
+        try:
+            psd_means, psd_stds = get_psd_stats(params)
+            if psd_means is not None:
+                psd_means = torch.from_numpy(psd_means).to(torch.float32)
+            if psd_stds is not None:
+                psd_stds = torch.from_numpy(psd_stds).to(torch.float32)
+        except ValueError:
+            psd_means = None
+            psd_stds = None
+
         # create module list
         self.loss_fn = nn.ModuleList([])
         self.loss_requires_input = []  # track which losses need input state
@@ -115,6 +127,8 @@ class LossHandler(nn.Module):
                 pole_mask=pole_mask,
                 bias=bias,
                 scale=scale,
+                psd_means=psd_means,
+                psd_stds=psd_stds,
                 grid_type=params.model_grid_type,
                 spatial_distributed=self.spatial_distributed,
                 ensemble_distributed=self.ensemble_distributed,
