@@ -100,8 +100,10 @@ def get_file_stats(filename,
             # for max and mins, make sure we only take from the valid samples
             tdata_masked_max = torch.where(valid_mask > 0.0, tdata, -torch.inf)
             tmax = torch.max(torch.max(torch.max(tdata_masked_max, dim=0, keepdim=True).values, dim=2, keepdim=True).values, dim=3, keepdim=True)
+            del tdata_masked_max
             tdata_masked_min = torch.where(valid_mask > 0.0, tdata, torch.inf)
             tmin = torch.min(torch.min(torch.min(tdata_masked_min, dim=0, keepdim=True).values, dim=2, keepdim=True).values, dim=3, keepdim=True)
+            del tdata_masked_min
 
             # fill the dict
             tmpstats = dict(
@@ -129,6 +131,7 @@ def get_file_stats(filename,
                     "values": torch.stack([tmean, tm2], dim=0).contiguous(),
                 }
             )
+            del tdata_masked, valid_mask
 
             # time diffs: read one more sample for these, if possible
             # TODO: tile it for dt < batch_size
@@ -137,6 +140,7 @@ def get_file_stats(filename,
                 data_m_dt = dset[sub_slc_m_dt, ...]
                 tdata_m_dt = torch.from_numpy(data_m_dt).to(device=device, dtype=torch.float64)
                 tdiff = tdata_m_dt[dt:, ...] - tdata_m_dt[:-dt, ...]
+                del tdata_m_dt
                 counts_timediff = tdiff.shape[0]
                 tdiff_masked, tdiff_valid_mask = mask_data(tdiff)
                 tdiff_valid_count = torch.sum(quadrature(tdiff_valid_mask), dim=0)
@@ -208,6 +212,9 @@ def get_file_stats(filename,
                             dim=0
                         ).contiguous(),
                     }
+
+            if counts_timediff != 0:
+                del tdiff, tdiff_masked, tdiff_valid_mask
 
             if stats is not None:
                 stats = welford_combine(stats, tmpstats)

@@ -27,7 +27,7 @@ def mask_data(data):
         data_masked = torch.where(valid_mask > 0.0, data, 0.0)
     else:
         valid_mask = torch.ones_like(data)
-        data_masked = data.clone()
+        data_masked = data
 
     return data_masked, valid_mask
 
