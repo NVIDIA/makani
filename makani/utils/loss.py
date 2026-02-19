@@ -23,12 +23,13 @@ import torch
 from torch import nn
 
 from makani.utils import comm
-from makani.utils.dataloaders.data_helpers import get_data_normalization
+from makani.utils.dataloaders.data_helpers import get_data_normalization, get_time_diff_stds
 from physicsnemo.distributed.mappings import gather_from_parallel_region, reduce_from_parallel_region
 
-from .losses import LossType, GeometricLpLoss, SpectralH1Loss, SpectralAMSELoss, HydrostaticBalanceLoss
-from .losses import EnsembleCRPSLoss, EnsembleSpectralCRPSLoss, EnsembleNLLLoss, EnsembleMMDLoss
-from .losses import DriftRegularization
+from .losses import LossType, GeometricLpLoss, SpectralH1Loss, SpectralAMSELoss
+from .losses import EnsembleCRPSLoss, EnsembleSpectralCRPSLoss, EnsembleVortDivCRPSLoss
+from .losses import EnsembleNLLLoss, EnsembleMMDLoss
+from .losses import DriftRegularization, HydrostaticBalanceLoss
 
 
 class LossHandler(nn.Module):
@@ -52,11 +53,12 @@ class LossHandler(nn.Module):
 
         # check whether dynamic loss weighting is required
         self.uncertainty_weighting = params.get("uncertainty_weighting", False)
+        self.balanced_weighting = params.get("balanced_weighting", False)
         self.randomized_loss_weights = params.get("randomized_loss_weights", False)
         self.random_slice_loss = params.get("random_slice_loss", False)
 
         # whether to keep running stats
-        self.track_running_stats = track_running_stats or self.uncertainty_weighting
+        self.track_running_stats = track_running_stats or self.uncertainty_weighting or self.balanced_weighting
         self.eps = eps
 
         n_channels = len(params.channel_names)
@@ -122,32 +124,23 @@ class LossHandler(nn.Module):
             else:
                 channel_weight_type = loss["channel_weights"]
 
+            # check if time difference weighting is required
+            if loss.get("temp_diff_normalization", False):
+                time_diff_scale = get_time_diff_stds(params).flatten()
+                time_diff_scale = torch.clamp(torch.from_numpy(time_diff_scale[params.out_channels]), min=1e-4)
+                time_diff_scale = scale.flatten() / time_diff_scale
+            else:
+                time_diff_scale = None
+
+            # get channel weights either directly or through the compute routine
             if isinstance(channel_weight_type, List):
-                chw = torch.tensor(channel_weight_type, dtype=torch.float32).reshape(1, -1)
+                chw = torch.tensor(channel_weight_type, dtype=torch.float32)
+                chw = chw * time_diff_scale
                 assert chw.shape[1] == loss_fn.n_channels
             else:
-                chw = loss_fn.compute_channel_weighting(channel_weight_type)
+                chw = loss_fn.compute_channel_weighting(channel_weight_type, time_diff_scale=time_diff_scale)
 
-            # the option to normalize outputs with stds of the time difference rather than th
-            if ("temp_diff_normalization" in loss.keys()) and loss["temp_diff_normalization"]:
-
-                # extract relevant stds
-                time_diff_stds = torch.from_numpy(np.load(params.time_diff_stds_path)).reshape(1, -1)[:, params.out_channels]
-                # the time differences are computed between two consecutive datapoints,
-                # so we need to account for the number of timesteps used in the prediction
-                # this is now commebnted out as we expect the stats to be computed with the correct dt
-                # time_diff_stds *= np.sqrt(params.dt)
-
-                # to avoid division by  very small numbers, we clamp the time differences from below
-                time_diff_stds = torch.clamp(time_diff_stds, min=1e-4)
-
-                time_var_weights = scale.reshape(1, -1) / time_diff_stds
-
-                if hasattr(loss_fn, "squared") and loss_fn.squared:
-                    time_var_weights = time_var_weights**2
-
-                chw = chw * time_var_weights
-
+            # reshape channel weights for propewr broadcasting
             chw = chw.reshape(1, -1)
 
             # check for a relative weight that weights the loss relative to other losses
@@ -242,11 +235,11 @@ class LossHandler(nn.Module):
                     p_max = int(x.replace("p_max=", ""))
             loss_handle = partial(HydrostaticBalanceLoss, p_min=p_min, p_max=p_max, use_moist_air_formula=use_moist_air_formula)
         elif "ensemble_crps" in loss_type:
-            loss_handle = partial(EnsembleCRPSLoss, crps_type="cdf")
+            loss_handle = partial(EnsembleCRPSLoss)
         elif "ensemble_spectral_crps" in loss_type:
-            loss_handle = partial(EnsembleSpectralCRPSLoss, crps_type="cdf")
-        elif "gauss_crps" in loss_type:
-            loss_handle = partial(EnsembleCRPSLoss, crps_type="gauss")
+            loss_handle = partial(EnsembleSpectralCRPSLoss)
+        elif "ensemble_vort_div_crps" in loss_type:
+            loss_handle = partial(EnsembleVortDivCRPSLoss)
         elif "ensemble_nll" in loss_type:
             loss_handle = EnsembleNLLLoss
         elif "ensemble_mmd" in loss_type:
@@ -364,6 +357,11 @@ class LossHandler(nn.Module):
         if self.uncertainty_weighting and self.training:
             var, _ = self.get_running_stats()
             chw = chw / (torch.sqrt(2 * var) + self.eps)
+        elif self.balanced_weighting and self.training:
+            _, mean = self.get_running_stats()
+            if self.num_batches_tracked.item() <= 100:
+                mean = torch.ones_like(mean)
+            chw = chw / mean
 
         if self.randomized_loss_weights:
             rmask = torch.zeros_like(chw)
