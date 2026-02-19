@@ -524,10 +524,10 @@ def get_stats(input_path: str, output_path: str, metadata_file: str,
 
         print("mins: ", stats["mins"]["values"][0, :, 0, 0])
         print("maxs: ", stats["maxs"]["values"][0, :, 0, 0])
-        print("means: ", stats["global_meanvar"]["values"][0, :, 0, 0])
-        print("stds: ", stats["global_meanvar"]["values"][1, :, 0, 0])
-        print(f"time_diff_means (dt={dt}): ", stats["time_diff_meanvar"]["values"][0, :, 0 ,0])
-        print(f"time_diff_stds (dt={dt}): ", stats["time_diff_meanvar"]["values"][1, :, 0, 0])
+        print("means: ", stats["global_meanvar"]["values"][0, 0, :, 0, 0])
+        print("stds: ", stats["global_meanvar"]["values"][1, 0, :, 0, 0])
+        print(f"time_diff_means (dt={dt}): ", stats["time_diff_meanvar"]["values"][0, 0, :, 0 ,0])
+        print(f"time_diff_stds (dt={dt}): ", stats["time_diff_meanvar"]["values"][1, 0, :, 0, 0])
 
 
     # wait for rank 0 to finish
