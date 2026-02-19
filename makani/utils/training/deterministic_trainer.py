@@ -47,7 +47,7 @@ from makani.utils import comm
 from makani.utils import visualize
 
 from makani.mpu.mappings import init_gradient_reduction_hooks
-from makani.mpu.helpers import sync_params
+from makani.mpu.helpers import sync_params, gather_uneven
 
 # for counting model parameters
 from makani.models.helpers import count_parameters
@@ -107,6 +107,14 @@ class Trainer(Driver):
             self.train_dataloader, self.train_dataset, self.train_sampler = get_dataloader(self.params, self.params.train_data_path, mode="train", device=self.device)
             self.valid_dataloader, self.valid_dataset, self.valid_sampler = get_dataloader(self.params, self.params.valid_data_path, mode="eval", device=self.device)
             self._set_data_shapes(self.params, self.valid_dataset)
+            # obtain the true lon lat grid after cropping and resampling
+            self.lat_global = torch.as_tensor(self.valid_dataset.lat_lon_local[0]).to(self.device)
+            self.lon_global = torch.as_tensor(self.valid_dataset.lat_lon_local[1]).to(self.device)
+            if comm.get_size("h") > 1:
+                self.lat_global = gather_uneven(self.lat_global, 0, "h")
+            if comm.get_size("w") > 1:
+                self.lon_global = gather_uneven(self.lon_global, 0, "w")
+            self.lat_lon_global = (self.lat_global.cpu().numpy(), self.lon_global.cpu().numpy())
         self.timers["dataloader init"] = timer.time
 
         if self.log_to_screen:
@@ -234,8 +242,8 @@ class Trainer(Driver):
                 path=None,
                 prefix=None,
                 plot_list=plot_list,
-                lat=np.deg2rad(np.array(self.valid_dataloader.lat_lon[0])),
-                lon=np.deg2rad(np.array(self.valid_dataloader.lat_lon[1])) - np.pi,
+                lat=np.deg2rad(self.lat_lon_global[0]),
+                lon=np.deg2rad(self.lat_lon_global[1]) - np.pi,
                 scale=out_scale[0, ...],
                 bias=out_bias[0, ...],
                 num_workers=self.params.num_visualization_workers,
@@ -249,10 +257,10 @@ class Trainer(Driver):
 
         pin_memory = self.device.type == "cuda"
         self.viz_prediction_cpu = torch.empty(
-            ((self.params.N_target_channels // (self.params.n_future + 1)), self.params.img_crop_shape_x, self.params.img_crop_shape_y), device="cpu", pin_memory=pin_memory
+            ((self.params.N_target_channels // (self.params.n_future + 1)), self.params.img_shape_x_resampled, self.params.img_shape_y_resampled), device="cpu", pin_memory=pin_memory
         )
         self.viz_target_cpu = torch.empty(
-            ((self.params.N_target_channels // (self.params.n_future + 1)), self.params.img_crop_shape_x, self.params.img_crop_shape_y), device="cpu", pin_memory=pin_memory
+            ((self.params.N_target_channels // (self.params.n_future + 1)), self.params.img_shape_x_resampled, self.params.img_shape_y_resampled), device="cpu", pin_memory=pin_memory
         )
 
         # reload checkpoints

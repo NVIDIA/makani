@@ -17,6 +17,8 @@ import os
 import sys
 import glob
 import copy
+import math
+from re import sub
 import tempfile
 import datetime as dt
 from typing import Optional
@@ -367,6 +369,59 @@ class TestDataLoader(unittest.TestCase):
                 inp_res.append(tmp[:, off_x : off_x + range_x, off_y : off_y + range_y])
                 tmp = get_sample(self.params.valid_data_path, off + b + 1)
                 tar_res.append(tmp[:, off_x : off_x + range_x, off_y : off_y + range_y])
+
+            # stack
+            test_inp = np.squeeze(np.stack(inp_res, axis=0))
+            test_tar = np.squeeze(np.stack(tar_res, axis=0))
+
+            inp = np.squeeze(inp.cpu().numpy())
+            tar = np.squeeze(tar.cpu().numpy())
+
+            self.assertTrue(np.allclose(inp, test_inp))
+            self.assertTrue(np.allclose(tar, test_tar))
+
+            if idt > self.num_steps:
+                break
+
+    @parameterized.expand(_multifiles_params, skip_on_empty=False)
+    def test_distributed_subsampling(self, multifiles):
+
+        # set multifiles
+        self.params.multifiles = multifiles
+
+        # set subsampling factor
+        subsample = 2
+        self.params.subsampling_factor = subsample
+
+        # set IO grid
+        self.params.io_grid = [1, 2, 1]
+        self.params.io_rank = [0, 1, 0]
+
+        valid_loader, valid_dataset, _ = get_dataloader(self.params, self.params.valid_data_path, mode="eval", device=self.device)
+
+        off_x = valid_dataset.img_local_offset_x
+        off_y = valid_dataset.img_local_offset_y
+        range_x = valid_dataset.img_local_shape_x
+        range_y = valid_dataset.img_local_shape_y
+
+        # do tests
+        num_steps = 3
+        for idt, token in enumerate(valid_loader):
+            # get loader samples
+            inp, tar = token
+
+            self.assertEqual(tuple(inp.shape), (self.params.batch_size, 1, NUM_CHANNELS, math.ceil(range_x / subsample), math.ceil(range_y / subsample)))
+            self.assertEqual(tuple(tar.shape), (self.params.batch_size, 1, NUM_CHANNELS, math.ceil(range_x / subsample), math.ceil(range_y / subsample)))
+
+            # get test samples
+            off = self.params.batch_size * idt
+            inp_res = []
+            tar_res = []
+            for b in range(self.params.batch_size):
+                tmp = get_sample(self.params.valid_data_path, off + b)
+                inp_res.append(tmp[:, off_x : off_x + range_x : subsample, off_y : off_y + range_y : subsample])
+                tmp = get_sample(self.params.valid_data_path, off + b + 1)
+                tar_res.append(tmp[:, off_x : off_x + range_x : subsample, off_y : off_y + range_y : subsample])
 
             # stack
             test_inp = np.squeeze(np.stack(inp_res, axis=0))

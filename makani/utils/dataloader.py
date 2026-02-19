@@ -95,6 +95,7 @@ def get_dataloader(params, files_pattern, device, mode="train"):
                                       scale=scale,
                                       crop_size=(params.get("crop_size_x", None), params.get("crop_size_y", None)),
                                       crop_anchor=(params.get("crop_anchor_x", 0), params.get("crop_anchor_y", 0)),
+                                      subsampling_factor=params.get("subsampling_factor", 1),
                                       return_timestamp=(True if (mode == "inference") else False),
                                       return_target=(False if (mode == "inference") else True),
                                       file_suffix=params.get("dataset_file_suffix", "h5"),
@@ -154,6 +155,7 @@ def get_dataloader(params, files_pattern, device, mode="train"):
             model_grid_type=params.get("model_grid_type", "equiangular"),
             crop_size=(params.get("crop_size_x", None), params.get("crop_size_y", None)),
             crop_anchor=(params.get("crop_anchor_x", 0), params.get("crop_anchor_y", 0)),
+            subsampling_factor=params.get("subsampling_factor", 1),
             return_timestamp=(True if (mode == "inference") else False),
             return_target=(False if (mode == "inference") else True),
             io_grid=params.get("io_grid", [1,1,1]),
@@ -170,10 +172,16 @@ def get_dataloader(params, files_pattern, device, mode="train"):
             img_crop_shape_y=dataloader.crop_shape[1],
             img_crop_offset_x=dataloader.crop_anchor[0],
             img_crop_offset_y=dataloader.crop_anchor[1],
-            img_local_shape_x=dataloader.return_shape[0],
-            img_local_shape_y=dataloader.return_shape[1],
+            img_local_shape_x=dataloader.read_shape[0],
+            img_local_shape_y=dataloader.read_shape[1],
             img_local_offset_x=dataloader.read_anchor[0],
             img_local_offset_y=dataloader.read_anchor[1],
+            img_local_shape_x_resampled=dataloader.return_shape[0],
+            img_local_shape_y_resampled=dataloader.return_shape[1],
+            img_shape_x_resampled=dataloader.img_shape_resampled[0],
+            img_shape_y_resampled=dataloader.img_shape_resampled[1],
+            subsampling_factor=dataloader.subsampling_factor,
+            lat_lon_local=dataloader.lat_lon_local,
         )
 
         # not needed for the no multifiles case
@@ -200,6 +208,12 @@ def get_dataloader(params, files_pattern, device, mode="train"):
             img_local_shape_y=dataloader.img_local_shape_y,
             img_local_offset_x=dataloader.img_local_offset_x,
             img_local_offset_y=dataloader.img_local_offset_y,
+            img_local_shape_x_resampled=dataloader.img_local_shape_x_resampled,
+            img_local_shape_y_resampled=dataloader.img_local_shape_y_resampled,
+            img_shape_x_resampled=dataloader.img_shape_x_resampled,
+            img_shape_y_resampled=dataloader.img_shape_y_resampled,
+            subsampling_factor=dataloader.subsampling_factor,
+            lat_lon_local=dataloader.lat_lon_local,
         )
 
         # not needed for the no multifiles case

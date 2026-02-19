@@ -88,6 +88,8 @@ class TestLosses(unittest.TestCase):
         self.params.img_shape_y = self.img_shape_y
         self.params.img_local_shape_x = self.params.img_crop_shape_x = self.params.img_shape_x
         self.params.img_local_shape_y = self.params.img_crop_shape_y = self.params.img_shape_y
+        self.params.img_shape_x_resampled = self.params.img_shape_x
+        self.params.img_shape_y_resampled = self.params.img_shape_y
         self.params.img_local_offset_x = self.params.img_crop_offset_x = 0
         self.params.img_local_offset_y = self.params.img_crop_offset_y = 0
 
