@@ -18,3 +18,4 @@ from .layers import DropPath, LayerScale, PatchEmbed2D, PatchEmbed3D, PatchRecov
 from .fft import RealFFT1, InverseRealFFT1, RealFFT2, InverseRealFFT2, RealFFT3, InverseRealFFT3
 from .layer_norm import GeometricInstanceNormS2
 from .spectral_convolution import SpectralConv, SpectralAttention
+from .pos_embedding import LearnablePositionEmbedding

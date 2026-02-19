@@ -88,7 +88,7 @@ def get_wind_channels(channel_names):
 
     wind_chans = []
     for c, ch in enumerate(channel_names):
-        if ch[0] == "u":
+        if ch[0] == "u" and ("v" + ch[1:]) in channel_names:
             vc = channel_names.index("v" + ch[1:])
             wind_chans = wind_chans + [c, vc]
 

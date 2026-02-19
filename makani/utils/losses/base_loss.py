@@ -17,6 +17,7 @@ from typing import Optional, Tuple, List
 from dataclasses import dataclass
 
 from abc import ABCMeta, abstractmethod
+import math
 
 import torch
 import torch.nn as nn
@@ -26,9 +27,10 @@ import torch_harmonics.distributed as thd
 
 from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature
 from makani.utils import comm
+from makani.utils.features import get_wind_channels
 
 
-def _compute_channel_weighting_helper(channel_names: List[str], channel_weight_type: str) -> torch.Tensor:
+def _compute_channel_weighting_helper(channel_names: List[str], channel_weight_type: str, time_diff_scale: torch.Tensor = None) -> torch.Tensor:
     """
     auxiliary routine for predetermining channel weighting
     """
@@ -50,6 +52,32 @@ def _compute_channel_weighting_helper(channel_names: List[str], channel_weight_t
             elif chn[0] in ["z", "u", "v", "t", "r", "q"]:
                 pressure_level = float(chn[1:])
                 channel_weights[c] = 0.001 * pressure_level
+            else:
+                channel_weights[c] = 0.01
+
+    elif channel_weight_type == "new auto":
+
+        for c, chn in enumerate(channel_names):
+            if chn in ["u10m", "v10m", "u100m", "v100m", "tp", "sp", "msl", "tcwv"]:
+                channel_weights[c] = 0.1
+            elif chn in ["t2m", "2d"]:
+                channel_weights[c] = 2.0
+            elif chn[0] in ["z", "u", "v", "t", "r", "q"]:
+                pressure_level = float(chn[1:])
+                channel_weights[c] = max(0.2, 0.001 * pressure_level)
+            else:
+                channel_weights[c] = 0.01
+
+    elif channel_weight_type == "new auto 2":
+
+        for c, chn in enumerate(channel_names):
+            if chn in ["u10m", "v10m", "u100m", "v100m", "tp", "sp", "msl", "tcwv"]:
+                channel_weights[c] = 0.1
+            elif chn in ["t2m", "2d"]:
+                channel_weights[c] = 2.0
+            elif chn[0] in ["z", "u", "v", "t", "r", "q"]:
+                pressure_level = float(chn[1:])
+                channel_weights[c] = max(0.3, 0.001 * pressure_level)
             else:
                 channel_weights[c] = 0.01
 
@@ -216,6 +244,10 @@ def _compute_channel_weighting_helper(channel_names: List[str], channel_weight_t
     # normalize
     channel_weights = channel_weights / torch.sum(channel_weights)
 
+    # get the time differences and weigh them additionally
+    if time_diff_scale is not None:
+        channel_weights = channel_weights * time_diff_scale
+
     return channel_weights
 
 
@@ -250,9 +282,8 @@ class GeometricBaseLoss(nn.Module, metaclass=ABCMeta):
         self.pole_mask = pole_mask
         self.spatial_distributed = comm.is_distributed("spatial") and spatial_distributed
 
+        # get the quadrature rule for the corresponding grid
         quadrature_rule = grid_to_quadrature_rule(grid_type)
-
-        # get the quadrature
         self.quadrature = GridQuadrature(
             quadrature_rule,
             img_shape=self.img_shape,
@@ -272,8 +303,8 @@ class GeometricBaseLoss(nn.Module, metaclass=ABCMeta):
         return len(self.channel_names)
 
     @torch.compiler.disable(recursive=False)
-    def compute_channel_weighting(self, channel_weight_type: str) -> torch.Tensor:
-        return _compute_channel_weighting_helper(self.channel_names, channel_weight_type)
+    def compute_channel_weighting(self, channel_weight_type: str, time_diff_scale: torch.Tensor = None) -> torch.Tensor:
+        return _compute_channel_weighting_helper(self.channel_names, channel_weight_type, time_diff_scale=time_diff_scale)
 
     @abstractmethod
     def forward(self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None) -> torch.Tensor:
@@ -302,6 +333,7 @@ class SpectralBaseLoss(nn.Module, metaclass=ABCMeta):
         self.channel_names = channel_names
         self.spatial_distributed = comm.is_distributed("spatial") and spatial_distributed
 
+        # SHT for the computation of SH coefficients
         if self.spatial_distributed and (comm.get_size("spatial") > 1):
             if not thd.is_initialized():
                 polar_group = None if (comm.get_size("h") == 1) else comm.get_group("h")
@@ -320,8 +352,84 @@ class SpectralBaseLoss(nn.Module, metaclass=ABCMeta):
         return len(self.n_channels)
 
     @torch.compiler.disable(recursive=False)
-    def compute_channel_weighting(self, channel_weight_type: str) -> torch.Tensor:
-        return _compute_channel_weighting_helper(self.channel_names, channel_weight_type)
+    def compute_channel_weighting(self, channel_weight_type: str, time_diff_scale: torch.Tensor = None) -> torch.Tensor:
+        return _compute_channel_weighting_helper(self.channel_names, channel_weight_type, time_diff_scale=time_diff_scale)
+
+    @abstractmethod
+    def forward(self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None) -> torch.Tensor:
+        pass
+
+
+class VortDivBaseLoss(nn.Module, metaclass=ABCMeta):
+    """
+    Geometric base loss class used by all geometric losses
+    """
+
+    def __init__(
+        self,
+        img_shape: Tuple[int, int],
+        crop_shape: Tuple[int, int],
+        crop_offset: Tuple[int, int],
+        channel_names: List[str],
+        grid_type: str,
+        pole_mask: int,
+        spatial_distributed: Optional[bool] = False,
+    ):
+        super().__init__()
+
+        self.img_shape = img_shape
+        self.crop_shape = crop_shape
+        self.crop_offset = crop_offset
+        self.channel_names = channel_names
+        self.pole_mask = pole_mask
+        self.spatial_distributed = comm.is_distributed("spatial") and spatial_distributed
+
+        # get the wind channels
+        wind_chans = get_wind_channels(self.channel_names)
+        self.register_buffer("wind_chans", torch.LongTensor(wind_chans))
+
+        if self.spatial_distributed and (comm.get_size("spatial") > 1):
+            if not thd.is_initialized():
+                polar_group = None if (comm.get_size("h") == 1) else comm.get_group("h")
+                azimuth_group = None if (comm.get_size("w") == 1) else comm.get_group("w")
+                thd.init(polar_group, azimuth_group)
+            self.vsht = thd.DistributedRealVectorSHT(*img_shape, grid=grid_type)
+            self.isht = thd.DistributedInverseRealVectorSHT(nlat=self.vsht.nlat, nlon=self.vsht.nlon, grid=grid_type)
+        else:
+            self.vsht = th.RealVectorSHT(*img_shape, grid=grid_type)
+            self.isht = th.InverseRealVectorSHT(nlat=self.vsht.nlat, nlon=self.vsht.nlon, grid=grid_type)
+
+        # get the quadrature rule for the corresponding grid
+        quadrature_rule = grid_to_quadrature_rule(grid_type)
+        self.quadrature = GridQuadrature(
+            quadrature_rule,
+            img_shape=self.img_shape,
+            crop_shape=self.crop_shape,
+            crop_offset=self.crop_offset,
+            normalize=True,
+            pole_mask=self.pole_mask,
+            distributed=self.spatial_distributed,
+        )
+
+    @property
+    def type(self):
+        return LossType.Deterministic
+
+    @property
+    def n_channels(self):
+        return len(self.n_channels)
+
+    @torch.compiler.disable(recursive=False)
+    def compute_channel_weighting(self, channel_weight_type: str, time_diff_scale: torch.Tensor = None) -> torch.Tensor:
+
+        chw = _compute_channel_weighting_helper(self.channel_names, channel_weight_type, time_diff_scale=time_diff_scale)
+        chw = chw[self.wind_chans.to(chw.device)]
+
+        # average u and v component weightings to weight vort and div equally
+        chw[1::2] = (chw[1::2] + chw[0::2]) / 2
+        chw[0::2] = chw[1::2]
+
+        return chw
 
     @abstractmethod
     def forward(self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None) -> torch.Tensor:

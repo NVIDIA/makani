@@ -24,7 +24,7 @@ from functools import partial
 from itertools import groupby
 
 # helpers
-from makani.models.common import DropPath, LayerScale, MLP, EncoderDecoder, SpectralConv
+from makani.models.common import DropPath, LayerScale, MLP, EncoderDecoder, SpectralConv, LearnablePositionEmbedding
 from makani.utils.features import get_water_channels, get_channel_groups
 
 # get spectral transforms and spherical convolutions from torch_harmonics
@@ -409,6 +409,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         atmo_embed_dim=8,
         surf_embed_dim=8,
         aux_embed_dim=8,
+        pos_embed_dim=0,
         num_layers=4,
         num_groups=1,
         use_mlp=True,
@@ -437,6 +438,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         self.atmo_embed_dim = atmo_embed_dim
         self.surf_embed_dim = surf_embed_dim
         self.aux_embed_dim = aux_embed_dim
+        self.pos_embed_dim = pos_embed_dim
         self.big_skip = big_skip
         self.checkpointing_level = checkpointing_level
 
@@ -561,6 +563,10 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
                 use_mlp=encoder_mlp,
             )
 
+        # position embedding
+        if self.pos_embed_dim > 0:
+            self.pos_embed = LearnablePositionEmbedding(img_shape=(self.h, self.w), grid=sht_grid_type, num_chans=self.pos_embed_dim, embed_type="lat")
+
         # dropout
         self.pos_drop = nn.Dropout(p=pos_drop_rate) if pos_drop_rate > 0.0 else nn.Identity()
         dpr = [x.item() for x in torch.linspace(0, path_drop_rate, num_layers)]
@@ -583,7 +589,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
             block = NeuralOperatorBlock(
                 self.sht,
                 self.isht,
-                self.total_embed_dim + (self.n_aux_chans > 0) * self.aux_embed_dim,
+                self.total_embed_dim + (self.n_aux_chans > 0) * self.aux_embed_dim + self.pos_embed_dim,
                 self.total_embed_dim,
                 conv_type=conv_type,
                 mlp_ratio=mlp_ratio,
@@ -726,6 +732,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         self,
         channel_names=[],
         aux_channel_names=[],
+        n_history=0,
     ):
         """
         group the channels appropriately into atmospheric pressure levels and surface variables
@@ -782,6 +789,13 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
             x_aux = x_aux.reshape(*batchdims, self.aux_embed_dim, *x_aux.shape[-2:])
         else:
             x_aux = None
+
+        if hasattr(self, "pos_embed"):
+            x_pos = self.pos_embed()
+            if x_aux is not None:
+                x_aux = torch.cat([x_aux, x_pos], dim=-3)
+            else:
+                x_aux = x_pos
 
         return x_aux
 
