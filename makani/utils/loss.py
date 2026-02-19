@@ -27,7 +27,8 @@ from makani.utils.dataloaders.data_helpers import get_data_normalization, get_ti
 from physicsnemo.distributed.mappings import gather_from_parallel_region, reduce_from_parallel_region
 
 from .losses import LossType, GeometricLpLoss, SpectralLpLoss, SpectralH1Loss, SpectralAMSELoss
-from .losses import EnsembleCRPSLoss, EnsembleSpectralCRPSLoss, EnsembleGradientCRPSLoss, EnsembleVortDivCRPSLoss, EnergyScoreLoss, RandomizedKernelCRPS
+from .losses import EnsembleCRPSLoss, EnsembleSpectralCRPSLoss, EnsembleGradientCRPSLoss, EnsembleVortDivCRPSLoss
+from .losses import LpEnergyScoreLoss, H1EnergyScoreLoss
 from .losses import EnsembleNLLLoss, EnsembleMMDLoss
 from .losses import DriftRegularization, HydrostaticBalanceLoss
 
@@ -258,6 +259,8 @@ class LossHandler(nn.Module):
             loss_handle = EnsembleMMDLoss
         elif "energy score" in loss_type:
             loss_handle = partial(LpEnergyScoreLoss)
+        elif "h1 energy score" in loss_type:
+            loss_handle = partial(H1EnergyScoreLoss)
         elif "drift_regularization" in loss_type:
             loss_handle = DriftRegularization
         else:

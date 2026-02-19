@@ -20,7 +20,7 @@ import torch
 import torch.nn as nn
 from torch import amp
 
-from makani.utils.losses.base_loss import GeometricBaseLoss, LossType
+from makani.utils.losses.base_loss import GeometricBaseLoss, GradientBaseLoss, LossType
 from makani.utils import comm
 
 import torch_harmonics as th
@@ -108,16 +108,40 @@ class LpEnergyScoreLoss(GeometricBaseLoss):
         # observations: batch, channels, lat, lon
         B, E, C, H, W = forecasts.shape
 
+        # get the data type before stripping amp types
+        dtype = forecasts.dtype
+
+        # before anything else compute the transform
+        # as the CDF definition doesn't generalize well to more than one-dimensional variables, we treat complex and imaginary part as the same
+        with amp.autocast(device_type="cuda", enabled=False):
+
+            # compute the SH coefficients of the forecasts and observations
+            forecasts = self.sht(forecasts.float()).unsqueeze(-3)
+            observations = self.sht(observations.float()).unsqueeze(-3)
+
+            # append zeros, so that we can use the inverse vector SHT
+            forecasts = torch.cat([forecasts, torch.zeros_like(forecasts)], dim=-3)
+            observations = torch.cat([observations, torch.zeros_like(observations)], dim=-3)
+
+            forecasts = self.ivsht(forecasts)
+            observations = self.ivsht(observations)
+
+        forecasts = forecasts.to(dtype)
+        observations = observations.to(dtype)
+
+        forecasts = forecasts.reshape(B, E, 2*C, H, W)
+        observations = observations.reshape(B, 2*C, H, W)
+
         # transpose the forecasts to ensemble, batch, channels, lat, lon and then do distributed transpose into ensemble direction.
         # ideally we split spatial dims
         forecasts = torch.moveaxis(forecasts, 1, 0)
-        forecasts = forecasts.reshape(E, B, C, H * W)
+        forecasts = forecasts.reshape(E, B, 2*C, H * W)
         if self.ensemble_distributed:
             ensemble_shapes = [forecasts.shape[0] for _ in range(comm.get_size("ensemble"))]
             forecasts = distributed_transpose.apply(forecasts, (-1, 0), ensemble_shapes, "ensemble")
 
         # observations does not need a transpose, but just a split
-        observations = observations.reshape(1, B, C, H * W)
+        observations = observations.reshape(1, B, 2*C, H * W)
         if self.ensemble_distributed:
             observations = scatter_to_parallel_region(observations, -1, "ensemble")
 
@@ -176,7 +200,7 @@ class LpEnergyScoreLoss(GeometricBaseLoss):
         # the resulting tensor should have dimension B, C which is what we return
         return eskill - 0.5 * espread
 
-class H1EnergyScoreLoss(GeometricBaseLoss):
+class H1EnergyScoreLoss(GradientBaseLoss):
 
     def __init__(
         self,
@@ -205,8 +229,12 @@ class H1EnergyScoreLoss(GeometricBaseLoss):
             channel_names=channel_names,
             grid_type=grid_type,
             pole_mask=pole_mask,
+            lmax=lmax,
             spatial_distributed=spatial_distributed,
         )
+
+        # if absolute is true, the loss is computed only on the absolute value of the gradient
+        self.absolute = absolute
 
         self.spatial_distributed = comm.is_distributed("spatial") and spatial_distributed
         self.ensemble_distributed = comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1) and ensemble_distributed
