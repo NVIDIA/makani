@@ -289,11 +289,6 @@ class TestGetStats(unittest.TestCase):
         tdiffmean = torch.sum(quadrature(tdiff_masked * tdiff_valid_mask), keepdims=False, dim=0).reshape(1, -1, 1, 1) / tdiff_valid_count
         tdiffvar = torch.sum(quadrature(torch.square(tdiff_masked - tdiffmean) * tdiff_valid_mask), keepdims=False, dim=0).reshape(1, -1, 1, 1) / tdiff_valid_count
 
-        print("stats['global_meanvar']['values'][0]: ", stats["global_meanvar"]["values"][0])
-        print("tmean: ", tmean)
-        print("stats['global_meanvar']['values'][1]: ", stats["global_meanvar"]["values"][1])
-        print("tm2: ", tm2)
-
         # Compare results
         with self.subTest(desc="mean"):
             self.assertTrue(compare_arrays("mean", stats["global_meanvar"]["values"][0].numpy(), tmean.numpy(), verbose=verbose))
