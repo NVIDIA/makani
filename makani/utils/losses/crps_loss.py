@@ -22,7 +22,7 @@ import torch
 import torch.nn as nn
 from torch import amp
 
-from makani.utils.losses.base_loss import GeometricBaseLoss, SpectralBaseLoss, VortDivBaseLoss, LossType
+from makani.utils.losses.base_loss import LossType, GeometricBaseLoss, SpectralBaseLoss, VortDivBaseLoss, GradientBaseLoss
 from makani.utils import comm
 
 # distributed stuff
@@ -431,6 +431,7 @@ class EnsembleSpectralCRPSLoss(SpectralBaseLoss):
         crop_offset: Tuple[int, int],
         channel_names: List[str],
         grid_type: str,
+        lmax: Optional[int] = None,
         crps_type: str = "skillspread",
         spatial_distributed: Optional[bool] = False,
         ensemble_distributed: Optional[bool] = False,
@@ -447,6 +448,7 @@ class EnsembleSpectralCRPSLoss(SpectralBaseLoss):
             crop_offset=crop_offset,
             channel_names=channel_names,
             grid_type=grid_type,
+            lmax=lmax,
             spatial_distributed=spatial_distributed,
         )
 
@@ -469,8 +471,12 @@ class EnsembleSpectralCRPSLoss(SpectralBaseLoss):
 
         # get the local l weights
         lmax = self.sht.lmax
-        # l_weights = 1 / (2*ls+1)
-        l_weights = torch.ones(lmax)
+        ls = torch.arange(lmax).reshape(-1, 1)
+        l_weights = 1 / (2*ls+1)
+        # l_weights = torch.ones(lmax).reshape(-1, 1)
+        if comm.get_size("h") > 1:
+            l_weights = split_tensor_along_dim(l_weights, dim=-2, num_chunks=comm.get_size("h"))[comm.get_rank("h")]
+        self.register_buffer("l_weights", l_weights, persistent=False)
 
         # get the local m weights
         mmax = self.sht.mmax
@@ -614,6 +620,200 @@ class EnsembleSpectralCRPSLoss(SpectralBaseLoss):
 
         if self.ensemble_distributed:
             crps = reduce_from_parallel_region(crps, "ensemble")
+
+        # the resulting tensor should have dimension B, C, which is what we return
+        return crps
+
+class EnsembleGradientCRPSLoss(GradientBaseLoss):
+
+    def __init__(
+        self,
+        img_shape: Tuple[int, int],
+        crop_shape: Tuple[int, int],
+        crop_offset: Tuple[int, int],
+        channel_names: List[str],
+        grid_type: str,
+        pole_mask: int,
+        lmax: Optional[int] = None,
+        crps_type: str = "skillspread",
+        spatial_distributed: Optional[bool] = False,
+        ensemble_distributed: Optional[bool] = False,
+        ensemble_weights: Optional[torch.Tensor] = None,
+        absolute: Optional[bool] = True,
+        alpha: Optional[float] = 1.0,
+        eps: Optional[float] = 1.0e-5,
+        **kwargs,
+    ):
+
+        super().__init__(
+            img_shape=img_shape,
+            crop_shape=crop_shape,
+            crop_offset=crop_offset,
+            channel_names=channel_names,
+            grid_type=grid_type,
+            pole_mask=pole_mask,
+            lmax=lmax,
+            spatial_distributed=spatial_distributed,
+        )
+
+        # if absolute is true, the loss is computed only on the absolute value of the gradient
+        self.absolute = absolute
+
+        self.spatial_distributed = comm.is_distributed("spatial") and spatial_distributed
+        self.ensemble_distributed = comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1) and ensemble_distributed
+        self.crps_type = crps_type
+        self.alpha = alpha
+        self.eps = eps
+
+        if (self.crps_type != "skillspread") and (self.alpha < 1.0):
+            raise NotImplementedError("The alpha parameter (almost fair CRPS factor) is only supported for the skillspread kernel.")
+
+        # we also need a variant of the weights split in ensemble direction:
+        quad_weight_split = self.quadrature.quad_weight.reshape(1, 1, -1)
+        if self.ensemble_distributed:
+            quad_weight_split = split_tensor_along_dim(quad_weight_split, dim=-1, num_chunks=comm.get_size("ensemble"))[comm.get_rank("ensemble")]
+        quad_weight_split = quad_weight_split.contiguous()
+        self.register_buffer("quad_weight_split", quad_weight_split, persistent=False)
+
+        if ensemble_weights is not None:
+            self.register_buffer("ensemble_weights", ensemble_weights, persistent=False)
+        else:
+            self.ensemble_weights = ensemble_weights
+
+    @property
+    def type(self):
+        return LossType.Probabilistic
+
+    @property
+    def n_channels(self):
+        if self.absolute:
+            return len(self.channel_names)
+        else:
+            return 2 * len(self.channel_names)
+
+    @torch.compiler.disable(recursive=False)
+    def compute_channel_weighting(self, channel_weight_type: str, time_diff_scale: torch.Tensor = None) -> torch.Tensor:
+        chw = super().compute_channel_weighting(channel_weight_type, time_diff_scale=time_diff_scale)
+
+        if self.absolute:
+            return chw
+        else:
+            return [weight for weight in chw for _ in range(2)]
+
+    def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, spatial_weights: Optional[torch.Tensor] = None) -> torch.Tensor:
+
+        # sanity checks
+        if forecasts.dim() != 5:
+            raise ValueError(f"Error, forecasts tensor expected to have 5 dimensions but found {forecasts.dim()}.")
+
+        # we assume that spatial_weights have NO ensemble dim
+        if (spatial_weights is not None) and (spatial_weights.dim() != observations.dim()):
+            spdim = spatial_weights.dim()
+            odim = observations.dim()
+            raise ValueError(f"the weights have to have the same number of dimensions (found {spdim}) as observations (found {odim}).")
+
+        # we assume the following shapes:
+        # forecasts: batch, ensemble, channels, lat, lon
+        # observations: batch, channels, lat, lon
+        B, E, C, H, W = forecasts.shape
+
+        # get the data type before stripping amp types
+        dtype = forecasts.dtype
+
+        # before anything else compute the transform
+        # as the CDF definition doesn't generalize well to more than one-dimensional variables, we treat complex and imaginary part as the same
+        with amp.autocast(device_type="cuda", enabled=False):
+
+            # compute the SH coefficients of the forecasts and observations
+            forecasts = self.sht(forecasts.float()).unsqueeze(-3)
+            observations = self.sht(observations.float()).unsqueeze(-3)
+
+            # append zeros, so that we can use the inverse vector SHT
+            forecasts = torch.cat([forecasts, torch.zeros_like(forecasts)], dim=-3)
+            observations = torch.cat([observations, torch.zeros_like(observations)], dim=-3)
+
+            forecasts = self.ivsht(forecasts)
+            observations = self.ivsht(observations)
+
+        forecasts = forecasts.to(dtype)
+        observations = observations.to(dtype)
+
+        if self.absolute:
+            forecasts = forecasts.pow(2).sum(dim=-3).sqrt()
+            observations = observations.pow(2).sum(dim=-3).sqrt()
+        else:
+            C = 2 * C
+
+        forecasts = forecasts.reshape(B, E, C, H, W)
+        observations = observations.reshape(B, C, H, W)
+
+        # if ensemble dim is one dimensional then computing the score is quick:
+        if (not self.ensemble_distributed) and (E == 1):
+            # in this case, CRPS is straightforward
+            crps = torch.abs(observations - forecasts.squeeze(1)).reshape(B, C, H * W)
+        else:
+            # transpose forecasts: ensemble, batch, channels, lat, lon
+            forecasts = torch.moveaxis(forecasts, 1, 0)
+
+            # now we need to transpose the forecasts into ensemble direction.
+            # ideally we split spatial dims
+            forecasts = forecasts.reshape(E, B, C, H * W)
+            if self.ensemble_distributed:
+                ensemble_shapes = [forecasts.shape[0] for _ in range(comm.get_size("ensemble"))]
+                forecasts = distributed_transpose.apply(forecasts, (-1, 0), ensemble_shapes, "ensemble")
+            # observations does not need a transpose, but just a split
+            observations = observations.reshape(B, C, H * W)
+            if self.ensemble_distributed:
+                observations = scatter_to_parallel_region(observations, -1, "ensemble")
+            if spatial_weights is not None:
+                spatial_weights_split = spatial_weights.flatten(start_dim=-2, end_dim=-1)
+                spatial_weights_split = scatter_to_parallel_region(spatial_weights_split, -1, "ensemble")
+
+            # run appropriate crps kernel to compute it pointwise
+            if self.crps_type == "cdf":
+                # now, E dimension is local and spatial dim is split further
+                # we need to sort the forecasts now
+                forecasts, idx = torch.sort(forecasts, dim=0)
+                if self.ensemble_weights is not None:
+                    ensemble_weights = self.ensemble_weights[idx]
+                else:
+                    ensemble_weights = torch.ones_like(forecasts, device=forecasts.device)
+
+                # compute score
+                crps = _crps_ensemble_kernel(observations, forecasts, ensemble_weights)
+            elif self.crps_type == "skillspread":
+                if self.ensemble_weights is not None:
+                    raise NotImplementedError("currently only constant ensemble weights are supported")
+                else:
+                    ensemble_weights = torch.ones_like(forecasts, device=forecasts.device)
+
+                # compute score
+                crps = _crps_skillspread_kernel(observations, forecasts, ensemble_weights, self.alpha)
+            elif self.crps_type == "gauss":
+                if self.ensemble_weights is not None:
+                    ensemble_weights = self.ensemble_weights[idx]
+                else:
+                    ensemble_weights = torch.ones_like(forecasts, device=forecasts.device)
+
+                # compute score
+                crps = _crps_gauss_kernel(observations, forecasts, ensemble_weights, self.eps)
+            else:
+                raise ValueError(f"Unknown CRPS crps_type {self.crps_type}")
+
+        # perform ensemble and spatial average of crps score
+        if spatial_weights is not None:
+            crps = torch.sum(crps * self.quad_weight_split * spatial_weights_split, dim=-1)
+        else:
+            crps = torch.sum(crps * self.quad_weight_split, dim=-1)
+
+        # since we split spatial dim into ensemble dim, we need to do an ensemble sum as well
+        if self.ensemble_distributed:
+            crps = reduce_from_parallel_region(crps, "ensemble")
+
+        # we need to do the spatial averaging manually since
+        # we are not calling he quadrature forward function
+        if self.spatial_distributed:
+            crps = reduce_from_parallel_region(crps, "spatial")
 
         # the resulting tensor should have dimension B, C, which is what we return
         return crps
@@ -777,147 +977,3 @@ class EnsembleVortDivCRPSLoss(VortDivBaseLoss):
 
         # the resulting tensor should have dimension B, C, which is what we return
         return crps
-
-class EnergyScoreLoss(GeometricBaseLoss):
-
-    def __init__(
-        self,
-        img_shape: Tuple[int, int],
-        crop_shape: Tuple[int, int],
-        crop_offset: Tuple[int, int],
-        channel_names: List[str],
-        grid_type: str,
-        pole_mask: int,
-        spatial_distributed: Optional[bool] = False,
-        ensemble_distributed: Optional[bool] = False,
-        ensemble_weights: Optional[torch.Tensor] = None,
-        alpha: Optional[float] = 1.0,
-        beta: Optional[float] = 1.0,
-        eps: Optional[float] = 1.0e-5,
-        **kwargs,
-    ):
-
-        super().__init__(
-            img_shape=img_shape,
-            crop_shape=crop_shape,
-            crop_offset=crop_offset,
-            channel_names=channel_names,
-            grid_type=grid_type,
-            pole_mask=pole_mask,
-            spatial_distributed=spatial_distributed,
-        )
-
-        self.spatial_distributed = comm.is_distributed("spatial") and spatial_distributed
-        self.ensemble_distributed = comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1) and ensemble_distributed
-        self.alpha = alpha
-        self.beta = beta
-        self.eps = eps
-
-        # we also need a variant of the weights split in ensemble direction:
-        quad_weight_split = self.quadrature.quad_weight.reshape(1, 1, -1)
-        if self.ensemble_distributed:
-            quad_weight_split = split_tensor_along_dim(quad_weight_split, dim=-1, num_chunks=comm.get_size("ensemble"))[comm.get_rank("ensemble")]
-        quad_weight_split = quad_weight_split.contiguous()
-        self.register_buffer("quad_weight_split", quad_weight_split, persistent=False)
-
-        if ensemble_weights is not None:
-            self.register_buffer("ensemble_weights", ensemble_weights, persistent=False)
-        else:
-            self.ensemble_weights = ensemble_weights
-
-    @property
-    def type(self):
-        return LossType.Probabilistic
-
-    @property
-    def n_channels(self):
-        return 1
-
-    @torch.compiler.disable(recursive=False)
-    def compute_channel_weighting(self, channel_weight_type: str, time_diff_scale: str) -> torch.Tensor:
-        return torch.ones(1)
-
-    def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, spatial_weights: Optional[torch.Tensor] = None) -> torch.Tensor:
-
-        # sanity checks
-        if forecasts.dim() != 5:
-            raise ValueError(f"Error, forecasts tensor expected to have 5 dimensions but found {forecasts.dim()}.")
-
-        # we assume that spatial_weights have NO ensemble dim
-        if (spatial_weights is not None) and (spatial_weights.dim() != observations.dim()):
-            spdim = spatial_weights.dim()
-            odim = observations.dim()
-            raise ValueError(f"the weights have to have the same number of dimensions (found {spdim}) as observations (found {odim}).")
-
-        # we assume the following shapes:
-        # forecasts: batch, ensemble, channels, lat, lon
-        # observations: batch, channels, lat, lon
-        B, E, C, H, W = forecasts.shape
-
-        # transpose the forecasts to ensemble, batch, channels, lat, lon and then do distributed transpose into ensemble direction.
-        # ideally we split spatial dims
-        forecasts = torch.moveaxis(forecasts, 1, 0)
-        forecasts = forecasts.reshape(E, B, C, H * W)
-        if self.ensemble_distributed:
-            ensemble_shapes = [forecasts.shape[0] for _ in range(comm.get_size("ensemble"))]
-            forecasts = distributed_transpose.apply(forecasts, (-1, 0), ensemble_shapes, "ensemble")
-
-        # observations does not need a transpose, but just a split
-        observations = observations.reshape(1, B, C, H * W)
-        if self.ensemble_distributed:
-            observations = scatter_to_parallel_region(observations, -1, "ensemble")
-
-        # for correct spatial reduction we need to do the same with spatial weights
-        if spatial_weights is not None:
-            spatial_weights_split = spatial_weights.flatten(start_dim=-2, end_dim=-1)
-            spatial_weights_split = scatter_to_parallel_region(spatial_weights_split, -1, "ensemble")
-
-        if self.ensemble_weights is not None:
-            raise NotImplementedError("currently only constant ensemble weights are supported")
-        else:
-            ensemble_weights = torch.ones_like(forecasts, device=forecasts.device)
-
-        #  ensemble size
-        num_ensemble = forecasts.shape[0]
-
-        # get nanmask from the observarions
-        nanmasks = torch.logical_or(torch.isnan(observations), torch.isnan(ensemble_weights))
-
-        # use broadcasting semantics to compute spread and skill and sum over channels (vector norm)
-        espread = (forecasts.unsqueeze(1) - forecasts.unsqueeze(0)).abs().pow(self.beta)
-        eskill = (observations - forecasts).abs().pow(self.beta)
-
-        # perform masking before any reduction
-        espread = torch.where(nanmasks.sum(dim=0) != 0, 0.0, espread)
-        eskill = torch.where(nanmasks.sum(dim=0) != 0, 0.0, eskill)
-
-        # do the channel reduction while ignoring NaNs
-        # if channel weights are required they should be added here to the reduction
-        espread = espread.sum(dim=-2, keepdim=True)
-        eskill = eskill.sum(dim=-2, keepdim=True)
-
-        # do the spatial reduction
-        if spatial_weights is not None:
-            espread = torch.sum(espread * self.quad_weight_split * spatial_weights_split, dim=-1)
-            eskill = torch.sum(eskill * self.quad_weight_split * spatial_weights_split, dim=-1)
-        else:
-            espread = torch.sum(espread * self.quad_weight_split, dim=-1)
-            eskill = torch.sum(eskill * self.quad_weight_split, dim=-1)
-
-        # since we split spatial dim into ensemble dim, we need to do an ensemble sum as well
-        if self.ensemble_distributed:
-            espread = reduce_from_parallel_region(espread, "ensemble")
-            eskill = reduce_from_parallel_region(eskill, "ensemble")
-
-        # we need to do the spatial averaging manually since
-        # we are not calling the quadrature forward function
-        if self.spatial_distributed:
-            espread = reduce_from_parallel_region(espread, "spatial")
-            eskill = reduce_from_parallel_region(eskill, "spatial")
-
-        # now we have reduced everything and need to sum appropriately
-        espread = espread.sum(dim=(0,1)) * (float(num_ensemble) - 1.0 + self.alpha) / float(num_ensemble * num_ensemble * (num_ensemble - 1))
-        eskill = eskill.sum(dim=0) / float(num_ensemble)
-
-        # the resulting tensor should have dimension B, C which is what we return
-        return eskill - 0.5 * espread

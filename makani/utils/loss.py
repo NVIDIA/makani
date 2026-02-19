@@ -26,10 +26,11 @@ from makani.utils import comm
 from makani.utils.dataloaders.data_helpers import get_data_normalization, get_time_diff_stds
 from physicsnemo.distributed.mappings import gather_from_parallel_region, reduce_from_parallel_region
 
-from .losses import LossType, GeometricLpLoss, SpectralH1Loss, SpectralAMSELoss
-from .losses import EnsembleCRPSLoss, EnsembleSpectralCRPSLoss, EnsembleVortDivCRPSLoss, EnergyScoreLoss
+from .losses import LossType, GeometricLpLoss, SpectralLpLoss, SpectralH1Loss, SpectralAMSELoss
+from .losses import EnsembleCRPSLoss, EnsembleSpectralCRPSLoss, EnsembleGradientCRPSLoss, EnsembleVortDivCRPSLoss, EnergyScoreLoss, RandomizedKernelCRPS
 from .losses import EnsembleNLLLoss, EnsembleMMDLoss
 from .losses import DriftRegularization, HydrostaticBalanceLoss
+from .losses import RandomizedKernelCRPS
 
 
 class LossHandler(nn.Module):
@@ -213,13 +214,18 @@ class LossHandler(nn.Module):
 
         loss_type = set(loss_type.split())
 
+        # this can probably all be moved to the loss function itself
         relative = "relative" in loss_type
         squared = "squared" in loss_type
 
         jacobian = "s2" if "geometric" in loss_type else "flat"
 
         # decide which loss to use
-        if "l2" in loss_type:
+        if "spectral" in loss_type and "l2" in loss_type:
+            loss_handle = partial(SpectralLpLoss, p=2, relative=relative, squared=squared)
+        elif "spectral" in loss_type and "l1" in loss_type:
+            loss_handle = partial(SpectralLpLoss, p=1, relative=relative, squared=squared)
+        elif "l2" in loss_type:
             loss_handle = partial(GeometricLpLoss, p=2, relative=relative, squared=squared, jacobian=jacobian)
         elif "l1" in loss_type:
             loss_handle = partial(GeometricLpLoss, p=1, relative=relative, squared=squared, jacobian=jacobian)
@@ -245,6 +251,8 @@ class LossHandler(nn.Module):
             loss_handle = partial(EnsembleSpectralCRPSLoss)
         elif "ensemble_vort_div_crps" in loss_type:
             loss_handle = partial(EnsembleVortDivCRPSLoss)
+        elif "ensemble_gradient_crps" in loss_type:
+            loss_handle = partial(EnsembleGradientCRPSLoss)
         elif "ensemble_nll" in loss_type:
             loss_handle = EnsembleNLLLoss
         elif "ensemble_mmd" in loss_type:
@@ -253,6 +261,8 @@ class LossHandler(nn.Module):
             loss_handle = partial(EnergyScoreLoss)
         elif "drift_regularization" in loss_type:
             loss_handle = DriftRegularization
+        elif "randomized_kernel" in loss_type:
+            loss_handle = RandomizedKernelCRPS
         else:
             raise NotImplementedError(f"Unknown loss function: {loss_type}")
 
