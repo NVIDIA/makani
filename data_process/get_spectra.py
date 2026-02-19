@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import os
+import sys
 from typing import Optional
 import time
 import socket
@@ -32,6 +33,8 @@ from mpi4py import MPI
 import torch
 import torch.distributed as dist
 from torch_harmonics import RealSHT
+
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 from wb2_helpers import DistributedProgressBar
 from data_process_helpers import welford_combine, collective_reduce, binary_reduce

@@ -42,7 +42,7 @@ class TestAnnotateDataset(unittest.TestCase):
         # Create unannotated dataset
         path = os.path.join(tmp_path, "data")
         os.makedirs(path, exist_ok=True)
-        cls.train_path, cls.num_train, cls.test_path, cls.num_test, _, cls.metadata_path = init_dataset(path, annotate=False)
+        cls.train_path, cls.num_train, cls.test_path, cls.num_test, _, cls.metadata_path = init_dataset(path, nan_fraction=0.0, annotate=False)
 
         # Create reference dataset with annotations
         ref_path = os.path.join(tmp_path, "ref_data")
@@ -216,18 +216,33 @@ class TestGetStats(unittest.TestCase):
         os.makedirs(path, exist_ok=True)
         cls.train_path, cls.num_train, cls.test_path, cls.num_test, _, cls.metadata_path = init_dataset(path, annotate=True)
 
+        # Create dataset with annotations and NaNs:
+        nan_path = os.path.join(tmp_path, "nan_data")
+        os.makedirs(nan_path, exist_ok=True)
+        cls.nan_train_path, cls.nan_num_train, cls.nan_test_path, cls.nan_num_test, _, _ = init_dataset(nan_path, nan_fraction=0.1, annotate=True)
+
     @classmethod
     def tearDownClass(cls):
         cls.tmpdir.cleanup()
 
-    @parameterized.expand([8, 16], skip_on_empty=False)
+    @parameterized.expand(
+        [
+            (8, False),
+            (16, False),
+            (8, True),
+            (16, True),
+        ], skip_on_empty=False
+    )
     @unittest.skipUnless(importlib.util.find_spec("mpi4py") is not None, "mpi4py needs to be installed for this test")
-    def test_get_stats(self, batch_size, verbose=True):
+    def test_get_stats(self, batch_size, allow_nan, verbose=True):
         # import necessary modules
         from data_process.get_stats import welford_combine, get_file_stats, mask_data
 
         # Get list of files to process
-        train_files = sorted([os.path.join(self.train_path, f) for f in os.listdir(self.train_path) if f.endswith(".h5")])
+        if allow_nan:
+            train_files = sorted([os.path.join(self.nan_train_path, f) for f in os.listdir(self.nan_train_path) if f.endswith(".h5")])
+        else:
+            train_files = sorted([os.path.join(self.train_path, f) for f in os.listdir(self.train_path) if f.endswith(".h5")])
         
         # Create quadrature rule
         quadrature_rule = grid_to_quadrature_rule("equiangular")
@@ -241,7 +256,7 @@ class TestGetStats(unittest.TestCase):
                 file_slice=slice(0, None),  # Process entire file
                 wind_indices=None,  # No wind indices
                 quadrature=quadrature,
-                fail_on_nan=True,
+                fail_on_nan=not allow_nan,
                 dt=1,
                 batch_size=batch_size,
             )
@@ -259,18 +274,20 @@ class TestGetStats(unittest.TestCase):
         all_data = np.concatenate(all_data, axis=0)
         
         # Convert to torch tensor for quadrature
-        tdata = torch.from_numpy(all_data)
+        tdata = torch.as_tensor(all_data)
         tdata_masked, valid_mask = mask_data(tdata)
         valid_count = torch.sum(quadrature(valid_mask), dim=0).reshape(1, -1, 1, 1)
-        
+
         # Compute means and variances using quadrature
-        tmean = torch.sum(quadrature(tdata_masked), keepdims=False, dim=0).reshape(1, -1, 1, 1) / valid_count
-        tm2 = torch.sum(quadrature(torch.square(tdata_masked - tmean)), keepdims=False, dim=0).reshape(1, -1, 1, 1)
-        
-        # # Compute time differences
-        # tdiff = tdata[1:] - tdata[:-1]
-        # tdiffmean = torch.mean(quadrature(tdiff), keepdims=False, dim=0).reshape(1, -1, 1, 1)
-        # tdiffvar = torch.mean(quadrature(torch.square(tdiff - tdiffmean)), keepdims=False, dim=0).reshape(1, -1, 1, 1)
+        tmean = torch.sum(quadrature(tdata_masked * valid_mask), keepdims=False, dim=0).reshape(1, -1, 1, 1) / valid_count
+        tm2 = torch.sum(quadrature(torch.square(tdata_masked - tmean) * valid_mask), keepdims=False, dim=0).reshape(1, -1, 1, 1)
+
+        # Compute time differences
+        tdiff = tdata[1:] - tdata[:-1]
+        tdiff_masked, tdiff_valid_mask = mask_data(tdiff)
+        tdiff_valid_count = torch.sum(quadrature(tdiff_valid_mask), dim=0).reshape(1, -1, 1, 1)
+        tdiffmean = torch.sum(quadrature(tdiff_masked * tdiff_valid_mask), keepdims=False, dim=0).reshape(1, -1, 1, 1) / tdiff_valid_count
+        tdiffvar = torch.sum(quadrature(torch.square(tdiff_masked - tdiffmean) * tdiff_valid_mask), keepdims=False, dim=0).reshape(1, -1, 1, 1) / tdiff_valid_count
 
         print("stats['global_meanvar']['values'][0]: ", stats["global_meanvar"]["values"][0])
         print("tmean: ", tmean)
@@ -282,16 +299,12 @@ class TestGetStats(unittest.TestCase):
             self.assertTrue(compare_arrays("mean", stats["global_meanvar"]["values"][0].numpy(), tmean.numpy(), verbose=verbose))
         with self.subTest(desc="m2"):
             self.assertTrue(compare_arrays("m2", stats["global_meanvar"]["values"][1].numpy(), tm2.numpy(), verbose=verbose))
-        
-        # this test is more tricky since it crosses file boundaries
-        #self.assertTrue(np.allclose(stats["time_diff_meanvar"]["values"][0], tdiffmean.numpy()))
-        #self.assertTrue(np.allclose(stats["time_diff_meanvar"]["values"][1], float(tdiff.shape[0]) * tdiffvar.numpy()))
-        
+
         # Compare min/max
         with self.subTest(desc="max"):
-            self.assertTrue(compare_arrays("max", stats["maxs"]["values"].numpy(), np.max(all_data, keepdims=True, axis=(0, 2, 3)), verbose=verbose))
+            self.assertTrue(compare_arrays("max", stats["maxs"]["values"].numpy(), np.nanmax(all_data, keepdims=True, axis=(0, 2, 3)), verbose=verbose))
         with self.subTest(desc="min"):
-            self.assertTrue(compare_arrays("min", stats["mins"]["values"].numpy(), np.min(all_data, keepdims=True, axis=(0, 2, 3)), verbose=verbose))
+            self.assertTrue(compare_arrays("min", stats["mins"]["values"].numpy(), np.nanmin(all_data, keepdims=True, axis=(0, 2, 3)), verbose=verbose))
 
 
 if __name__ == "__main__":

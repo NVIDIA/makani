@@ -111,7 +111,8 @@ sirfshampoo = [
 
 [tool.pytest.ini_options]
 minversion = "6.0"
-addopts = ""
+# Disable hypothesis plugin so pytest does not load it (hypothesis uses pkg_resources, removed in setuptools>=82)
+addopts = "-p no:hypothesis"
 testpaths = [
     "tests",
     "makani",

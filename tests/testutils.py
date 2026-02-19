@@ -86,7 +86,13 @@ def get_default_parameters():
 
 
 def init_dataset(
-    path: str, num_samples_per_year: Optional[int] = 365, num_channels: Optional[int] = NUM_CHANNELS, img_size_h: Optional[int] = IMG_SIZE_H, img_size_w: Optional[int] = IMG_SIZE_W, annotate=True
+    path: str, 
+    num_samples_per_year: Optional[int] = 365, 
+    num_channels: Optional[int] = NUM_CHANNELS, 
+    img_size_h: Optional[int] = IMG_SIZE_H, 
+    img_size_w: Optional[int] = IMG_SIZE_W, 
+    nan_fraction: Optional[float] = 0.0,
+    annotate: Optional[bool] = True
 ):
 
     test_path = os.path.join(path, "test")
@@ -123,7 +129,23 @@ def init_dataset(
         data_path = os.path.join(train_path, f"{y}.h5")
         with h5.File(data_path, "w") as hf:
             hf.create_dataset(H5_PATH, shape=(num_samples_per_year, num_channels, img_size_h, img_size_w))
-            hf[H5_PATH][...] = rng.random((num_samples_per_year, num_channels, img_size_h, img_size_w), dtype=np.float32)
+
+            num_dof = num_samples_per_year * num_channels * img_size_h * img_size_w
+            data = rng.random((num_dof,), dtype=np.float32)
+
+            # add NaNs
+            if nan_fraction > 0.0:
+                indices = np.arange(num_samples_per_year * num_channels * img_size_h * img_size_w, dtype=np.int32)
+                nan_count = int(nan_fraction * num_dof)
+                rng.shuffle(indices)
+                nan_indices = indices[0:nan_count]
+                data[nan_indices] = np.nan
+
+            # reshape to correct shape
+            data = data.reshape(num_samples_per_year, num_channels, img_size_h, img_size_w)
+
+            # store in file
+            hf[H5_PATH][...] = data[...]
 
             # annotations
             if annotate:
