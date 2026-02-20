@@ -632,15 +632,15 @@ class Driver(metaclass=abc.ABCMeta):
         if params.optimizer_type == "Adam":
             if self.log_to_screen:
                 self.logger.info("using Adam optimizer")
-            optimizer = optim.Adam(all_parameters, betas=betas, lr=params.get("lr", 1e-3), weight_decay=params.get("weight_decay", 0), foreach=True)
+            optimizer = optim.Adam(all_parameters, lr=params.get("lr", 1e-3), betas=betas, eps=params.get("optimizer_eps", 1e-8), weight_decay=params.get("weight_decay", 0), foreach=True)
         elif params.optimizer_type == "AdamW":
             if self.log_to_screen:
                 self.logger.info("using AdamW optimizer")
-            optimizer = optim.AdamW(all_parameters, betas=betas, lr=params.get("lr", 1e-3), weight_decay=params.get("weight_decay", 0), foreach=True)
+            optimizer = optim.AdamW(all_parameters, lr=params.get("lr", 1e-3), betas=betas, eps=params.get("optimizer_eps", 1e-8), weight_decay=params.get("weight_decay", 0), foreach=True)
         elif params.optimizer_type == "SGD":
             if self.log_to_screen:
                 self.logger.info("using SGD optimizer")
-            optimizer = optim.SGD(all_parameters, lr=params.get("lr", 1e-3), weight_decay=params.get("weight_decay", 0), momentum=params.get("momentum", 0), foreach=True)
+            optimizer = optim.SGD(all_parameters, lr=params.get("lr", 1e-3), weight_decay=params.get("weight_decay", 0), momentum=params.get("momentum", 0), nesterov=params.get("nesterov", True), foreach=True)
         elif params.optimizer_type == "SIRFShampoo":
             if self.log_to_screen:
                 self.logger.info("using SIRFShampoo optimizer")

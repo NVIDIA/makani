@@ -171,11 +171,11 @@ class Trainer(Driver):
             self.loss_obj = self.loss_obj.to(self.device)
         self.timers["loss handler init"] = timer.time
 
-        # channel weights:
-        if self.log_to_screen:
-            chw_weights = self.loss_obj.channel_weights.squeeze().cpu().numpy().tolist()
-            chw_output = {k: v for k,v in zip(self.params.channel_names, chw_weights)}
-            self.logger.info(f"Channel weights: {chw_output}")
+        # # channel weights:
+        # if self.log_to_screen:
+        #     chw_weights = self.loss_obj.channel_weights.squeeze().cpu().numpy().tolist()
+        #     chw_output = {k: v for k,v in zip(self.params.channel_names, chw_weights)}
+        #     self.logger.info(f"Channel weights: {chw_output}")
 
         # optimizer and scheduler setup
         with Timer() as timer:
@@ -227,7 +227,12 @@ class Trainer(Driver):
 
         # visualization wrapper:
         with Timer() as timer:
-            plot_list = [{"name": "windspeed_uv10", "functor": "lambda x: np.sqrt(np.square(x[0, ...]) + np.square(x[1, ...]))", "diverging": False}]
+            plot_channel = "z500"
+            # plot_channel = "q50"
+            # plot_index = self.params.channel_names.index(plot_channel)
+            plot_index = 0
+            print(self.params.channel_names)
+            plot_list = [{"name": plot_channel, "functor": f"lambda x: x[{plot_index}, ...]", "diverging": False}]
             out_bias, out_scale = self.train_dataloader.get_output_normalization()
             self.visualizer = visualize.VisualizationWrapper(
                 self.params.log_to_wandb,
@@ -481,7 +486,8 @@ class Trainer(Driver):
         train_steps = 0
         train_start = time.perf_counter_ns()
         self.model_train.zero_grad(set_to_none=True)
-        for data in tqdm(self.train_dataloader, desc=f"Training progress epoch {self.epoch}", disable=not self.log_to_screen):
+        progress_bar = tqdm(self.train_dataloader, desc=f"Training progress epoch {self.epoch}", disable=not self.log_to_screen)
+        for data in progress_bar:
 
             train_steps += 1
             self.iters += 1
@@ -512,12 +518,12 @@ class Trainer(Driver):
                 if do_update:
                     # regular forward pass including DDP
                     pred = self.model_train(inp)
-                    loss = self.loss_obj(pred, tar)
+                    loss = self.loss_obj(pred, tar, inp=inp)
                 else:
                     # disable sync step
                     with self.model_train.no_sync():
                         pred = self.model_train(inp)
-                        loss = self.loss_obj(pred, tar)
+                        loss = self.loss_obj(pred, tar, inp=inp)
                 loss = loss * loss_scaling_fact
 
             # backward pass
@@ -527,6 +533,9 @@ class Trainer(Driver):
             accumulated_loss[0] += loss.detach().clone() * inp.shape[0]
             accumulated_loss[1] += inp.shape[0]
 
+            # log the loss
+            pbar_postfix = {"loss": loss.item()}
+
             # perform weight update if requested: we do not need to add 1 here because we already do that before the step
             if do_update:
                 if self.max_grad_norm > 0.0:
@@ -534,6 +543,7 @@ class Trainer(Driver):
                     grad_norm = clip_grads(self.model_train, self.max_grad_norm)
                     accumulated_grad_norm[0] += grad_norm.detach()
                     accumulated_grad_norm[1] += 1.0
+                    pbar_postfix["grad norm"] = grad_norm.item()
 
                 self.gscaler.step(self.optimizer)
                 self.gscaler.update()
@@ -555,6 +565,9 @@ class Trainer(Driver):
                 if self.log_to_screen:
                     self.logger.info(f"Dumping weights and gradients to {weights_and_grads_path}")
                 self.dump_weights_and_grads(weights_and_grads_path, self.model, step=(self.epoch * self.params.num_samples_per_epoch + self.iters))
+
+            # set progress bar prefix
+            progress_bar.set_postfix(**pbar_postfix)
 
             if torch.cuda.is_available():
                 torch.cuda.nvtx.range_pop()
@@ -613,7 +626,8 @@ class Trainer(Driver):
         with torch.inference_mode():
             with torch.no_grad():
                 eval_steps = 0
-                for data in tqdm(self.valid_dataloader, desc=f"Validation progress epoch {self.epoch}", disable=not self.log_to_screen):
+                progress_bar = tqdm(self.valid_dataloader, desc=f"Validation progress epoch {self.epoch}", disable=not self.log_to_screen)
+                for data in progress_bar:
                     eval_steps += 1
 
                     if torch.cuda.is_available():
@@ -663,6 +677,9 @@ class Trainer(Driver):
 
                                 tag = f"step{eval_steps}_time{str(idt).zfill(3)}"
                                 self.visualizer.add(tag, pred_cpu, targ_cpu)
+
+                        # log the loss
+                        progress_bar.set_postfix({"loss": loss.item()})
 
                         # put in the metrics handler
                         self.metrics.update(pred, targ, loss, idt)

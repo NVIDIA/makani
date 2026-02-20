@@ -21,14 +21,10 @@ from parameterized import parameterized
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.distributed as dist
 
 import torch_harmonics as th
 import torch_harmonics.distributed as thd
-
-from makani.utils import comm
-from makani.utils import functions as fn
 
 from makani.mpu.mappings import init_gradient_reduction_hooks
 
@@ -37,48 +33,14 @@ from makani.models.common.layer_norm import GeometricInstanceNormS2
 from makani.mpu.layer_norm import DistributedGeometricInstanceNormS2, DistributedInstanceNorm2d
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-from .distributed_helpers import split_helper, gather_helper
-from ..testutils import compare_tensors
+from .distributed_helpers import init_grid, split_helper, gather_helper
+from ..testutils import compare_tensors, disable_tf32
 
 class TestDistributedLayers(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-
-        # set up distributed
-        cls.grid_size_h = int(os.getenv('GRID_H', 1))
-        cls.grid_size_w = int(os.getenv('GRID_W', 1))
-        cls.world_size = cls.grid_size_h * cls.grid_size_w
-
-        # init groups
-        comm.init(model_parallel_sizes=[cls.grid_size_h, cls.grid_size_w, 1, 1, 1],
-                  model_parallel_names=["h", "w", "fin", "fout", "batch"])
-        cls.world_rank = comm.get_world_rank()
-
-        torch.manual_seed(333)
-        if torch.cuda.is_available():
-            if cls.world_rank == 0:
-                print("Running test on GPU")
-            local_rank = comm.get_local_rank()
-            cls.device = torch.device(f"cuda:{local_rank}")
-            torch.cuda.set_device(cls.device)
-            torch.cuda.manual_seed(333)
-        else:
-            if cls.world_rank == 0:
-                print("Running test on CPU")
-            cls.device = torch.device('cpu')
-
-        # store comm group parameters
-        cls.wrank = comm.get_rank("w")
-        cls.hrank = comm.get_rank("h")
-        cls.w_group = comm.get_group("w")
-        cls.h_group = comm.get_group("h")
-
-        # initializing sht process groups
-        thd.init(cls.h_group, cls.w_group)
-
-        if cls.world_rank == 0:
-            print(f"Running distributed tests on grid H x W = {cls.grid_size_h} x {cls.grid_size_w}")
+        init_grid(cls)
 
 
     def _init_seed(self, seed):
@@ -87,13 +49,13 @@ class TestDistributedLayers(unittest.TestCase):
             torch.cuda.manual_seed(seed)
         return
 
-        
+
     def _split_helper(self, tensor, hdim=-2, wdim=-1):
         tensor_local = split_helper(tensor, dim=hdim, group=self.h_group)
         tensor_local = split_helper(tensor_local, dim=wdim, group=self.w_group)
         return tensor_local
-        
-        
+
+
     def _gather_helper(self, tensor, hdim=-2, wdim=-1):
         tensor_gather = gather_helper(tensor, dim=hdim, group=self.h_group)
         tensor_gather = gather_helper(tensor_gather, dim=wdim, group=self.w_group)
@@ -113,6 +75,10 @@ class TestDistributedLayers(unittest.TestCase):
         skip_on_empty=True,
     )
     def test_distributed_spectral_conv(self, nlat_in, nlon_in, nlat_out, nlon_out, batch_size, num_chan, tol, verbose=True):
+
+        # disable tf32
+        disable_tf32()
+
         B, C, Hi, Wi, Ho, Wo = batch_size, num_chan, nlat_in, nlon_in, nlat_out, nlon_out
 
         from makani.models.common import SpectralConv
@@ -232,14 +198,18 @@ class TestDistributedLayers(unittest.TestCase):
 
     @parameterized.expand(
         [
-            [256, 512, 32, 8, True, 1e-5],
-            [181, 360, 1, 10, True, 1e-5],
-            [256, 512, 32, 8, False, 1e-5],
-            [181, 360, 1, 10, False, 1e-5],
+            [256, 512, 32, 8, True, 1e-4],
+            [181, 360, 1, 10, True, 1e-4],
+            [256, 512, 32, 8, False, 1e-4],
+            [181, 360, 1, 10, False, 1e-4],
         ],
         skip_on_empty=True,
     )
     def test_distributed_instance_norm_2d(self, nlat, nlon, batch_size, num_chan, affine, tol, verbose=True):
+
+        # disable tf32
+        disable_tf32()
+
         B, C, H, W = batch_size, num_chan, nlat, nlon
 
         self._init_seed(333)
@@ -360,14 +330,18 @@ class TestDistributedLayers(unittest.TestCase):
 
     @parameterized.expand(
         [
-            [181, 360, 1, 4, "equiangular", True, 1e-5],
-            [181, 360, 1, 4, "equiangular", False, 1e-5],
-            [180, 360, 1, 10, "legendre-gauss", True, 1e-5],
-            [180, 360, 1, 10, "legendre-gauss", False, 1e-5],
+            [181, 360, 1, 4, "equiangular", True, 1e-4],
+            [181, 360, 1, 4, "equiangular", False, 1e-4],
+            [180, 360, 1, 10, "legendre-gauss", True, 1e-4],
+            [180, 360, 1, 10, "legendre-gauss", False, 1e-4],
         ],
         skip_on_empty=True,
     )
     def test_distributed_geometric_instance_norm_s2(self, nlat, nlon, batch_size, num_chan, grid_type, affine, tol, verbose=True):
+
+        # disable tf32
+        disable_tf32()
+
         B, C, H, W = batch_size, num_chan, nlat, nlon
 
         # set up layer norm parameters

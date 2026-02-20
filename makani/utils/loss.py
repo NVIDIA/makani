@@ -23,12 +23,17 @@ import torch
 from torch import nn
 
 from makani.utils import comm
-from makani.utils.dataloaders.data_helpers import get_data_normalization
+from makani.utils.grids import GridQuadrature, BandLimitMask
+from makani.utils.dataloaders.data_helpers import get_data_normalization, get_time_diff_stds, get_psd_stats
+from physicsnemo.distributed.utils import compute_split_shapes
 from physicsnemo.distributed.mappings import gather_from_parallel_region, reduce_from_parallel_region
 
-from .losses import LossType, GeometricLpLoss, SpectralH1Loss, SpectralAMSELoss, HydrostaticBalanceLoss
-from .losses import EnsembleCRPSLoss, EnsembleSpectralCRPSLoss, EnsembleNLLLoss, EnsembleMMDLoss
-from .losses import DriftRegularization
+from .losses import LossType, GeometricLpLoss, SpectralLpLoss, SpectralH1Loss, SpectralAMSELoss
+from .losses import CRPSLoss, SpectralCRPSLoss, GradientCRPSLoss, VortDivCRPSLoss, KernelScoreLoss
+from .losses import L2EnergyScoreLoss, SobolevEnergyScoreLoss, SpectralL2EnergyScoreLoss, SpectralCoherenceLoss
+from .losses import GaussianMMDLoss
+from .losses import EnsembleNLLLoss
+from .losses import DriftRegularization, HydrostaticBalanceLoss, SpectralRegularization
 
 
 class LossHandler(nn.Module):
@@ -42,6 +47,7 @@ class LossHandler(nn.Module):
 
         self.rank = comm.get_rank("matmul")
         self.n_future = params.n_future
+        self.n_history = params.n_history
         self.spatial_distributed = comm.is_distributed("spatial") and (comm.get_size("spatial") > 1)
         self.ensemble_distributed = comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1)
 
@@ -52,11 +58,12 @@ class LossHandler(nn.Module):
 
         # check whether dynamic loss weighting is required
         self.uncertainty_weighting = params.get("uncertainty_weighting", False)
+        self.balanced_weighting = params.get("balanced_weighting", False)
         self.randomized_loss_weights = params.get("randomized_loss_weights", False)
         self.random_slice_loss = params.get("random_slice_loss", False)
 
         # whether to keep running stats
-        self.track_running_stats = track_running_stats or self.uncertainty_weighting
+        self.track_running_stats = track_running_stats or self.uncertainty_weighting or self.balanced_weighting
         self.eps = eps
 
         n_channels = len(params.channel_names)
@@ -81,13 +88,28 @@ class LossHandler(nn.Module):
         else:
             scale = torch.ones((1, len(params.out_channels), 1, 1), dtype=torch.float32)
 
+        # load PSD stats
+        try:
+            psd_means, psd_stds = get_psd_stats(params)
+            if psd_means is not None:
+                psd_means = torch.from_numpy(psd_means).to(torch.float32)
+            if psd_stds is not None:
+                psd_stds = torch.from_numpy(psd_stds).to(torch.float32)
+        except ValueError:
+            psd_means = None
+            psd_stds = None
+
         # create module list
         self.loss_fn = nn.ModuleList([])
+        self.loss_requires_input = []  # track which losses need input state
 
         channel_weights = []
 
         for loss in losses:
             loss_type = loss["type"]
+
+            # check if this is a tendency loss (from explicit field, not string parsing)
+            requires_input = loss.get("tendency", False)
 
             # get pole mask if it was specified
             pole_mask = loss.get("pole_mask", 0)
@@ -105,6 +127,8 @@ class LossHandler(nn.Module):
                 pole_mask=pole_mask,
                 bias=bias,
                 scale=scale,
+                psd_means=psd_means,
+                psd_stds=psd_stds,
                 grid_type=params.model_grid_type,
                 spatial_distributed=self.spatial_distributed,
                 ensemble_distributed=self.ensemble_distributed,
@@ -112,42 +136,34 @@ class LossHandler(nn.Module):
             )
 
             # append to dict and compile before:
-            # TODO: fix the compile issue
-            # self.loss_fn[loss_type] = torch.compile(loss_fn)
             self.loss_fn.append(loss_fn)
+            self.loss_requires_input.append(requires_input)
 
+            # TODO: the entire channel weighting logic should be moved to the loss function base class
             # determine channel weighting
             if "channel_weights" not in loss.keys():
                 channel_weight_type = "constant"
             else:
                 channel_weight_type = loss["channel_weights"]
 
+            # check if time difference weighting is required
+            if loss.get("temp_diff_normalization", False):
+                time_diff_scale = get_time_diff_stds(params).flatten()
+                time_diff_scale = torch.clamp(torch.from_numpy(time_diff_scale[params.out_channels]), min=1e-4)
+                time_diff_scale = scale.flatten() / time_diff_scale
+            else:
+                time_diff_scale = None
+
+            # get channel weights either directly or through the compute routine
             if isinstance(channel_weight_type, List):
-                chw = torch.tensor(channel_weight_type, dtype=torch.float32).reshape(1, -1)
+                chw = torch.tensor(channel_weight_type, dtype=torch.float32)
+                if time_diff_scale is not None:
+                    chw = chw * time_diff_scale
                 assert chw.shape[1] == loss_fn.n_channels
             else:
-                chw = loss_fn.compute_channel_weighting(channel_weight_type)
+                chw = loss_fn.compute_channel_weighting(channel_weight_type, time_diff_scale=time_diff_scale)
 
-            # the option to normalize outputs with stds of the time difference rather than th
-            if ("temp_diff_normalization" in loss.keys()) and loss["temp_diff_normalization"]:
-
-                # extract relevant stds
-                time_diff_stds = torch.from_numpy(np.load(params.time_diff_stds_path)).reshape(1, -1)[:, params.out_channels]
-                # the time differences are computed between two consecutive datapoints,
-                # so we need to account for the number of timesteps used in the prediction
-                # this is now commebnted out as we expect the stats to be computed with the correct dt
-                # time_diff_stds *= np.sqrt(params.dt)
-
-                # to avoid division by  very small numbers, we clamp the time differences from below
-                time_diff_stds = torch.clamp(time_diff_stds, min=1e-4)
-
-                time_var_weights = scale.reshape(1, -1) / time_diff_stds
-
-                if hasattr(loss_fn, "squared") and loss_fn.squared:
-                    time_var_weights = time_var_weights**2
-
-                chw = chw * time_var_weights
-
+            # reshape channel weights for propewr broadcasting
             chw = chw.reshape(1, -1)
 
             # check for a relative weight that weights the loss relative to other losses
@@ -195,6 +211,7 @@ class LossHandler(nn.Module):
             # linear weighting factor for the case of multistep training
             multistep_weight = torch.arange(1, self.n_future + 2, dtype=torch.float32) / float(self.n_future + 1)
         elif multistep_weight_type == "last-n-1":
+            print(f"using last n-1")
             # weighting factor for the last n steps, with the first step weighted 0
             multistep_weight = torch.ones(self.n_future + 1, dtype=torch.float32) / float(self.n_future)
             multistep_weight[0] = 0.0
@@ -215,13 +232,18 @@ class LossHandler(nn.Module):
 
         loss_type = set(loss_type.split())
 
+        # this can probably all be moved to the loss function itself
         relative = "relative" in loss_type
         squared = "squared" in loss_type
 
         jacobian = "s2" if "geometric" in loss_type else "flat"
 
         # decide which loss to use
-        if "l2" in loss_type:
+        if "spectral" in loss_type and "l2" in loss_type:
+            loss_handle = partial(SpectralLpLoss, p=2, relative=relative, squared=squared)
+        elif "spectral" in loss_type and "l1" in loss_type:
+            loss_handle = partial(SpectralLpLoss, p=1, relative=relative, squared=squared)
+        elif "l2" in loss_type:
             loss_handle = partial(GeometricLpLoss, p=2, relative=relative, squared=squared, jacobian=jacobian)
         elif "l1" in loss_type:
             loss_handle = partial(GeometricLpLoss, p=1, relative=relative, squared=squared, jacobian=jacobian)
@@ -242,17 +264,31 @@ class LossHandler(nn.Module):
                     p_max = int(x.replace("p_max=", ""))
             loss_handle = partial(HydrostaticBalanceLoss, p_min=p_min, p_max=p_max, use_moist_air_formula=use_moist_air_formula)
         elif "ensemble_crps" in loss_type:
-            loss_handle = partial(EnsembleCRPSLoss, crps_type="cdf")
+            loss_handle = partial(CRPSLoss)
         elif "ensemble_spectral_crps" in loss_type:
-            loss_handle = partial(EnsembleSpectralCRPSLoss, crps_type="cdf")
-        elif "gauss_crps" in loss_type:
-            loss_handle = partial(EnsembleCRPSLoss, crps_type="gauss")
+            loss_handle = partial(SpectralCRPSLoss)
+        elif "ensemble_vort_div_crps" in loss_type:
+            loss_handle = partial(VortDivCRPSLoss)
+        elif "ensemble_gradient_crps" in loss_type:
+            loss_handle = partial(GradientCRPSLoss)
+        elif "ensemble_kernel_score" in loss_type:
+            loss_handle = partial(KernelScoreLoss)
         elif "ensemble_nll" in loss_type:
             loss_handle = EnsembleNLLLoss
-        elif "ensemble_mmd" in loss_type:
-            loss_handle = EnsembleMMDLoss
+        elif "gaussian_mmd" in loss_type:
+            loss_handle = GaussianMMDLoss
+        elif "l2_energy_score" in loss_type:
+            loss_handle = partial(L2EnergyScoreLoss)
+        elif "sobolev_energy_score" in loss_type:
+            loss_handle = partial(SobolevEnergyScoreLoss)
+        elif "spectral_l2_energy_score" in loss_type:
+            loss_handle = partial(SpectralL2EnergyScoreLoss)
+        elif "spectral_coherence_loss" in loss_type:
+            loss_handle = partial(SpectralCoherenceLoss)
         elif "drift_regularization" in loss_type:
             loss_handle = DriftRegularization
+        elif "spectral_regularization" in loss_type:
+            loss_handle = SpectralRegularization
         else:
             raise NotImplementedError(f"Unknown loss function: {loss_type}")
 
@@ -309,7 +345,23 @@ class LossHandler(nn.Module):
             self.running_var.fill_(1)
             self.num_batches_tracked.zero_()
 
-    def forward(self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None):
+    def _extract_input_state(self, inp: torch.Tensor) -> torch.Tensor:
+        """
+        Extract last timestep from flattened history input.
+
+        Args:
+            inp: Input tensor with shape (B, (n_history+1)*C, H, W)
+
+        Returns:
+            Last timestep with shape (B, C, H, W)
+        """
+        # inp shape: (B, (n_history+1)*C, H, W)
+        # we want: (B, C, H, W) - the last timestep
+        n_channels_per_step = inp.shape[1] // (self.n_history + 1)
+        inp_last = inp[..., -n_channels_per_step:, :, :]
+        return inp_last
+
+    def forward(self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None, inp: Optional[torch.Tensor] = None):
         # we assume the following:
         # if prd is 5D, we assume that the dims are
         # batch, ensemble, channel, h, w
@@ -347,13 +399,48 @@ class LossHandler(nn.Module):
         else:
             prdm = prd
 
+        # transform to tendency space if any loss requires it
+        if inp is not None and any(self.loss_requires_input):
+            inp_state = self._extract_input_state(inp)
+
+            # validate channel counts for single-step predictions
+            if self.n_future == 0:
+                n_pred_channels = prdm.shape[1]
+                n_inp_channels = inp_state.shape[1]
+                assert n_pred_channels == n_inp_channels, \
+                    f"Channel mismatch: prediction has {n_pred_channels} channels but input has {n_inp_channels} channels"
+
+            # transform predictions and targets to tendency space
+            # this allows ANY loss function to compute tendency-based metrics
+            prdm_tendency = prdm - inp_state
+            tar_tendency = tar - inp_state
+
+            # also transform ensemble predictions if present
+            if prd.dim() == 5:
+                # expand inp_state to match ensemble dim
+                inp_state_expanded = inp_state.unsqueeze(1)
+                prd_tendency = prd - inp_state_expanded
+            else:
+                prd_tendency = prdm_tendency
+        else:
+            prdm_tendency = prdm
+            tar_tendency = tar
+            prd_tendency = prd
+
         # compute loss contributions from each loss
         loss_vals = []
-        for lfn in self.loss_fn:
+        for lfn, requires_inp in zip(self.loss_fn, self.loss_requires_input):
             if lfn.type == LossType.Deterministic:
-                loss_vals.append(lfn(prdm, tar, wgt))
+                if requires_inp:
+                    loss_vals.append(lfn(prdm_tendency, tar_tendency, wgt))
+                else:
+                    loss_vals.append(lfn(prdm, tar, wgt))
             else:
-                loss_vals.append(lfn(prd, tar, wgt))
+                # probabilistic losses: use tendency-transformed ensemble if needed
+                if requires_inp:
+                    loss_vals.append(lfn(prd_tendency, tar_tendency, wgt))
+                else:
+                    loss_vals.append(lfn(prd, tar, wgt))
         all_losses = torch.cat(loss_vals, dim=-1)
 
         if self.training and self.track_running_stats:
@@ -363,7 +450,14 @@ class LossHandler(nn.Module):
         chw = self.channel_weights
         if self.uncertainty_weighting and self.training:
             var, _ = self.get_running_stats()
+            if self.num_batches_tracked.item() <= 100:
+                var = torch.ones_like(var)
             chw = chw / (torch.sqrt(2 * var) + self.eps)
+        elif self.balanced_weighting and self.training:
+            _, mean = self.get_running_stats()
+            if self.num_batches_tracked.item() <= 100:
+                mean = torch.ones_like(mean)
+            chw = chw / (mean + self.eps)
 
         if self.randomized_loss_weights:
             rmask = torch.zeros_like(chw)

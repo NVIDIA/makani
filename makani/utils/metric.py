@@ -73,14 +73,14 @@ class MetricRollout:
 
         # CPU buffers
         pin_memory = self.device.type == "cuda"
-        
+
         if self.aux_shape_finalized is None:
             data_shape_finalized  = (self.num_rollout_steps, self.num_channels)
             integral_shape = (self.num_channels)
         else:
             data_shape_finalized = (self.num_rollout_steps, self.num_channels, *self.aux_shape_finalized)
             integral_shape = (self.num_channels, *self.aux_shape_finalized)
-        
+
         self.rollout_curve_cpu = torch.zeros(data_shape_finalized, dtype=torch.float32, device="cpu", pin_memory=pin_memory)
 
         if self.integrate:
@@ -213,12 +213,12 @@ class MetricsHandler:
         climatology,
         num_rollout_steps,
         device,
-        l1_var_names=["u10m", "t2m", "u500", "z500", "q500", "sp"],
-        rmse_var_names=["u10m", "t2m", "u500", "z500", "q500", "sp"],
-        acc_var_names=["u10m", "t2m", "u500", "z500", "q500", "sp"],
-        crps_var_names=["u10m", "t2m", "u500", "z500", "q500", "sp"],
-        spread_var_names=["u10m", "t2m", "u500", "z500", "q500", "sp"],
-        ssr_var_names=["u10m", "t2m", "u500", "z500", "q500", "sp"],
+        l1_var_names=["u10m", "t2m", "sp", "sst", "u500", "z500", "q500", "q50"],
+        rmse_var_names=["u10m", "t2m", "sp", "sst", "u500", "z500", "q500", "q50"],
+        acc_var_names=["u10m", "t2m", "sp", "sst", "u500", "z500", "q500", "q50"],
+        crps_var_names=["u10m", "t2m", "sp", "sst", "u500", "z500", "q500", "q50"],
+        spread_var_names=["u10m", "t2m", "sp", "sst", "u500", "z500", "q500", "q50"],
+        ssr_var_names=["u10m", "t2m", "sp", "sst", "u500", "z500", "q500", "q50"],
         rh_var_names=[],
         wb2_compatible=False,
     ):

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,58 +15,24 @@
 
 from typing import Optional, Tuple, List
 
-import numpy as np
-
+import math
 import torch
 import torch.nn as nn
-from torch.cuda import amp
+from torch import amp
 
-from makani.utils.losses.base_loss import GeometricBaseLoss, SpectralBaseLoss, LossType
+from makani.utils.losses.base_loss import GeometricBaseLoss, GradientBaseLoss, LossType
 from makani.utils import comm
+
+import torch_harmonics as th
+import torch_harmonics.distributed as thd
 
 # distributed stuff
 from physicsnemo.distributed.utils import compute_split_shapes, split_tensor_along_dim
 from physicsnemo.distributed.mappings import scatter_to_parallel_region, reduce_from_parallel_region
 from makani.mpu.mappings import distributed_transpose
 
-# @torch.compile
-# def _mmd_rbf_kernel(x: torch.Tensor, y: torch.Tensor):
-#     return torch.abs(x - y)
 
-
-@torch.compile
-def _mmd_rbf_kernel(x: torch.Tensor, y: torch.Tensor, bandwidth: float = 1.0):
-    return torch.exp(-0.5 * torch.square(torch.abs(x - y)) / bandwidth)
-
-
-# Computes the squared maximum mean discrepancy
-# @torch.compile
-def _mmd2_ensemble_kernel(observation: torch.Tensor, forecasts: torch.Tensor) -> torch.Tensor:
-
-    # initial values
-    spread_term = torch.zeros_like(observation)
-    disc_term = torch.zeros_like(observation)
-
-    num_forecasts = forecasts.shape[0]
-
-    for m in range(num_forecasts):
-
-        # get the forecast
-        ym = forecasts[m]
-
-        # account for contributions on the off-diasgonal assuming that the kernel is symmetric
-        spread_term = spread_term + 2.0 * torch.sum(_mmd_rbf_kernel(ym, forecasts[m:]), dim=0)
-
-        # contributions to the discrepancy term
-        disc_term = disc_term + _mmd_rbf_kernel(ym, observation)
-
-    # compute the squared mmd
-    mmd2 = spread_term / (num_forecasts - 1) / num_forecasts - 2.0 * disc_term / num_forecasts
-
-    return mmd2
-
-
-class EnsembleMMDLoss(GeometricBaseLoss):
+class GaussianMMDLoss(GeometricBaseLoss):
     r"""
     Computes the maximum mean discrepancy loss for a specific kernel. For details see [1]
 
@@ -80,10 +46,15 @@ class EnsembleMMDLoss(GeometricBaseLoss):
         crop_offset: Tuple[int, int],
         channel_names: List[str],
         grid_type: str,
-        squared: Optional[bool] = False,
-        pole_mask: Optional[int] = 0,
+        pole_mask: int,
         spatial_distributed: Optional[bool] = False,
         ensemble_distributed: Optional[bool] = False,
+        ensemble_weights: Optional[torch.Tensor] = None,
+        sigma: Optional[float] = 1.0,
+        alpha: Optional[float] = 1.0,
+        beta: Optional[float] = 2.0,
+        eps: Optional[float] = 1.0e-5,
+        channel_reduction: Optional[bool] = False,
         **kwargs,
     ):
 
@@ -97,10 +68,13 @@ class EnsembleMMDLoss(GeometricBaseLoss):
             spatial_distributed=spatial_distributed,
         )
 
-        self.squared = squared
-
         self.spatial_distributed = comm.is_distributed("spatial") and spatial_distributed
         self.ensemble_distributed = comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1) and ensemble_distributed
+        self.alpha = alpha
+        self.beta = beta
+        self.eps = eps
+        self.channel_reduction = channel_reduction
+        self.sigma = sigma
 
         # we also need a variant of the weights split in ensemble direction:
         quad_weight_split = self.quadrature.quad_weight.reshape(1, 1, -1)
@@ -109,9 +83,25 @@ class EnsembleMMDLoss(GeometricBaseLoss):
         quad_weight_split = quad_weight_split.contiguous()
         self.register_buffer("quad_weight_split", quad_weight_split, persistent=False)
 
+        if ensemble_weights is not None:
+            self.register_buffer("ensemble_weights", ensemble_weights, persistent=False)
+        else:
+            self.ensemble_weights = ensemble_weights
+
     @property
     def type(self):
         return LossType.Probabilistic
+
+    @property
+    def n_channels(self):
+        if self.channel_reduction:
+            return 1
+        else:
+            return len(self.channel_names)
+
+    @torch.compiler.disable(recursive=False)
+    def compute_channel_weighting(self, channel_weight_type: str, time_diff_scale: str) -> torch.Tensor:
+        return torch.ones(1)
 
     def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, spatial_weights: Optional[torch.Tensor] = None) -> torch.Tensor:
 
@@ -121,51 +111,236 @@ class EnsembleMMDLoss(GeometricBaseLoss):
 
         # we assume that spatial_weights have NO ensemble dim
         if (spatial_weights is not None) and (spatial_weights.dim() != observations.dim()):
-            raise ValueError("the weights have to have the same number of dimensions as observations")
+            spdim = spatial_weights.dim()
+            odim = observations.dim()
+            raise ValueError(f"the weights have to have the same number of dimensions (found {spdim}) as observations (found {odim}).")
 
         # we assume the following shapes:
         # forecasts: batch, ensemble, channels, lat, lon
         # observations: batch, channels, lat, lon
         B, E, C, H, W = forecasts.shape
 
-        # if ensemble dim is one dimensional then computing the score is quick:
-        if (not self.ensemble_distributed) and (forecasts.shape[1] == 1):
-            # in this case, CRPS is straightforward
-            mmd = _mmd_rbf_kernel(observations, forecasts.squeeze(1)).reshape(B, C, H * W)
-        else:
-            # transpose forecasts: ensemble, batch, channels, lat, lon
-            forecasts = torch.moveaxis(forecasts, 1, 0)
+        # get the data type before stripping amp types
+        dtype = forecasts.dtype
 
-            # now we need to transpose the forecasts into ensemble direction.
-            # ideally we split spatial dims
-            forecasts = forecasts.reshape(E, B, C, H * W)
-            if self.ensemble_distributed:
-                ensemble_shapes = [forecasts.shape[0] for _ in range(comm.get_size("ensemble"))]
-                forecasts = distributed_transpose.apply(forecasts, (-1, 0), ensemble_shapes, "ensemble")
-            # observations does not need a transpose, but just a split
-            observations = observations.reshape(B, C, H * W)
-            if self.ensemble_distributed:
-                observations = scatter_to_parallel_region(observations, -1, "ensemble")
-            if spatial_weights is not None:
-                spatial_weights_split = spatial_weights.flatten(-2, -1)
-                spatial_weights_split = scatter_to_parallel_region(spatial_weights_split, -1, "ensemble")
-
-            # now, E dimension is local and spatial dim is split further. Compute the mmd
-            mmd = _mmd2_ensemble_kernel(observations, forecasts)
-
-        # perform spatial average of crps score
-        if spatial_weights is not None:
-            mmd = torch.sum(mmd * self.quad_weight_split * spatial_weights_split, dim=-1)
-        else:
-            mmd = torch.sum(mmd * self.quad_weight_split, dim=-1)
+        # transpose the forecasts to ensemble, batch, channels, lat, lon and then do distributed transpose into ensemble direction.
+        # ideally we split spatial dims
+        forecasts = torch.moveaxis(forecasts, 1, 0)
+        forecasts = forecasts.reshape(E, B, C, H * W)
         if self.ensemble_distributed:
-            mmd = reduce_from_parallel_region(mmd, "ensemble")
+            ensemble_shapes = [forecasts.shape[0] for _ in range(comm.get_size("ensemble"))]
+            forecasts = distributed_transpose.apply(forecasts, (-1, 0), ensemble_shapes, "ensemble")
 
+        # observations does not need a transpose, but just a split
+        observations = observations.reshape(1, B, C, H * W)
+        if self.ensemble_distributed:
+            observations = scatter_to_parallel_region(observations, -1, "ensemble")
+
+        # for correct spatial reduction we need to do the same with spatial weights
+        if spatial_weights is not None:
+            spatial_weights_split = spatial_weights.flatten(start_dim=-2, end_dim=-1)
+            spatial_weights_split = scatter_to_parallel_region(spatial_weights_split, -1, "ensemble")
+
+        if self.ensemble_weights is not None:
+            raise NotImplementedError("currently only constant ensemble weights are supported")
+        else:
+            ensemble_weights = torch.ones_like(forecasts, device=forecasts.device)
+
+        #  ensemble size
+        num_ensemble = forecasts.shape[0]
+
+        # get nanmask from observations and forecasts
+        nanmasks = torch.logical_or(torch.isnan(observations), torch.isnan(forecasts))
+        nanmask_bool = nanmasks.sum(dim=0) != 0
+
+        # impute NaN before computation to avoid 0 * NaN = NaN in backward pass
+        observations = torch.where(torch.isnan(observations), 0.0, observations)
+        forecasts = torch.where(torch.isnan(forecasts), 0.0, forecasts)
+
+        # use broadcasting semantics to compute spread and skill and sum over channels (vector norm)
+        espread = (forecasts.unsqueeze(1) - forecasts.unsqueeze(0)).abs().pow(self.beta)
+        eskill = (observations - forecasts).abs().pow(self.beta)
+
+        # zero out masked positions
+        espread = torch.where(nanmask_bool, 0.0, espread)
+        eskill = torch.where(nanmask_bool, 0.0, eskill)
+
+        # do the spatial reduction
+        if spatial_weights is not None:
+            espread = torch.sum(espread * self.quad_weight_split * spatial_weights_split, dim=-1)
+            eskill = torch.sum(eskill * self.quad_weight_split * spatial_weights_split, dim=-1)
+        else:
+            espread = torch.sum(espread * self.quad_weight_split, dim=-1)
+            eskill = torch.sum(eskill * self.quad_weight_split, dim=-1)
+
+        # since we split spatial dim into ensemble dim, we need to do an ensemble sum as well
+        if self.ensemble_distributed:
+            espread = reduce_from_parallel_region(espread, "ensemble")
+            eskill = reduce_from_parallel_region(eskill, "ensemble")
+
+        # we need to do the spatial averaging manually since
+        # we are not calling the quadrature forward function
         if self.spatial_distributed:
-            mmd = reduce_from_parallel_region(mmd, "spatial")
+            espread = reduce_from_parallel_region(espread, "spatial")
+            eskill = reduce_from_parallel_region(eskill, "spatial")
 
-        if not self.squared:
-            mmd = torch.sqrt(mmd)
+        # do the channel reduction while ignoring NaNs
+        # if channel weights are required they should be added here to the reduction
+        if self.channel_reduction:
+            espread = espread.sum(dim=-2, keepdim=True)
+            eskill = eskill.sum(dim=-2, keepdim=True)
 
-        # the resulting tensor should have dimension B, C, which is what we return
-        return mmd
+        # apply the Gaussian kernel
+        espread = torch.exp(-0.5 * torch.square(espread) / self.sigma)
+        eskill = torch.exp(-0.5 * torch.square(eskill) / self.sigma)
+
+        # mask out the diagonal elements in the spread term
+        espread = torch.where(torch.eye(num_ensemble, device=espread.device).bool().reshape(num_ensemble, num_ensemble, 1, 1), 0.0, espread)
+
+        # now we have reduced everything and need to sum appropriately
+        espread = espread.sum(dim=(0,1)) * (float(num_ensemble) - 1.0 + self.alpha) / float(num_ensemble * num_ensemble * (num_ensemble - 1))
+        eskill = eskill.sum(dim=0) / float(num_ensemble)
+
+        # the resulting tensor should have dimension B, C which is what we return
+        return eskill - 0.5 * espread
+
+# @torch.compile
+# def _mmd_rbf_kernel(x: torch.Tensor, y: torch.Tensor):
+#     return torch.abs(x - y)
+
+
+# @torch.compile
+# def _mmd_rbf_kernel(x: torch.Tensor, y: torch.Tensor, bandwidth: float = 1.0):
+#     return torch.exp(-0.5 * torch.square(torch.abs(x - y)) / bandwidth)
+
+
+# # Computes the squared maximum mean discrepancy
+# # @torch.compile
+# def _mmd2_ensemble_kernel(observation: torch.Tensor, forecasts: torch.Tensor) -> torch.Tensor:
+
+#     # initial values
+#     spread_term = torch.zeros_like(observation)
+#     disc_term = torch.zeros_like(observation)
+
+#     num_forecasts = forecasts.shape[0]
+
+#     for m in range(num_forecasts):
+
+#         # get the forecast
+#         ym = forecasts[m]
+
+#         # account for contributions on the off-diasgonal assuming that the kernel is symmetric
+#         spread_term = spread_term + 2.0 * torch.sum(_mmd_rbf_kernel(ym, forecasts[m:]), dim=0)
+
+#         # contributions to the discrepancy term
+#         disc_term = disc_term + _mmd_rbf_kernel(ym, observation)
+
+#     # compute the squared mmd
+#     mmd2 = spread_term / (num_forecasts - 1) / num_forecasts - 2.0 * disc_term / num_forecasts
+
+#     return mmd2
+
+
+# class EnsembleMMDLoss(GeometricBaseLoss):
+#     r"""
+#     Computes the maximum mean discrepancy loss for a specific kernel. For details see [1]
+
+#     [1] Dziugaite, Gintare Karolina; Roy, Daniel M.; Ghahramani, Zhoubin; Training generative neural networks via Maximum Mean Discrepancy optimization; arXiv:1505.03906
+#     """
+
+#     def __init__(
+#         self,
+#         img_shape: Tuple[int, int],
+#         crop_shape: Tuple[int, int],
+#         crop_offset: Tuple[int, int],
+#         channel_names: List[str],
+#         grid_type: str,
+#         squared: Optional[bool] = False,
+#         pole_mask: Optional[int] = 0,
+#         spatial_distributed: Optional[bool] = False,
+#         ensemble_distributed: Optional[bool] = False,
+#         **kwargs,
+#     ):
+
+#         super().__init__(
+#             img_shape=img_shape,
+#             crop_shape=crop_shape,
+#             crop_offset=crop_offset,
+#             channel_names=channel_names,
+#             grid_type=grid_type,
+#             pole_mask=pole_mask,
+#             spatial_distributed=spatial_distributed,
+#         )
+
+#         self.squared = squared
+
+#         self.spatial_distributed = comm.is_distributed("spatial") and spatial_distributed
+#         self.ensemble_distributed = comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1) and ensemble_distributed
+
+#         # we also need a variant of the weights split in ensemble direction:
+#         quad_weight_split = self.quadrature.quad_weight.reshape(1, 1, -1)
+#         if self.ensemble_distributed:
+#             quad_weight_split = split_tensor_along_dim(quad_weight_split, dim=-1, num_chunks=comm.get_size("ensemble"))[comm.get_rank("ensemble")]
+#         quad_weight_split = quad_weight_split.contiguous()
+#         self.register_buffer("quad_weight_split", quad_weight_split, persistent=False)
+
+#     @property
+#     def type(self):
+#         return LossType.Probabilistic
+
+#     def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, spatial_weights: Optional[torch.Tensor] = None) -> torch.Tensor:
+
+#         # sanity checks
+#         if forecasts.dim() != 5:
+#             raise ValueError(f"Error, forecasts tensor expected to have 5 dimensions but found {forecasts.dim()}.")
+
+#         # we assume that spatial_weights have NO ensemble dim
+#         if (spatial_weights is not None) and (spatial_weights.dim() != observations.dim()):
+#             raise ValueError("the weights have to have the same number of dimensions as observations")
+
+#         # we assume the following shapes:
+#         # forecasts: batch, ensemble, channels, lat, lon
+#         # observations: batch, channels, lat, lon
+#         B, E, C, H, W = forecasts.shape
+
+#         # if ensemble dim is one dimensional then computing the score is quick:
+#         if (not self.ensemble_distributed) and (forecasts.shape[1] == 1):
+#             # in this case, CRPS is straightforward
+#             mmd = _mmd_rbf_kernel(observations, forecasts.squeeze(1)).reshape(B, C, H * W)
+#         else:
+#             # transpose forecasts: ensemble, batch, channels, lat, lon
+#             forecasts = torch.moveaxis(forecasts, 1, 0)
+
+#             # now we need to transpose the forecasts into ensemble direction.
+#             # ideally we split spatial dims
+#             forecasts = forecasts.reshape(E, B, C, H * W)
+#             if self.ensemble_distributed:
+#                 ensemble_shapes = [forecasts.shape[0] for _ in range(comm.get_size("ensemble"))]
+#                 forecasts = distributed_transpose.apply(forecasts, (-1, 0), ensemble_shapes, "ensemble")
+#             # observations does not need a transpose, but just a split
+#             observations = observations.reshape(B, C, H * W)
+#             if self.ensemble_distributed:
+#                 observations = scatter_to_parallel_region(observations, -1, "ensemble")
+#             if spatial_weights is not None:
+#                 spatial_weights_split = spatial_weights.flatten(-2, -1)
+#                 spatial_weights_split = scatter_to_parallel_region(spatial_weights_split, -1, "ensemble")
+
+#             # now, E dimension is local and spatial dim is split further. Compute the mmd
+#             mmd = _mmd2_ensemble_kernel(observations, forecasts)
+
+#         # perform spatial average of crps score
+#         if spatial_weights is not None:
+#             mmd = torch.sum(mmd * self.quad_weight_split * spatial_weights_split, dim=-1)
+#         else:
+#             mmd = torch.sum(mmd * self.quad_weight_split, dim=-1)
+#         if self.ensemble_distributed:
+#             mmd = reduce_from_parallel_region(mmd, "ensemble")
+
+#         if self.spatial_distributed:
+#             mmd = reduce_from_parallel_region(mmd, "spatial")
+
+#         if not self.squared:
+#             mmd = torch.sqrt(mmd)
+
+#         # the resulting tensor should have dimension B, C, which is what we return
+#         return mmd

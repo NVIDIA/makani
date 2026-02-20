@@ -84,6 +84,7 @@ class Block(nn.Module):
         norm_layer=nn.LayerNorm,
         comm_inp_name="fin",
         comm_hidden_name="fout",
+        seed=333,
     ):
         super().__init__()
 
@@ -108,6 +109,16 @@ class Block(nn.Module):
         self.norm1 = norm_layer(dim)
         self.norm2 = norm_layer(dim)
 
+        # generator objects:
+        seed = seed + comm.get_rank("model") + comm.get_size("model") * comm.get_rank("ensemble") + comm.get_size("model") * comm.get_size("ensemble") * comm.get_rank("batch")
+        self.set_rng(seed=seed)
+
+        # stochastic bias
+        self.bias_std = nn.Parameter(torch.zeros(1, 1, dim))
+        scale = math.sqrt(2.0 / self.bias_std.shape[-1] / 2)
+        nn.init.normal_(self.bias_std, mean=0.0, std=scale)
+        self.bias_std.is_shared_mp = ["spatial"]
+
         mlp_hidden_dim = int(dim * mlp_ratio)
 
         # distribute MLP for model parallelism
@@ -125,11 +136,26 @@ class Block(nn.Module):
         else:
             self.mlp = MLP(in_features=dim, hidden_features=mlp_hidden_dim, out_features=dim, act_layer=act_layer, drop_rate=mlp_drop_rate, input_format="traditional")
 
+    @torch.compiler.disable(recursive=False)
+    def set_rng(self, seed=333):
+        self.rng_cpu = torch.Generator(device=torch.device("cpu"))
+        self.rng_cpu.manual_seed(seed)
+        if torch.cuda.is_available():
+            self.rng_gpu = torch.Generator(device=torch.device(f"cuda:{comm.get_local_rank()}"))
+            self.rng_gpu.manual_seed(seed)
+
     def forward(self, x):
         # flatten transpose:
         y = self.attn(self.norm1(x))
         x = x + self.drop_path(y)
         x = self.norm2(x)
+
+        if hasattr(self, "bias_std"):
+            with torch.no_grad():
+                n = torch.zeros_like(self.bias_std)
+                n.normal_(mean=0.0, std=1.0, generator=self.rng_gpu if n.is_cuda else self.rng_cpu)
+            x = x + self.bias_std * n
+
         x = x + self.drop_path(self.mlp(x))
 
         return x
@@ -153,6 +179,7 @@ class VisionTransformer(nn.Module):
         norm_layer="layer_norm",
         comm_inp_name="fin",
         comm_hidden_name="fout",
+        seed = 333,
         **kwargs,
     ):
         super().__init__()
