@@ -21,6 +21,7 @@ from parameterized import parameterized
 
 import itertools
 import tempfile
+import math
 import numpy as np
 import torch
 import xarray as xr
@@ -421,7 +422,7 @@ class TestMetricsAggregation(unittest.TestCase):
         self.assertTrue(compare_arrays("deterministic aggregation", res_full.cpu().numpy(), res_split.cpu().numpy(), rtol=1e-6, atol=1e-6, verbose=verbose))
 
     @parameterized.expand(_deterministic_metric_weighted_aggregation_params, skip_on_empty=True)
-    def test_deterministic_aggregation_weighted(self, metric_handle, grid_type, batch_size, num_channels, nlat, nlon, cred, bred, verbose=True):
+    def test_deterministic_aggregation_weighted(self, metric_handle, grid_type, batch_size, num_channels, nlat, nlon, cred, bred, verbose=False):
         """Same as test_deterministic_aggregation but with a spatial weight tensor (0/1 mask) at every step."""
         # inflate batch size
         num_rollout_steps = 10
@@ -459,6 +460,77 @@ class TestMetricsAggregation(unittest.TestCase):
         res_split = metric_func.finalize(res_split, counts_split)
 
         self.assertTrue(compare_arrays("deterministic aggregation weighted", res_full.cpu().numpy(), res_split.cpu().numpy(), rtol=1e-6, atol=1e-6, verbose=verbose))
+
+    @parameterized.expand(_deterministic_metric_weighted_aggregation_params, skip_on_empty=True)
+    def test_deterministic_aggregation_nan(self, metric_handle, grid_type, batch_size, num_channels, nlat, nlon, cred, bred, verbose=True):
+        """With NaNs in different positions in output and target, a combined mask (1 where both valid, 0 else) as weight should yield a metric output with no NaNs."""
+        # inflate batch size
+        num_rollout_steps = 10
+        batch_size_nsteps = num_rollout_steps * batch_size
+        shape = (batch_size_nsteps, num_channels, nlat, nlon)
+
+        # instantiate metric
+        metric_func = metric_handle(grid_type, img_shape=(nlat, nlon), normalize=True, channel_reduction=cred, batch_reduction=bred).to(self.device)
+
+        # prediction and target with random values
+        inp = torch.randn(shape, dtype=torch.float32, device=self.device)
+        tar = torch.randn(shape, dtype=torch.float32, device=self.device)
+
+        # inject NaNs in different positions in inp and tar
+        rng = np.random.default_rng(42)
+        n_nan = int(math.prod(shape) * 0.1)
+        flat_inp = inp.view(-1)
+        flat_tar = tar.view(-1)
+        idx_inp = rng.choice(flat_inp.numel(), size=n_nan, replace=False)
+        idx_tar = rng.choice(flat_tar.numel(), size=n_nan, replace=False)
+        flat_inp[idx_inp] = torch.nan
+        flat_tar[idx_tar] = torch.nan
+
+        # combined mask: 1 where both are non-NaN, 0 where either is NaN
+        valid_inp = torch.logical_not(torch.isnan(inp)).to(torch.float32)
+        valid_tar = torch.logical_not(torch.isnan(tar)).to(torch.float32)
+        weight_full = valid_inp * valid_tar
+
+        # mask nan values in inp and tar
+        inp_masked = torch.where(weight_full > 0.0, inp, 0.0)
+        tar_masked = torch.where(weight_full > 0.0, tar, 0.0)
+
+        # full metric with weight
+        res_full = metric_func(inp_masked, tar_masked, weight=weight_full)
+        counts_full = metric_func.compute_counts(inp_masked, weight=weight_full)
+        res_full = metric_func.finalize(res_full, counts_full)
+
+        # split and compute metrics stepwise, passing the same spatial weight at each step
+        inp_split = torch.split(inp, batch_size, dim=0)
+        tar_split = torch.split(tar, batch_size, dim=0)
+        weight_split = torch.split(weight_full, batch_size, dim=0)
+
+        # mask inps and tars
+        inp_split_masked = torch.where(weight_split[0] > 0.0, inp_split[0], 0.0)
+        tar_split_masked = torch.where(weight_split[0] > 0.0, tar_split[0], 0.0)
+        res_split = metric_func(inp_split_masked, tar_split_masked, weight=weight_split[0])
+        counts_split = metric_func.compute_counts(inp_split_masked, weight=weight_split[0])
+        for inps, tars, weights in zip(inp_split[1:], tar_split[1:], weight_split[1:]):
+            # mask inps and tars
+            inps_masked = torch.where(weights > 0.0, inps, 0.0)
+            tars_masked = torch.where(weights > 0.0, tars, 0.0)
+            res_tmp = metric_func(inps_masked, tars_masked, weight=weights)
+            res_tmp = torch.stack([res_split, res_tmp], dim=0)
+            counts_tmp = metric_func.compute_counts(inps_masked, weight=weights)
+            counts_tmp = torch.stack([counts_split, counts_tmp], dim=0)
+            res_split, counts_split = metric_func.combine(res_tmp, counts_tmp, dim=0)
+
+        res_split = metric_func.finalize(res_split, counts_split)
+
+        with self.subTest(desc="full result"):
+            self.assertFalse(torch.isnan(res_full).any(), msg="Full metric output must have no NaNs when using combined NaN mask as weight.")
+            self.assertFalse(torch.isinf(res_full).any(), msg="Full metric output must have no Infs when using combined NaN mask as weight.")
+
+        with self.subTest(desc="split result"):
+            self.assertFalse(torch.isnan(res_split).any(), msg="Aggregated metric output must have no NaNs when using combined NaN mask as weight.")
+            self.assertFalse(torch.isinf(res_split).any(), msg="Aggregated metric output must have no Infs when using combined NaN mask as weight.")
+
+        self.assertTrue(compare_arrays("deterministic aggregation with nan", res_full.cpu().numpy(), res_split.cpu().numpy(), rtol=1e-6, atol=1e-6, verbose=verbose))
 
     @parameterized.expand(_probabilistic_metric_aggregation_params, skip_on_empty=True)
     def test_probabilistic_aggregation(self, metric_handle, grid_type, batch_size, ensemble_size, num_channels, nlat, nlon, cred, bred, verbose=False):
@@ -536,6 +608,74 @@ class TestMetricsAggregation(unittest.TestCase):
         res_split = metric_func.finalize(res_split, counts_split)
 
         self.assertTrue(compare_arrays("probabilistic aggregation weighted", res_full.cpu().numpy(), res_split.cpu().numpy(), rtol=1e-6, atol=1e-6, verbose=verbose))
+
+    @parameterized.expand(_probabilistic_metric_weighted_aggregation_params, skip_on_empty=True)
+    def test_probabilistic_aggregation_nan(self, metric_handle, grid_type, batch_size, ensemble_size, num_channels, nlat, nlon, cred, bred, verbose=False):
+        """Same as test_probabilistic_aggregation but with a spatial weight tensor (0/1 mask) at every step."""
+        num_rollout_steps = 10
+        batch_size_nsteps = num_rollout_steps * batch_size
+
+        # metric handle
+        metric_func = metric_handle(grid_type=grid_type, img_shape=(nlat, nlon), crop_shape=(nlat, nlon), crop_offset=(0, 0), crps_type="skillspread", normalize=True, channel_reduction=cred, batch_reduction=bred).to(self.device)
+
+        inp = torch.randn((batch_size_nsteps, ensemble_size, num_channels, nlat, nlon), dtype=torch.float32, device=self.device)
+        tar = torch.randn((batch_size_nsteps, num_channels, nlat, nlon), dtype=torch.float32, device=self.device)
+
+        # inject NaNs in different positions in inp and tar
+        rng = np.random.default_rng(42)
+        n_nan = int(math.prod((batch_size_nsteps, ensemble_size, num_channels, nlat, nlon)) * 0.1)
+        flat_inp = inp.view(-1)
+        idx_inp = rng.choice(flat_inp.numel(), size=n_nan, replace=False)
+        flat_inp[idx_inp] = torch.nan
+
+        n_nan = int(math.prod((batch_size_nsteps, num_channels, nlat, nlon)) * 0.1)
+        flat_tar = tar.view(-1)
+        idx_tar = rng.choice(flat_tar.numel(), size=n_nan, replace=False)
+        flat_tar[idx_tar] = torch.nan
+
+        # combined mask: 1 where both are non-NaN, 0 where either is NaN
+        # we mask all ensemble members if any one is NaN for now
+        valid_inp = torch.logical_not(torch.isnan(torch.sum(inp, dim=1))).to(torch.float32)
+        valid_tar = torch.logical_not(torch.isnan(tar)).to(torch.float32)
+        weight_full = valid_inp * valid_tar
+
+        # mask nan values in inp and tar
+        inp_masked = torch.where(weight_full.unsqueeze(1).expand_as(inp) > 0.0, inp, 0.0)
+        tar_masked = torch.where(weight_full > 0.0, tar, 0.0)
+
+        res_full = metric_func(inp_masked, tar_masked, weight=weight_full)
+        counts_full = metric_func.compute_counts(inp_masked, weight=weight_full)
+        res_full = metric_func.finalize(res_full, counts_full)
+
+        inp_split = torch.split(inp, batch_size, dim=0)
+        tar_split = torch.split(tar, batch_size, dim=0)
+        weight_split = torch.split(weight_full, batch_size, dim=0)
+
+        inp_split_masked = torch.where(weight_split[0].unsqueeze(1).expand_as(inp_split[0]) > 0.0, inp_split[0], 0.0)
+        tar_split_masked = torch.where(weight_split[0] > 0.0, tar_split[0], 0.0)
+        res_split = metric_func(inp_split_masked, tar_split_masked, weight=weight_split[0])
+        counts_split = metric_func.compute_counts(inp_split_masked, weight=weight_split[0])
+        for inps, tars, weights in zip(inp_split[1:], tar_split[1:], weight_split[1:]):
+            # mask inps and tars
+            inps_masked = torch.where(weights.unsqueeze(1).expand_as(inps) > 0.0, inps, 0.0)
+            tars_masked = torch.where(weights > 0.0, tars, 0.0)
+            res_tmp = metric_func(inps_masked, tars_masked, weight=weights)
+            res_tmp = torch.stack([res_split, res_tmp], dim=0)
+            counts_tmp = metric_func.compute_counts(inps_masked, weight=weights)
+            counts_tmp = torch.stack([counts_split, counts_tmp], dim=0)
+            res_split, counts_split = metric_func.combine(res_tmp, counts_tmp, dim=0)
+
+        res_split = metric_func.finalize(res_split, counts_split)
+
+        with self.subTest(desc="full result"):
+            self.assertFalse(torch.isnan(res_full).any(), msg="Full metric output must have no NaNs when using combined NaN mask as weight.")
+            self.assertFalse(torch.isinf(res_full).any(), msg="Full metric output must have no Infs when using combined NaN mask as weight.")
+
+        with self.subTest(desc="split result"):
+            self.assertFalse(torch.isnan(res_split).any(), msg="Aggregated metric output must have no NaNs when using combined NaN mask as weight.")
+            self.assertFalse(torch.isinf(res_split).any(), msg="Aggregated metric output must have no Infs when using combined NaN mask as weight.")
+
+        self.assertTrue(compare_arrays("probabilistic aggregation nan", res_full.cpu().numpy(), res_split.cpu().numpy(), rtol=1e-6, atol=1e-6, verbose=verbose))
 
         
 class TestMetricsHandler(unittest.TestCase):
