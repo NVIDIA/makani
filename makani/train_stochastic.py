@@ -139,7 +139,6 @@ if __name__ == "__main__":
     params["n_future"] = 0
 
     # debug:
-    params["enable_benchy"] = args.enable_benchy
     params["disable_ddp"] = args.disable_ddp
     params["enable_grad_anomaly_detection"] = args.enable_grad_anomaly_detection
 

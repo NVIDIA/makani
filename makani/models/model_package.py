@@ -20,7 +20,6 @@ perform inference and its interface is compatible with earth2mip
 import os
 import shutil
 import json
-import jsbeautifier
 import numpy as np
 import torch
 from makani.utils.YParams import ParamsBase
@@ -38,7 +37,7 @@ logger = logging.getLogger(__name__)
 
 class LocalPackage:
     """
-    Implements the earth2mip/modulus Package interface.
+    Implements the modulus Package interface.
     """
 
     # These define the model package in terms of where makani expects the files to be located
@@ -49,7 +48,7 @@ class LocalPackage:
     MEANS_FILE = "global_means.npy"
     STDS_FILE = "global_stds.npy"
     OROGRAPHY_FILE = "orography.nc"
-    LANDMASK_FILE = "land_mask.nc"
+    LANDMASK_FILE = "land_sea_mask.nc"
     SOILTYPE_FILE = "soil_type.nc"
 
     def __init__(self, root):
@@ -148,11 +147,11 @@ class ModelWrapper(torch.nn.Module):
     def update_state(self, replace_state=True):
         self.model.preprocessor.update_internal_state(replace_state=replace_state)
         return
-    
+
     def set_rng(self, reset=True, seed=333):
         self.model.preprocessor.set_rng(reset=reset, seed=seed)
         return
-        
+
     def forward(self, x, time, normalized_data=True, replace_state=None):
         if not normalized_data:
             x = (x - self.in_bias) / self.in_scale
@@ -180,11 +179,9 @@ def save_model_package(params):
     """
     # save out the current state of the parameters, make it human readable
     config_path = os.path.join(params.experiment_dir, "config.json")
-    jsopts = jsbeautifier.default_options()
-    jsopts.indent_size = 2
 
     with open(config_path, "w") as f:
-        msg = jsbeautifier.beautify(json.dumps(params.to_dict()), jsopts)
+        msg = json.dumps(params.to_dict(), indent=4, sort_keys=True)
         f.write(msg)
 
     if params.get("add_orography", False):
@@ -211,7 +208,7 @@ def save_model_package(params):
         "entrypoint": {"name": f"{LocalPackage.THIS_MODULE}:load_time_loop"},
     }
     with open(os.path.join(params.experiment_dir, "metadata.json"), "w") as f:
-        msg = jsbeautifier.beautify(json.dumps(fcn_mip_data), jsopts)
+        msg = json.dumps(fcn_mip_data, indent=4, sort_keys=True)
         f.write(msg)
 
 

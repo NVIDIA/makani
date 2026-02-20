@@ -57,7 +57,7 @@ RUN pip install more_itertools zarr xarray pandas gcsfs boto3
 RUN pip install moviepy imageio
 
 # other python stuff
-RUN pip install --upgrade wandb ruamel.yaml tqdm progressbar2 jsbeautifier
+RUN pip install --upgrade wandb ruamel.yaml tqdm progressbar2
 
 # numba
 RUN pip install numba
@@ -66,17 +66,14 @@ ENV NUMBA_DISABLE_CUDA=1
 # scoring tools
 RUN pip install xskillscore properscoring
 
-# benchy
-RUN pip install git+https://github.com/romerojosh/benchy.git
-
 # some useful scripts from mlperf
 RUN pip install --ignore-installed "git+https://github.com/NVIDIA/mlperf-common.git"
 
 # torch-harmonics
 ENV FORCE_CUDA_EXTENSION 1
-ENV TORCH_CUDA_ARCH_LIST "8.0 8.6 9.0 10.0 12.0+PTX"
-ENV HARMONICS_VERSION 0.8.3
-RUN cd /opt && git clone https://github.com/NVIDIA/torch-harmonics.git && \
+ENV TORCH_CUDA_ARCH_LIST "8.0 8.6 8.7 9.0 10.0+PTX"
+ENV HARMONICS_VERSION 0.8.1
+RUN cd /opt && git clone -b bbonev/disco-modal-normalization https://github.com/NVIDIA/torch-harmonics.git && \
     cd torch-harmonics && \
     pip install --no-build-isolation -e .
 

@@ -14,12 +14,18 @@
 # limitations under the License.
 
 import cdsapi
-import numpy as np
 import os
 import argparse
+import warnings
 
 
 def main(args):
+
+    warnings.warn(
+        "get_data() is deprecated and will be removed in the future. Use data_process/convert_wb2_to_makani_input.py instead.",
+        category=DeprecationWarning,
+        stacklevel=2,  # so the warning points to the caller, not this line
+    )
 
     # get base path
     base_path = os.path.join(args.output_dir, "raw")

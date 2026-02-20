@@ -182,27 +182,19 @@ class StochasticTrainer(Driver):
         # gradient clipping
         self.max_grad_norm = self.params.get("optimizer_max_grad_norm", -1.0)
 
-        # we need this further down
-        capture_stream = None
+        # Initialize gradient reduction (DDP-like) hooks on the default stream so that
+        # AccumulateGrad nodes use the same stream as training forward/backward.
         if dist.is_initialized() and not self.params.disable_ddp:
-            if self.device.type == "cuda":
-                capture_stream = torch.Stream(device="cuda")
-
-            with torch.cuda.stream(capture_stream):
-                self.model = init_gradient_reduction_hooks(
-                    self.model,
-                    device=self.device,
-                    reduction_buffer_count=self.params.parameters_reduction_buffer_count,
-                    broadcast_buffers=False,
-                    find_unused_parameters=self.params["enable_grad_anomaly_detection"],
-                    gradient_as_bucket_view=True,
-                    static_graph=False,
-                    verbose=True,
-                )
-
-            # capture stream sync
-            if capture_stream is not None:
-                capture_stream.synchronize()
+            self.model = init_gradient_reduction_hooks(
+                self.model,
+                device=self.device,
+                reduction_buffer_count=self.params.parameters_reduction_buffer_count,
+                broadcast_buffers=False,
+                find_unused_parameters=self.params["enable_grad_anomaly_detection"],
+                gradient_as_bucket_view=True,
+                static_graph=False,
+                verbose=True,
+            )
 
         # lets get one sample from the dataloader:
         # set to train just to be safe
@@ -475,7 +467,8 @@ class StochasticTrainer(Driver):
         train_steps = 0
         train_start = time.perf_counter_ns()
         self.model_train.zero_grad(set_to_none=True)
-        for data in tqdm(self.train_dataloader, desc=f"Training progress epoch {self.epoch}", disable=not self.log_to_screen):
+        progress_bar = tqdm(self.train_dataloader, desc=f"Training progress epoch {self.epoch}", disable=not self.log_to_screen)
+        for data in progress_bar:
             train_steps += 1
             self.iters += 1
 
@@ -501,11 +494,11 @@ class StochasticTrainer(Driver):
             with amp.autocast(device_type="cuda", enabled=self.amp_enabled, dtype=self.amp_dtype):
                 if do_update:
                     pred, tar = self.model_train(inp, tar, n_samples=self.params.stochastic_size)
-                    loss = self.loss_obj(pred, tar)
+                    loss = self.loss_obj(pred, tar, inp=inp)
                 else:
                     with self.model_train.no_sync():
                         pred, tar = self.model_train(inp, tar, n_samples=self.params.stochastic_size)
-                        loss = self.loss_obj(pred, tar)
+                        loss = self.loss_obj(pred, tar, inp=inp)
                 loss = loss * loss_scaling_fact
 
             self.gscaler.scale(loss).backward()
@@ -514,6 +507,9 @@ class StochasticTrainer(Driver):
             accumulated_loss[0] += loss.detach().clone() * inp.shape[0]
             accumulated_loss[1] += inp.shape[0]
 
+            # log the loss
+            pbar_postfix = {"loss": loss.item()}
+
             # gradient clipping
             if do_update:
                 if self.max_grad_norm > 0.0:
@@ -521,6 +517,7 @@ class StochasticTrainer(Driver):
                     grad_norm = clip_grads(self.model_train, self.max_grad_norm)
                     accumulated_grad_norm[0] += grad_norm.detach()
                     accumulated_grad_norm[1] += 1.0
+                    pbar_postfix["grad norm"] = grad_norm.item()
 
                 # perform weight update
                 self.gscaler.step(self.optimizer)
@@ -548,6 +545,9 @@ class StochasticTrainer(Driver):
                 if self.log_to_screen:
                     self.logger.info(f"Dumping weights and gradients to {weights_and_grads_path}")
                 self.dump_weights_and_grads(weights_and_grads_path, self.model, step=(self.epoch * self.params.num_samples_per_epoch + self.iters))
+
+            # set progress bar prefix
+            progress_bar.set_postfix(**pbar_postfix)
 
         # average the loss over ranks and steps
         if dist.is_initialized():
@@ -605,7 +605,8 @@ class StochasticTrainer(Driver):
                     normalize_weights(self.model, eps=1e-4)
 
                 eval_steps = 0
-                for data in tqdm(self.valid_dataloader, desc=f"Validation progress epoch {self.epoch}", disable=not self.log_to_screen):
+                progress_bar = tqdm(self.valid_dataloader, desc=f"Validation progress epoch {self.epoch}", disable=not self.log_to_screen)
+                for data in progress_bar:
                     eval_steps += 1
 
                     # map to gpu
@@ -670,6 +671,9 @@ class StochasticTrainer(Driver):
 
                             tag = f"step{eval_steps}_time{str(idt).zfill(3)}"
                             self.visualizer.add(tag, pred_cpu, targ_cpu)
+
+                        # log the loss
+                        progress_bar.set_postfix({"loss": loss.item()})
 
                         # update metrics
                         self.metrics.update(pred, targ, loss, idt)

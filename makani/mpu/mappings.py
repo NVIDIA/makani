@@ -58,6 +58,24 @@ class distributed_transpose(torch.autograd.Function):
         return gi, None, None, None
 
 
+class gradient_print_wrapper(torch.autograd.Function):
+
+    @staticmethod
+    @custom_fwd(device_type="cuda")
+    def forward(ctx, x, msg=""):
+        ctx.msg = msg
+        return x
+
+    @staticmethod
+    @custom_bwd(device_type="cuda")
+    def backward(ctx, go):
+
+        msg = ctx.msg
+        print(f"Gradient stats for {msg}: min: {go.min()}, max: {go.max()}, mean: {go.mean()}")
+
+        return go, None
+
+
 # handler for additional gradient reductions
 # helper for gradient reduction across channel parallel ranks
 def init_gradient_reduction_hooks(model, device, reduction_buffer_count=1, broadcast_buffers=True, find_unused_parameters=False, gradient_as_bucket_view=True, static_graph=False, verbose=False):

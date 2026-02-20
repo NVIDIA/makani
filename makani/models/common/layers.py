@@ -628,5 +628,5 @@ class DownSample3D(nn.Module):
 
         x = self.norm(x)
         x = self.linear(x)
-        
+
         return x

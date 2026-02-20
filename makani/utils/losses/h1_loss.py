@@ -134,7 +134,7 @@ class SpectralH1Loss(SpectralBaseLoss):
             tar_norm2 = 2 * torch.sum(tar_coeffssq, dim=-1)
         if self.spatial_distributed and (comm.get_size("w") > 1):
             tar_norm2 = reduce_from_parallel_region(tar_norm2, "w")
-        
+
         # compute target norms
         tar_norm2 = tar_norm2.reshape(B, C, -1)
         tar_h1_norm2 = torch.sum(tar_norm2 * self.h1_weights, dim=-1)

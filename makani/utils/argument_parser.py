@@ -65,7 +65,6 @@ def get_default_argument_parser(training=True):
         parser.add_argument("--multistep_count", default=1, type=int, help="Number of autoregressive training steps. A value of 1 denotes conventional training")
     
     # debug parameters
-    parser.add_argument("--enable_benchy", action="store_true")
     if training:
         parser.add_argument("--disable_ddp", action="store_true")
         parser.add_argument("--enable_grad_anomaly_detection", action="store_true")

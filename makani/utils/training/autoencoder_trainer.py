@@ -174,27 +174,19 @@ class AutoencoderTrainer(Driver):
         # gradient clipping
         self.max_grad_norm = self.params.get("optimizer_max_grad_norm", -1.0)
 
-        # we need this further down
-        capture_stream = None
+        # Initialize gradient reduction (DDP-like) hooks on the default stream so that
+        # AccumulateGrad nodes use the same stream as training forward/backward.
         if dist.is_initialized() and not self.params.disable_ddp:
-            if self.device.type == "cuda":
-                capture_stream = torch.Stream(device="cuda")
-
-            with torch.cuda.stream(capture_stream):
-                self.model = init_gradient_reduction_hooks(
-                    self.model,
-                    device=self.device,
-                    reduction_buffer_count=self.params.parameters_reduction_buffer_count,
-                    broadcast_buffers=False,
-                    find_unused_parameters=self.params["enable_grad_anomaly_detection"],
-                    gradient_as_bucket_view=True,
-                    static_graph=False,
-                    verbose=True,
-                )
-
-            # capture stream sync
-            if capture_stream is not None:
-                capture_stream.synchronize()
+            self.model = init_gradient_reduction_hooks(
+                self.model,
+                device=self.device,
+                reduction_buffer_count=self.params.parameters_reduction_buffer_count,
+                broadcast_buffers=False,
+                find_unused_parameters=self.params["enable_grad_anomaly_detection"],
+                gradient_as_bucket_view=True,
+                static_graph=False,
+                verbose=True,
+            )
 
         # lets get one sample from the dataloader:
         # set to train just to be safe
@@ -497,7 +489,8 @@ class AutoencoderTrainer(Driver):
         train_steps = 0
         train_start = time.perf_counter_ns()
         self.model_train.zero_grad(set_to_none=True)
-        for data in tqdm(self.train_dataloader, desc=f"Training progress epoch {self.epoch}", disable=not self.log_to_screen):
+        progress_bar = tqdm(self.train_dataloader, desc=f"Training progress epoch {self.epoch}", disable=not self.log_to_screen)
+        for data in progress_bar:
             train_steps += 1
             self.iters += 1
 
@@ -534,6 +527,9 @@ class AutoencoderTrainer(Driver):
             accumulated_loss[0] += loss.detach().clone() * inp.shape[0]
             accumulated_loss[1] += inp.shape[0]
 
+            # log the loss
+            pbar_postfix = {"loss": loss.item()}
+
             # perform weight update
             if do_update:
                 if self.max_grad_norm > 0.0:
@@ -541,6 +537,7 @@ class AutoencoderTrainer(Driver):
                     grad_norm = clip_grads(self.model_train, self.max_grad_norm)
                     accumulated_grad_norm[0] += grad_norm.detach()
                     accumulated_grad_norm[1] += 1.0
+                    pbar_postfix["grad norm"] = grad_norm.item()
 
                 self.gscaler.step(self.optimizer)
                 self.gscaler.update()
@@ -562,6 +559,9 @@ class AutoencoderTrainer(Driver):
                 if self.log_to_screen:
                     self.logger.info(f"Dumping weights and gradients to {weights_and_grads_path}")
                 self.dump_weights_and_grads(weights_and_grads_path, self.model, step=(self.epoch * self.params.num_samples_per_epoch + self.iters))
+
+            # set progress bar prefix
+            progress_bar.set_postfix(**pbar_postfix)
 
             if profiler is not None:
                 profiler.step()
@@ -621,7 +621,8 @@ class AutoencoderTrainer(Driver):
         with torch.inference_mode():
             with torch.no_grad():
                 eval_steps = 0
-                for data in tqdm(self.valid_dataloader, desc=f"Validation progress epoch {self.epoch}", disable=not self.log_to_screen):
+                progress_bar = tqdm(self.valid_dataloader, desc=f"Validation progress epoch {self.epoch}", disable=not self.log_to_screen)
+                for data in progress_bar:
                     eval_steps += 1
 
                     # map to gpu
@@ -675,6 +676,9 @@ class AutoencoderTrainer(Driver):
                             targ_cpu = self.viz_target_cpu.to(torch.float32).numpy()
 
                             self.visualizer.add(tag, pred_cpu, targ_cpu)
+
+                    # log the loss
+                    progress_bar.set_postfix({"loss": loss.item()})
 
                     # put in the metrics handler
                     self.metrics.update(pred, inpt, loss, 0)

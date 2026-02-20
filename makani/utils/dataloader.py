@@ -216,11 +216,6 @@ def get_dataloader(params, files_pattern, device, mode="train"):
             lat_lon_local=dataloader.lat_lon_local,
         )
 
-        if params.enable_benchy and (mode == "train"):
-            from benchy.torch import BenchmarkGenericIteratorWrapper
-
-            dataloader = BenchmarkGenericIteratorWrapper(dataloader, params.batch_size)
-
         # not needed for the no multifiles case
         sampler = None
 

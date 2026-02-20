@@ -18,10 +18,17 @@ import torch.distributed as dist
 import math
 
 def mask_data(data):
-    data_masked = data.clone()
-    nan_mask = torch.isnan(data)
-    data_masked[nan_mask] = 0.0
-    valid_mask = torch.logical_not(nan_mask).to(torch.float64)
+    # check for NaNs and return a FP valued mask where
+    # valid_mask = 1 for data which are valid (not NaN) and 0 otherwise.
+
+    if torch.isnan(data).any():
+        nan_mask = torch.isnan(data)
+        valid_mask = torch.logical_not(nan_mask).to(torch.float64)
+        data_masked = torch.where(valid_mask > 0.0, data, 0.0)
+    else:
+        valid_mask = torch.ones_like(data)
+        data_masked = data
+
     return data_masked, valid_mask
 
 

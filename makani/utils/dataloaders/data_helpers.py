@@ -58,6 +58,36 @@ def get_data_normalization(params):
 
     return bias, scale
 
+def get_time_diff_stds(params):
+
+    time_diff_stds = None
+
+    if hasattr(params, "time_diff_stds_path"):
+        time_diff_stds = np.load(params.time_diff_stds_path)
+    else:
+        raise ValueError(f"time_diff_std_path not defined.")
+
+    return time_diff_stds
+
+
+def get_psd_stats(params):
+
+    psd_means = None
+    psd_stds = None
+
+    if hasattr(params, "psd_means_path") and hasattr(params, "psd_stds_path"):
+        psd_means = np.load(params.psd_means_path)
+        psd_stds = np.load(params.psd_stds_path)
+
+        # filter channels if requested
+        if hasattr(params, "out_channels"):
+            psd_means = psd_means[..., params.out_channels, :]
+            psd_stds = psd_stds[..., params.out_channels, :]
+    else:
+        raise ValueError(f"psd_means_path or psd_stds_path not defined.")
+
+    return psd_means, psd_stds
+
 
 def get_climatology(params):
     """

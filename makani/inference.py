@@ -163,7 +163,6 @@ if __name__ == "__main__":
     params["jit_mode"] = args.jit_mode
     params["enable_odirect"] = args.enable_odirect
     params["enable_s3"] = args.enable_s3
-    params["enable_benchy"] = args.enable_benchy
     params["disable_ddp"] = args.disable_ddp
     params["checkpointing_level"] = args.checkpointing_level
     params["enable_synthetic_data"] = args.enable_synthetic_data
