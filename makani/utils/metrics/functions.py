@@ -23,6 +23,7 @@ from physicsnemo.distributed.utils import split_tensor_along_dim
 from makani.mpu.mappings import distributed_transpose
 
 from makani.utils.losses import EnsembleCRPSLoss, LossType
+from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature
 from makani.utils.metrics.base_metric import _sanitize_shapes, _welford_reduction_helper, GeometricBaseMetric
 
 class GeometricL1(GeometricBaseMetric):
@@ -98,7 +99,6 @@ class GeometricRMSE(GeometricBaseMetric):
         vals, counts = _sanitize_shapes(vals, counts, dim=dim)
         vals_res, counts_res = _welford_reduction_helper(torch.square(vals), counts, self.batch_reduction, dim=dim)
         vals_res = torch.sqrt(vals_res)
-        counts_res = counts_res.squeeze()
         return vals_res, counts_res
 
     def finalize(self, vals, counts):
@@ -169,6 +169,12 @@ class GeometricACC(GeometricBaseMetric):
                 bias = split_tensor_along_dim(bias, dim=-2, num_chunks=comm.get_size("h"))[comm.get_rank("h")]
             self.register_buffer("bias", bias)
 
+    def compute_counts(self, inp: torch.Tensor, weight: Optional[torch.Tensor] = None) -> torch.Tensor:
+        counts = super().compute_counts(inp, weight)
+        if self.method == "micro":
+            counts = counts.unsqueeze(-1)
+        return counts
+
     def finalize(self, vals, counts):
         if self.method == "micro":
             return vals[..., 0] / torch.sqrt(vals[..., 1] * vals[..., 2])
@@ -212,115 +218,6 @@ class GeometricACC(GeometricBaseMetric):
         return acc
 
 
-class GeometricPCC(GeometricBaseMetric):
-    def __init__(
-        self,
-        grid_type: str,
-        img_shape: Tuple[int, int],
-        crop_shape: Optional[Tuple[int, int]] = None,
-        crop_offset: Optional[Tuple[int, int]] = (0, 0),
-        normalize: Optional[bool] = False,
-        channel_reduction: Optional[str] = "mean",
-        batch_reduction: Optional[str] = "mean",
-        bias: Optional[torch.Tensor] = None,
-        eps: Optional[float] = 1e-8,
-        spatial_distributed: Optional[bool] = False,
-        **kwargs,
-    ):
-        super().__init__(
-            grid_type=grid_type,
-            img_shape=img_shape,
-            crop_shape=crop_shape,
-            crop_offset=crop_offset,
-            normalize=normalize,
-            channel_reduction=channel_reduction,
-            batch_reduction=batch_reduction,
-            spatial_distributed=spatial_distributed
-        )
-        """
-        This metric is similat to ACC but here we subtract the individual means from prediction and target as well.
-        """
-        self.eps = eps
-
-        if bias is not None:
-            if comm.get_size("w") > 1:
-                bias = split_tensor_along_dim(bias, dim=-1, num_chunks=comm.get_size("w"))[comm.get_rank("w")]
-            if comm.get_size("h") > 1:
-                bias = split_tensor_along_dim(bias, dim=-2, num_chunks=comm.get_size("h"))[comm.get_rank("h")]
-            self.register_buffer("bias", bias)
-
-    def combine(self, vals, counts, dim=0):
-        # sanitize shapes
-        vals, counts = _sanitize_shapes(vals, counts, dim=dim)
-        
-        # extract parameters
-        covs = vals[..., 0].unsqueeze(-1)
-        m2s = vals[..., 1:3]
-        means = vals[..., 3:5]
-        
-        # counts are: n = sum_k n_k
-        counts_agg = torch.sum(counts, dim=0)
-        # means are: mu = sum_i n_i * mu_i / n
-        means_agg = torch.sum(means * counts, dim=0) / counts_agg
-        # m2s are: sum_i m2_i + sum_i n_i * (mu_i - mu)^2
-        m2s_agg = torch.sum(m2s, dim=0)
-        deltas_agg = torch.sum(torch.square(means - means_agg.unsqueeze(0)) * counts, dim=0)
-        m2s_agg = m2s_agg + deltas_agg
-        # covs are: sum_i cov_i + sum_i n_i * (mu_i-mu) * (nu_i-nu)
-        covs_agg = torch.sum(covs, dim=0)
-        cdeltas_agg = torch.sum( torch.prod(means - means_agg.unsqueeze(0), dim=-1).unsqueeze(-1) * counts, dim=0)
-        covs_agg = covs_agg + cdeltas_agg
-        # update
-        vals_agg = torch.cat([covs_agg, m2s_agg, means_agg], dim=-1)
-        counts_agg = counts_agg.squeeze()
-
-        return vals_agg, counts_agg
-
-    def finalize(self, vals, counts):
-        return vals[..., 0] / torch.sqrt(vals[..., 1] * vals[..., 2])
-
-    def forward(self, x: torch.Tensor, y: torch.Tensor, weight: Optional[torch.Tensor] = None) -> torch.Tensor:
-        
-        if hasattr(self, "bias"):
-            x = x - self.bias
-            y = y - self.bias
-
-        # compute means first
-        if weight is not None:
-            mean_x = self.quadrature(x * weight)
-            mean_y = self.quadrature(y * weight)
-        else:
-            mean_x = self.quadrature(x)
-            mean_y = self.quadrature(y)
-        mean_x = mean_x.unsqueeze(-1).unsqueeze(-1)
-        mean_y = mean_y.unsqueeze(-1).unsqueeze(-1)
-
-        if self.batch_reduction != "none":
-            mean_x = torch.mean(mean_x, dim=0, keepdim=True)
-            mean_y = torch.mean(mean_y, dim=0, keepdim=True)
-
-        if weight is not None:
-            cov_xy = self.quadrature((x-mean_x) * (y-mean_y) * weight)
-            var_x = self.quadrature(torch.square(x-mean_x) * weight)
-            var_y = self.quadrature(torch.square(y-mean_y) * weight)
-        else:
-            cov_xy = self.quadrature((x-mean_x) * (y-mean_y))
-            var_x = self.quadrature(torch.square(x-mean_x))
-            var_y = self.quadrature(torch.square(y-mean_y))
-
-        if self.batch_reduction != "none":
-            cov_xy = torch.sum(cov_xy, dim=0)
-            var_x = torch.sum(var_x, dim=0)
-            var_y = torch.sum(var_y, dim=0)
-            mean_x = mean_x.squeeze(0).squeeze(-1).squeeze(-1)
-            mean_y = mean_y.squeeze(0).squeeze(-1).squeeze(-1)
-
-        # we need to store all components individually
-        pcc = torch.stack([cov_xy, var_x, var_y, mean_x, mean_y], dim=-1)
-
-        return pcc
-
-
 class GeometricSpread(GeometricBaseMetric):
     def __init__(
         self,
@@ -349,6 +246,27 @@ class GeometricSpread(GeometricBaseMetric):
     @property
     def type(self):
         return LossType.Probabilistic
+
+    def compute_counts(self, inp: torch.Tensor, weight: Optional[torch.Tensor] = None) -> torch.Tensor:
+        if weight is not None:
+            if self.batch_reduction == "mean":
+                raise ValueError(f"Batch reduction mode 'mean' is not supported when weights are provided. Use 'sum' instead.")
+            elif self.batch_reduction == "sum":
+                counts = torch.sum(self.quadrature(weight), dim=0)
+            else:
+                raise ValueError(f"Batch reduction mode '{self.batch_reduction}' is not supported")
+        else:
+            if self.batch_reduction == "mean":
+                counts = torch.ones(size=(inp.shape[2],), device=inp.device, dtype=inp.dtype)
+            elif self.batch_reduction == "sum":
+                counts = torch.full(size=(inp.shape[2],), fill_value=inp.shape[0], device=inp.device, dtype=inp.dtype)
+
+        if self.channel_reduction == "mean":
+            counts = torch.mean(counts, dim=0)
+        elif self.channel_reduction == "sum":
+            counts = torch.sum(counts, dim=0)
+
+        return counts
     
     def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, weight: Optional[torch.Tensor] = None) -> torch.Tensor:
 
@@ -429,6 +347,27 @@ class GeometricSSR(GeometricBaseMetric):
     @property
     def type(self):
         return LossType.Probabilistic
+
+    def compute_counts(self, inp: torch.Tensor, weight: Optional[torch.Tensor] = None) -> torch.Tensor:
+        if weight is not None:
+            if self.batch_reduction == "mean":
+                raise ValueError(f"Batch reduction mode 'mean' is not supported when weights are provided. Use 'sum' instead.")
+            elif self.batch_reduction == "sum":
+                counts = torch.sum(self.quadrature(weight), dim=0)
+            else:
+                raise ValueError(f"Batch reduction mode '{self.batch_reduction}' is not supported")
+        else:
+            if self.batch_reduction == "mean":
+                counts = torch.ones(size=(inp.shape[2],), device=inp.device, dtype=inp.dtype)
+            elif self.batch_reduction == "sum":
+                counts = torch.full(size=(inp.shape[2],), fill_value=inp.shape[0], device=inp.device, dtype=inp.dtype)
+
+        if self.channel_reduction == "mean":
+            counts = torch.mean(counts, dim=0)
+        elif self.channel_reduction == "sum":
+            counts = torch.sum(counts, dim=0)
+
+        return counts
 
     def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, weight: Optional[torch.Tensor] = None) -> torch.Tensor:
 
@@ -514,14 +453,45 @@ class GeometricCRPS(torch.nn.Module):
         self.channel_reduction = channel_reduction
         self.batch_reduction = batch_reduction
 
+        # get the quadrature
+        quadrature_rule = grid_to_quadrature_rule(grid_type)
+        self.quadrature = GridQuadrature(
+            quadrature_rule,
+            img_shape=img_shape,
+            crop_shape=crop_shape,
+            crop_offset=crop_offset,
+            normalize=True,
+            distributed=spatial_distributed,
+        )
+
     @property
     def type(self):
         return self.metric_func.type
 
+    def compute_counts(self, inp: torch.Tensor, weight: Optional[torch.Tensor] = None) -> torch.Tensor:
+        if weight is not None:
+            if self.batch_reduction == "mean":
+                raise ValueError(f"Batch reduction mode 'mean' is not supported when weights are provided. Use 'sum' instead.")
+            elif self.batch_reduction == "sum":
+                counts = torch.sum(self.quadrature(weight), dim=0)
+            else:
+                raise ValueError(f"Batch reduction mode '{self.batch_reduction}' is not supported")
+        else:
+            if self.batch_reduction == "mean":
+                counts = torch.ones(size=(inp.shape[2],), device=inp.device, dtype=inp.dtype)
+            elif self.batch_reduction == "sum":
+                counts = torch.full(size=(inp.shape[2],), fill_value=inp.shape[0], device=inp.device, dtype=inp.dtype)
+
+        if self.channel_reduction == "mean":
+            counts = torch.mean(counts, dim=0)
+        elif self.channel_reduction == "sum":
+            counts = torch.sum(counts, dim=0)
+
+        return counts
+
     def combine(self, vals, counts, dim=0):
         vals, counts = _sanitize_shapes(vals, counts, dim=dim)
         vals_res, counts_res = _welford_reduction_helper(vals, counts, self.batch_reduction, dim=dim)
-        counts_res = counts_res.squeeze()
         return vals_res, counts_res
 
     def finalize(self, vals, counts):
@@ -530,8 +500,8 @@ class GeometricCRPS(torch.nn.Module):
         else:
             return vals / counts
 
-    def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, spatial_weights: Optional[torch.Tensor] = None) -> torch.Tensor:
-        crps = self.metric_func(forecasts, observations, spatial_weights)
+    def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, weight: Optional[torch.Tensor] = None) -> torch.Tensor:
+        crps = self.metric_func(forecasts, observations, weight)
 
         if self.channel_reduction == "mean":
             crps = torch.mean(crps, dim=1)
@@ -584,15 +554,39 @@ class GeometricRankHistogram(GeometricBaseMetric):
     def type(self):
         return LossType.Probabilistic
 
-    def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, spatial_weights: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def compute_counts(self, inp: torch.Tensor, weight: Optional[torch.Tensor] = None) -> torch.Tensor:
+        if weight is not None:
+            if self.batch_reduction == "mean":
+                raise ValueError(f"Batch reduction mode 'mean' is not supported when weights are provided. Use 'sum' instead.")
+            elif self.batch_reduction == "sum":
+                counts = torch.sum(self.quadrature(weight), dim=0)
+            else:
+                raise ValueError(f"Batch reduction mode '{self.batch_reduction}' is not supported")
+        else:
+            if self.batch_reduction == "mean":
+                counts = torch.ones(size=(inp.shape[2],), device=inp.device, dtype=inp.dtype)
+            elif self.batch_reduction == "sum":
+                counts = torch.full(size=(inp.shape[2],), fill_value=inp.shape[0], device=inp.device, dtype=inp.dtype)
+
+        if self.channel_reduction == "mean":
+            counts = torch.mean(counts, dim=0)
+        elif self.channel_reduction == "sum":
+            counts = torch.sum(counts, dim=0)
+
+        # we need to add another dim:
+        counts = counts.unsqueeze(-1)
+
+        return counts
+
+    def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, weight: Optional[torch.Tensor] = None) -> torch.Tensor:
 
         # sanity checks
         if forecasts.dim() != 5:
             raise ValueError(f"Error, forecasts tensor expected to have 5 dimensions but found {forecasts.dim()}.")
 
-        # we assume that spatial_weights have NO ensemble dim
-        if (spatial_weights is not None) and (spatial_weights.dim() != observations.dim()):
-            spdim = spatial_weights.dim()
+        # we assume that weight have NO ensemble dim
+        if (weight is not None) and (weight.dim() != observations.dim()):
+            spdim = weight.dim()
             odim = observations.dim()
             raise ValueError(f"the weights have to have the same number of dimensions (found {spdim}) as observations (found {odim}).")
 
@@ -605,7 +599,7 @@ class GeometricRankHistogram(GeometricBaseMetric):
 
         if self.ensemble_distributed:
             ensemble_shapes = [E for _ in range(comm.get_size("ensemble"))]
-            forecasts = distributed_transpose.apply(forecasts, (-1, 1), ensemble_shapes, "ensemble")
+            forecasts = distributed_transpose(forecasts, (-1, 1), ensemble_shapes, "ensemble")
             ensemble_size = E * comm.get_size("ensemble")
         else:
             ensemble_size = E
@@ -613,9 +607,10 @@ class GeometricRankHistogram(GeometricBaseMetric):
         # observations does not need a transpose, but just a split
         if self.ensemble_distributed:
             observations = scatter_to_parallel_region(observations, -1, "ensemble")
-        if spatial_weights is not None:
-            spatial_weights_split = spatial_weights.flatten(start_dim=-2, end_dim=-1)
-            spatial_weights_split = scatter_to_parallel_region(spatial_weight_splits, -1, "ensemble")
+        if weight is not None:
+            weight = weight.flatten(start_dim=-2, end_dim=-1)
+            if self.ensemble_distributed:
+                weight = scatter_to_parallel_region(weight, -1, "ensemble")
 
         # we need to have ensemble dim innermost
         forecasts = torch.moveaxis(forecasts, 1, -1)
@@ -632,8 +627,8 @@ class GeometricRankHistogram(GeometricBaseMetric):
         rankhist = torch.nn.functional.one_hot(insertions, num_classes=ensemble_size+1).to(dtype=torch.float32)
 
         # do spatial contraction:
-        if spatial_weights is not None:
-            rankhist = torch.sum(rankhist * self.quad_weight_split * spatial_weights.unsqueeze(-1), dim=2)
+        if weight is not None:
+            rankhist = torch.sum(rankhist * self.quad_weight_split * weight.unsqueeze(-1), dim=2)
         else:
             rankhist = torch.sum(rankhist * self.quad_weight_split, dim=2)
 

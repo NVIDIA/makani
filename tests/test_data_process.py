@@ -29,7 +29,8 @@ import torch
 from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from .testutils import init_dataset, H5_PATH, IMG_SIZE_H, IMG_SIZE_W, compare_arrays
+from .testutils import disable_tf32, init_dataset, H5_PATH, IMG_SIZE_H, IMG_SIZE_W, compare_arrays
+
 
 class TestAnnotateDataset(unittest.TestCase):
 
@@ -52,6 +53,9 @@ class TestAnnotateDataset(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.tmpdir.cleanup()
+
+    def setUp(self):
+        disable_tf32()
 
     def test_annotate_dataset(self, verbose=False):
         # import necessary modules
@@ -127,6 +131,9 @@ class TestConcatenateDataset(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.tmpdir.cleanup()
+
+    def setUp(self):
+        disable_tf32()
 
     @parameterized.expand(
         [1, 5],

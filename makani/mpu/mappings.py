@@ -32,7 +32,7 @@ from makani.mpu.helpers import _transpose
 from makani.models.helpers import count_parameters
 
 
-class distributed_transpose(torch.autograd.Function):
+class _DistributedTranspose(torch.autograd.Function):
 
     @staticmethod
     @custom_fwd(device_type="cuda")
@@ -57,6 +57,8 @@ class distributed_transpose(torch.autograd.Function):
         gi = torch.cat(gilist, dim=dims[0]).contiguous()
         return gi, None, None, None
 
+def distributed_transpose(x, dims, shapes, comm_id):
+    return _DistributedTranspose.apply(x, dims, shapes, comm_id)
 
 # handler for additional gradient reductions
 # helper for gradient reduction across channel parallel ranks

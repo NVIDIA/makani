@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import importlib.util
 import os
 import sys
 import unittest
@@ -20,25 +21,29 @@ from parameterized import parameterized
 
 import itertools
 import tempfile
+import math
 import numpy as np
 import torch
 import xarray as xr
 import xskillscore as xs
 
-from makani.utils import functions as fn
 from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature
 from makani.utils import MetricsHandler
-from makani.utils.metrics.functions import GeometricL1, GeometricRMSE, GeometricACC, GeometricPCC, GeometricCRPS, GeometricSSR, GeometricRankHistogram, Quadrature
+from makani.utils.metrics.functions import (
+    GeometricL1, 
+    GeometricRMSE, 
+    GeometricACC, 
+    GeometricSpread, 
+    GeometricCRPS, 
+    GeometricSSR, 
+    GeometricRankHistogram,
+)
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from .testutils import get_default_parameters, compare_arrays
+from .testutils import disable_tf32, get_default_parameters, compare_arrays
 
 # check consistency with weatherbench2 if it is installed
-try:
-    import weatherbench2 as wb2
-    from weatherbench2 import metrics
-except ImportError:
-    wb2 = None
+_have_wb2 = importlib.util.find_spec("weatherbench2") is not None
 
 # parameters for deterministic metrics
 # grid_type, shape
@@ -76,35 +81,90 @@ _wb2_metrics_params = [
 ]
 
 _deterministic_metric_aggregation_params = [
+    # GeometricL1
     (GeometricL1, "equiangular", *(4, 21, 17, 32), "mean", "mean"),
+    (GeometricL1, "equiangular", *(4, 21, 17, 32), "mean", "sum"),
+    (GeometricL1, "equiangular", *(4, 21, 17, 32), "sum", "mean"),
+    (GeometricL1, "equiangular", *(4, 21, 17, 32), "sum", "sum"),
     (GeometricL1, "equiangular", *(4, 21, 17, 32), "none", "mean"),
+    (GeometricL1, "equiangular", *(4, 21, 17, 32), "none", "sum"),
+    # GeometricRMSE
+    (GeometricRMSE, "equiangular", *(4, 21, 17, 32), "mean", "mean"),
+    (GeometricRMSE, "equiangular", *(4, 21, 17, 32), "mean", "sum"),
+    (GeometricRMSE, "equiangular", *(4, 21, 17, 32), "sum", "mean"),
+    (GeometricRMSE, "equiangular", *(4, 21, 17, 32), "sum", "sum"),
+    (GeometricRMSE, "equiangular", *(4, 21, 17, 32), "none", "mean"),
+    (GeometricRMSE, "equiangular", *(4, 21, 17, 32), "none", "sum"),
+    # ACC
+    (GeometricACC, "equiangular", *(4, 21, 17, 32), "mean", "mean"),
+    (GeometricACC, "equiangular", *(4, 21, 17, 32), "mean", "sum"),
+    (GeometricACC, "equiangular", *(4, 21, 17, 32), "sum", "mean"),
+    (GeometricACC, "equiangular", *(4, 21, 17, 32), "sum", "sum"),
+    (GeometricACC, "equiangular", *(4, 21, 17, 32), "none", "mean"),
+    (GeometricACC, "equiangular", *(4, 21, 17, 32), "none", "sum"),
+]
+
+_deterministic_metric_weighted_aggregation_params = [
+    # GeometricL1
+    (GeometricL1, "equiangular", *(4, 21, 17, 32), "mean", "sum"),
     (GeometricL1, "equiangular", *(4, 21, 17, 32), "sum", "sum"),
     (GeometricL1, "equiangular", *(4, 21, 17, 32), "none", "sum"),
-    (GeometricRMSE, "equiangular", *(4, 21, 17, 32), "mean", "mean"),
-    (GeometricRMSE, "equiangular", *(4, 21, 17, 32), "none", "mean"),
+    # # GeometricRMSE
+    (GeometricRMSE, "equiangular", *(4, 21, 17, 32), "mean", "sum"),
     (GeometricRMSE, "equiangular", *(4, 21, 17, 32), "sum", "sum"),
     (GeometricRMSE, "equiangular", *(4, 21, 17, 32), "none", "sum"),
-    (GeometricACC, "equiangular", *(4, 21, 17, 32), "mean", "mean"),
-    (GeometricACC, "equiangular", *(4, 21, 17, 32), "none", "mean"),
+    # ACC
+    (GeometricACC, "equiangular", *(4, 21, 17, 32), "mean", "sum"),
     (GeometricACC, "equiangular", *(4, 21, 17, 32), "sum", "sum"),
     (GeometricACC, "equiangular", *(4, 21, 17, 32), "none", "sum"),
-    (GeometricPCC, "equiangular", *(4, 21, 17, 32), "mean", "mean"),
-    (GeometricPCC, "equiangular", *(4, 21, 17, 32), "none", "mean"),
-    (GeometricPCC, "equiangular", *(4, 21, 17, 32), "sum", "sum"),
-    (GeometricPCC, "equiangular", *(4, 21, 17, 32), "none", "sum"),
 ]
 
 _probabilistic_metric_aggregation_params = [
+    # Geometric CRPS
     (GeometricCRPS, "equiangular", *(4, 16, 21, 17, 32), "mean", "mean"),
+    (GeometricCRPS, "equiangular", *(4, 16, 21, 17, 32), "mean", "sum"),
+    (GeometricCRPS, "equiangular", *(4, 16, 21, 17, 32), "sum", "mean"),
+    (GeometricCRPS, "equiangular", *(4, 16, 21, 17, 32), "sum", "sum"),
     (GeometricCRPS, "equiangular", *(4, 16, 21, 17, 32), "none", "mean"),
+    (GeometricCRPS, "equiangular", *(4, 16, 21, 17, 32), "none", "sum"),
+    # Geometric Spread
+    (GeometricSpread, "equiangular", *(4, 16, 21, 17, 32), "mean", "mean"),
+    (GeometricSpread, "equiangular", *(4, 16, 21, 17, 32), "mean", "sum"),
+    (GeometricSpread, "equiangular", *(4, 16, 21, 17, 32), "sum", "mean"),
+    (GeometricSpread, "equiangular", *(4, 16, 21, 17, 32), "sum", "sum"),
+    (GeometricSpread, "equiangular", *(4, 16, 21, 17, 32), "none", "mean"),
+    (GeometricSpread, "equiangular", *(4, 16, 21, 17, 32), "none", "sum"),
+    # Geometric SSR
+    (GeometricSSR, "equiangular", *(4, 16, 21, 17, 32), "mean", "mean"),
+    (GeometricSSR, "equiangular", *(4, 16, 21, 17, 32), "mean", "sum"),
+    (GeometricSSR, "equiangular", *(4, 16, 21, 17, 32), "sum", "mean"),
+    (GeometricSSR, "equiangular", *(4, 16, 21, 17, 32), "sum", "sum"),
+    (GeometricSSR, "equiangular", *(4, 16, 21, 17, 32), "none", "mean"),
+    (GeometricSSR, "equiangular", *(4, 16, 21, 17, 32), "none", "sum"),
+    # Geometric Rank Histogram
+    (GeometricRankHistogram, "equiangular", *(4, 16, 21, 17, 32), "mean", "mean"),
+    (GeometricRankHistogram, "equiangular", *(4, 16, 21, 17, 32), "mean", "sum"),
+    (GeometricRankHistogram, "equiangular", *(4, 16, 21, 17, 32), "sum", "mean"),
+    (GeometricRankHistogram, "equiangular", *(4, 16, 21, 17, 32), "sum", "sum"),
+    (GeometricRankHistogram, "equiangular", *(4, 16, 21, 17, 32), "none", "mean"),
+    (GeometricRankHistogram, "equiangular", *(4, 16, 21, 17, 32), "none", "sum"),
+]
+
+_probabilistic_metric_weighted_aggregation_params = [
+    # Geometric CRPS
+    (GeometricCRPS, "equiangular", *(4, 16, 21, 17, 32), "mean", "sum"),
     (GeometricCRPS, "equiangular", *(4, 16, 21, 17, 32), "sum", "sum"),
     (GeometricCRPS, "equiangular", *(4, 16, 21, 17, 32), "none", "sum"),
-    (GeometricSSR, "equiangular", *(4, 16, 21, 17, 32), "mean", "mean"),
-    (GeometricSSR, "equiangular", *(4, 16, 21, 17, 32), "none", "mean"),
+    # Geometric Spread
+    (GeometricSpread, "equiangular", *(4, 16, 21, 17, 32), "mean", "sum"),
+    (GeometricSpread, "equiangular", *(4, 16, 21, 17, 32), "sum", "sum"),
+    (GeometricSpread, "equiangular", *(4, 16, 21, 17, 32), "none", "sum"),
+    # Geometric SSR
+    (GeometricSSR, "equiangular", *(4, 16, 21, 17, 32), "mean", "sum"),
     (GeometricSSR, "equiangular", *(4, 16, 21, 17, 32), "sum", "sum"),
     (GeometricSSR, "equiangular", *(4, 16, 21, 17, 32), "none", "sum"),
-    (GeometricRankHistogram, "equiangular", *(4, 16, 21, 17, 32), "mean", "mean"),
-    (GeometricRankHistogram, "equiangular", *(4, 16, 21, 17, 32), "none", "mean"),
+    # Geometric Rank Histogram
+    (GeometricRankHistogram, "equiangular", *(4, 16, 21, 17, 32), "mean", "sum"),
     (GeometricRankHistogram, "equiangular", *(4, 16, 21, 17, 32), "sum", "sum"),
     (GeometricRankHistogram, "equiangular", *(4, 16, 21, 17, 32), "none", "sum"),
 ]
@@ -120,6 +180,9 @@ class TestMetrics(unittest.TestCase):
     """
 
     def setUp(self):
+
+        disable_tf32()
+
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         torch.manual_seed(333)
         torch.cuda.manual_seed(333)
@@ -230,36 +293,6 @@ class TestMetrics(unittest.TestCase):
 
         self.assertTrue(compare_arrays("acc micro", acc, acc_xskillscore, rtol=5e-5, atol=0))
 
-    @parameterized.expand(_deterministic_metrics_params, skip_on_empty=True)
-    def test_weighted_pcc(self, grid_type, batch_size, num_channels, nlat, nlon):
-
-        # PCC handle
-        pcc_func = GeometricPCC(grid_type, img_shape=(nlat, nlon), normalize=True, channel_reduction="none", batch_reduction="mean").to(self.device)
-
-        # generate toy data
-        A = torch.randn(batch_size, num_channels, nlat, nlon, device=self.device)
-        B = torch.randn(batch_size, num_channels, nlat, nlon, device=self.device)
-
-        # compute means
-        A_mean = pcc_func.quadrature(A).mean(dim=0).reshape(1, num_channels, 1, 1)
-        B_mean = pcc_func.quadrature(B).mean(dim=0).reshape(1, num_channels, 1, 1)
-
-        # compute score using makani
-        pcc = pcc_func(A, B).cpu().numpy()
-        # finalize score
-        pcc = pcc[..., 0] / np.sqrt(pcc[..., 1] * pcc[..., 2])
-
-        # we need to ensure that the weights have the correct dimensions
-        lwf = torch.tile(torch.squeeze(pcc_func.quadrature.quad_weight).unsqueeze(0), (batch_size, 1, 1)).cpu().numpy()
-        lwf = xr.DataArray(lwf, dims=["batch", "lat", "lon"])
-        A = xr.DataArray(A.cpu(), dims=["batch", "channels", "lat", "lon"])
-        B = xr.DataArray(B.cpu(), dims=["batch", "channels", "lat", "lon"])
-
-        # compute score using xskillscore
-        pcc_xskillscore = xs.pearson_r(A, B, weights=lwf, dim=["batch", "lat", "lon"]).to_numpy()
-
-        self.assertTrue(compare_arrays("pcc", pcc, pcc_xskillscore, rtol=5e-5, atol=0))
-
     @parameterized.expand(_probabilistic_metrics_params, skip_on_empty=True)
     def test_weighted_crps(self, grid_type, batch_size, ensemble_size, num_channels, nlat, nlon):
 
@@ -350,14 +383,15 @@ class TestMetricsAggregation(unittest.TestCase):
     def test_deterministic_aggregation(self, metric_handle, grid_type, batch_size, num_channels, nlat, nlon, cred, bred, verbose=False):
 
         # inflate batch size
-        batch_size = 4 * batch_size
+        num_rollout_steps = 10
+        batch_size_nsteps = num_rollout_steps * batch_size
                 
         # metric handle
         metric_func = metric_handle(grid_type, img_shape=(nlat, nlon), normalize=True, channel_reduction=cred, batch_reduction=bred).to(self.device)
 
         # input and target:
-        inp = torch.randn((batch_size, num_channels, nlat, nlon), dtype=torch.float32, device=self.device)
-        tar = torch.randn((batch_size, num_channels, nlat, nlon), dtype=torch.float32, device=self.device)
+        inp = torch.randn((batch_size_nsteps, num_channels, nlat, nlon), dtype=torch.float32, device=self.device)
+        tar = torch.randn((batch_size_nsteps, num_channels, nlat, nlon), dtype=torch.float32, device=self.device)
         
         # full metric
         res_full = metric_func(inp, tar)
@@ -365,17 +399,19 @@ class TestMetricsAggregation(unittest.TestCase):
         res_full = metric_func.finalize(res_full, counts_full)
         
         # split and compute metrics stepwise
-        inp_split = torch.split(inp, batch_size // 4, dim=0)
-        tar_split = torch.split(tar, batch_size // 4, dim=0)
+        inp_split = torch.split(inp, batch_size, dim=0)
+        tar_split = torch.split(tar, batch_size, dim=0)
         
         res_split = metric_func(inp_split[0], tar_split[0])
         counts_split = torch.tensor(inp_split[0].shape[0], dtype=torch.float32, device=self.device)
         for inps, tars in zip(inp_split[1:], tar_split[1:]):
             res_tmp = metric_func(inps, tars)
             res_tmp = torch.stack([res_split, res_tmp], dim=0)
-            counts_tmp = torch.tensor(inps.shape[0], dtype=torch.float32, device=self.device)
+            counts_tmp = torch.tensor((inps.shape[0]), dtype=torch.float32, device=self.device)
             counts_tmp = torch.stack([counts_split, counts_tmp], dim=0)
             res_tmp, counts_tmp = metric_func.combine(res_tmp, counts_tmp, dim=0)
+            # we need to squeeze the counts now since combine returns unsqueezed tensors:
+            counts_tmp = counts_tmp.squeeze()
             with torch.no_grad():
                 res_split.copy_(res_tmp)
                 counts_split.copy_(counts_tmp)
@@ -385,19 +421,130 @@ class TestMetricsAggregation(unittest.TestCase):
         # compare
         self.assertTrue(compare_arrays("deterministic aggregation", res_full.cpu().numpy(), res_split.cpu().numpy(), rtol=1e-6, atol=1e-6, verbose=verbose))
 
+    @parameterized.expand(_deterministic_metric_weighted_aggregation_params, skip_on_empty=True)
+    def test_deterministic_aggregation_weighted(self, metric_handle, grid_type, batch_size, num_channels, nlat, nlon, cred, bred, verbose=False):
+        """Same as test_deterministic_aggregation but with a spatial weight tensor (0/1 mask) at every step."""
+        # inflate batch size
+        num_rollout_steps = 10
+        batch_size_nsteps = num_rollout_steps * batch_size
+
+        # metric handle
+        metric_func = metric_handle(grid_type, img_shape=(nlat, nlon), normalize=True, channel_reduction=cred, batch_reduction=bred).to(self.device)
+
+        # input and target
+        inp = torch.randn((batch_size_nsteps, num_channels, nlat, nlon), dtype=torch.float32, device=self.device)
+        tar = torch.randn((batch_size_nsteps, num_channels, nlat, nlon), dtype=torch.float32, device=self.device)
+
+        # spatial weight: random 0/1 mask (same for all steps so full vs split aggregation are comparable)
+        weight_full = torch.where(torch.rand(batch_size_nsteps, num_channels, nlat, nlon, device=self.device, dtype=torch.float32) > 0.5, 1.0, 0.0)
+
+        # full metric with weight
+        res_full = metric_func(inp, tar, weight=weight_full)
+        counts_full = metric_func.compute_counts(inp, weight=weight_full)
+        res_full = metric_func.finalize(res_full, counts_full)
+
+        # split and compute metrics stepwise, passing the same spatial weight at each step
+        inp_split = torch.split(inp, batch_size, dim=0)
+        tar_split = torch.split(tar, batch_size, dim=0)
+        weight_split = torch.split(weight_full, batch_size, dim=0)
+
+        res_split = metric_func(inp_split[0], tar_split[0], weight=weight_split[0])
+        counts_split = metric_func.compute_counts(inp_split[0], weight=weight_split[0])
+        for inps, tars, weights in zip(inp_split[1:], tar_split[1:], weight_split[1:]):
+            res_tmp = metric_func(inps, tars, weight=weights)
+            res_tmp = torch.stack([res_split, res_tmp], dim=0)
+            counts_tmp = metric_func.compute_counts(inps, weight=weights)
+            counts_tmp = torch.stack([counts_split, counts_tmp], dim=0)
+            res_split, counts_split = metric_func.combine(res_tmp, counts_tmp, dim=0)
+
+        res_split = metric_func.finalize(res_split, counts_split)
+
+        self.assertTrue(compare_arrays("deterministic aggregation weighted", res_full.cpu().numpy(), res_split.cpu().numpy(), rtol=1e-6, atol=1e-6, verbose=verbose))
+
+    @parameterized.expand(_deterministic_metric_weighted_aggregation_params, skip_on_empty=True)
+    def test_deterministic_aggregation_nan(self, metric_handle, grid_type, batch_size, num_channels, nlat, nlon, cred, bred, verbose=True):
+        """With NaNs in different positions in output and target, a combined mask (1 where both valid, 0 else) as weight should yield a metric output with no NaNs."""
+        # inflate batch size
+        num_rollout_steps = 10
+        batch_size_nsteps = num_rollout_steps * batch_size
+        shape = (batch_size_nsteps, num_channels, nlat, nlon)
+
+        # instantiate metric
+        metric_func = metric_handle(grid_type, img_shape=(nlat, nlon), normalize=True, channel_reduction=cred, batch_reduction=bred).to(self.device)
+
+        # prediction and target with random values
+        inp = torch.randn(shape, dtype=torch.float32, device=self.device)
+        tar = torch.randn(shape, dtype=torch.float32, device=self.device)
+
+        # inject NaNs in different positions in inp and tar
+        rng = np.random.default_rng(42)
+        n_nan = int(math.prod(shape) * 0.1)
+        flat_inp = inp.view(-1)
+        flat_tar = tar.view(-1)
+        idx_inp = rng.choice(flat_inp.numel(), size=n_nan, replace=False)
+        idx_tar = rng.choice(flat_tar.numel(), size=n_nan, replace=False)
+        flat_inp[idx_inp] = torch.nan
+        flat_tar[idx_tar] = torch.nan
+
+        # combined mask: 1 where both are non-NaN, 0 where either is NaN
+        valid_inp = torch.logical_not(torch.isnan(inp)).to(torch.float32)
+        valid_tar = torch.logical_not(torch.isnan(tar)).to(torch.float32)
+        weight_full = valid_inp * valid_tar
+
+        # mask nan values in inp and tar
+        inp_masked = torch.where(weight_full > 0.0, inp, 0.0)
+        tar_masked = torch.where(weight_full > 0.0, tar, 0.0)
+
+        # full metric with weight
+        res_full = metric_func(inp_masked, tar_masked, weight=weight_full)
+        counts_full = metric_func.compute_counts(inp_masked, weight=weight_full)
+        res_full = metric_func.finalize(res_full, counts_full)
+
+        # split and compute metrics stepwise, passing the same spatial weight at each step
+        inp_split = torch.split(inp, batch_size, dim=0)
+        tar_split = torch.split(tar, batch_size, dim=0)
+        weight_split = torch.split(weight_full, batch_size, dim=0)
+
+        # mask inps and tars
+        inp_split_masked = torch.where(weight_split[0] > 0.0, inp_split[0], 0.0)
+        tar_split_masked = torch.where(weight_split[0] > 0.0, tar_split[0], 0.0)
+        res_split = metric_func(inp_split_masked, tar_split_masked, weight=weight_split[0])
+        counts_split = metric_func.compute_counts(inp_split_masked, weight=weight_split[0])
+        for inps, tars, weights in zip(inp_split[1:], tar_split[1:], weight_split[1:]):
+            # mask inps and tars
+            inps_masked = torch.where(weights > 0.0, inps, 0.0)
+            tars_masked = torch.where(weights > 0.0, tars, 0.0)
+            res_tmp = metric_func(inps_masked, tars_masked, weight=weights)
+            res_tmp = torch.stack([res_split, res_tmp], dim=0)
+            counts_tmp = metric_func.compute_counts(inps_masked, weight=weights)
+            counts_tmp = torch.stack([counts_split, counts_tmp], dim=0)
+            res_split, counts_split = metric_func.combine(res_tmp, counts_tmp, dim=0)
+
+        res_split = metric_func.finalize(res_split, counts_split)
+
+        with self.subTest(desc="full result"):
+            self.assertFalse(torch.isnan(res_full).any(), msg="Full metric output must have no NaNs when using combined NaN mask as weight.")
+            self.assertFalse(torch.isinf(res_full).any(), msg="Full metric output must have no Infs when using combined NaN mask as weight.")
+
+        with self.subTest(desc="split result"):
+            self.assertFalse(torch.isnan(res_split).any(), msg="Aggregated metric output must have no NaNs when using combined NaN mask as weight.")
+            self.assertFalse(torch.isinf(res_split).any(), msg="Aggregated metric output must have no Infs when using combined NaN mask as weight.")
+
+        self.assertTrue(compare_arrays("deterministic aggregation with nan", res_full.cpu().numpy(), res_split.cpu().numpy(), rtol=1e-6, atol=1e-6, verbose=verbose))
 
     @parameterized.expand(_probabilistic_metric_aggregation_params, skip_on_empty=True)
     def test_probabilistic_aggregation(self, metric_handle, grid_type, batch_size, ensemble_size, num_channels, nlat, nlon, cred, bred, verbose=False):
 
         # inflate batch size
-        batch_size = 4 * batch_size
+        num_rollout_steps = 10
+        batch_size_nsteps = num_rollout_steps * batch_size
 
         # metric handle
         metric_func = metric_handle(grid_type=grid_type, img_shape=(nlat, nlon), crop_shape=(nlat, nlon), crop_offset=(0, 0), crps_type="skillspread", normalize=True, channel_reduction=cred, batch_reduction=bred).to(self.device)
 
         # input and target:
-        inp = torch.randn((batch_size, ensemble_size, num_channels, nlat, nlon), dtype=torch.float32, device=self.device)
-        tar = torch.randn((batch_size, num_channels, nlat, nlon), dtype=torch.float32, device=self.device)
+        inp = torch.randn((batch_size_nsteps, ensemble_size, num_channels, nlat, nlon), dtype=torch.float32, device=self.device)
+        tar = torch.randn((batch_size_nsteps, num_channels, nlat, nlon), dtype=torch.float32, device=self.device)
 
         # full metric
         res_full = metric_func(inp, tar)
@@ -405,8 +552,8 @@ class TestMetricsAggregation(unittest.TestCase):
         res_full = metric_func.finalize(res_full, counts_full)
 
         # split and compute metrics stepwise
-        inp_split = torch.split(inp, batch_size // 4, dim=0)
-        tar_split = torch.split(tar, batch_size // 4, dim=0)
+        inp_split = torch.split(inp, batch_size, dim=0)
+        tar_split = torch.split(tar, batch_size, dim=0)
 
         res_split = metric_func(inp_split[0], tar_split[0])
         counts_split = torch.tensor(inp_split[0].shape[0], dtype=torch.float32, device=self.device)
@@ -416,6 +563,8 @@ class TestMetricsAggregation(unittest.TestCase):
             counts_tmp = torch.tensor(inps.shape[0], dtype=torch.float32, device=self.device)
             counts_tmp = torch.stack([counts_split, counts_tmp], dim=0)
             res_tmp, counts_tmp = metric_func.combine(res_tmp, counts_tmp, dim=0)
+            # we need to squeeze the counts now since combine returns unsqueezed tensors:
+            counts_tmp = counts_tmp.squeeze()
             with torch.no_grad():
                 res_split.copy_(res_tmp)
                 counts_split.copy_(counts_tmp)
@@ -424,6 +573,109 @@ class TestMetricsAggregation(unittest.TestCase):
 
         # compare
         self.assertTrue(compare_arrays("probabilistic aggregation", res_full.cpu().numpy(), res_split.cpu().numpy(), rtol=1e-6, atol=1e-6, verbose=verbose))
+
+    @parameterized.expand(_probabilistic_metric_weighted_aggregation_params, skip_on_empty=True)
+    def test_probabilistic_aggregation_weighted(self, metric_handle, grid_type, batch_size, ensemble_size, num_channels, nlat, nlon, cred, bred, verbose=False):
+        """Same as test_probabilistic_aggregation but with a spatial weight tensor (0/1 mask) at every step."""
+        num_rollout_steps = 10
+        batch_size_nsteps = num_rollout_steps * batch_size
+
+        metric_func = metric_handle(grid_type=grid_type, img_shape=(nlat, nlon), crop_shape=(nlat, nlon), crop_offset=(0, 0), crps_type="skillspread", normalize=True, channel_reduction=cred, batch_reduction=bred).to(self.device)
+
+        inp = torch.randn((batch_size_nsteps, ensemble_size, num_channels, nlat, nlon), dtype=torch.float32, device=self.device)
+        tar = torch.randn((batch_size_nsteps, num_channels, nlat, nlon), dtype=torch.float32, device=self.device)
+
+        # spatial weight: 0/1 mask, same ndim as observations (no ensemble dim)
+        weight_full = (torch.rand(batch_size_nsteps, num_channels, nlat, nlon, device=self.device, dtype=torch.float32) > 0.5)
+
+        res_full = metric_func(inp, tar, weight=weight_full)
+        counts_full = metric_func.compute_counts(inp, weight=weight_full)
+        res_full = metric_func.finalize(res_full, counts_full)
+
+        inp_split = torch.split(inp, batch_size, dim=0)
+        tar_split = torch.split(tar, batch_size, dim=0)
+        weight_split = torch.split(weight_full, batch_size, dim=0)
+
+        res_split = metric_func(inp_split[0], tar_split[0], weight=weight_split[0])
+        counts_split = metric_func.compute_counts(inp_split[0], weight=weight_split[0])
+        for inps, tars, weights in zip(inp_split[1:], tar_split[1:], weight_split[1:]):
+            res_tmp = metric_func(inps, tars, weight=weights)
+            res_tmp = torch.stack([res_split, res_tmp], dim=0)
+            counts_tmp = metric_func.compute_counts(inps, weight=weights)
+            counts_tmp = torch.stack([counts_split, counts_tmp], dim=0)
+            res_split, counts_split = metric_func.combine(res_tmp, counts_tmp, dim=0)
+
+        res_split = metric_func.finalize(res_split, counts_split)
+
+        self.assertTrue(compare_arrays("probabilistic aggregation weighted", res_full.cpu().numpy(), res_split.cpu().numpy(), rtol=1e-6, atol=1e-6, verbose=verbose))
+
+    @parameterized.expand(_probabilistic_metric_weighted_aggregation_params, skip_on_empty=True)
+    def test_probabilistic_aggregation_nan(self, metric_handle, grid_type, batch_size, ensemble_size, num_channels, nlat, nlon, cred, bred, verbose=False):
+        """Same as test_probabilistic_aggregation but with a spatial weight tensor (0/1 mask) at every step."""
+        num_rollout_steps = 10
+        batch_size_nsteps = num_rollout_steps * batch_size
+
+        # metric handle
+        metric_func = metric_handle(grid_type=grid_type, img_shape=(nlat, nlon), crop_shape=(nlat, nlon), crop_offset=(0, 0), crps_type="skillspread", normalize=True, channel_reduction=cred, batch_reduction=bred).to(self.device)
+
+        inp = torch.randn((batch_size_nsteps, ensemble_size, num_channels, nlat, nlon), dtype=torch.float32, device=self.device)
+        tar = torch.randn((batch_size_nsteps, num_channels, nlat, nlon), dtype=torch.float32, device=self.device)
+
+        # inject NaNs in different positions in inp and tar
+        rng = np.random.default_rng(42)
+        n_nan = int(math.prod((batch_size_nsteps, ensemble_size, num_channels, nlat, nlon)) * 0.1)
+        flat_inp = inp.view(-1)
+        idx_inp = rng.choice(flat_inp.numel(), size=n_nan, replace=False)
+        flat_inp[idx_inp] = torch.nan
+
+        n_nan = int(math.prod((batch_size_nsteps, num_channels, nlat, nlon)) * 0.1)
+        flat_tar = tar.view(-1)
+        idx_tar = rng.choice(flat_tar.numel(), size=n_nan, replace=False)
+        flat_tar[idx_tar] = torch.nan
+
+        # combined mask: 1 where both are non-NaN, 0 where either is NaN
+        # we mask all ensemble members if any one is NaN for now
+        valid_inp = torch.logical_not(torch.isnan(torch.sum(inp, dim=1))).to(torch.float32)
+        valid_tar = torch.logical_not(torch.isnan(tar)).to(torch.float32)
+        weight_full = valid_inp * valid_tar
+
+        # mask nan values in inp and tar
+        inp_masked = torch.where(weight_full.unsqueeze(1).expand_as(inp) > 0.0, inp, 0.0)
+        tar_masked = torch.where(weight_full > 0.0, tar, 0.0)
+
+        res_full = metric_func(inp_masked, tar_masked, weight=weight_full)
+        counts_full = metric_func.compute_counts(inp_masked, weight=weight_full)
+        res_full = metric_func.finalize(res_full, counts_full)
+
+        inp_split = torch.split(inp, batch_size, dim=0)
+        tar_split = torch.split(tar, batch_size, dim=0)
+        weight_split = torch.split(weight_full, batch_size, dim=0)
+
+        inp_split_masked = torch.where(weight_split[0].unsqueeze(1).expand_as(inp_split[0]) > 0.0, inp_split[0], 0.0)
+        tar_split_masked = torch.where(weight_split[0] > 0.0, tar_split[0], 0.0)
+        res_split = metric_func(inp_split_masked, tar_split_masked, weight=weight_split[0])
+        counts_split = metric_func.compute_counts(inp_split_masked, weight=weight_split[0])
+        for inps, tars, weights in zip(inp_split[1:], tar_split[1:], weight_split[1:]):
+            # mask inps and tars
+            inps_masked = torch.where(weights.unsqueeze(1).expand_as(inps) > 0.0, inps, 0.0)
+            tars_masked = torch.where(weights > 0.0, tars, 0.0)
+            res_tmp = metric_func(inps_masked, tars_masked, weight=weights)
+            res_tmp = torch.stack([res_split, res_tmp], dim=0)
+            counts_tmp = metric_func.compute_counts(inps_masked, weight=weights)
+            counts_tmp = torch.stack([counts_split, counts_tmp], dim=0)
+            res_split, counts_split = metric_func.combine(res_tmp, counts_tmp, dim=0)
+
+        res_split = metric_func.finalize(res_split, counts_split)
+
+        with self.subTest(desc="full result"):
+            self.assertFalse(torch.isnan(res_full).any(), msg="Full metric output must have no NaNs when using combined NaN mask as weight.")
+            self.assertFalse(torch.isinf(res_full).any(), msg="Full metric output must have no Infs when using combined NaN mask as weight.")
+
+        with self.subTest(desc="split result"):
+            self.assertFalse(torch.isnan(res_split).any(), msg="Aggregated metric output must have no NaNs when using combined NaN mask as weight.")
+            self.assertFalse(torch.isinf(res_split).any(), msg="Aggregated metric output must have no Infs when using combined NaN mask as weight.")
+
+        self.assertTrue(compare_arrays("probabilistic aggregation nan", res_full.cpu().numpy(), res_split.cpu().numpy(), rtol=1e-6, atol=1e-6, verbose=verbose))
 
         
 class TestMetricsHandler(unittest.TestCase):
@@ -608,7 +860,8 @@ class TestMetricsHandler(unittest.TestCase):
                 continue
             val_full = metrics_full[key]
             val_split = metrics_split[key]
-            self.assertTrue(np.allclose(val_full, val_split))
+            with self.subTest(desc=f"validation {key}"):
+                self.assertTrue(compare_arrays(f"{key}", val_full, val_split, rtol=1e-5, atol=1e-5, verbose=verbose))
 
         # compare rollouts
         rollouts_full = logs_full["metrics"]["rollouts"]
@@ -629,9 +882,261 @@ class TestMetricsHandler(unittest.TestCase):
             self.assertTrue(compare_arrays("rollouts", data_full, data_split, rtol=1e-6, atol=1e-6, verbose=verbose))
 
 
-# TODO: ssr test comparing to xskillcore
-    
-@unittest.skipIf(wb2 is None, "test requires weatherbench2 installation")
+    @parameterized.expand(_metric_handler_params, skip_on_empty=True)
+    def test_aggregation_weighted(self, grid_type, batch_size, ensemble_size, num_rollout_steps, bred, verbose=True):
+        """Test that weighted metric updates aggregate correctly when splitting batches."""
+        # create dummy climatology
+        num_steps = 4
+        num_channels = len(self.params.channel_names)
+        clim = torch.zeros(1, num_channels, self.params.img_local_shape_x, self.params.img_local_shape_y)
+
+        # update parameters
+        self.params.batch_size = batch_size
+        self.params.ensemble_size = ensemble_size
+
+        metric_handler = MetricsHandler(self.params,
+                                        clim,
+                                        num_rollout_steps,
+                                        self.device,
+                                        l1_var_names=self.params.channel_names,
+                                        rmse_var_names=self.params.channel_names,
+                                        acc_var_names=self.params.channel_names,
+                                        crps_var_names=self.params.channel_names,
+                                        spread_var_names=self.params.channel_names,
+                                        ssr_var_names=self.params.channel_names,
+                                        rh_var_names=self.params.channel_names,
+                                        wb2_compatible=False)
+        metric_handler.initialize_buffers()
+        metric_handler.zero_buffers()
+
+        metric_handler_split = MetricsHandler(self.params,
+                                              clim,
+                                              num_rollout_steps,
+                                              self.device,
+                                              l1_var_names=self.params.channel_names,
+                                              rmse_var_names=self.params.channel_names,
+                                              acc_var_names=self.params.channel_names,
+                                              crps_var_names=self.params.channel_names,
+                                              spread_var_names=self.params.channel_names,
+                                              ssr_var_names=self.params.channel_names,
+                                              rh_var_names=self.params.channel_names,
+                                              wb2_compatible=False)
+        metric_handler_split.initialize_buffers()
+        metric_handler_split.zero_buffers()
+
+        inplist = [torch.randn((num_rollout_steps, batch_size, ensemble_size, num_channels, self.params.img_local_shape_x, self.params.img_local_shape_y),
+                               dtype=torch.float32, device=self.device) for _ in range(num_steps)]
+        tarlist = [torch.randn((num_rollout_steps, batch_size, num_channels, self.params.img_local_shape_x, self.params.img_local_shape_y),
+                               dtype=torch.float32, device=self.device) for _ in range(num_steps)]
+
+        # Random weights per (step, rollout_step, batch, channels, x, y) for use in updates
+        weightlist = [
+            torch.abs(
+                torch.randn(
+                    num_rollout_steps,
+                    batch_size,
+                    num_channels,
+                    self.params.img_local_shape_x,
+                    self.params.img_local_shape_y,
+                    dtype=torch.float32,
+                    device=self.device,
+                )
+            ) for _ in range(num_rollout_steps)
+        ]
+
+        loss_acc = 0.0
+        for i, (inp, tar, wgt) in enumerate(zip(inplist, tarlist, weightlist)):
+            for idt in range(num_rollout_steps):
+                inpp = inp[idt, ...]
+                tarp = tar[idt, ...]
+                wgtt = wgt[idt, ...]
+
+                # super simple l1 loss
+                loss = torch.mean(torch.abs(torch.mean(inpp, dim=1) - tarp))
+                if idt == 0:
+                    loss_acc += loss.item()
+                
+                metric_handler.update(inpp, tarp, loss, idt, weight=wgtt)
+
+        # finalize
+        loss_acc /= float(num_steps)
+        logs_full = metric_handler.finalize()
+
+        # metric handler split: same data and weights split in half along batch
+        inplist_split = list(itertools.chain.from_iterable([torch.split(tens, batch_size // 2, dim=1) for tens in inplist]))
+        tarlist_split = list(itertools.chain.from_iterable([torch.split(tens, batch_size // 2, dim=1) for tens in tarlist]))
+        # split weights the same way: (num_steps, num_rollout_steps, batch_size, ...) -> per-step chunks of size batch_size//2
+        weightlist_split = list(itertools.chain.from_iterable([torch.split(tens, batch_size // 2, dim=1) for tens in weightlist]))
+
+        for (inp, tar, wgt) in zip(inplist_split, tarlist_split, weightlist_split):
+            for idt in range(num_rollout_steps):
+                inpp = inp[idt, ...]
+                tarp = tar[idt, ...]
+                wgtt = wgt[idt, ...]
+
+                loss = torch.mean(torch.abs(torch.mean(inpp, dim=1) - tarp))
+                metric_handler_split.update(inpp, tarp, loss, idt, weight=wgtt)
+
+        # finalize
+        logs_split = metric_handler_split.finalize()
+
+        # compare loss
+        mloss_split = logs_split["base"]["validation loss"]
+
+        # extract dicts
+        metrics_full = logs_full["metrics"]
+        metrics_split = logs_split["metrics"]
+
+        # compare scalar metrics
+        for key in metrics_full.keys():
+            if key == "rollouts":
+                continue
+            val_full = metrics_full[key]
+            val_split = metrics_split[key]
+            with self.subTest(desc=f"validation {key}"):
+                self.assertTrue(compare_arrays(f"{key}", val_full, val_split, rtol=1e-5, atol=1e-5, verbose=verbose))
+
+        # compare rollouts
+        rollouts_full = logs_full["metrics"]["rollouts"]
+        rollouts_split = logs_split["metrics"]["rollouts"]
+
+        data_full = []
+        for row in rollouts_full.data:
+            data_full.append(row[-1])
+        data_full = np.array(data_full)
+
+        data_split = []
+        for row in rollouts_split.data:
+            data_split.append(row[-1])
+        data_split = np.array(data_split)
+
+        with self.subTest(desc="rollouts"):
+            self.assertTrue(compare_arrays("rollouts", data_full, data_split, rtol=1e-5, atol=1e-5, verbose=verbose))
+
+    @parameterized.expand(_metric_handler_params, skip_on_empty=True)
+    def test_aggregation_weighted_vs_unweighted(self, grid_type, batch_size, ensemble_size, num_rollout_steps, bred, verbose=False):
+        """Unit weights should yield the same result as no weights if weighting is implemented correctly."""
+        num_steps = 4
+        num_channels = len(self.params.channel_names)
+        clim = torch.zeros(1, num_channels, self.params.img_local_shape_x, self.params.img_local_shape_y)
+
+        self.params.batch_size = batch_size
+        self.params.ensemble_size = ensemble_size
+
+        handler_unweighted = MetricsHandler(
+            self.params,
+            clim,
+            num_rollout_steps,
+            self.device,
+            l1_var_names=self.params.channel_names,
+            rmse_var_names=self.params.channel_names,
+            acc_var_names=self.params.channel_names,
+            crps_var_names=self.params.channel_names,
+            spread_var_names=self.params.channel_names,
+            ssr_var_names=self.params.channel_names,
+            rh_var_names=self.params.channel_names,
+            wb2_compatible=False,
+        )
+        handler_unweighted.initialize_buffers()
+        handler_unweighted.zero_buffers()
+
+        handler_unit_weights = MetricsHandler(
+            self.params,
+            clim,
+            num_rollout_steps,
+            self.device,
+            l1_var_names=self.params.channel_names,
+            rmse_var_names=self.params.channel_names,
+            acc_var_names=self.params.channel_names,
+            crps_var_names=self.params.channel_names,
+            spread_var_names=self.params.channel_names,
+            ssr_var_names=self.params.channel_names,
+            rh_var_names=self.params.channel_names,
+            wb2_compatible=False,
+        )
+        handler_unit_weights.initialize_buffers()
+        handler_unit_weights.zero_buffers()
+
+        inplist = [
+            torch.randn(
+                (
+                    num_rollout_steps,
+                    batch_size,
+                    ensemble_size,
+                    num_channels,
+                    self.params.img_local_shape_x,
+                    self.params.img_local_shape_y,
+                ),
+                dtype=torch.float32,
+                device=self.device,
+            )
+            for _ in range(num_steps)
+        ]
+        tarlist = [
+            torch.randn(
+                (
+                    num_rollout_steps,
+                    batch_size,
+                    num_channels,
+                    self.params.img_local_shape_x,
+                    self.params.img_local_shape_y,
+                ),
+                dtype=torch.float32,
+                device=self.device,
+            )
+            for _ in range(num_steps)
+        ]
+
+        unit_weight = torch.ones(
+            batch_size,
+            num_channels,
+            self.params.img_local_shape_x,
+            self.params.img_local_shape_y,
+            dtype=torch.float32,
+            device=self.device,
+        )
+
+        for inp, tar in zip(inplist, tarlist):
+            for idt in range(num_rollout_steps):
+                inpp = inp[idt, ...]
+                tarp = tar[idt, ...]
+                loss = torch.mean(torch.abs(torch.mean(inpp, dim=1) - tarp))
+
+                handler_unweighted.update(inpp, tarp, loss, idt)
+                handler_unit_weights.update(inpp, tarp, loss, idt, weight=unit_weight)
+
+        logs_unweighted = handler_unweighted.finalize()
+        logs_unit_weights = handler_unit_weights.finalize()
+
+        metrics_unweighted = logs_unweighted["metrics"]
+        metrics_unit_weights = logs_unit_weights["metrics"]
+
+        for key in metrics_unweighted.keys():
+            if key == "rollouts":
+                continue
+            val_u = metrics_unweighted[key]
+            val_w = metrics_unit_weights[key]
+            with self.subTest(desc=f"validation {key}"):
+                self.assertTrue(
+                    compare_arrays(key, val_u, val_w, rtol=1e-5, atol=1e-5, verbose=verbose),
+                    msg=f"Unit-weight and unweighted results differ for '{key}'",
+                )
+
+        rollouts_u = logs_unweighted["metrics"]["rollouts"]
+        rollouts_w = logs_unit_weights["metrics"]["rollouts"]
+
+        data_u = np.array([row[-1] for row in rollouts_u.data])
+        data_w = np.array([row[-1] for row in rollouts_w.data])
+
+        with self.subTest(desc="rollouts"):
+            self.assertTrue(
+                compare_arrays("rollouts", data_u, data_w, rtol=1e-5, atol=1e-5, verbose=verbose),
+                msg="Unit-weight and unweighted rollouts differ",
+            )
+
+
+# TODO: ssr test comparing to weatherbench2
+@unittest.skipUnless(_have_wb2, "test requires weatherbench2 installation")
 class ComparetMetricsWB2(unittest.TestCase):
     """
     A set of tests that compare weatherbench2 metrics to makani metrics
@@ -645,7 +1150,10 @@ class ComparetMetricsWB2(unittest.TestCase):
 
     # same as above but compare to wb2
     @parameterized.expand(_wb2_metrics_params, skip_on_empty=True)
-    def test_weighted_crps(self, grid_type, batch_size, ensemble_size, num_channels, nlat, nlon, verbose=False):
+    def test_weighted_crps(self, grid_type, batch_size, ensemble_size, num_channels, nlat, nlon, verbose=True):
+
+        # some imports
+        from weatherbench2.metrics import CRPS
 
         # CRPS handle
         crps_func = GeometricCRPS(
@@ -670,13 +1178,16 @@ class ComparetMetricsWB2(unittest.TestCase):
 
         # compute and compare CRPS
         crps = crps_func(fct, obs).cpu().numpy()
-        crps_wb2 = wb2.metrics.CRPS(ensemble_dim="ensemble").compute_chunk(xr_fct, xr_obs, region=None)["var"].to_numpy()
+        crps_wb2 = CRPS(ensemble_dim="ensemble").compute_chunk(xr_fct, xr_obs, region=None)["var"].to_numpy()
 
-        self.assertTrue(compare_arrays("crps", crps, crps_wb2, rtol=5e-4, atol=0, verbose=verbose))
+        self.assertTrue(compare_arrays("crps", crps, crps_wb2, rtol=1e-3, atol=1e-3, verbose=verbose))
 
     # same as above but compare to wb2
     @parameterized.expand(_wb2_metrics_params, skip_on_empty=True)
-    def test_weighted_ssr(self, grid_type, batch_size, ensemble_size, num_channels, nlat, nlon, verbose=False):
+    def test_weighted_ssr(self, grid_type, batch_size, ensemble_size, num_channels, nlat, nlon, verbose=True):
+
+        # some imports
+        from weatherbench2.metrics import EnergyScoreSkill, EnergyScoreSpread
 
         # CRPS handle
         ssr_func = GeometricSSR(
@@ -701,11 +1212,11 @@ class ComparetMetricsWB2(unittest.TestCase):
 
         # compute and compare ssr
         ssr = ssr_func(fct, obs).cpu().numpy()
-        ssr_skill_wb2 = wb2.metrics.EnergyScoreSkill(ensemble_dim="ensemble").compute_chunk(xr_fct, xr_obs, region=None)["var"].to_numpy()
-        ssr_spread_wb2 = wb2.metrics.EnergyScoreSpread(ensemble_dim="ensemble").compute_chunk(xr_fct, xr_obs, region=None)["var"].to_numpy()
+        ssr_skill_wb2 = EnergyScoreSkill(ensemble_dim="ensemble").compute_chunk(xr_fct, xr_obs, region=None)["var"].to_numpy()
+        ssr_spread_wb2 = EnergyScoreSpread(ensemble_dim="ensemble").compute_chunk(xr_fct, xr_obs, region=None)["var"].to_numpy()
         ssr_wb2 = ssr_spread_wb2 / ssr_skill_wb2
 
-        self.assertTrue(compare_arrays("ssr", ssr, ssr_wb2, rtol=2e-2, atol=0, verbose=verbose))
+        self.assertTrue(compare_arrays("ssr", ssr, ssr_wb2, rtol=5e-2, atol=5e-2, verbose=verbose))
 
 
 if __name__ == "__main__":

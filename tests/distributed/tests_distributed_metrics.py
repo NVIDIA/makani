@@ -34,12 +34,12 @@ from makani.utils import MetricsHandler
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 from .distributed_helpers import split_helper, get_default_parameters
-from ..testutils import compare_arrays
+from ..testutils import disable_tf32, compare_arrays
 
 # because of physicsnemo/NCCL tear down issues, we can only run one test at a time
 _metric_handler_params = [
-    #("equiangular", 4, 16, 3, "mean"),
-    ("equiangular", 4, 16, 3, "sum"),
+    ("equiangular", 4, 16, 3, "mean"),
+    #("equiangular", 4, 16, 3, "sum"),
 ]
 
 class TestDistributedMetricHandler(unittest.TestCase):
@@ -72,6 +72,7 @@ class TestDistributedMetricHandler(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.tmpdir.cleanup()
+
 
     def _init_comms(self):
         
@@ -108,10 +109,6 @@ class TestDistributedMetricHandler(unittest.TestCase):
 
         return
 
-    def _destroy_comms(self):
-        comm.cleanup()
-        return
-
     def _split_helper(self, tensor):
         with torch.no_grad():
             # split in W
@@ -130,6 +127,9 @@ class TestDistributedMetricHandler(unittest.TestCase):
         return tensor_local
         
     def setUp(self):
+
+        disable_tf32()
+
         self.params = get_default_parameters()
         self.params["dhours"] = 1
 
@@ -301,9 +301,6 @@ class TestDistributedMetricHandler(unittest.TestCase):
         # wait for everything to finish
         self.mpi_comm.Barrier()
 
-        self._destroy_comms()
-        
-        
 
 if __name__ == "__main__":
     unittest.main()

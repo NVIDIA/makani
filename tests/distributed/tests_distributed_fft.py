@@ -28,7 +28,7 @@ from makani.mpu.fft import DistributedRealFFT1, DistributedInverseRealFFT1, Dist
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 from .distributed_helpers import split_helper, gather_helper
-from ..testutils import compare_tensors
+from ..testutils import disable_tf32, compare_tensors
 
 class TestDistributedRealFFT(unittest.TestCase):
 
@@ -70,14 +70,17 @@ class TestDistributedRealFFT(unittest.TestCase):
         if cls.world_rank == 0:
             print(f"Running distributed tests on grid H x W = {cls.grid_size_h} x {cls.grid_size_w}")
 
-        
+    def setUp(self):
+        disable_tf32()
+
+
     def _split_helper(self, tensor):
         tensor_local = split_helper(tensor, dim=-1, group=self.w_group)
         tensor_local = split_helper(tensor_local, dim=-2, group=self.h_group)
 
         return tensor_local
-        
-        
+
+
     def _gather_helper(self, tensor):
         tensor_gather = gather_helper(tensor, dim=-2, group=self.h_group)
         tensor_gather =	gather_helper(tensor_gather, dim=-1, group=self.w_group)

@@ -13,10 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from packaging import version
 import os
 import json
 import datetime as dt
-from typing import List, Optional
+from typing import Optional
 
 import numpy as np
 import h5py as h5
@@ -30,6 +31,20 @@ NUM_CHANNELS = 5
 IMG_SIZE_H = 64
 IMG_SIZE_W = 128
 CHANNEL_NAMES = ["u10m", "t2m", "u500", "z500", "t500"]
+
+
+def disable_tf32():
+    # the api for this was changed lately in pytorch
+    if torch.cuda.is_available():
+        if version.parse(torch.__version__) >= version.parse("2.9.0"):
+            torch.backends.cuda.matmul.fp32_precision = "ieee"
+            torch.backends.cudnn.fp32_precision = "ieee"
+            torch.backends.cudnn.conv.fp32_precision = "ieee"
+            torch.backends.cudnn.rnn.fp32_precision = "ieee"
+        else:
+            torch.backends.cuda.matmul.allow_tf32 = False
+            torch.backends.cudnn.allow_tf32 = False
+    return
 
 
 def get_default_parameters():
