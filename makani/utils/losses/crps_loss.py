@@ -265,6 +265,8 @@ class EnsembleCRPSLoss(GeometricBaseLoss):
                 spatial_weights_split = spatial_weights.flatten(start_dim=-2, end_dim=-1)
                 if self.ensemble_distributed:
                     spatial_weights_split = scatter_to_parallel_region(spatial_weights_split, -1, "ensemble")
+            else:
+                spatial_weights_split = None
 
             # run appropriate crps kernel to compute it pointwise
             if self.crps_type == "cdf":
