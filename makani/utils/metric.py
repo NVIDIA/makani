@@ -114,7 +114,8 @@ class MetricRollout:
         inpp = inp[..., self.channel_mask, :, :]
         tarp = tar[..., self.channel_mask, :, :]
 
-        if self.mask_target_nan:
+        # only mask if the target actually contains nans:
+        if self.mask_target_nan and torch.any(torch.isnan(tarp)):
             wgtt_nan = torch.logical_not(torch.isnan(tarp)).to(torch.float32)
             tarp = torch.where(wgtt_nan > 0.0, tarp, 0.0)
         else:
