@@ -52,7 +52,6 @@ from makani.mpu.helpers import sync_params, gather_uneven
 
 # for counting model parameters
 from makani.models.helpers import count_parameters
-from physicsnemo.distributed.mappings import reduce_from_parallel_region
 
 # checkpoint helpers
 from makani.utils.checkpoint_helpers import get_latest_checkpoint_version
@@ -468,7 +467,7 @@ class EnsembleTrainer(Trainer):
 
         return
 
-    def _ensemble_step(self, inp: torch.Tensor, tar: torch.Tensor):
+    def _ensemble_step(self, inp: torch.Tensor, tar: torch.Tensor, check_nan: Optional[bool] = True):
         predlist = []
         for _ in range(self.params.local_ensemble_size):
             # forward pass
@@ -478,6 +477,12 @@ class EnsembleTrainer(Trainer):
 
         # stack predictions along new dim (ensemble dim):
         pred = torch.stack(predlist, dim=1)
+
+        if check_nan and torch.isnan(pred).any():
+            # compute NaN fraction in prediction:
+            nan_fraction = torch.isnan(pred).sum() / pred.numel()
+            print(f"NaN fraction in model prediction on rank {comm.get_rank()}: {nan_fraction}")
+
         # compute loss
         loss = self.loss_obj(pred, tar, inp=inp)
 
@@ -529,10 +534,10 @@ class EnsembleTrainer(Trainer):
             with amp.autocast(device_type="cuda", enabled=self.amp_enabled, dtype=self.amp_dtype):
 
                 if do_update:
-                    pred, loss = self._ensemble_step(inp, tar)
+                    _, loss = self._ensemble_step(inp, tar)
                 else:
                     with self.model_train.no_sync():
-                        pred, loss = self._ensemble_step(inp, tar)
+                        _, loss = self._ensemble_step(inp, tar)
                 loss = loss * loss_scaling_fact
 
             # backward pass

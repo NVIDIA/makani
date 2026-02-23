@@ -15,17 +15,12 @@
 
 from typing import Optional, List
 from functools import partial
-import math
-
-import numpy as np
 
 import torch
 from torch import nn
 
 from makani.utils import comm
-from makani.utils.grids import GridQuadrature, BandLimitMask
 from makani.utils.dataloaders.data_helpers import get_data_normalization, get_time_diff_stds, get_psd_stats
-from physicsnemo.distributed.utils import compute_split_shapes
 from physicsnemo.distributed.mappings import gather_from_parallel_region, reduce_from_parallel_region
 
 from .losses import LossType, GeometricLpLoss, SpectralLpLoss, SpectralH1Loss, SpectralAMSELoss
@@ -65,8 +60,6 @@ class LossHandler(nn.Module):
         # whether to keep running stats
         self.track_running_stats = track_running_stats or self.uncertainty_weighting or self.balanced_weighting
         self.eps = eps
-
-        n_channels = len(params.channel_names)
 
         # determine channel weighting
         if hasattr(params, "losses"):
@@ -211,7 +204,6 @@ class LossHandler(nn.Module):
             # linear weighting factor for the case of multistep training
             multistep_weight = torch.arange(1, self.n_future + 2, dtype=torch.float32) / float(self.n_future + 1)
         elif multistep_weight_type == "last-n-1":
-            print(f"using last n-1")
             # weighting factor for the last n steps, with the first step weighted 0
             multistep_weight = torch.ones(self.n_future + 1, dtype=torch.float32) / float(self.n_future)
             multistep_weight[0] = 0.0
