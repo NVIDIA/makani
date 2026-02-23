@@ -34,13 +34,15 @@ from physicsnemo.distributed.mappings import gather_from_parallel_region, reduce
 
 
 class MetricRollout:
-    def __init__(self, metric_name, metric_channels, metric_handle, channel_names, num_rollout_steps, dtphys, device, aux_shape=None, aux_shape_finalized=None, scale=None, integrate=False, report_metric=True):
+    def __init__(self, metric_name, metric_channels, metric_handle, channel_names, num_rollout_steps, dtphys, device, aux_shape=None, aux_shape_finalized=None, scale=None, mask_target_nan=True, integrate=False, report_metric=True):
 
         # store members
         self.metric_name = metric_name
         self.metric_channels = metric_channels
         self.device = device
         self.integrate = integrate
+        # we assume that the prediction are nan-free (the model should take care of this)
+        self.mask_target_nan = mask_target_nan
         self.report_metric = report_metric
         self.num_rollout_steps = num_rollout_steps
         self.dtphys = dtphys
@@ -78,14 +80,14 @@ class MetricRollout:
 
         # CPU buffers
         pin_memory = self.device.type == "cuda"
-        
+
         if self.aux_shape_finalized is None:
             data_shape_finalized  = (self.num_rollout_steps, self.num_channels)
             integral_shape = (self.num_channels)
         else:
             data_shape_finalized = (self.num_rollout_steps, self.num_channels, *self.aux_shape_finalized)
             integral_shape = (self.num_channels, *self.aux_shape_finalized)
-        
+
         self.rollout_curve_cpu = torch.zeros(data_shape_finalized, dtype=torch.float32, device="cpu", pin_memory=pin_memory)
 
         if self.integrate:
@@ -112,10 +114,21 @@ class MetricRollout:
         inpp = inp[..., self.channel_mask, :, :]
         tarp = tar[..., self.channel_mask, :, :]
 
+        if self.mask_target_nan:
+            wgtt_nan = torch.logical_not(torch.isnan(tarp)).to(torch.float32)
+            tarp = torch.where(wgtt_nan > 0.0, tarp, 0.0)
+        else:
+            wgtt_nan = None
+
         if wgt is not None:
             wgtt = wgt[..., self.channel_mask, :, :]
+            if wgtt_nan is not None:
+                wgtt = wgtt * wgtt_nan
         else:
-            wgtt = None
+            if wgtt_nan is not None:
+                wgtt = wgtt_nan
+            else:
+                wgtt = None
 
         # compute metric
         metric = self.metric_func(inpp, tarp, wgtt)
@@ -222,13 +235,14 @@ class MetricsHandler:
         climatology,
         num_rollout_steps,
         device,
-        l1_var_names=["u10m", "t2m", "u500", "z500", "q500", "sp"],
-        rmse_var_names=["u10m", "t2m", "u500", "z500", "q500", "sp"],
-        acc_var_names=["u10m", "t2m", "u500", "z500", "q500", "sp"],
-        crps_var_names=["u10m", "t2m", "u500", "z500", "q500", "sp"],
-        spread_var_names=["u10m", "t2m", "u500", "z500", "q500", "sp"],
-        ssr_var_names=["u10m", "t2m", "u500", "z500", "q500", "sp"],
+        l1_var_names=["u10m", "t2m", "sp", "sst", "u500", "z500", "q500", "q50"],
+        rmse_var_names=["u10m", "t2m", "sp", "sst", "u500", "z500", "q500", "q50"],
+        acc_var_names=["u10m", "t2m", "sp", "sst", "u500", "z500", "q500", "q50"],
+        crps_var_names=["u10m", "t2m", "sp", "sst", "u500", "z500", "q500", "q50"],
+        spread_var_names=["u10m", "t2m", "sp", "sst", "u500", "z500", "q500", "q50"],
+        ssr_var_names=["u10m", "t2m", "sp", "sst", "u500", "z500", "q500", "q50"],
         rh_var_names=[],
+        mask_target_nan=True,
         wb2_compatible=False,
     ):
 
@@ -291,6 +305,9 @@ class MetricsHandler:
         # grid extraction
         grid_type = params.get("model_grid_type", "equiangular")
 
+        # mask nan
+        self.mask_target_nan = mask_target_nan
+
         # enable overwriting this with weatherbench2 compatible metrics
         if wb2_compatible:
             if grid_type == "equiangular":
@@ -325,6 +342,7 @@ class MetricsHandler:
                     dtphys=self.dtxdh,
                     device=self.device,
                     integrate=False,
+                    mask_target_nan=self.mask_target_nan,
                     report_metric=True,
                 )
             )
@@ -353,6 +371,7 @@ class MetricsHandler:
                     device=self.device,
                     scale=scale.reshape(-1),
                     integrate=False,
+                    mask_target_nan=self.mask_target_nan,
                     report_metric=True,
                 )
             )
@@ -393,6 +412,7 @@ class MetricsHandler:
                     dtphys=self.dtxdh,
                     device=self.device,
                     integrate=True,
+                    mask_target_nan=self.mask_target_nan,
                     report_metric=True,
                 )
             )
@@ -424,6 +444,7 @@ class MetricsHandler:
                     device=self.device,
                     scale=scale.reshape(-1),
                     integrate=False,
+                    mask_target_nan=self.mask_target_nan,
                     report_metric=True,
                 )
             )
@@ -454,6 +475,7 @@ class MetricsHandler:
                     device=self.device,
                     scale=scale.reshape(-1),
                     integrate=False,
+                    mask_target_nan=self.mask_target_nan,
                     report_metric=True,
                 )
             )
@@ -482,6 +504,7 @@ class MetricsHandler:
                     dtphys=self.dtxdh,
                     device=self.device,
                     integrate=False,
+                    mask_target_nan=self.mask_target_nan,
                     report_metric=True,
                 )
             )
@@ -489,14 +512,14 @@ class MetricsHandler:
 
         if self.rh_var_names:
             handle = partial(
-	        GeometricRankHistogram,
-	        grid_type=grid_type,
-	        img_shape=self.img_shape,
-	        crop_shape=self.crop_shape,
-	        crop_offset=self.crop_offset,
+                GeometricRankHistogram,
+                grid_type=grid_type,
+                img_shape=self.img_shape,
+                crop_shape=self.crop_shape,
+                crop_offset=self.crop_offset,
                 normalize=True,
                 channel_reduction="none",
-		batch_reduction="sum",
+                batch_reduction="sum",
                 spatial_distributed=self.spatial_distributed,
                 ensemble_distributed=self.ensemble_distributed,
             )
@@ -516,6 +539,7 @@ class MetricsHandler:
                     aux_shape=(ens_size+1,),
                     aux_shape_finalized=(ens_size+1,),
                     integrate=False,
+                    mask_target_nan=self.mask_target_nan,
                     report_metric=False,
                 )
             )
