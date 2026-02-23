@@ -59,7 +59,7 @@ def get_data_normalization(params):
     return bias, scale
 
 
-def get_climatology(params):
+def get_climatology(params, mask_nan=True):
     """
     routine for fetching climatology and normalization factors
     """
@@ -83,6 +83,10 @@ def get_climatology(params):
         time_means = np.load(params.time_means_path)
         time_means = time_means[..., params.out_channels, start_x:end_x, start_y:end_y]
         clim = (time_means - bias) / scale
+
+        # impute NaN values if requested
+        if mask_nan:
+            clim = np.where(np.isnan(clim), 0.0, clim)
 
     return clim
 
