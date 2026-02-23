@@ -121,7 +121,7 @@ class L2EnergyScoreLoss(GeometricBaseLoss):
 
         if self.ensemble_distributed:
             ensemble_shapes = [forecasts.shape[0] for _ in range(comm.get_size("ensemble"))]
-            forecasts = distributed_transpose.apply(forecasts, (-1, 0), ensemble_shapes, "ensemble")
+            forecasts = distributed_transpose(forecasts, (-1, 0), ensemble_shapes, "ensemble")
 
         # observations does not need a transpose, but just a split
         observations = observations.reshape(1, B, C, H * W)
@@ -326,7 +326,7 @@ class SobolevEnergyScoreLoss(SpectralBaseLoss):
         forecasts = forecasts.reshape(E, B, C, H * W)
         if self.ensemble_distributed:
             ensemble_shapes = [forecasts.shape[0] for _ in range(comm.get_size("ensemble"))]
-            forecasts = distributed_transpose.apply(forecasts, (-1, 0), ensemble_shapes, "ensemble")        # for correct spatial reduction we need to do the same with spatial weights
+            forecasts = distributed_transpose(forecasts, (-1, 0), ensemble_shapes, "ensemble")        # for correct spatial reduction we need to do the same with spatial weights
 
         lm_weights_split = self.lm_weights.flatten(start_dim=-2, end_dim=-1)
         if self.ensemble_distributed:
@@ -494,7 +494,7 @@ class SpectralL2EnergyScoreLoss(SpectralBaseLoss):
         forecasts = torch.moveaxis(forecasts, 1, 0)
         if self.ensemble_distributed:
             ensemble_shapes = [forecasts.shape[0] for _ in range(comm.get_size("ensemble"))]
-            forecasts = distributed_transpose.apply(forecasts, (-1, 0), ensemble_shapes, "ensemble")        # for correct spatial reduction we need to do the same with spatial weights
+            forecasts = distributed_transpose(forecasts, (-1, 0), ensemble_shapes, "ensemble")        # for correct spatial reduction we need to do the same with spatial weights
 
         lm_weights_split = self.lm_weights
         if self.ensemble_distributed:
@@ -673,7 +673,7 @@ class SpectralCoherenceLoss(SpectralBaseLoss):
         forecasts = torch.moveaxis(forecasts, 1, 0)
         if self.ensemble_distributed:
             ensemble_shapes = [forecasts.shape[0] for _ in range(comm.get_size("ensemble"))]
-            forecasts = distributed_transpose.apply(forecasts, (-1, 0), ensemble_shapes, "ensemble")        # for correct spatial reduction we need to do the same with spatial weights
+            forecasts = distributed_transpose(forecasts, (-1, 0), ensemble_shapes, "ensemble")        # for correct spatial reduction we need to do the same with spatial weights
 
         lm_weights_split = self.lm_weights
         if self.ensemble_distributed:

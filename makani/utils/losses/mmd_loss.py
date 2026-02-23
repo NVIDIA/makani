@@ -120,22 +120,22 @@ class GaussianMMDLoss(GeometricBaseLoss):
         # get the data type before stripping amp types
         dtype = forecasts.dtype
 
-            # now we need to transpose the forecasts into ensemble direction.
-            # ideally we split spatial dims
-            forecasts = forecasts.reshape(E, B, C, H * W)
-            if self.ensemble_distributed:
-                ensemble_shapes = [forecasts.shape[0] for _ in range(comm.get_size("ensemble"))]
-                forecasts = distributed_transpose(forecasts, (-1, 0), ensemble_shapes, "ensemble")
-            # observations does not need a transpose, but just a split
-            observations = observations.reshape(B, C, H * W)
-            if self.ensemble_distributed:
-                observations = scatter_to_parallel_region(observations, -1, "ensemble")
-            if spatial_weights is not None:
-                spatial_weights_split = spatial_weights.flatten(-2, -1)
-                spatial_weights_split = scatter_to_parallel_region(spatial_weights_split, -1, "ensemble")
+        # now we need to transpose the forecasts into ensemble direction.
+        # ideally we split spatial dims
+        forecasts = forecasts.reshape(E, B, C, H * W)
+        if self.ensemble_distributed:
+            ensemble_shapes = [forecasts.shape[0] for _ in range(comm.get_size("ensemble"))]
+            forecasts = distributed_transpose(forecasts, (-1, 0), ensemble_shapes, "ensemble")
+        # observations does not need a transpose, but just a split
+        observations = observations.reshape(B, C, H * W)
+        if self.ensemble_distributed:
+            observations = scatter_to_parallel_region(observations, -1, "ensemble")
+        if spatial_weights is not None:
+            spatial_weights_split = spatial_weights.flatten(-2, -1)
+            spatial_weights_split = scatter_to_parallel_region(spatial_weights_split, -1, "ensemble")
 
-            # now, E dimension is local and spatial dim is split further. Compute the mmd
-            mmd = _mmd2_ensemble_kernel(observations, forecasts)
+        # now, E dimension is local and spatial dim is split further. Compute the mmd
+        mmd = _mmd2_ensemble_kernel(observations, forecasts)
 
         # perform spatial average of crps score
         if spatial_weights is not None:
@@ -144,7 +144,7 @@ class GaussianMMDLoss(GeometricBaseLoss):
             mmd = torch.sum(mmd * self.quad_weight_split, dim=-1)
         if self.ensemble_distributed:
             ensemble_shapes = [forecasts.shape[0] for _ in range(comm.get_size("ensemble"))]
-            forecasts = distributed_transpose.apply(forecasts, (-1, 0), ensemble_shapes, "ensemble")
+            forecasts = distributed_transpose(forecasts, (-1, 0), ensemble_shapes, "ensemble")
 
         # observations does not need a transpose, but just a split
         observations = observations.reshape(1, B, C, H * W)
@@ -331,7 +331,7 @@ class GaussianMMDLoss(GeometricBaseLoss):
 #             forecasts = forecasts.reshape(E, B, C, H * W)
 #             if self.ensemble_distributed:
 #                 ensemble_shapes = [forecasts.shape[0] for _ in range(comm.get_size("ensemble"))]
-#                 forecasts = distributed_transpose.apply(forecasts, (-1, 0), ensemble_shapes, "ensemble")
+#                 forecasts = distributed_transpose(forecasts, (-1, 0), ensemble_shapes, "ensemble")
 #             # observations does not need a transpose, but just a split
 #             observations = observations.reshape(B, C, H * W)
 #             if self.ensemble_distributed:
