@@ -152,6 +152,7 @@ class ERA5DaliESDataloader(object):
         self.n_future = params.n_future if train else params.valid_autoreg_steps
         self.in_channels = params.in_channels
         self.out_channels = params.out_channels
+        self.subsampling_factor = params.get("subsampling_factor", 1)
         self.add_zenith = params.get("add_zenith", False)
         self.return_timestamp = params.get("return_timestamp", False)
         if hasattr(params, "lat") and hasattr(params, "lon"):
@@ -213,6 +214,7 @@ class ERA5DaliESDataloader(object):
             out_channels=self.out_channels,
             crop_size=crop_size,
             crop_anchor=crop_anchor,
+            subsampling_factor=self.subsampling_factor,
             num_shards=self.num_shards,
             shard_id=self.shard_id,
             io_grid=params.get("io_grid", [1, 1, 1]),
@@ -248,10 +250,19 @@ class ERA5DaliESDataloader(object):
         self.img_crop_offset_x = self.extsource.crop_anchor[0]
         self.img_crop_offset_y = self.extsource.crop_anchor[1]
 
-        self.img_local_shape_x = self.extsource.return_shape[0]
-        self.img_local_shape_y = self.extsource.return_shape[1]
+        self.img_local_shape_x = self.extsource.read_shape[0]
+        self.img_local_shape_y = self.extsource.read_shape[1]
         self.img_local_offset_x = self.extsource.read_anchor[0]
         self.img_local_offset_y = self.extsource.read_anchor[1]
+
+        # resampled shape
+        self.img_shape_x_resampled = self.extsource.img_shape_resampled[0]
+        self.img_shape_y_resampled = self.extsource.img_shape_resampled[1]
+        self.img_local_shape_x_resampled = self.extsource.return_shape[0]
+        self.img_local_shape_y_resampled = self.extsource.return_shape[1]
+
+        # lat lon coords
+        self.lat_lon_local = self.extsource.lat_lon_local
 
         # num steps
         self.num_steps_per_epoch = self.extsource.num_steps_per_epoch

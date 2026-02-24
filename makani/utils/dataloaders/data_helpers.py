@@ -64,6 +64,8 @@ def get_climatology(params, mask_nan=True):
     routine for fetching climatology and normalization factors
     """
 
+    subsampling_factor = params.subsampling_factor
+
     # compute climatology
     if params.enable_synthetic_data:
         clim = np.zeros([1, params.N_out_channels, params.img_crop_shape_x, params.img_crop_shape_y], dtype=np.float32)
@@ -87,6 +89,10 @@ def get_climatology(params, mask_nan=True):
         # impute NaN values if requested
         if mask_nan:
             clim = np.where(np.isnan(clim), 0.0, clim)
+
+    # apply subsampling
+    if subsampling_factor > 1:
+        clim = clim[:, :, ::subsampling_factor, ::subsampling_factor]
 
     return clim
 
