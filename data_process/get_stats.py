@@ -266,7 +266,7 @@ def get_stats(input_path: str, output_path: str, metadata_file: str,
     dt : int
         The temporal difference for which the temporal means and standard deviations should be computed. Note that this is in units of dhours (see metadata file),
     quadrature_rule : str
-        Which spherical quadrature rule to use for the spatial averages. Supported are "naive", "clenshaw-curtiss" and "gauss-legendre".
+        Which spherical quadrature rule to use for the spatial averages. Supported are "naive", "clenshaw-curtiss" and "legendre-gauss".
     wind_angle_aware : bool
         If this flag is set to true, then wind channels will be grouped together (all u and v channels, e.g. u500 and v500, u10m and v10m, etc) and
         instead of computing stadard deviation component-wise, the standard deviation will be computed for the magnitude. This ensures that the direction of the
@@ -562,7 +562,7 @@ if __name__ == "__main__":
     parser.add_argument("--metadata_file", type=str, help="File containing dataset metadata.", required=True)
     parser.add_argument("--output_path", type=str, help="Directory for saving stats files.", required=True)
     parser.add_argument("--reduction_group_size", type=int, default=8, help="Size of collective reduction groups.")
-    parser.add_argument("--quadrature_rule", type=str, default="naive", choices=["naive", "clenshaw-curtiss", "gauss-legendre"], help="Specify quadrature_rule for spatial averages.")
+    parser.add_argument("--quadrature_rule", type=str, default="naive", choices=["naive", "clenshaw-curtiss", "legendre-gauss"], help="Specify quadrature_rule for spatial averages.")
     parser.add_argument("--dt", type=int, default=1, help="Step size for which time difference stats will be computed.")
     parser.add_argument('--wind_angle_aware', action='store_true', help="Just compute mean and magnitude of wind vectors and not componentwise stats")
     parser.add_argument('--fail_on_nan', action='store_true', help="When computing stats, code will fail if NaN values are encountered.")
