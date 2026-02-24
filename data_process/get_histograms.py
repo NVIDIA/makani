@@ -233,7 +233,7 @@ def get_histograms(input_dir: str, output_dir: str, stats_dir: str, metadata_fil
         Note that the number of entries in coords["lat"] has to match dimension -2 of the dataset, and coords["lon"] dimension -1.
         The length of the channel names has to match dimension -3 (or dimension 1, which is the same) of the dataset. 
     quadrature_rule : str
-        Which spherical quadrature rule to use for the spatial averages. Supported are "naive", "clenshaw-curtiss" and "gauss-legendre".
+        Which spherical quadrature rule to use for the spatial averages. Supported are "naive", "clenshaw-curtiss" and "legendre-gauss".
     nbins : int
         Number of bins used for the histogram. If a number < 1 is specified, the number of bins is automatically computed based on the data.
     batch_size : int
@@ -459,7 +459,7 @@ if __name__ == "__main__":
     parser.add_argument("--metadata_file", type=str, help="File containing dataset metadata.", required=True)
     parser.add_argument("--output_dir", type=str, help="Directory for saving stats files.", required=True)
     parser.add_argument("--stats_dir", type=str, default=None, help="Directory with stats normalization files.")
-    parser.add_argument("--quadrature_rule", type=str, default="naive", choices=["naive", "clenshaw-curtiss", "gauss-legendre"], help="Specify quadrature_rule for spatial averages.")
+    parser.add_argument("--quadrature_rule", type=str, default="naive", choices=["naive", "clenshaw-curtiss", "legendre-gauss"], help="Specify quadrature_rule for spatial averages.")
     parser.add_argument("--nbins", type=int, default=100, help="Number of bins for histograms")
     parser.add_argument("--batch_size", type=int, default=16, help="Batch size used for reading chunks from a file at a time to avoid OOM errors.")
     args = parser.parse_args()
