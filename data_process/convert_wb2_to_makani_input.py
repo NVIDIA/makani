@@ -99,7 +99,8 @@ def convert(input_file: str, output_dir: str, metadata_file: str, years: List[in
     atmospheric_channel_names, atmospheric_channel_names_wb2, surface_channel_names, surface_channel_names_wb2, atmospheric_levels = split_convert_channel_names(channel_names)
 
     # open cloud dataset
-    wb2_data = xr.open_dataset(input_file, engine="zarr")
+    storage_options = {"token": "anon"} if input_file.startswith(("gs://", "gcs://")) else {}
+    wb2_data = xr.open_dataset(input_file, engine="zarr", storage_options=storage_options)
 
     # check total number of entries:
     num_entries_total = 0
