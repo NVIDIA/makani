@@ -83,7 +83,8 @@ def generate_wb2_climatology(metadata_file: str, input_climatology: str, mask_ou
     atmospheric_channel_names, atmospheric_channel_names_wb2, surface_channel_names, surface_channel_names_wb2, atmospheric_levels = split_convert_channel_names(channel_names)
     
     # open zarr file and load the above_ground mask:
-    clim = xr.open_zarr(input_climatology)
+    storage_options = {"token": "anon"} if input_climatology.startswith(("gs://", "gcs://")) else {}
+    clim = xr.open_zarr(input_climatology, storage_options=storage_options)
 
     # above ground data, only relevant levels
     above_ground = clim["above_ground"]
