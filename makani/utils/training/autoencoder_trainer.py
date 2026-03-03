@@ -312,7 +312,7 @@ class AutoencoderTrainer(Driver):
         if self.log_to_screen:
             # log memory usage so far
             all_mem_gb, max_mem_gb = get_memory_usage(self.device)
-            self.logger.info(f"Scaffolding memory high watermark: {all_mem_gb:.2f} GB ({max_mem_gb:.2f} GB for pytorch)")
+            self.logger.info(f"Scaffolding GPU memory high watermark: {all_mem_gb:.2f} GB ({max_mem_gb:.2f} GB for pytorch)")
             # announce training start
             self.logger.info("Starting Training Loop...")
 
@@ -717,7 +717,9 @@ class AutoencoderTrainer(Driver):
             self.logger.info(print_prefix + "training steps: {}".format(train_logs["train_steps"]))
             self.logger.info(print_prefix + "validation steps: {}".format(valid_logs["base"]["validation steps"]))
             all_mem_gb, _ = get_memory_usage(self.device)
-            self.logger.info(print_prefix + f"memory footprint [GB]: {all_mem_gb:.2f}")
+            self.logger.info(print_prefix + f"GPU memory footprint [GB]: {all_mem_gb:.2f}")
+            all_mem_gb, _ = get_memory_usage(torch.device("cpu"))
+            self.logger.info(print_prefix + f"CPU memory footprint [GB]: {all_mem_gb:.2f}")
             for key in timing_logs.keys():
                 self.logger.info(print_prefix + key + ": {:.2f}".format(timing_logs[key]))
 

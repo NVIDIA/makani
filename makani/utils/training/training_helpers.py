@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import psutil
+
 import torch
 from torch import nn
 import torch.distributed as dist
@@ -20,9 +22,17 @@ from makani.utils import comm
 
 
 def get_memory_usage(device):
-    free_mem, total_mem = torch.cuda.mem_get_info(device=device)
-    allocated_mem_gb = (total_mem - free_mem) / (1024.0 * 1024.0 * 1024.0)
-    torch_mem_gb = torch.cuda.max_memory_allocated(device=device) / (1024.0 * 1024.0 * 1024.0)
+    gb = 1024.0 * 1024.0 * 1024.0
+    if device.type == "cuda":
+        free_mem, total_mem = torch.cuda.mem_get_info(device=device)
+        allocated_mem_gb = (total_mem - free_mem) / gb
+        torch_mem_gb = torch.cuda.max_memory_allocated(device=device) / gb
+    elif device.type == "cpu":
+        used_mem = psutil.virtual_memory().used
+        allocated_mem_gb = used_mem / gb
+        torch_mem_gb = 0.0
+    else:
+        raise ValueError(f"Unsupported device type: {device.type}")
 
     return allocated_mem_gb, torch_mem_gb
 
