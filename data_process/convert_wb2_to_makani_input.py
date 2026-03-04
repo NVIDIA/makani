@@ -27,7 +27,7 @@ import xarray as xr
 # MPI
 from mpi4py import MPI
 
-from .wb2_helpers import surface_variables, atmospheric_variables, split_convert_channel_names, DistributedProgressBar
+from .wb2_helpers import surface_variables, atmospheric_variables, split_convert_channel_names, DistributedProgressBar, gcs_storage_options
 
 
 def convert(input_file: str, output_dir: str, metadata_file: str, years: List[int],
@@ -99,13 +99,7 @@ def convert(input_file: str, output_dir: str, metadata_file: str, years: List[in
     atmospheric_channel_names, atmospheric_channel_names_wb2, surface_channel_names, surface_channel_names_wb2, atmospheric_levels = split_convert_channel_names(channel_names)
 
     # open cloud dataset
-    if input_file.startswith(("gs://", "gcs://")):
-        # Allow configuration of GCS authentication via environment variable.
-        # If GCS_TOKEN is unset, rely on the default gcsfs/xarray authentication behavior.
-        gcs_token = os.getenv("GCS_TOKEN", "anon")
-        storage_options = {"token": gcs_token} if gcs_token is not None else {}
-    else:
-        storage_options = {}
+    storage_options = gcs_storage_options() if input_file.startswith(("gs://", "gcs://")) else {}
     wb2_data = xr.open_dataset(input_file, engine="zarr", storage_options=storage_options)
 
     # check total number of entries:
