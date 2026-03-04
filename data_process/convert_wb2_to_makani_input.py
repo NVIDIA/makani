@@ -99,7 +99,13 @@ def convert(input_file: str, output_dir: str, metadata_file: str, years: List[in
     atmospheric_channel_names, atmospheric_channel_names_wb2, surface_channel_names, surface_channel_names_wb2, atmospheric_levels = split_convert_channel_names(channel_names)
 
     # open cloud dataset
-    storage_options = {"token": "anon"} if input_file.startswith(("gs://", "gcs://")) else {}
+    if input_file.startswith(("gs://", "gcs://")):
+        # Allow configuration of GCS authentication via environment variable.
+        # If GCS_TOKEN is unset, rely on the default gcsfs/xarray authentication behavior.
+        gcs_token = os.getenv("GCS_TOKEN")
+        storage_options = {"token": gcs_token} if gcs_token is not None else {}
+    else:
+        storage_options = {}
     wb2_data = xr.open_dataset(input_file, engine="zarr", storage_options=storage_options)
 
     # check total number of entries:
