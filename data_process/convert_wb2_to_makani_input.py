@@ -102,7 +102,7 @@ def convert(input_file: str, output_dir: str, metadata_file: str, years: List[in
     if input_file.startswith(("gs://", "gcs://")):
         # Allow configuration of GCS authentication via environment variable.
         # If GCS_TOKEN is unset, rely on the default gcsfs/xarray authentication behavior.
-        gcs_token = os.getenv("GCS_TOKEN")
+        gcs_token = os.getenv("GCS_TOKEN", "anon")
         storage_options = {"token": gcs_token} if gcs_token is not None else {}
     else:
         storage_options = {}
