@@ -41,7 +41,7 @@ from makani.utils import comm
 # for annotation of models
 from dataclasses import dataclass
 import physicsnemo
-from physicsnemo.models.meta import ModelMetaData
+from physicsnemo import ModelMetaData
 
 # heuristic for finding theta_cutoff
 def _compute_cutoff_radius(nlat, kernel_shape, basis_type):
