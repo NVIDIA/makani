@@ -83,7 +83,7 @@ def generate_wb2_climatology(metadata_file: str, input_climatology: str, mask_ou
     atmospheric_channel_names, atmospheric_channel_names_wb2, surface_channel_names, surface_channel_names_wb2, atmospheric_levels = split_convert_channel_names(channel_names)
     
     # open zarr file and load the above_ground mask:
-    if input_file.startswith(("gs://", "gcs://")):
+    if input_climatology.startswith(("gs://", "gcs://")):
         # Allow configuration of GCS authentication via environment variable.
         # If GCS_TOKEN is unset, rely on the default gcsfs/xarray authentication behavior.
         gcs_token = os.getenv("GCS_TOKEN", "anon")
