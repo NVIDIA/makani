@@ -21,6 +21,7 @@ import numpy as np
 
 from makani.utils.features import get_channel_groups
 
+
 # variable translation
 surface_variables = {
     "u10m" : "10m_u_component_of_wind",
@@ -45,8 +46,19 @@ atmospheric_variables = {
     "q": "specific_humidity",
 }
 
+
+def gcs_storage_options():
+    """Return gcsfs storage options with anonymous access token if no ADC found."""
+    try:
+        import google.auth
+        google.auth.default()
+        return {}
+    except Exception:
+        return {"token": "anon"}
+
+
 def split_convert_channel_names(makani_channel_names):
-    
+
     # split in surface and atmospheric channels
     atmospheric_channel_indices, surface_channel_indices, _, atmospheric_levels = get_channel_groups(makani_channel_names)
 
@@ -55,11 +67,11 @@ def split_convert_channel_names(makani_channel_names):
     pat = re.compile(r"^(.*?)\d{1,}$")
     atmospheric_channel_names = sorted(list(set([pat.match(c).groups()[0] for c in atmospheric_channel_names])))
     atmospheric_channel_names_wb2 = [atmospheric_variables[c] for c in atmospheric_channel_names]
-    
+
     # surface
     surface_channel_names = sorted([makani_channel_names[k] for k in surface_channel_indices])
     surface_channel_names_wb2 = [surface_variables[c] for c in surface_channel_names]
-    
+
     # levels
     atmospheric_levels = sorted(list(atmospheric_levels))
 
