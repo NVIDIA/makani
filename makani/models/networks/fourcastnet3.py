@@ -78,6 +78,32 @@ class DiscreteContinuousEncoder(nn.Module):
     ):
         super().__init__()
 
+        if skip:
+            # init distributed torch-harmonics if needed
+            if comm.get_size("spatial") > 1:
+                polar_group = None if (comm.get_size("h") == 1) else comm.get_group("h")
+                azimuth_group = None if (comm.get_size("w") == 1) else comm.get_group("w")
+                thd.init(polar_group, azimuth_group)
+
+            if resample_sht:
+                # set up sht for upsampling
+                sht_handle = thd.DistributedRealSHT if comm.get_size("spatial") > 1 else th.RealSHT
+                isht_handle = thd.DistributedInverseRealSHT if comm.get_size("spatial") > 1 else th.InverseRealSHT
+
+                # set upsampling module
+                self.sht = sht_handle(*inp_shape, grid=grid_in).float()
+                self.isht = isht_handle(*out_shape, lmax=self.sht.lmax, mmax=self.sht.mmax, grid=grid_out).float()
+                self.resample = nn.Sequential(self.sht, self.isht)
+            else:
+                resample_handle = thd.DistributedResampleS2 if comm.get_size("spatial") > 1 else th.ResampleS2
+
+                self.resample = resample_handle(*inp_shape, *out_shape, grid_in=grid_in, grid_out=grid_out, mode="bilinear")
+
+            self.skip_projection = nn.Conv2d(inp_chans, out_chans, 1, 1, groups=groups, bias=False)
+            torch.nn.init.normal_(self.skip_projection.weight, std=math.sqrt(1.0 / inp_chans))
+            self.skip_projection.weight.is_shared_mp = ["spatial"]
+            self.skip_projection.weight.sharded_dims_mp = [None, None, None, None]
+
         # heuristic for finding theta_cutoff
         theta_cutoff = _compute_cutoff_radius(nlat=inp_shape[0], kernel_shape=kernel_shape, basis_type=basis_type)
 
@@ -124,6 +150,9 @@ class DiscreteContinuousEncoder(nn.Module):
 
         with amp.autocast(device_type="cuda", enabled=False):
             x = x.float()
+            if hasattr(self, "skip_projection"):
+                res = self.resample(x)
+                res = res.to(dtype=dtype)
             x = self.conv(x)
             x = x.to(dtype=dtype)
 
@@ -153,16 +182,8 @@ class DiscreteContinuousDecoder(nn.Module):
         activation_function=nn.GELU,
         groups=1,
         bias=False,
-        upsample_sht=False,
     ):
         super().__init__()
-
-        if use_mlp:
-            self.mlp = EncoderDecoder(
-                num_layers=1, input_dim=inp_chans, output_dim=inp_chans, hidden_dim=int(mlp_ratio * inp_chans), act_layer=activation_function, input_format="nchw", gain=2.0
-            )
-
-            self.act = activation_function()
 
         # init distributed torch-harmonics if needed
         if comm.get_size("spatial") > 1:
@@ -171,7 +192,7 @@ class DiscreteContinuousDecoder(nn.Module):
             thd.init(polar_group, azimuth_group)
 
         # spatial parallelism in the SHT
-        if upsample_sht:
+        if resample_sht:
             # set up sht for upsampling
             sht_handle = thd.DistributedRealSHT if comm.get_size("spatial") > 1 else th.RealSHT
             isht_handle = thd.DistributedInverseRealSHT if comm.get_size("spatial") > 1 else th.InverseRealSHT
@@ -179,11 +200,17 @@ class DiscreteContinuousDecoder(nn.Module):
             # set upsampling module
             self.sht = sht_handle(*inp_shape, grid=grid_in).float()
             self.isht = isht_handle(*out_shape, lmax=self.sht.lmax, mmax=self.sht.mmax, grid=grid_out).float()
-            self.upsample = nn.Sequential(self.sht, self.isht)
+            self.resample = nn.Sequential(self.sht, self.isht)
         else:
             resample_handle = thd.DistributedResampleS2 if comm.get_size("spatial") > 1 else th.ResampleS2
 
-            self.upsample = resample_handle(*inp_shape, *out_shape, grid_in=grid_in, grid_out=grid_out, mode="bilinear")
+            self.resample = resample_handle(*inp_shape, *out_shape, grid_in=grid_in, grid_out=grid_out, mode="bilinear")
+
+        if skip:
+            self.skip_projection = nn.Conv2d(inp_chans, out_chans, 1, 1, groups=groups, bias=False)
+            torch.nn.init.normal_(self.skip_projection.weight, std=math.sqrt(1.0 / inp_chans))
+            self.skip_projection.weight.is_shared_mp = ["spatial"]
+            self.skip_projection.weight.sharded_dims_mp = [None, None, None, None]
 
         # heuristic for finding theta_cutoff
         # nto entirely clear if out or in shape should be used here with a non-conv method for upsampling
@@ -215,8 +242,12 @@ class DiscreteContinuousDecoder(nn.Module):
     def forward(self, x):
         dtype = x.dtype
 
-        if hasattr(self, "act"):
-            x = self.act(x)
+        with amp.autocast(device_type="cuda", enabled=False):
+            x = x.float()
+            res = self.resample(x)
+            x = self.conv(res)
+            x = x.to(dtype=dtype)
+            res = res.to(dtype=dtype)
 
         if hasattr(self, "mlp"):
             x = self.mlp(x)
@@ -228,7 +259,6 @@ class DiscreteContinuousDecoder(nn.Module):
             x = x.to(dtype=dtype)
 
         return x
-
 
 class NeuralOperatorBlock(nn.Module):
     def __init__(

@@ -101,7 +101,7 @@ class Preprocessor2D(nn.Module):
             # register static buffer
             self.register_buffer("static_features", static_features, persistent=False)
 
-        if hasattr(params, "input_noise"):
+        if params.get("input_noise", None) is not None:
             noise_params = params.input_noise
             centered_noise = noise_params.get("centered", False)
 

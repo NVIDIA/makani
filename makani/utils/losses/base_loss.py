@@ -24,7 +24,7 @@ import torch.nn as nn
 import torch_harmonics as th
 import torch_harmonics.distributed as thd
 
-from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature
+from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature, compute_spherical_bandlimit
 from makani.utils import comm
 
 
@@ -302,6 +302,12 @@ class SpectralBaseLoss(nn.Module, metaclass=ABCMeta):
         self.channel_names = channel_names
         self.spatial_distributed = comm.is_distributed("spatial") and spatial_distributed
 
+        # clamp lmax/mmax to the grid's spherical bandlimit
+        bandlimit = compute_spherical_bandlimit(img_shape, grid_type)
+        if lmax is None or lmax > bandlimit:
+            lmax = bandlimit
+
+        # SHT for the computation of SH coefficients
         if self.spatial_distributed and (comm.get_size("spatial") > 1):
             if not thd.is_initialized():
                 polar_group = None if (comm.get_size("h") == 1) else comm.get_group("h")
