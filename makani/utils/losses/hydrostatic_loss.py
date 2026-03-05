@@ -24,6 +24,24 @@ from makani.utils.losses.base_loss import GeometricBaseLoss
 import makani.utils.constants as const
 
 
+def interpolate_q_weight(q_weights, pressure):
+
+    # compute q_min and q_max in the list
+    p_min = min([q[0] for q in q_weights.keys()])
+    p_max = max([q[1] for q in q_weights.keys()])
+
+    # first check out of bounds values:
+    if pressure < p_min:
+        return interpolate_q_weight(q_weights, p_min)
+    
+    if pressure >= p_max:
+        return  interpolate_q_weight(q_weights, p_max)
+
+    for pressure_range in q_weights.keys():
+        if (pressure_range[0] <= pressure) and (pressure < pressure_range[1]):
+            return q_weights[pressure_range]
+
+
 class HydrostaticBalanceLoss(GeometricBaseLoss):
     """Computes a loss term constraining relationship between
     pressure, geopotential and temperature based on  hydrostatic balance"""
@@ -38,9 +56,10 @@ class HydrostaticBalanceLoss(GeometricBaseLoss):
         bias: torch.Tensor,
         scale: torch.Tensor,
         p_min: Optional[int] = 0,
-        p_max: Optional[int] = 1000,
+        p_max: Optional[int] = 850,
         pole_mask: Optional[int] = 0,
-        use_moist_air_formula: Optional[bool] = False,
+        use_moist_air_formula: Optional[bool] = True,
+        use_error_tolerant_loss: Optional[bool] = False,
         spatial_distributed: Optional[bool] = False,
         **kwargs,
     ):
@@ -49,6 +68,7 @@ class HydrostaticBalanceLoss(GeometricBaseLoss):
 
         # store some variables
         self.use_moist_air_formula = use_moist_air_formula
+        self.use_error_tolerant_loss = use_error_tolerant_loss
         self.spatial_distributed = spatial_distributed
 
         # get matching pl between z and t
@@ -83,10 +103,23 @@ class HydrostaticBalanceLoss(GeometricBaseLoss):
         ptens = ptens.reshape(1, -1, 1, 1)
         self.register_buffer("p", ptens, persistent=False)
 
+        # empirical altitude weights:
+        # we specify it by the lower pressure level since this is what we use for creating
+        # the c-matrix:
+        # Q(0.5):
+        level_weights = {
+            (50, 100): 0.676, 
+            (100, 250): 1.895, 
+            (250, 500): 0.640, 
+            (500, 700): 0.255, 
+            (700, 850): 0.211
+        }
+
         # create conserved quantity matrix
         row_indices = []
         col_indices = []
         values = []
+        alpha_values = []
         # every interval in its own equation
         for idx in range(0, len(self.t_idx) - 1):
             # z_idx
@@ -105,14 +138,18 @@ class HydrostaticBalanceLoss(GeometricBaseLoss):
             row_indices.append(idx)
             col_indices.append(self.t_idx[idx + 1])
             values.append(0.5 * torch.log(ptens[0, idx + 1, 0, 0] / ptens[0, idx, 0, 0]))
+            # alpha:
+            alpha_values.append(interpolate_q_weight(level_weights, ptens[0, idx, 0, 0]))
 
         # get sparse tensor
         indices = torch.as_tensor([row_indices, col_indices], dtype=torch.long)
         values = torch.as_tensor(values, dtype=torch.float32)
         cmat = torch.sparse_coo_tensor(indices, values, size=(len(self.t_idx) - 1, len(channel_names))).coalesce().to_dense()
+        alphasq = torch.square(torch.as_tensor(alpha_values, dtype=torch.float32))
 
         # register buffer
         self.register_buffer("cmat", cmat, persistent=False)
+        self.register_buffer("alphasq", alphasq, persistent=False)
 
     @property
     def n_channels(self):
@@ -150,6 +187,10 @@ class HydrostaticBalanceLoss(GeometricBaseLoss):
 
         # we need to disable autocast here
         res = torch.square(torch.matmul(self.cmat, prdf).reshape(-1, B, H, W).permute([1, 0, 2, 3])).contiguous()
+
+        if self.use_error_tolerant_loss:
+            res = res / self.alphasq
+            res = res / (1.0 + torch.exp(1.0 - res))
 
         if wgt is not None:
             res = res * wgt

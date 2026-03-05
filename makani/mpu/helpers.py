@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+
 import torch
 import torch.distributed as dist
 
@@ -20,11 +22,57 @@ from physicsnemo.distributed.utils import split_tensor_along_dim
 from makani.utils import comm
 
 
-def _transpose(tensor, dim0, dim1, dim1_split_sizes, group=None, async_op=False):
+class _DistributedConfig:
+    """
+    Module-level configuration for makani.mpu.
+    Env vars are used as defaults but can be overridden programmatically, e.g.:
+
+        from makani.mpu import config
+        config.debug = True
+    """
+
+    def __init__(self):
+        self._debug = None
+
+    @property
+    def debug(self):
+        if self._debug is None:
+            return os.getenv("MAKANI_DISTRIBUTED_DEBUG", "0") == "1"
+        return self._debug
+
+    @debug.setter
+    def debug(self, value):
+        self._debug = bool(value)
+
+    def __repr__(self):
+        return f"_DistributedConfig(debug={self.debug})"
+
+config = _DistributedConfig()
+
+
+def _check_shapes(shapes_gather, shapes_expected):
+    for idx, (size_gather, size_expected) in enumerate(zip(shapes_gather, shapes_expected)):
+        if size_gather != size_expected:
+            raise ValueError(f"Error, shapes_ are not correct. Expected {size_expected}, got {size_gather} for index {idx}. Please check that the number of chunks is correct.")
+
+
+def _transpose(tensor, dim0, dim1, dim1_split_sizes, group=None, async_op=False, verify_shapes=None):
+
+    if verify_shapes is None:
+        verify_shapes = config.debug
 
     # get comm params
     comm_size = dist.get_world_size(group=group)
     comm_rank = dist.get_rank(group=group)
+
+    # verify_shapes: check that dim1_split_sizes are correct:
+    if verify_shapes:
+        stens = torch.as_tensor([tensor.size(dim1)], dtype=torch.int64, device=tensor.device)
+        stens_gather = [torch.empty_like(stens) for _ in range(comm_size)]
+        stens_gather[comm_rank] = stens
+        dist.all_gather(stens_gather, stens, group=group)
+        sizes_gather = [stens.item() for stens in stens_gather]
+        _check_shapes(sizes_gather, dim1_split_sizes)
 
     # split and local transposition
     tsplit = split_tensor_along_dim(tensor, dim=dim0, num_chunks=comm_size)
@@ -48,6 +96,9 @@ def _transpose(tensor, dim0, dim1, dim1_split_sizes, group=None, async_op=False)
 def gather_uneven(tensor, dim, comm_name):
     if comm.get_size(comm_name) == 1:
         return tensor
+
+    # make tensor contiguous, just in case:
+    tensor = tensor.contiguous()
 
     # gather dims
     dim_tensor = torch.tensor([tensor.shape[dim]], dtype=torch.int, device=tensor.device)

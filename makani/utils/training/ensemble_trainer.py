@@ -623,7 +623,7 @@ class EnsembleTrainer(Trainer):
             noise_states.append(self.preprocessor.get_internal_state(tensor=True))
         return noise_states
 
-    def validate_one_epoch(self, epoch, profiler=None):
+    def validate_one_epoch(self, epoch, profiler=None, debug=False):
         # set to eval
         self._set_eval()
 
@@ -680,6 +680,10 @@ class EnsembleTrainer(Trainer):
 
                         # FW pass
                         predlist = []
+
+                        # DEBUG
+                        if debug:
+                            print(f"RANK {comm.get_world_rank()}: starting validation step {epoch}.{eval_steps}.{idt}")
 
                         with amp.autocast(device_type="cuda", enabled=self.amp_enabled, dtype=self.amp_dtype):
                             # loop over local ensemble members
@@ -738,6 +742,10 @@ class EnsembleTrainer(Trainer):
                             tag = f"step{eval_steps}_time{str(idt).zfill(3)}"
                             self.visualizer.add(tag, pred_cpu, targ_cpu)
 
+                        # DEBUG
+                        if debug:
+                            print(f"RANK {comm.get_world_rank()}: finished validation step {epoch}.{eval_steps}.{idt}")
+
                         # update metrics
                         self.metrics.update(pred, targ, loss, idt)
 
@@ -747,6 +755,10 @@ class EnsembleTrainer(Trainer):
                     # profiler step
                     if profiler is not None:
                         profiler.step()
+
+                # barrier after eval is complete:
+                if dist.is_initialized():
+                    dist.barrier(device_ids=[self.device.index])
 
                 # create final logs
                 logs = self.metrics.finalize()

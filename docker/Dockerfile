@@ -30,21 +30,22 @@ RUN SETUPTOOLS_USE_DISTUTILS=local pip install mpi4py
 RUN pip install onnx onnxruntime onnxruntime-gpu
 
 # hdf5 and h5py
-ENV HDF5_VERSION=1.14.6
-RUN cd /tmp && wget https://support.hdfgroup.org/releases/hdf5/v1_14/v1_14_6/downloads/hdf5-${HDF5_VERSION}.tar.gz && \
+ENV HDF5_VERSION=2.0.0
+RUN cd /tmp && wget https://support.hdfgroup.org/releases/hdf5/v2_0/v2_0_0/downloads/hdf5-${HDF5_VERSION}.tar.gz && \
     gzip -cd hdf5-${HDF5_VERSION}.tar.gz | tar xvf - && \
     mkdir hdf5-${HDF5_VERSION}/build && cd hdf5-${HDF5_VERSION}/build && \
     cmake -DCMAKE_INSTALL_PREFIX=/opt/hdf5 \
     -DHDF5_ENABLE_OPTIMIZATION=ON \
+    -DHDF5_ENABLE_ZLIB_SUPPORT=ON \
     -DHDF5_ENABLE_DIRECT_VFD=ON \
-    -DHDF5_ENABLE_ROS3_VFD=ON \
     -DHDF5_ENABLE_PARALLEL=ON \
     -DHDF5_TEST_API=ON \
     -DHDF5_TEST_VFD=ON \
     -DHDF5_TEST_PARALLEL=ON \
     .. && \
-    make -j 8 && make install
-RUN CC="mpicc" HDF5_MPI=ON H5PY_ROS3=1 H5PY_DIRECT_VFD=1 HDF5_DIR=/opt/hdf5 pip install --no-build-isolation --no-binary=h5py h5py==3.13.0
+    make -j 8 && make install && \
+    mkdir -p /opt/hdf5/lib/plugin
+RUN CC="mpicc" HDF5_MPI=ON H5PY_DIRECT_VFD=1 HDF5_DIR=/opt/hdf5 pip install --no-build-isolation --no-binary=h5py h5py==3.15.1
 ENV PATH=/opt/hdf5/bin:${PATH}
 
 # install cdsapi for downloading the dataset
