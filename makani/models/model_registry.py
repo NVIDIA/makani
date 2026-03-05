@@ -171,6 +171,7 @@ def get_model(params: ParamsBase, use_stochastic_interpolation: bool = False, mu
         if params.get("normalization", "none") in ["zscore", "minmax"]:
             try:
                 bias, scale = get_data_normalization(params)
+                print(f"bias and scale dtype after get_data_normalization: {bias.dtype}, {scale.dtype}")
                 # Slice the stats to match the model's output channels
                 # Assuming the model's output corresponds to params.out_channels
                 if hasattr(params, "out_channels"):
@@ -182,6 +183,7 @@ def get_model(params: ParamsBase, use_stochastic_interpolation: bool = False, mu
                 if bias is not None and scale is not None:
                     model_kwargs["normalization_means"] = bias
                     model_kwargs["normalization_stds"] = scale
+                    print(f"bias and scale in the model kwargs: {model_kwargs['normalization_means'].dtype}, {model_kwargs['normalization_stds'].dtype}")
             except Exception as e:
                 logging.warning(f"Could not load normalization stats. Error: {e}")
 

@@ -436,7 +436,7 @@ class AutoencoderTrainer(Driver):
             model_handle = self.model_train.module
         else:
             model_handle = self.model_train
-            
+
         enc = model_handle.model.encoder(inp)
 
         if self.params.get("variational", False):
@@ -464,7 +464,7 @@ class AutoencoderTrainer(Driver):
                 # maybe fuse decode and reparameterize
                 z_hat = model_handle.model.gp.reparameterize(z_mean, z_logvar)
                 enc_rep = model_handle.model.gp.decode(z_hat)
-                
+
             dec_rep = model_handle.model.decoder(enc_rep)
 
             # reprojection loss

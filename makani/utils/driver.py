@@ -188,7 +188,7 @@ class Driver(metaclass=abc.ABCMeta):
             params.N_dynamic_channels += 1
 
         params.n_noise_chan = 0
-        if hasattr(params, "input_noise"):
+        if params.get("input_noise", None) is not None:
             if params.input_noise["mode"] == "concatenate":
                 if "n_channels" in params.input_noise:
                     params.n_noise_chan = params.input_noise["n_channels"]
@@ -679,6 +679,8 @@ class Driver(metaclass=abc.ABCMeta):
             scheduler = lr_scheduler.CosineAnnealingLR(optimizer, T_max=params.scheduler_T_max, eta_min=params.scheduler_min_lr)
         elif params.scheduler == "OneCycleLR":
             scheduler = lr_scheduler.OneCycleLR(optimizer, max_lr=params.lr, total_steps=params.scheduler_T_max, steps_per_epoch=1)
+        elif params.scheduler == "CosineAnnealingWarmRestarts":
+            scheduler = lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=params.get("scheduler_T_0", 10), T_mult=params.get("scheduler_T_mult", 1), eta_min=params.get("scheduler_min_lr", 0.0))
         else:
             scheduler = None
 
