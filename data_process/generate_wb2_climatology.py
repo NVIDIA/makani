@@ -24,7 +24,7 @@ from tqdm import tqdm
 
 from mpi4py import MPI
 
-from .wb2_helpers import split_convert_channel_names
+from .wb2_helpers import split_convert_channel_names, gcs_storage_options
 
 
 def generate_wb2_climatology(metadata_file: str, input_climatology: str, mask_output_file: str, climatology_output_file: str,
@@ -83,7 +83,8 @@ def generate_wb2_climatology(metadata_file: str, input_climatology: str, mask_ou
     atmospheric_channel_names, atmospheric_channel_names_wb2, surface_channel_names, surface_channel_names_wb2, atmospheric_levels = split_convert_channel_names(channel_names)
     
     # open zarr file and load the above_ground mask:
-    clim = xr.open_zarr(input_climatology)
+    storage_options = gcs_storage_options() if input_climatology.startswith(("gs://", "gcs://")) else {}
+    clim = xr.open_zarr(input_climatology, storage_options=storage_options)
 
     # above ground data, only relevant levels
     above_ground = clim["above_ground"]
