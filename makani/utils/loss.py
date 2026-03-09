@@ -231,24 +231,17 @@ class LossHandler(nn.Module):
 
         loss_type = set(loss_type.split())
 
-        # this can probably all be moved to the loss function itself
-        relative = "relative" in loss_type
-        squared = "squared" in loss_type
-
-        jacobian = "s2" if "geometric" in loss_type else "flat"
-
         # decide which loss to use
         if "spectral" in loss_type and "l2" in loss_type:
-            loss_handle = partial(SpectralLpLoss, p=2, relative=relative, squared=squared)
+            loss_handle = partial(SpectralLpLoss, p=2)
         elif "spectral" in loss_type and "l1" in loss_type:
-            loss_handle = partial(SpectralLpLoss, p=1, relative=relative, squared=squared)
+            loss_handle = partial(SpectralLpLoss, p=1)
         elif "l2" in loss_type:
-            loss_handle = partial(GeometricLpLoss, p=2, relative=relative, squared=squared, jacobian=jacobian)
+            loss_handle = partial(GeometricLpLoss, p=2)
         elif "l1" in loss_type:
-            loss_handle = partial(GeometricLpLoss, p=1, relative=relative, squared=squared, jacobian=jacobian)
+            loss_handle = partial(GeometricLpLoss, p=1)
         elif "h1" in loss_type:
-            assert jacobian == "s2"
-            loss_handle = partial(SpectralH1Loss, relative=relative, squared=squared, jacobian=jacobian)
+            loss_handle = partial(SpectralH1Loss)
         elif "amse" in loss_type:
             loss_handle = SpectralAMSELoss
         elif "hydrostatic" in loss_type:
