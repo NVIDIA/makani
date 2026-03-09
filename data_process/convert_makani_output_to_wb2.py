@@ -16,6 +16,7 @@
 from typing import Optional, List
 import progressbar
 import os
+import sys
 import time
 import numpy as np
 import h5py as h5
@@ -30,7 +31,8 @@ from mpi4py import MPI
 
 from makani.utils.dataloaders.data_helpers import get_date_from_timestamp
 
-from wb2_helpers import surface_variables, atmospheric_variables, split_convert_channel_names
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from data_process.wb2_helpers import surface_variables, atmospheric_variables, split_convert_channel_names
 
 
 def convert(file_names_to_convert: List[str], output_file: str, batch_size: Optional[int]=32,

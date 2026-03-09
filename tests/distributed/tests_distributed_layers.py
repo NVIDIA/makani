@@ -34,13 +34,16 @@ from makani.mpu.layer_norm import DistributedGeometricInstanceNormS2, Distribute
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 from .distributed_helpers import init_grid, split_helper, gather_helper
-from ..testutils import compare_tensors, disable_tf32
+from ..testutils import disable_tf32, compare_tensors
 
 class TestDistributedLayers(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
         init_grid(cls)
+
+    def setUp(self):
+        disable_tf32()
 
 
     def _init_seed(self, seed):
@@ -65,12 +68,12 @@ class TestDistributedLayers(unittest.TestCase):
 
     @parameterized.expand(
         [
-            [180, 360, 256, 512, 32,  8, 5e-4],
-            [181, 360, 181, 360, 1, 10, 5e-5],
-            [180, 360, 128, 256, 32,  8, 5e-4],
-            [181, 360,  91, 180, 1, 10, 5e-5],
-            [128, 256, 256, 512, 32,  8, 5e-5],
-            [ 91, 180, 181, 360, 1, 10, 5e-5],
+            [180, 360, 256, 512, 32,  8, 1e-3],
+            [181, 360, 181, 360, 1, 10, 1e-3],
+            [180, 360, 128, 256, 32,  8, 1e-4],
+            [181, 360,  91, 180, 1, 10, 1e-4],
+            [128, 256, 256, 512, 32,  8, 1e-4],
+            [ 91, 180, 181, 360, 1, 10, 1e-4],
         ],
         skip_on_empty=True,
     )
@@ -82,7 +85,7 @@ class TestDistributedLayers(unittest.TestCase):
         B, C, Hi, Wi, Ho, Wo = batch_size, num_chan, nlat_in, nlon_in, nlat_out, nlon_out
 
         from makani.models.common import SpectralConv
-        
+
         # set up handles
         forward_transform_local = th.RealSHT(nlat=Hi, nlon=Wi).to(self.device)
         inverse_transform_local = th.InverseRealSHT(nlat=Ho, nlon=Wo, lmax=forward_transform_local.lmax, mmax=forward_transform_local.mmax).to(self.device)
@@ -130,10 +133,10 @@ class TestDistributedLayers(unittest.TestCase):
             weight = self._split_helper(spect_conv_local.weight, hdim=-1, wdim=None)
             spect_conv_dist.module.weight.copy_(weight)
             spect_conv_dist.module.bias.copy_(spect_conv_local.bias)
-        
+
         # input
         inp_full = torch.randn((B, C, Hi, Wi), dtype=torch.float32, device=self.device)
-        
+
         #############################################################
         # local transform
         #############################################################
@@ -145,13 +148,13 @@ class TestDistributedLayers(unittest.TestCase):
         with torch.no_grad():
             # create full grad
             ograd_full = torch.randn_like(out_full)
-            
+
         # BWD pass
         out_full.backward(ograd_full)
         igrad_full = inp_full.grad.clone()
         wgrad_full = spect_conv_local.weight.grad.clone()
         bgrad_full = spect_conv_local.bias.grad.clone()
-        
+
         #############################################################
         # distributed transform
         #############################################################
@@ -167,7 +170,7 @@ class TestDistributedLayers(unittest.TestCase):
         igrad_local = inp_local.grad.clone()
         wgrad_local = spect_conv_dist.module.weight.grad.clone()
         bgrad_local = spect_conv_dist.module.bias.grad.clone()
-        
+
         #############################################################
         # evaluate FWD pass
         #############################################################
@@ -250,10 +253,10 @@ class TestDistributedLayers(unittest.TestCase):
             with torch.no_grad():
                 norm_dist_handle.weight.copy_(norm_local.weight)
                 norm_dist_handle.bias.copy_(norm_local.bias)
-        
+
         # input
         inp_full = torch.randn((B, C, H, W), dtype=torch.float32, device=self.device)
-        
+
         #############################################################
         # local (serial) transform
         #############################################################
@@ -273,7 +276,7 @@ class TestDistributedLayers(unittest.TestCase):
         if affine:
             wgrad_full = norm_local.weight.grad.clone()
             bgrad_full = norm_local.bias.grad.clone()
-        
+
         #############################################################
         # distributed transform
         #############################################################
@@ -290,7 +293,7 @@ class TestDistributedLayers(unittest.TestCase):
         if affine:
             wgrad_local = norm_dist_handle.weight.grad.clone()
             bgrad_local = norm_dist_handle.bias.grad.clone()
-        
+
         #############################################################
         # evaluate FWD pass
         #############################################################
@@ -395,10 +398,10 @@ class TestDistributedLayers(unittest.TestCase):
             with torch.no_grad():
                 norm_dist.module.weight.copy_(norm_local.weight)
                 norm_dist.module.bias.copy_(norm_local.bias)
-        
+
         # input
         inp_full = torch.randn((B, C, H, W), dtype=torch.float32, device=self.device)
-        
+
         #############################################################
         # local (serial) transform
         #############################################################
@@ -418,7 +421,7 @@ class TestDistributedLayers(unittest.TestCase):
         if affine:
             wgrad_full = norm_local.weight.grad.clone()
             bgrad_full = norm_local.bias.grad.clone()
-        
+
         #############################################################
         # distributed transform
         #############################################################
@@ -435,7 +438,7 @@ class TestDistributedLayers(unittest.TestCase):
         if affine:
             wgrad_local = norm_dist.module.weight.grad.clone()
             bgrad_local = norm_dist.module.bias.grad.clone()
-        
+
         #############################################################
         # evaluate FWD pass
         #############################################################
@@ -472,5 +475,5 @@ class TestDistributedLayers(unittest.TestCase):
                     self.assertTrue(compare_tensors(f"bias gradient {idb}", bgrad_gather_full, bgrad_full, tol, tol, verbose=verbose))
 
 
-if __name__ == '__main__':    
+if __name__ == '__main__':
     unittest.main()

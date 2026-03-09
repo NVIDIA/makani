@@ -56,7 +56,7 @@ class DistributedRealFFT1(nn.Module):
 
         # We make w local by transposing into channel dim
         if self.comm_size_w > 1:
-            x = distributed_transpose_w.apply(x, (channel_dim, -1), self.lon_shapes)
+            x = distributed_transpose_w(x, (channel_dim, -1), self.lon_shapes)
 
         # do first FFT
         x = torch.fft.rfft(x, n=self.nlon, dim=-1, norm=norm)
@@ -67,7 +67,7 @@ class DistributedRealFFT1(nn.Module):
         # transpose: after this, m is split and c is local
         if self.comm_size_w > 1:
             chan_shapes = compute_split_shapes(num_chans, self.comm_size_w)
-            x = distributed_transpose_w.apply(x, (-1, channel_dim), chan_shapes)
+            x = distributed_transpose_w(x, (-1, channel_dim), chan_shapes)
 
         return x
 
@@ -103,7 +103,7 @@ class DistributedInverseRealFFT1(nn.Module):
 
         # transpose: after this, channels are split and m is local
         if self.comm_size_w > 1:
-            x = distributed_transpose_w.apply(x, (channel_dim, -1), self.m_shapes)
+            x = distributed_transpose_w(x, (channel_dim, -1), self.m_shapes)
 
         # apply the inverse (real) FFT
         x = torch.fft.irfft(x, n=self.nlon, dim=-1, norm=norm)
@@ -111,7 +111,7 @@ class DistributedInverseRealFFT1(nn.Module):
         # transpose: after this, m is split and channels are local
         if self.comm_size_w > 1:
             chan_shapes = compute_split_shapes(num_chans, self.comm_size_w)
-            x = distributed_transpose_w.apply(x, (-1, channel_dim), chan_shapes)
+            x = distributed_transpose_w(x, (-1, channel_dim), chan_shapes)
 
         return x
 
@@ -151,7 +151,7 @@ class DistributedRealFFT2(nn.Module):
 
         # h and w is split. First we make w local by transposing into channel dim
         if self.comm_size_w > 1:
-            x = distributed_transpose_w.apply(x, (channel_dim, -1), self.lon_shapes)
+            x = distributed_transpose_w(x, (channel_dim, -1), self.lon_shapes)
 
         # do first FFT
         x = torch.fft.rfft(x, n=self.nlon, dim=-1, norm=norm)
@@ -162,11 +162,11 @@ class DistributedRealFFT2(nn.Module):
         # transpose: after this, m is split and c is local
         if self.comm_size_w > 1:
             chan_shapes = compute_split_shapes(num_chans, self.comm_size_w)
-            x = distributed_transpose_w.apply(x, (-1, channel_dim), chan_shapes)
+            x = distributed_transpose_w(x, (-1, channel_dim), chan_shapes)
 
         # transpose: after this, c is split and h is local
         if self.comm_size_h > 1:
-            x = distributed_transpose_h.apply(x, (channel_dim, -2), self.lat_shapes)
+            x = distributed_transpose_h(x, (channel_dim, -2), self.lat_shapes)
 
         # do second FFT:
         x = torch.fft.fft(x, n=self.nlat, dim=-2, norm=norm)
@@ -177,7 +177,7 @@ class DistributedRealFFT2(nn.Module):
         # transpose: after this, l is split and c is local
         if self.comm_size_h > 1:
             chan_shapes = compute_split_shapes(num_chans, self.comm_size_h)
-            x = distributed_transpose_h.apply(x, (-2, channel_dim), chan_shapes)
+            x = distributed_transpose_h(x, (-2, channel_dim), chan_shapes)
 
         return x
 
@@ -217,7 +217,7 @@ class DistributedInverseRealFFT2(nn.Module):
 
         # transpose: after that, channels are split, l is local:
         if self.comm_size_h > 1:
-            x = distributed_transpose_h.apply(x, (channel_dim, -2), self.l_shapes)
+            x = distributed_transpose_h(x, (channel_dim, -2), self.l_shapes)
 
         # we should pad the middle here manually, so that the inverse FFT is correct
         # TEST THIS
@@ -232,11 +232,11 @@ class DistributedInverseRealFFT2(nn.Module):
 
         if self.comm_size_h > 1:
             chan_shapes = compute_split_shapes(num_chans, self.comm_size_h)
-            x = distributed_transpose_h.apply(x, (-2, channel_dim), chan_shapes)
+            x = distributed_transpose_h(x, (-2, channel_dim), chan_shapes)
 
         # transpose: after this, channels are split and m is local
         if self.comm_size_w > 1:
-            x = distributed_transpose_w.apply(x, (channel_dim, -1), self.m_shapes)
+            x = distributed_transpose_w(x, (channel_dim, -1), self.m_shapes)
 
         # apply the inverse (real) FFT
         x = torch.fft.irfft(x, n=self.nlon, dim=-1, norm=norm)
@@ -244,7 +244,7 @@ class DistributedInverseRealFFT2(nn.Module):
         # transpose: after this, m is split and channels are local
         if self.comm_size_w > 1:
             chan_shapes = compute_split_shapes(num_chans, self.comm_size_w)
-            x = distributed_transpose_w.apply(x, (-1, channel_dim), chan_shapes)
+            x = distributed_transpose_w(x, (-1, channel_dim), chan_shapes)
 
         return x
 
@@ -294,7 +294,7 @@ class DistributedRealFFT3(nn.Module):
 
         # h and w is split. First we make w local by transposing into channel dim
         if self.comm_size_w > 1:
-            x = distributed_transpose_w.apply(x, (1, -1), self.lon_shapes)
+            x = distributed_transpose_w(x, (1, -1), self.lon_shapes)
 
         # do first 2D FFT
         x = torch.fft.rfft2(x, s=(self.nd, self.nw), dim=(-3, -1), norm="ortho")
@@ -308,11 +308,11 @@ class DistributedRealFFT3(nn.Module):
         # transpose: after this, m is split and c is local
         if self.comm_size_w > 1:
             chan_shapes = compute_split_shapes(num_chans, self.comm_size_w)
-            x = distributed_transpose_w.apply(x, (-1, 1), chan_shapes)
+            x = distributed_transpose_w(x, (-1, 1), chan_shapes)
 
         # transpose: after this, c is split and h is local
         if self.comm_size_h > 1:
-            x = distributed_transpose_h.apply(x, (1, -2), self.lat_shapes)
+            x = distributed_transpose_h(x, (1, -2), self.lat_shapes)
 
         # do second FFT:
         x = torch.fft.fft(x, n=self.nh, dim=-2, norm="ortho")
@@ -323,7 +323,7 @@ class DistributedRealFFT3(nn.Module):
         # transpose: after this, l is split and c is local
         if self.comm_size_h > 1:
             chan_shapes = compute_split_shapes(num_chans, self.comm_size_h)
-            x = distributed_transpose_h.apply(x, (-2, 1), chan_shapes)
+            x = distributed_transpose_h(x, (-2, 1), chan_shapes)
 
         return x
 
@@ -371,7 +371,7 @@ class DistributedInverseRealFFT3(nn.Module):
 
         # transpose: after that, channels are split, lh is local:
         if self.comm_size_h > 1:
-            x = distributed_transpose_h.apply(x, (1, -2), self.l_shapes)
+            x = distributed_transpose_h(x, (1, -2), self.l_shapes)
 
         # we should pad the middle here manually, so that the inverse FFT is correct
         if self.lhmax < self.nh:
@@ -391,11 +391,11 @@ class DistributedInverseRealFFT3(nn.Module):
 
         if self.comm_size_h > 1:
             chan_shapes = compute_split_shapes(num_chans, self.comm_size_h)
-            x = distributed_transpose_h.apply(x, (-2, 1), chan_shapes)
+            x = distributed_transpose_h(x, (-2, 1), chan_shapes)
 
         # transpose: after this, channels are split and m is local
         if self.comm_size_w > 1:
-            x = distributed_transpose_w.apply(x, (1, -1), self.m_shapes)
+            x = distributed_transpose_w(x, (1, -1), self.m_shapes)
 
         # apply the inverse (real) FFT
         x = torch.fft.irfft(x, n=self.nw, dim=-1, norm="ortho")
@@ -403,6 +403,6 @@ class DistributedInverseRealFFT3(nn.Module):
         # transpose: after this, m is split and channels are local
         if self.comm_size_w > 1:
             chan_shapes = compute_split_shapes(num_chans, self.comm_size_w)
-            x = distributed_transpose_w.apply(x, (-1, 1), chan_shapes)
+            x = distributed_transpose_w(x, (-1, 1), chan_shapes)
 
         return x

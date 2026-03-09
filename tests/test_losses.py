@@ -28,7 +28,7 @@ from makani.utils.losses import CRPSLoss
 from makani.utils.losses.energy_score import SobolevEnergyScoreLoss
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from .testutils import get_default_parameters, compare_tensors, compare_arrays, disable_tf32
+from .testutils import disable_tf32, get_default_parameters, compare_tensors, compare_arrays
 
 from properscoring import crps_ensemble, crps_gaussian
 
@@ -78,6 +78,8 @@ class TestLosses(unittest.TestCase):
 
 
     def setUp(self):
+
+        disable_tf32()
 
         torch.manual_seed(333)
         torch.cuda.manual_seed(333)

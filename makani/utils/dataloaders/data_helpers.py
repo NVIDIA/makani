@@ -89,7 +89,7 @@ def get_psd_stats(params):
     return psd_means, psd_stds
 
 
-def get_climatology(params):
+def get_climatology(params, mask_nan=True):
     """
     routine for fetching climatology and normalization factors
     """
@@ -116,9 +116,14 @@ def get_climatology(params):
         time_means = time_means[..., params.out_channels, start_x:end_x, start_y:end_y]
         clim = (time_means - bias) / scale
 
+        # impute NaN values if requested
+        if mask_nan:
+            clim = np.where(np.isnan(clim), 0.0, clim)
+
     # apply subsampling
-    clim = clim[:, :, ::subsampling_factor, ::subsampling_factor]
-    
+    if subsampling_factor > 1:
+        clim = clim[:, :, ::subsampling_factor, ::subsampling_factor]
+
     return clim
 
 

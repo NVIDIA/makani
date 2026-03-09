@@ -46,7 +46,7 @@ from makani.mpu.layer_norm import DistributedInstanceNorm2d, DistributedLayerNor
 # for annotation of models
 from dataclasses import dataclass
 import physicsnemo
-from physicsnemo.models.meta import ModelMetaData
+from physicsnemo import ModelMetaData
 
 
 class SpectralFilterLayer(nn.Module):

@@ -135,7 +135,7 @@ mpirun -n 8 python get_stats.py \
   --metadata_file /mnt/era5/metadata.json \
   --output_path /mnt/era5/stats/train \
   --dt 1 \
-  --quadrature_rule gauss-legendre \
+  --quadrature_rule legendre-gauss \
   --batch_size 16 \
   --reduction_group_size 8 \
   --wind_angle_aware \
@@ -147,7 +147,7 @@ Key flags:
 - `--metadata_file`: matches the dataset/VDS (channels/lat/lon/dhours must align).
 - `--output_path`: directory where the `.npy` outputs are written.
 - `--dt`: time-step (in units of `dhours`) for difference stats.
-- `--quadrature_rule`: spatial weighting (`naive`, `clenshaw-curtiss`, `gauss-legendre`).
+- `--quadrature_rule`: spatial weighting (`naive`, `clenshaw-curtiss`, `legendre-gauss`).
 - `--wind_angle_aware`: treat paired wind components as magnitudes for mean/std. This conserves the angle of the wind vector and just normalizes its magnitudes.
 - `--fail_on_nan`: abort if NaNs appear instead of masking them. This should not be used when computing stats for fields with missing numbers such as `sst`.
 - `--batch_size`: samples per read; tune for memory.

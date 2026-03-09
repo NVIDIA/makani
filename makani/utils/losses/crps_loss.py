@@ -19,7 +19,6 @@ import numpy as np
 import math
 
 import torch
-import torch.nn as nn
 from torch import amp
 
 from makani.utils.losses.base_loss import LossType, GeometricBaseLoss, SpectralBaseLoss, VortDivBaseLoss, GradientBaseLoss
@@ -335,14 +334,17 @@ class CRPSLoss(GeometricBaseLoss):
             forecasts = forecasts.reshape(E, B, C, H * W)
             if self.ensemble_distributed:
                 ensemble_shapes = [forecasts.shape[0] for _ in range(comm.get_size("ensemble"))]
-                forecasts = distributed_transpose.apply(forecasts, (-1, 0), ensemble_shapes, "ensemble")
+                forecasts = distributed_transpose(forecasts, (-1, 0), ensemble_shapes, "ensemble")
             # observations does not need a transpose, but just a split
             observations = observations.reshape(B, C, H * W)
             if self.ensemble_distributed:
                 observations = scatter_to_parallel_region(observations, -1, "ensemble")
             if spatial_weights is not None:
                 spatial_weights_split = spatial_weights.flatten(start_dim=-2, end_dim=-1)
-                spatial_weights_split = scatter_to_parallel_region(spatial_weights_split, -1, "ensemble")
+                if self.ensemble_distributed:
+                    spatial_weights_split = scatter_to_parallel_region(spatial_weights_split, -1, "ensemble")
+            else:
+                spatial_weights_split = None
 
             # run appropriate crps kernel to compute it pointwise
             if self.crps_type == "cdf":
@@ -517,7 +519,7 @@ class SpectralCRPSLoss(SpectralBaseLoss):
             forecasts = forecasts.reshape(E, B, C, H * W)
             if self.ensemble_distributed:
                 ensemble_shapes = [forecasts.shape[0] for _ in range(comm.get_size("ensemble"))]
-                forecasts = distributed_transpose.apply(forecasts, (-1, 0), ensemble_shapes, "ensemble")
+                forecasts = distributed_transpose(forecasts, (-1, 0), ensemble_shapes, "ensemble")
             # observations does not need a transpose, but just a split
             observations = observations.reshape(B, C, H * W)
             if self.ensemble_distributed:
@@ -721,7 +723,7 @@ class GradientCRPSLoss(GradientBaseLoss):
             forecasts = forecasts.reshape(E, B, C, H * W)
             if self.ensemble_distributed:
                 ensemble_shapes = [forecasts.shape[0] for _ in range(comm.get_size("ensemble"))]
-                forecasts = distributed_transpose.apply(forecasts, (-1, 0), ensemble_shapes, "ensemble")
+                forecasts = distributed_transpose(forecasts, (-1, 0), ensemble_shapes, "ensemble")
             # observations does not need a transpose, but just a split
             observations = observations.reshape(B, C, H * W)
             if self.ensemble_distributed:
@@ -881,7 +883,7 @@ class VortDivCRPSLoss(VortDivBaseLoss):
             forecasts = forecasts.reshape(E, B, C, H * W)
             if self.ensemble_distributed:
                 ensemble_shapes = [forecasts.shape[0] for _ in range(comm.get_size("ensemble"))]
-                forecasts = distributed_transpose.apply(forecasts, (-1, 0), ensemble_shapes, "ensemble")
+                forecasts = distributed_transpose(forecasts, (-1, 0), ensemble_shapes, "ensemble")
             # observations does not need a transpose, but just a split
             observations = observations.reshape(B, C, H * W)
             if self.ensemble_distributed:
@@ -1080,7 +1082,7 @@ class KernelScoreLoss(GeometricBaseLoss):
             forecasts = forecasts.reshape(E, B, C, H * W)
             if self.ensemble_distributed:
                 ensemble_shapes = [forecasts.shape[0] for _ in range(comm.get_size("ensemble"))]
-                forecasts = distributed_transpose.apply(forecasts, (-1, 0), ensemble_shapes, "ensemble")
+                forecasts = distributed_transpose(forecasts, (-1, 0), ensemble_shapes, "ensemble")
             # observations does not need a transpose, but just a split
             observations = observations.reshape(B, C, H * W)
             if self.ensemble_distributed:

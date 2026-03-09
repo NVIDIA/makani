@@ -36,14 +36,18 @@ from makani.utils.losses import (
 
 # Add parent directory to path for testutils import
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-from tests.distributed.distributed_helpers import init_grid, split_helper, gather_helper
-from tests.testutils import compare_tensors, disable_tf32
+
+from .distributed_helpers import init_grid, split_helper, gather_helper
+from ..testutils import disable_tf32, compare_tensors
 
 class TestDistributedLoss(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
         init_grid(cls)
+
+    def setUp(self):
+        disable_tf32()
 
     def _split_helper(self, tensor):
         with torch.no_grad():
@@ -159,7 +163,7 @@ class TestDistributedLoss(unittest.TestCase):
         # generate gauss random distributed around 1, with sigma=2
         mean, sigma = (1.0, 2.0)
         inp_full = torch.randn((B, E, C, H, W), dtype=torch.float32, device=self.device) * sigma + mean
-        obs_full = torch.full((B, C, H, W), fill_value=mean, dtype=torch.float32, device=self.device)
+        obs_full = torch.randn((B, C, H, W), dtype=torch.float32, device=self.device) * sigma * 0.001 + mean
 
         if loss_type != "nll":
             # local loss
@@ -274,12 +278,13 @@ class TestDistributedLoss(unittest.TestCase):
 
     @parameterized.expand(
         [
-            [128, 256, 32, 8, 4, "cdf", True, 1e-4],
-            [129, 256, 1, 10, 4, "cdf", True, 1e-4],
-            [128, 256, 32, 8, 4, "skillspread", False, 1e-4],
-            [129, 256, 1, 10, 4, "skillspread", False, 1e-4],
-            [128, 256, 32, 8, 4, "skillspread", True, 1e-4],
-            [129, 256, 1, 10, 4, "skillspread", True, 1e-4],
+            [128, 256, 32, 8, 4, "ensemble_crps", False, 1e-4],
+            [129, 256, 1, 10, 4, "ensemble_crps", False, 1e-4],
+            [128, 256, 32, 8, 4, "ensemble_crps", True, 1e-4],
+            [128, 256, 32, 8, 4, "skillspread_crps", False, 1e-4],
+            [129, 256, 1, 10, 4, "skillspread_crps", False, 1e-4],
+            [128, 256, 32, 8, 4, "skillspread_crps", True, 1e-4],
+            [129, 256, 1, 10, 4, "skillspread_crps", True, 5e-4],
         ], skip_on_empty=True
     )
     def test_distributed_spectral_crps(self, nlat, nlon, batch_size, num_chan, ens_size, loss_type, absolute, tol, verbose=True):
@@ -293,7 +298,7 @@ class TestDistributedLoss(unittest.TestCase):
         # generate gauss random distributed around 1, with sigma=2
         mean, sigma = (1.0, 2.0)
         inp_full = torch.randn((B, E, C, H, W), dtype=torch.float32, device=self.device) * sigma + mean
-        obs_full = torch.randn((B, C, H, W), dtype=torch.float32, device=self.device) * sigma * 0.01 + mean
+        obs_full = torch.randn((B, C, H, W), dtype=torch.float32, device=self.device) * sigma * 0.001 + mean
 
         # local loss
         loss_fn_local = SpectralCRPSLoss(

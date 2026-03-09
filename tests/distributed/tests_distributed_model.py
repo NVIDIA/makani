@@ -33,7 +33,7 @@ from physicsnemo.distributed.mappings import reduce_from_parallel_region
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 from .distributed_helpers import get_default_parameters, split_helper, gather_helper
-from ..testutils import compare_tensors
+from ..testutils import disable_tf32, compare_tensors
 
 
 class TestDistributedModel(unittest.TestCase):
@@ -62,6 +62,9 @@ class TestDistributedModel(unittest.TestCase):
 
 
     def setUp(self):
+
+        disable_tf32()
+
         self.params = get_default_parameters()
 
         self.params.history_normalization_mode = "none"

@@ -298,7 +298,7 @@ class CoherenceRegularization(SpectralBaseLoss):
         forecasts = torch.moveaxis(forecasts, 1, 0)
         if self.ensemble_distributed:
             ensemble_shapes = [forecasts.shape[0] for _ in range(comm.get_size("ensemble"))]
-            forecasts = distributed_transpose.apply(forecasts, (-1, 0), ensemble_shapes, "ensemble")        # for correct spatial reduction we need to do the same with spatial weights
+            forecasts = distributed_transpose(forecasts, (-1, 0), ensemble_shapes, "ensemble")        # for correct spatial reduction we need to do the same with spatial weights
 
         # also split observations along m for the ensemble-distributed transpose
         observations = observations.unsqueeze(0)

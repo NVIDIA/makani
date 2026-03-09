@@ -26,7 +26,7 @@ from typing import Optional
 from makani.utils.inference.rollout_buffer import TemporalAverageBuffer
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from .testutils import init_dataset, get_default_parameters, compare_arrays, H5_PATH, IMG_SIZE_H, IMG_SIZE_W
+from .testutils import disable_tf32, init_dataset, get_default_parameters, compare_arrays, H5_PATH, IMG_SIZE_H, IMG_SIZE_W
 
 
 def init_dataset_params(
@@ -101,6 +101,8 @@ class TestRolloutBuffers(unittest.TestCase):
     def setUp(self):
         """Set up test parameters for each test method"""
         
+        disable_tf32()
+
         # Initialize parameters using the same approach as test_dataloader.py
         self.params = init_dataset_params(
             self.train_path, 
