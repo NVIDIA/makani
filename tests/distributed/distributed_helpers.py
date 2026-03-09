@@ -17,9 +17,7 @@
 import torch
 import torch.distributed as dist
 
-from physicsnemo.distributed.utils import split_tensor_along_dim
-from physicsnemo.distributed.mappings import gather_from_parallel_region, scatter_to_parallel_region, \
-    reduce_from_parallel_region
+from torch_harmonics.distributed import split_tensor_along_dim
 
 from makani.utils.YParams import ParamsBase
 

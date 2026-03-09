@@ -16,7 +16,6 @@
 from typing import Optional, Tuple, List
 
 import torch
-import torch.nn as nn
 
 from physicsnemo.distributed.mappings import reduce_from_parallel_region
 

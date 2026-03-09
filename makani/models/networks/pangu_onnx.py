@@ -13,17 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
-import sys
-import math
-import numpy as np
-from collections.abc import Sequence
-from copy import deepcopy
-
 import torch
-import time
-import torch.nn as nn
-from torch.nn import functional as F
 from makani.utils.features import get_channel_groups
 
 from makani.models.onnx_wrapper import OnnxWrapper
