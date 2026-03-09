@@ -107,7 +107,7 @@ class GeometricLpLoss(GeometricBaseLoss):
 
         return all_norms
 
-    def forward(self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None):
+    def forward(self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None, **kwargs):
         if self.relative:
             loss = self.rel(prd, tar, wgt)
         else:
@@ -244,7 +244,7 @@ class SpectralLpLoss(SpectralBaseLoss):
 
         return retval
 
-    def forward(self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor:
 
         if self.relative:
             loss = self.rel(prd, tar, wgt)

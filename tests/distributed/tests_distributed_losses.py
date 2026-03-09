@@ -29,7 +29,7 @@ from makani.utils.losses import (
     CRPSLoss,
     EnsembleNLLLoss,
     SpectralCRPSLoss,
-    L2EnergyScoreLoss,
+    LpEnergyScoreLoss,
     SpectralL2EnergyScoreLoss,
     SobolevEnergyScoreLoss,
 )
@@ -388,7 +388,7 @@ class TestDistributedLoss(unittest.TestCase):
             [129, 256, 2, 5, 4, 1e-4],
         ], skip_on_empty=True
     )
-    def test_distributed_l2_energy_score(self, nlat, nlon, batch_size, num_chan, ens_size, tol, verbose=False):
+    def test_distributed_lp_energy_score(self, nlat, nlon, batch_size, num_chan, ens_size, tol, verbose=False):
 
         # disable tf32 for deterministic comparison# disable tf32
         disable_tf32()
@@ -401,15 +401,16 @@ class TestDistributedLoss(unittest.TestCase):
         obs_full = torch.randn((B, C, H, W), dtype=torch.float32, device=self.device) * sigma * 0.01 + mean
 
         # local loss
-        loss_fn_local = L2EnergyScoreLoss(
+        loss_fn_local = LpEnergyScoreLoss(
             img_shape=(H, W),
-            crop_shape=None,
+            crop_shape=(H, W),
             crop_offset=(0, 0),
-            channel_names=(),
+            channel_names=tuple(),
             grid_type="equiangular",
             pole_mask=0,
             alpha=1.0,
             beta=1.0,
+            p=2.0,
             eps=1.0e-5,
             spatial_distributed=False,
             ensemble_distributed=False,
@@ -417,7 +418,7 @@ class TestDistributedLoss(unittest.TestCase):
         ).to(self.device)
 
         # distributed loss
-        loss_fn_dist = L2EnergyScoreLoss(
+        loss_fn_dist = LpEnergyScoreLoss(
             img_shape=(H, W),
             crop_shape=None,
             crop_offset=(0, 0),
@@ -426,6 +427,7 @@ class TestDistributedLoss(unittest.TestCase):
             pole_mask=0,
             alpha=1.0,
             beta=1.0,
+            p=2.0,
             eps=1.0e-5,
             spatial_distributed=(comm.is_distributed("spatial") and (comm.get_size("spatial") > 1)),
             ensemble_distributed=(comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1)),

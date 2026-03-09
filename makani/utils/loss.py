@@ -30,10 +30,10 @@ from physicsnemo.distributed.mappings import gather_from_parallel_region, reduce
 
 from .losses import LossType, GeometricLpLoss, SpectralLpLoss, SpectralH1Loss, SpectralAMSELoss
 from .losses import CRPSLoss, SpectralCRPSLoss, GradientCRPSLoss, VortDivCRPSLoss, KernelScoreLoss
-from .losses import L2EnergyScoreLoss, SobolevEnergyScoreLoss, SpectralL2EnergyScoreLoss, SpectralCoherenceLoss
+from .losses import LpEnergyScoreLoss, SobolevEnergyScoreLoss, SpectralL2EnergyScoreLoss, SpectralCoherenceLoss, CorrectedSpectralL2EnergyScoreLoss
 from .losses import GaussianMMDLoss
 from .losses import EnsembleNLLLoss
-from .losses import DriftRegularization, HydrostaticBalanceLoss, SpectralRegularization
+from .losses import DriftRegularization, HydrostaticBalanceLoss, SpectralRegularization, CoherenceRegularization
 
 
 class LossHandler(nn.Module):
@@ -211,7 +211,6 @@ class LossHandler(nn.Module):
             # linear weighting factor for the case of multistep training
             multistep_weight = torch.arange(1, self.n_future + 2, dtype=torch.float32) / float(self.n_future + 1)
         elif multistep_weight_type == "last-n-1":
-            print(f"using last n-1")
             # weighting factor for the last n steps, with the first step weighted 0
             multistep_weight = torch.ones(self.n_future + 1, dtype=torch.float32) / float(self.n_future)
             multistep_weight[0] = 0.0
@@ -277,18 +276,24 @@ class LossHandler(nn.Module):
             loss_handle = EnsembleNLLLoss
         elif "gaussian_mmd" in loss_type:
             loss_handle = GaussianMMDLoss
+        elif "lp_energy_score" in loss_type:
+            loss_handle = partial(LpEnergyScoreLoss)
         elif "l2_energy_score" in loss_type:
-            loss_handle = partial(L2EnergyScoreLoss)
+            loss_handle = partial(LpEnergyScoreLoss, p=2.0)
         elif "sobolev_energy_score" in loss_type:
             loss_handle = partial(SobolevEnergyScoreLoss)
         elif "spectral_l2_energy_score" in loss_type:
             loss_handle = partial(SpectralL2EnergyScoreLoss)
         elif "spectral_coherence_loss" in loss_type:
             loss_handle = partial(SpectralCoherenceLoss)
+        elif "corrected_spectral_l2_energy_score" in loss_type:
+            loss_handle = partial(CorrectedSpectralL2EnergyScoreLoss)
         elif "drift_regularization" in loss_type:
             loss_handle = DriftRegularization
         elif "spectral_regularization" in loss_type:
             loss_handle = SpectralRegularization
+        elif "coherence_regularization" in loss_type:
+            loss_handle = partial(CoherenceRegularization)
         else:
             raise NotImplementedError(f"Unknown loss function: {loss_type}")
 
@@ -361,7 +366,15 @@ class LossHandler(nn.Module):
         inp_last = inp[..., -n_channels_per_step:, :, :]
         return inp_last
 
-    def forward(self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None, inp: Optional[torch.Tensor] = None):
+    def forward(
+        self,
+        prd: torch.Tensor,
+        tar: torch.Tensor,
+        wgt: Optional[torch.Tensor] = None,
+        inp: Optional[torch.Tensor] = None,
+        training_progress: Optional[float] = None,
+        **kwargs,
+    ):
         # we assume the following:
         # if prd is 5D, we assume that the dims are
         # batch, ensemble, channel, h, w
@@ -430,17 +443,23 @@ class LossHandler(nn.Module):
         # compute loss contributions from each loss
         loss_vals = []
         for lfn, requires_inp in zip(self.loss_fn, self.loss_requires_input):
+            if self.n_future > 0:
+                ncw = lfn.n_channels
+                # step index per channel: [0,...,0, 1,...,1, ..., n_future,...,n_future], ncw per step
+                lead_time_step = torch.arange(0, self.n_future + 1, dtype=torch.long, device=prd.device).repeat_interleave(ncw)
+            else:
+                lead_time_step = None
+            kwargs_step = {"lead_time_step": lead_time_step, "training_progress": training_progress, "n_future": self.n_future}
             if lfn.type == LossType.Deterministic:
                 if requires_inp:
-                    loss_vals.append(lfn(prdm_tendency, tar_tendency, wgt))
+                    loss_vals.append(lfn(prdm_tendency, tar_tendency, wgt, **kwargs_step))
                 else:
-                    loss_vals.append(lfn(prdm, tar, wgt))
+                    loss_vals.append(lfn(prdm, tar, wgt, **kwargs_step))
             else:
-                # probabilistic losses: use tendency-transformed ensemble if needed
                 if requires_inp:
-                    loss_vals.append(lfn(prd_tendency, tar_tendency, wgt))
+                    loss_vals.append(lfn(prd_tendency, tar_tendency, wgt, **kwargs_step))
                 else:
-                    loss_vals.append(lfn(prd, tar, wgt))
+                    loss_vals.append(lfn(prd, tar, wgt, **kwargs_step))
         all_losses = torch.cat(loss_vals, dim=-1)
 
         if self.training and self.track_running_stats:

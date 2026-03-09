@@ -87,7 +87,7 @@ class EnsembleNLLLoss(GeometricBaseLoss):
     def type(self):
         return LossType.Probabilistic
 
-    def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, spatial_weights: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, spatial_weights: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor:
 
         # we assume the following shapes:
         # forecasts: batch, ensemble, channels, lat, lon

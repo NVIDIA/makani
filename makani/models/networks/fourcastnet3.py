@@ -44,7 +44,7 @@ from physicsnemo.models.meta import ModelMetaData
 
 # heuristic for finding theta_cutoff
 def _compute_cutoff_radius(lmax, kernel_shape, basis_type):
-    margin_factor = {"piecewise linear": 2.0, "morlet": 1.0, "harmonic": 2.0, "zernike": 1.0}
+    margin_factor = {"piecewise linear": 1.0, "morlet": 1.0, "harmonic": 1.0, "zernike": 1.0}
     return margin_factor[basis_type] * (kernel_shape[0] + 0.25) * math.pi / float(lmax)
 
 # commenting out torch.compile due to long intiial compile times
@@ -504,10 +504,8 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
 
         if normalization_means is not None:
             self.register_buffer("normalization_means", torch.as_tensor(normalization_means))
-            print(f"normalization_means dtype after register_buffer: {self.normalization_means.dtype}")
         if normalization_stds is not None:
             self.register_buffer("normalization_stds", torch.as_tensor(normalization_stds))
-            print(f"normalization_stds dtype after register_buffer: {self.normalization_stds.dtype}")
 
         # initialize spectral transforms
         self._init_spectral_transforms(model_grid_type, sht_grid_type, hard_thresholding_fraction, lmax)

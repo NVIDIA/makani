@@ -29,7 +29,11 @@ from physicsnemo.distributed.mappings import scatter_to_parallel_region, reduce_
 from makani.mpu.mappings import distributed_transpose
 
 
-class L2EnergyScoreLoss(GeometricBaseLoss):
+class LpEnergyScoreLoss(GeometricBaseLoss):
+    """
+    Lp Energy Score (Gneiting et al. 2005). Uses Lebesgue norm ||x||_p = (sum |x_i|^p)^(1/p).
+    p=2 gives the standard L2/Euclidean energy score.
+    """
 
     def __init__(
         self,
@@ -45,7 +49,9 @@ class L2EnergyScoreLoss(GeometricBaseLoss):
         channel_reduction: Optional[bool] = True,
         alpha: Optional[float] = 1.0,
         beta: Optional[float] = 1.0,
+        p: Optional[float] = 2.0,
         eps: Optional[float] = 1.0e-5,
+        spread_temper_steps: Optional[int] = 0,
         **kwargs,
     ):
 
@@ -64,7 +70,9 @@ class L2EnergyScoreLoss(GeometricBaseLoss):
         self.channel_reduction = channel_reduction
         self.alpha = alpha
         self.beta = beta
+        self.p = float(p)
         self.eps = eps
+        self.spread_temper_steps = spread_temper_steps
 
         # we also need a variant of the weights split in ensemble direction:
         quad_weight_split = self.quadrature.quad_weight.reshape(1, 1, -1)
@@ -94,7 +102,7 @@ class L2EnergyScoreLoss(GeometricBaseLoss):
             chw = super().compute_channel_weighting(channel_weight_type, time_diff_scale)
         return chw
 
-    def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, spatial_weights: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, spatial_weights: Optional[torch.Tensor] = None, lead_time_step: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor:
 
         # sanity checks
         if forecasts.dim() != 5:
@@ -149,9 +157,9 @@ class L2EnergyScoreLoss(GeometricBaseLoss):
         observations = torch.where(torch.isnan(observations), 0.0, observations)
         forecasts = torch.where(torch.isnan(forecasts), 0.0, forecasts)
 
-        # use broadcasting semantics to compute spread and skill and sum over channels (vector norm)
-        espread = (forecasts.unsqueeze(1) - forecasts.unsqueeze(0)).abs().square()
-        eskill = (observations - forecasts).abs().square()
+        # use broadcasting semantics: Lp norm components (sum |diff|^p, then ^(1/p) later)
+        espread = (forecasts.unsqueeze(1) - forecasts.unsqueeze(0)).abs().pow(self.p)
+        eskill = (observations - forecasts).abs().pow(self.p)
 
         # zero out masked positions
         espread = torch.where(nanmask_bool, 0.0, espread)
@@ -197,9 +205,9 @@ class L2EnergyScoreLoss(GeometricBaseLoss):
             espread = espread.float()
             eskill = eskill.float()
 
-            # This is according to the definition in Gneiting et al. 2005
-            espread = torch.sqrt(espread).pow(self.beta)
-            eskill = torch.sqrt(eskill).pow(self.beta)
+            # Lp norm = (sum |x|^p)^(1/p); then optional beta exponent (Gneiting et al. 2005)
+            espread = espread.pow(1.0 / self.p).pow(self.beta)
+            eskill = eskill.pow(1.0 / self.p).pow(self.beta)
 
         # mask espread and sum
         espread = torch.where(espread_mask, 0.0, espread)
@@ -210,10 +218,19 @@ class L2EnergyScoreLoss(GeometricBaseLoss):
         # sum over ensemble
         eskill = eskill.sum(dim=0) / float(num_ensemble)
 
+        # apply spread tempering (lead_time_step shape (C,) for channel-wise weighting)
+        if self.training and self.spread_temper_steps > 0 and lead_time_step is not None:
+            scale = lead_time_step.float().to(espread.device) / self.spread_temper_steps
+            espread = espread * torch.maximum(scale, torch.ones_like(scale))
+
         # the resulting tensor should have dimension B, C which is what we return
         loss =  eskill - 0.5 * espread
 
         return loss
+
+
+# backward-compatibility alias
+L2EnergyScoreLoss = LpEnergyScoreLoss
 
 
 class SobolevEnergyScoreLoss(SpectralBaseLoss):
@@ -299,7 +316,7 @@ class SobolevEnergyScoreLoss(SpectralBaseLoss):
             chw = super().compute_channel_weighting(channel_weight_type, time_diff_scale)
         return chw
 
-    def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, ensemble_weights: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, ensemble_weights: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor:
 
         # sanity checks
         if forecasts.dim() != 5:
@@ -463,7 +480,7 @@ class SpectralL2EnergyScoreLoss(SpectralBaseLoss):
             chw = super().compute_channel_weighting(channel_weight_type, time_diff_scale)
         return chw
 
-    def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, ensemble_weights: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, ensemble_weights: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor:
 
         # sanity checks
         if forecasts.dim() != 5:
@@ -646,7 +663,7 @@ class SpectralCoherenceLoss(SpectralBaseLoss):
             chw = super().compute_channel_weighting(channel_weight_type, time_diff_scale)
         return chw
 
-    def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, ensemble_weights: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, ensemble_weights: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor:
 
         # sanity checks
         if forecasts.dim() != 5:
@@ -743,5 +760,171 @@ class SpectralCoherenceLoss(SpectralBaseLoss):
 
         # reduce over the channel dimension
         loss = loss.sum(dim=-1)
+
+        return loss
+
+class CorrectedSpectralL2EnergyScoreLoss(SpectralBaseLoss):
+    """
+    Spectral L2 Energy Score with spread term capped by truth PSD (Option 2).
+
+    Standard ES: spread reward at wavenumber k is P_k * (1 - mean coherence between
+    ensemble members). The model can reduce the score by inflating P_k and
+    decorrelating phases ("cheap spread").
+
+    This variant uses P_k* (truth PSD) instead of P_k as the coefficient, so the
+    spread reward is bounded by the true signal level. Same accuracy term as
+    standard ES; only the spread term is modified.
+    """
+
+    def __init__(
+        self,
+        img_shape: Tuple[int, int],
+        crop_shape: Tuple[int, int],
+        crop_offset: Tuple[int, int],
+        channel_names: List[str],
+        grid_type: str,
+        lmax: Optional[int] = None,
+        spatial_distributed: Optional[bool] = False,
+        ensemble_distributed: Optional[bool] = False,
+        ensemble_weights: Optional[torch.Tensor] = None,
+        channel_reduction: Optional[bool] = True,
+        alpha: Optional[float] = 1.0,
+        beta: Optional[float] = 1.0,
+        eps: Optional[float] = 1.0e-3,
+        **kwargs,
+    ):
+        super().__init__(
+            img_shape=img_shape,
+            crop_shape=crop_shape,
+            crop_offset=crop_offset,
+            channel_names=channel_names,
+            grid_type=grid_type,
+            lmax=lmax,
+            spatial_distributed=spatial_distributed,
+        )
+
+        self.spatial_distributed = spatial_distributed and comm.is_distributed("spatial")
+        self.ensemble_distributed = ensemble_distributed and comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1)
+        self.channel_reduction = channel_reduction
+        self.alpha = alpha
+        self.beta = beta
+        self.eps = eps
+
+        if ensemble_weights is not None:
+            self.register_buffer("ensemble_weights", ensemble_weights, persistent=False)
+        else:
+            self.ensemble_weights = ensemble_weights
+
+    @property
+    def type(self):
+        return LossType.Probabilistic
+
+    @property
+    def n_channels(self):
+        return 1 if self.channel_reduction else len(self.channel_names)
+
+    @torch.compiler.disable(recursive=False)
+    def compute_channel_weighting(self, channel_weight_type: str, time_diff_scale: Optional[torch.Tensor] = None) -> torch.Tensor:
+        if self.channel_reduction:
+            return torch.ones(1, dtype=torch.float32)
+        return super().compute_channel_weighting(channel_weight_type, time_diff_scale)
+
+    def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, ensemble_weights: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor:
+        if forecasts.dim() != 5:
+            raise ValueError(f"Error, forecasts tensor expected to have 5 dimensions but found {forecasts.dim()}.")
+
+        dtype = forecasts.dtype
+        forecasts = forecasts.float()
+        observations = observations.float()
+        with amp.autocast(device_type="cuda", enabled=False):
+            forecasts = self.sht(forecasts) / math.sqrt(4.0 * math.pi)
+            observations = self.sht(observations) / math.sqrt(4.0 * math.pi)
+
+        forecasts = forecasts.to(dtype)
+        observations = observations.to(dtype)
+
+        B, E, C, H, W = forecasts.shape
+
+        forecasts = torch.moveaxis(forecasts, 1, 0)
+        if self.ensemble_distributed:
+            ensemble_shapes = [forecasts.shape[0] for _ in range(comm.get_size("ensemble"))]
+            forecasts = distributed_transpose.apply(forecasts, (-1, 0), ensemble_shapes, "ensemble")
+
+        lm_weights_split = self.lm_weights
+        if self.ensemble_distributed:
+            lm_weights_split = scatter_to_parallel_region(lm_weights_split, -1, "ensemble")
+
+        if self.ensemble_distributed:
+            observations = scatter_to_parallel_region(observations, -1, "ensemble")
+
+        num_ensemble = forecasts.shape[0]
+
+        nanmasks = torch.logical_or(torch.isnan(observations), torch.isnan(forecasts))
+        nanmask_bool = nanmasks.sum(dim=0) != 0
+        observations = torch.where(torch.isnan(observations), 0.0, observations)
+        forecasts = torch.where(torch.isnan(forecasts), 0.0, forecasts)
+
+        # PSD per (b, c, l): for Option 2 we need P_pred and P_true
+        # P_pred = (1/E) * sum_e sum_m w_m |forecasts[e,b,c,l,m]|^2
+        # P_true = sum_m w_m |observations[b,c,l,m]|^2
+        # forecasts (E, B, C, L, M), observations (B, C, L, M) after scatter
+        psd_pred = (lm_weights_split * forecasts.abs().square()).sum(dim=-1).mean(dim=0)
+        psd_true = (lm_weights_split * observations.abs().square()).sum(dim=-1)
+
+        if self.ensemble_distributed:
+            psd_pred = reduce_from_parallel_region(psd_pred, "ensemble")
+            psd_true = reduce_from_parallel_region(psd_true, "ensemble")
+        if self.spatial_distributed:
+            psd_pred = reduce_from_parallel_region(psd_pred, "w")
+            psd_true = reduce_from_parallel_region(psd_true, "w")
+
+        espread = lm_weights_split * (forecasts.unsqueeze(1) - forecasts.unsqueeze(0)).abs().square()
+        eskill = lm_weights_split * (observations - forecasts).abs().square()
+
+        espread = torch.where(nanmask_bool, 0.0, espread)
+        eskill = torch.where(nanmask_bool, 0.0, eskill)
+
+        if self.channel_reduction:
+            espread = espread.sum(dim=-3, keepdim=True)
+            eskill = eskill.sum(dim=-3, keepdim=True)
+            psd_pred = psd_pred.sum(dim=-2, keepdim=True)
+            psd_true = psd_true.sum(dim=-2, keepdim=True)
+
+        espread = espread.sum(dim=-1, keepdim=False)
+        eskill = eskill.sum(dim=-1, keepdim=False)
+
+        if self.ensemble_distributed:
+            espread = reduce_from_parallel_region(espread, "ensemble")
+            eskill = reduce_from_parallel_region(eskill, "ensemble")
+        if self.spatial_distributed:
+            espread = reduce_from_parallel_region(espread, "w")
+            eskill = reduce_from_parallel_region(eskill, "w")
+
+        espread_mask = torch.where(espread < self.eps, True, False)
+        eskill_mask = torch.where(eskill < self.eps, True, False)
+        espread = torch.where(espread_mask, self.eps, espread)
+        eskill = torch.where(eskill_mask, self.eps, eskill)
+
+        with amp.autocast(device_type="cuda", enabled=False):
+            espread = espread.float()
+            eskill = eskill.float()
+            espread = torch.sqrt(espread).pow(self.beta)
+            eskill = torch.sqrt(eskill).pow(self.beta)
+
+        espread = torch.where(espread_mask, 0.0, espread)
+        eskill = torch.where(eskill_mask, 0.0, eskill)
+
+        espread = espread.sum(dim=(0, 1)) * (float(num_ensemble) - 1.0 + self.alpha) / float(num_ensemble * num_ensemble * (num_ensemble - 1))
+        eskill = eskill.sum(dim=0) / float(num_ensemble)
+
+        # Option 2: spread term = P_true * (1 - Coh^ens) = (P_true / P_pred) * [P_pred * (1 - Coh^ens)]
+        # Standard ES has spread contribution 0.5 * espread = P_pred * (1 - Coh^ens) in the decomposition.
+        # So we scale the spread term by (P_true / (P_pred + eps)).
+        ratio = psd_true / (psd_pred + self.eps)
+        loss = eskill - 0.5 * espread * ratio
+
+        loss = loss.sum(dim=-1)
+        if self.spatial_distributed:
+            loss = reduce_from_parallel_region(loss, "h")
 
         return loss

@@ -135,7 +135,7 @@ class HydrostaticBalanceLoss(GeometricBaseLoss):
 
         return channel_weights
 
-    def forward(self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor:
 
         # undo normalization
         prdun = prd * self.scale + self.bias

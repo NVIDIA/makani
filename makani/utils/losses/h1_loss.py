@@ -153,7 +153,7 @@ class SpectralH1Loss(SpectralBaseLoss):
 
         return retval
 
-    def forward(self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor:
 
         if self.relative:
             loss = self.rel(prd, tar, wgt)

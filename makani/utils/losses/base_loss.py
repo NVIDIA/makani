@@ -245,6 +245,47 @@ class LossType(object):
     Probabilistic = 2
 
 
+def compute_alpha_per_step(
+    n_future: int,
+    schedule: str = "linear",
+    alpha_min: float = 0.0,
+    alpha_max: float = 1.0,
+    training_progress: Optional[float] = None,
+    annealing: str = "quadratic",
+    sigmoid_t0_frac: Optional[float] = None,
+    sigmoid_beta: float = 5.0,
+    device: Optional[torch.device] = None,
+) -> torch.Tensor:
+    """
+    Compute alpha (spread weight) per lead step for tempered energy score.
+    alpha_per_step[k] is used at step k (0 .. n_future).
+    """
+    n_steps = n_future + 1
+    k = torch.arange(n_steps, dtype=torch.float32, device=device)
+    if schedule == "linear":
+        # alpha_k = alpha_min + (alpha_max - alpha_min) * (k / (n_steps - 1)), k=0..n_future
+        if n_steps <= 1:
+            alpha = torch.full((n_steps,), alpha_max, dtype=torch.float32, device=device)
+        else:
+            alpha = alpha_min + (alpha_max - alpha_min) * (k / (n_steps - 1))
+    elif schedule == "sigmoid":
+        # alpha_k = alpha_max * sigmoid(beta * (t_k - t0) / t_max)
+        t0_frac = sigmoid_t0_frac if sigmoid_t0_frac is not None else 0.5
+        t_norm = (k / max(n_steps - 1, 1)) - t0_frac
+        alpha = alpha_max * torch.sigmoid(sigmoid_beta * t_norm)
+    else:
+        alpha = torch.full((n_steps,), alpha_max, dtype=torch.float32, device=device)
+    if training_progress is not None:
+        if annealing == "linear":
+            g = training_progress
+        elif annealing == "quadratic":
+            g = training_progress ** 2
+        else:
+            g = training_progress
+        alpha = alpha * g
+    return alpha
+
+
 # geometric base loss class
 class GeometricBaseLoss(nn.Module, metaclass=ABCMeta):
     """
@@ -295,7 +336,7 @@ class GeometricBaseLoss(nn.Module, metaclass=ABCMeta):
         return _compute_channel_weighting_helper(self.channel_names, channel_weight_type, time_diff_scale=time_diff_scale)
 
     @abstractmethod
-    def forward(self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor:
         pass
 
 
@@ -371,7 +412,7 @@ class SpectralBaseLoss(nn.Module, metaclass=ABCMeta):
         return _compute_channel_weighting_helper(self.channel_names, channel_weight_type, time_diff_scale=time_diff_scale)
 
     @abstractmethod
-    def forward(self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor:
         pass
 
 
@@ -448,8 +489,9 @@ class VortDivBaseLoss(nn.Module, metaclass=ABCMeta):
         return chw
 
     @abstractmethod
-    def forward(self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor:
         pass
+
 
 class GradientBaseLoss(nn.Module, metaclass=ABCMeta):
     """
@@ -513,5 +555,5 @@ class GradientBaseLoss(nn.Module, metaclass=ABCMeta):
 
 
     @abstractmethod
-    def forward(self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor:
         pass

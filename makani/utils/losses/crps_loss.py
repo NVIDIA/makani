@@ -305,7 +305,7 @@ class CRPSLoss(GeometricBaseLoss):
     def type(self):
         return LossType.Probabilistic
 
-    def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, spatial_weights: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, spatial_weights: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor:
 
         # sanity checks
         if forecasts.dim() != 5:
@@ -464,7 +464,7 @@ class SpectralCRPSLoss(SpectralBaseLoss):
     def type(self):
         return LossType.Probabilistic
 
-    def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, spectral_weights: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, spectral_weights: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor:
 
         # sanity checks
         if forecasts.dim() != 5:
@@ -661,7 +661,7 @@ class GradientCRPSLoss(GradientBaseLoss):
         else:
             return [weight for weight in chw for _ in range(2)]
 
-    def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, spatial_weights: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, spatial_weights: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor:
 
         # sanity checks
         if forecasts.dim() != 5:
@@ -833,7 +833,7 @@ class VortDivCRPSLoss(VortDivBaseLoss):
     def type(self):
         return LossType.Probabilistic
 
-    def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, spatial_weights: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, spatial_weights: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor:
 
         # sanity checks
         if forecasts.dim() != 5:
@@ -1038,7 +1038,7 @@ class KernelScoreLoss(GeometricBaseLoss):
     def type(self):
         return LossType.Probabilistic
 
-    def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, spatial_weights: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, spatial_weights: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor:
 
         # sanity checks
         if forecasts.dim() != 5:
