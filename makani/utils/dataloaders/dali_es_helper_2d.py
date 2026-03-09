@@ -14,7 +14,6 @@
 # limitations under the License.
 
 import time
-import sys
 import os
 import glob
 from functools import partial
@@ -31,7 +30,7 @@ from bisect import bisect_right
 import torch
 
 # import splitting logic
-from physicsnemo.distributed.utils import compute_split_shapes
+from torch_harmonics.distributed import compute_split_shapes
 
 # data helpers
 from .data_helpers import get_date_from_string, get_timestamp, get_date_from_timestamp, get_date_ranges, get_default_aws_connector

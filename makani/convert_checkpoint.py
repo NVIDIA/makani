@@ -16,10 +16,8 @@
 import argparse
 import os
 import glob
-import tempfile
 from collections import OrderedDict
 
-import pynvml
 import torch
 from torch import nn
 
@@ -29,7 +27,6 @@ from makani.models.model_package import LocalPackage
 from makani.models import model_registry
 
 # distributed computing stuff
-from makani.utils import comm
 from makani.utils.driver import Driver
 from makani.utils.YParams import ParamsBase
 

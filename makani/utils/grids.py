@@ -13,13 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import numpy as np
 import torch
 
 from torch_harmonics.quadrature import legendre_gauss_weights, clenshaw_curtiss_weights
 
 from makani.utils import comm
-from physicsnemo.distributed.utils import compute_split_shapes
+from torch_harmonics.distributed import compute_split_shapes
 from physicsnemo.distributed.mappings import reduce_from_parallel_region
 
 

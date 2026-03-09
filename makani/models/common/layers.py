@@ -15,8 +15,7 @@
 
 import torch
 import torch.nn as nn
-from torch.nn.modules.container import Sequential
-from torch.utils.checkpoint import checkpoint, checkpoint_sequential
+from torch.utils.checkpoint import checkpoint
 import math
 
 from makani.utils.context import rng_context

@@ -20,13 +20,11 @@ import unittest
 from parameterized import parameterized
 
 import torch
-import torch.nn.functional as F
 import torch.distributed as dist
 
 import torch_harmonics.distributed as thd
 
 from makani.utils import comm
-from makani.utils import functions as fn
 
 from makani.utils.grids import GridQuadrature
 from makani.utils.losses import EnsembleCRPSLoss, EnsembleNLLLoss, EnsembleSpectralCRPSLoss

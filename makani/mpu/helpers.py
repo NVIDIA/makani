@@ -16,7 +16,7 @@
 import torch
 import torch.distributed as dist
 
-from physicsnemo.distributed.utils import split_tensor_along_dim
+from torch_harmonics.distributed import split_tensor_along_dim
 from makani.utils import comm
 
 

@@ -13,17 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import math
-
 import torch.nn.functional as F
 import torch
 import torch.nn as nn
-from functools import partial
 
 # mp stuff
 from makani.utils import comm
 from makani.models.common import DropPath, MLP, PatchEmbed2D
-from makani.mpu.layers import DistributedMatmul, DistributedMLP, DistributedAttention
+from makani.mpu.layers import DistributedMLP, DistributedAttention
 
 
 class Attention(nn.Module):

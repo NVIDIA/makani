@@ -21,14 +21,12 @@ from parameterized import parameterized
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.distributed as dist
 
 import torch_harmonics as th
 import torch_harmonics.distributed as thd
 
 from makani.utils import comm
-from makani.utils import functions as fn
 
 from makani.mpu.mappings import init_gradient_reduction_hooks
 

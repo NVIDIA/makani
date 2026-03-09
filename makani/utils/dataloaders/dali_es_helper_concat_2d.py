@@ -28,7 +28,7 @@ import torch
 from .data_helpers import get_date_from_string, get_date_from_timestamp, get_date_ranges
 
 # import splitting logic
-from physicsnemo.distributed.utils import compute_split_shapes
+from torch_harmonics.distributed import compute_split_shapes
 
 # coszen
 from makani.third_party.climt.zenith_angle import cos_zenith_angle

@@ -13,15 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
-import sys
 import numpy as np
-from typing import Union
 import torch
 import torch.nn as nn
-
-
-import onnx
 
 
 class OnnxWrapper(nn.Module):

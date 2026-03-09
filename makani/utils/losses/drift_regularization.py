@@ -16,7 +16,6 @@
 from typing import Optional, Tuple, List
 
 import torch
-import torch.nn as nn
 
 from makani.utils.losses.base_loss import GeometricBaseLoss, LossType
 

@@ -22,7 +22,6 @@ import torch
 
 from makani.models import model_registry
 from makani.utils import checkpoint_helpers
-from makani.utils import functions as fn
 from makani.utils import LossHandler
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))

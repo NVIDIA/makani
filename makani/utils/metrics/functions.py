@@ -19,7 +19,7 @@ import torch
 
 from makani.utils import comm
 from physicsnemo.distributed.mappings import scatter_to_parallel_region, reduce_from_parallel_region
-from physicsnemo.distributed.utils import split_tensor_along_dim
+from torch_harmonics.distributed import split_tensor_along_dim
 from makani.mpu.mappings import distributed_transpose
 
 from makani.utils.losses import EnsembleCRPSLoss, LossType

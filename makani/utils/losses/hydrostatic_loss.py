@@ -15,10 +15,7 @@
 
 from typing import Tuple, List, Optional
 
-import numpy as np
-
 import torch
-import torch.nn as nn
 
 from makani.utils.losses.base_loss import GeometricBaseLoss
 import makani.utils.constants as const
