@@ -27,7 +27,54 @@ from makani.utils import comm
 from physicsnemo.distributed.utils import split_tensor_along_dim, compute_split_shapes
 
 
-class BaseNoiseS2(nn.Module):
+class BaseNoise(nn.Module):
+    def __init__(self, seed=333, **kwargs):
+        super().__init__()
+        self.set_rng(seed=seed)
+
+    def set_rng(self, seed=333):
+        self.rng_cpu = torch.Generator(device=torch.device("cpu"))
+        self.rng_cpu.manual_seed(seed)
+        if torch.cuda.is_available():
+            self.rng_gpu = torch.Generator(device=torch.device(f"cuda:{comm.get_local_rank()}"))
+            self.rng_gpu.manual_seed(seed)
+
+    def reset(self, batch_size=None):
+        if hasattr(self, "state") and self.state is not None:
+            if batch_size is not None:
+                # This assumes self.state is defined in the derived class with correct shape logic
+                # For BaseNoiseS2 and others, specific reset logic might still be needed or this needs to be generic
+                # We'll leave the generic implementation to the derived classes or implement a helper if shape is known
+                pass
+
+            with torch.no_grad():
+                self.state.fill_(0.0)
+
+    def set_rng_state(self, cpu_state, gpu_state):
+        if cpu_state is not None:
+            self.rng_cpu.set_state(cpu_state)
+        if torch.cuda.is_available() and (gpu_state is not None):
+            self.rng_gpu.set_state(gpu_state)
+
+    def get_rng_state(self):
+        cpu_state = self.rng_cpu.get_state()
+        gpu_state = None
+        if torch.cuda.is_available():
+            gpu_state = self.rng_gpu.get_state()
+        return cpu_state, gpu_state
+
+    def get_tensor_state(self):
+        if hasattr(self, "state"):
+            return self.state.detach().clone()
+        return None
+
+    def set_tensor_state(self, newstate):
+        if hasattr(self, "state"):
+            with torch.no_grad():
+                self.state.copy_(newstate)
+
+
+class BaseNoiseS2(BaseNoise):
     def __init__(
         self,
         img_shape,
@@ -43,7 +90,7 @@ class BaseNoiseS2(nn.Module):
         Abstract base class for noise on the sphere. Initializes the inverse SHT needed by many of the
         noise classes. Derived noise classes can be stateful or stateless.
         """
-        super().__init__()
+        super().__init__(seed=seed)
 
         # Number of latitudinal modes.
         self.nlat, self.nlon = img_shape
@@ -72,21 +119,11 @@ class BaseNoiseS2(nn.Module):
         self.lmax = self.isht.lmax
         self.mmax = self.isht.mmax
 
-        # generator objects:
-        self.set_rng(seed=seed)
-
         # store the noise state: initialize to None
         self.register_buffer("state", torch.zeros((batch_size, self.num_time_steps, self.num_channels, self.lmax_local, self.mmax_local, 2), dtype=torch.float32), persistent=False)
 
     def is_stateful(self):
         raise NotImplementedError("is_stateful method not implemented for this noise class")
-
-    def set_rng(self, seed=333):
-        self.rng_cpu = torch.Generator(device=torch.device("cpu"))
-        self.rng_cpu.manual_seed(seed)
-        if torch.cuda.is_available():
-            self.rng_gpu = torch.Generator(device=torch.device(f"cuda:{comm.get_local_rank()}"))
-            self.rng_gpu.manual_seed(seed)
 
     # Resets the internal state. Can be used to change the batch size if required.
     def reset(self, batch_size=None):
@@ -100,7 +137,7 @@ class BaseNoiseS2(nn.Module):
 
     # this routine generates a noise sample for a single time step and updates the state accordingly, by appending the last time step
     def update(self, replace_state=False, batch_size=None):
-        # Update should always create a new state, so 
+        # Update should always create a new state, so
         # we don't need to check for replace_state
         # create single occurence
         with torch.no_grad():
@@ -120,30 +157,6 @@ class BaseNoiseS2(nn.Module):
             else:
                 self.state = newstate
 
-        return
-
-    def set_rng_state(self, cpu_state, gpu_state):
-        if cpu_state is not None:
-            self.rng_cpu.set_state(cpu_state)
-        if torch.cuda.is_available() and (gpu_state is not None):
-            self.rng_gpu.set_state(gpu_state)
-
-        return
-
-    def get_rng_state(self):
-        cpu_state = self.rng_cpu.get_state()
-        gpu_state = None
-        if torch.cuda.is_available():
-            gpu_state = self.rng_gpu.get_state()
-
-        return cpu_state, gpu_state
-
-    def get_tensor_state(self):
-        return self.state.detach().clone()
-
-    def set_tensor_state(self, newstate):
-        with torch.no_grad():
-            self.state.copy_(newstate)
         return
 
 
@@ -518,3 +531,74 @@ class DummyNoiseS2(nn.Module):
             self.update()
 
         return state
+
+class GaussianVectorNoise(BaseNoise):
+    def __init__(
+        self,
+        img_shape,
+        batch_size,
+        num_channels,
+        num_time_steps=1,
+        sigma=1.0,
+        seed=333,
+        **kwargs,
+    ):
+        r"""
+        Gaussian noise vector in R^d.
+
+        Parameters
+        ============
+        img_shape : (int, int)
+            Ignored, kept for compatibility.
+        batch_size: int
+            Batch size for the noise
+        num_channels: int
+            Number of channels (dimension of the vector)
+        num_time_steps: int
+            Number of time steps
+        sigma : float, default is 1.0
+            Standard deviation
+        """
+        super().__init__(seed=seed)
+
+        self.num_channels = num_channels
+        self.num_time_steps = num_time_steps
+        self.sigma = sigma
+
+        # State: (B, T, C, 1, 1)
+        self.register_buffer("state", torch.zeros((batch_size, self.num_time_steps, self.num_channels, 1, 1), dtype=torch.float32), persistent=False)
+
+    def is_stateful(self):
+        return False
+
+    def reset(self, batch_size=None):
+        if self.state is not None:
+            if batch_size is not None:
+                self.state = torch.zeros(batch_size, self.num_time_steps, self.num_channels, 1, 1, dtype=self.state.dtype, device=self.state.device)
+            with torch.no_grad():
+                self.state.fill_(0.0)
+
+    def update(self, replace_state=False, batch_size=None):
+        with torch.no_grad():
+            if batch_size is None:
+                batch_size = self.state.shape[0]
+
+            # Generate new noise
+            newstate = torch.empty((batch_size, self.num_time_steps, self.num_channels, 1, 1), dtype=self.state.dtype, device=self.state.device)
+            if self.state.is_cuda:
+                newstate.normal_(mean=0.0, std=self.sigma, generator=self.rng_gpu)
+            else:
+                newstate.normal_(mean=0.0, std=self.sigma, generator=self.rng_cpu)
+
+            if newstate.shape == self.state.shape:
+                self.state.copy_(newstate)
+            else:
+                self.state = newstate
+        return
+
+    def forward(self, update_internal_state=False):
+
+        if update_internal_state:
+            self.update()
+
+        return self.state.clone()
