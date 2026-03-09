@@ -44,7 +44,7 @@ class GridConverter(torch.nn.Module):
         if self.src != self.dst:
             if self.dst == "legendre-gauss":
                 cost_lg, _ = legendre_gauss_weights(lat_rad.shape[0], -1, 1)
-                tq = torch.arccos(torch.from_numpy(cost_lg)) - torch.pi / 2.0
+                tq = torch.arccos(cost_lg) - torch.pi / 2.0
                 self.dst_lat = tq.to(lat_rad.device)
                 self.dst_lon = lon_rad
 
