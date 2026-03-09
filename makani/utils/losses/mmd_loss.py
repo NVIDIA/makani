@@ -20,11 +20,8 @@ import torch
 from makani.utils.losses.base_loss import GeometricBaseLoss, GradientBaseLoss, LossType
 from makani.utils import comm
 
-import torch_harmonics as th
-import torch_harmonics.distributed as thd
-
 # distributed stuff
-from physicsnemo.distributed.utils import compute_split_shapes, split_tensor_along_dim
+from torch_harmonics.distributed import split_tensor_along_dim
 from physicsnemo.distributed.mappings import scatter_to_parallel_region, reduce_from_parallel_region
 from makani.mpu.mappings import distributed_transpose
 

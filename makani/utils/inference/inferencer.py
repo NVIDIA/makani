@@ -13,14 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 import time
 from typing import Optional, Union, List
 
 import numpy as np
 from tqdm import tqdm
-import datetime as dt
-import h5py as h5
 
 import torch
 import torch.distributed as dist
@@ -31,7 +28,7 @@ from makani.utils.driver import Driver
 from makani.utils import LossHandler, MetricsHandler
 from makani.utils.dataloader import get_dataloader
 from makani.utils.dataloaders.data_loader_multifiles import MultifilesDataset
-from makani.utils.dataloaders.data_helpers import get_timestamp, get_date_from_timestamp, get_default_aws_connector, get_data_normalization, get_climatology
+from makani.utils.dataloaders.data_helpers import get_date_from_timestamp, get_data_normalization, get_climatology
 from makani.utils.YParams import YParams
 
 from makani.models import model_registry

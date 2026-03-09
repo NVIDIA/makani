@@ -37,11 +37,10 @@ OF THE POSSIBILITY OF SUCH DAMAGE.
 
 import datetime as dt
 import numpy as np
-from typing import Union, Tuple, TypeVar
+from typing import Tuple
 
 # numba stuff for parallelization
-import numba as nb
-from numba import jit, njit
+from numba import jit
 
 # define helper type
 dtype = np.float32

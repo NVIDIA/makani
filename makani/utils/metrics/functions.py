@@ -18,10 +18,10 @@ from typing import Optional, Tuple
 import torch
 
 from makani.utils import comm
+from torch_harmonics.distributed import split_tensor_along_dim
 from physicsnemo.distributed.mappings import scatter_to_parallel_region, reduce_from_parallel_region
-from physicsnemo.distributed.utils import split_tensor_along_dim
-from makani.mpu.mappings import distributed_transpose
 
+from makani.mpu.mappings import distributed_transpose
 from makani.utils.losses import CRPSLoss, LossType
 from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature
 from makani.utils.metrics.base_metric import _sanitize_shapes, _welford_reduction_helper, GeometricBaseMetric

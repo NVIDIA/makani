@@ -18,7 +18,7 @@ import torch.nn as nn
 
 from torch import amp
 
-from typing import Tuple, List, Optional
+from typing import Tuple, Optional
 
 # quadrature stuff
 from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature

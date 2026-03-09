@@ -17,14 +17,13 @@ from typing import Optional, Tuple, List
 
 import math
 import torch
-import torch.nn as nn
 from torch import amp
 
 from makani.utils.losses.base_loss import GeometricBaseLoss, SpectralBaseLoss, LossType
 from makani.utils import comm
 
 # distributed stuff
-from physicsnemo.distributed.utils import compute_split_shapes, split_tensor_along_dim
+from torch_harmonics.distributed import split_tensor_along_dim
 from physicsnemo.distributed.mappings import scatter_to_parallel_region, reduce_from_parallel_region
 from makani.mpu.mappings import distributed_transpose
 

@@ -26,7 +26,6 @@ import torch
 from torch import amp
 import torch.distributed as dist
 
-import logging
 import wandb
 
 # timers

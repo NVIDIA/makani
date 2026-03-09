@@ -14,7 +14,6 @@
 # limitations under the License.
 
 import os
-import sys
 import gc
 import time
 from typing import Optional
@@ -26,7 +25,6 @@ import torch
 from torch import amp
 import torch.distributed as dist
 
-import logging
 import wandb
 
 # timers
@@ -48,7 +46,7 @@ from makani.utils import comm
 from makani.utils import visualize
 
 from makani.mpu.mappings import init_gradient_reduction_hooks
-from makani.mpu.helpers import sync_params, gather_uneven
+from makani.mpu.helpers import sync_params
 
 # for counting model parameters
 from makani.models.helpers import count_parameters

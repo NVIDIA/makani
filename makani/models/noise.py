@@ -24,7 +24,7 @@ import torch_harmonics as th
 import torch_harmonics.distributed as thd
 
 from makani.utils import comm
-from physicsnemo.distributed.utils import split_tensor_along_dim, compute_split_shapes
+from torch_harmonics.distributed import compute_split_shapes, split_tensor_along_dim
 
 
 class BaseNoiseS2(nn.Module):

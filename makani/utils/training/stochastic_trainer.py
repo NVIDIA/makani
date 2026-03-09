@@ -14,7 +14,6 @@
 # limitations under the License.
 
 import os
-import sys
 import gc
 import time
 from typing import Optional
@@ -23,18 +22,14 @@ from tqdm import tqdm
 
 # torch
 import torch
-import torch.optim as optim
-import torch.optim.lr_scheduler as lr_scheduler
 import torch.amp as amp
 import torch.distributed as dist
 
-import logging
 import wandb
 
 # makani depenedencies
 from makani.utils import LossHandler, MetricsHandler
 from makani.utils.driver import Driver
-from makani.utils.training import Trainer
 from makani.utils.dataloader import get_dataloader
 from makani.utils.dataloaders.data_helpers import get_climatology
 from makani.utils.YParams import YParams

@@ -18,7 +18,7 @@ import os
 import torch
 import torch.distributed as dist
 
-from physicsnemo.distributed.utils import split_tensor_along_dim
+from torch_harmonics.distributed import split_tensor_along_dim
 from makani.utils import comm
 
 
@@ -50,10 +50,10 @@ class _DistributedConfig:
 config = _DistributedConfig()
 
 
-def _check_shapes(shapes_gather, shapes_expected):
+def _check_shapes(msg, shapes_gather, shapes_expected):
     for idx, (size_gather, size_expected) in enumerate(zip(shapes_gather, shapes_expected)):
         if size_gather != size_expected:
-            raise ValueError(f"Error, shapes_ are not correct. Expected {size_expected}, got {size_gather} for index {idx}. Please check that the number of chunks is correct.")
+            raise ValueError(f"{msg} shapes are not correct. Expected {size_expected}, got {size_gather} for index {idx}. Please check that the number of chunks is correct.")
 
 
 def _transpose(tensor, dim0, dim1, dim1_split_sizes, group=None, async_op=False, verify_shapes=None):
@@ -67,12 +67,13 @@ def _transpose(tensor, dim0, dim1, dim1_split_sizes, group=None, async_op=False,
 
     # verify_shapes: check that dim1_split_sizes are correct:
     if verify_shapes:
+        dim0_size = tensor.size(dim0)
         stens = torch.as_tensor([tensor.size(dim1)], dtype=torch.int64, device=tensor.device)
         stens_gather = [torch.empty_like(stens) for _ in range(comm_size)]
         stens_gather[comm_rank] = stens
         dist.all_gather(stens_gather, stens, group=group)
         sizes_gather = [stens.item() for stens in stens_gather]
-        _check_shapes(sizes_gather, dim1_split_sizes)
+        _check_shapes("_transpose: error, dim1_split_sizes", sizes_gather, dim1_split_sizes)
 
     # split and local transposition
     tsplit = split_tensor_along_dim(tensor, dim=dim0, num_chunks=comm_size)
@@ -89,6 +90,16 @@ def _transpose(tensor, dim0, dim1, dim1_split_sizes, group=None, async_op=False,
 
     # get dim0 split sizes
     dim0_split_sizes = [x[dim0] for x in x_send_shapes]
+
+    if verify_shapes:
+        stens = torch.as_tensor([tensor.size(dim0)], dtype=torch.int64, device=tensor.device)
+        stens_gather = [torch.empty_like(stens) for _ in range(comm_size)]
+        stens_gather[comm_rank] = stens
+        dist.all_gather(stens_gather, stens, group=group)
+        sizes_gather = [stens.item() for stens in stens_gather]
+        _check_shapes("_transpose: error, dim0_split_sizes", sizes_gather, dim0_split_sizes)
+        if sum(sizes_gather) != dim0_size:
+            raise ValueError(f"_transpose: error, dim0_split_sizes do not sum to the correct size. Expected {dim0_size}, got {torch.sum(sizes_gather)}")
 
     return x_recv, dim0_split_sizes, req
 

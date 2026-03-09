@@ -27,7 +27,7 @@ from torch.optim import Optimizer
 from makani.utils import comm
 from makani.mpu.helpers import gather_uneven
 
-from physicsnemo.distributed.utils import split_tensor_along_dim
+from torch_harmonics.distributed import split_tensor_along_dim
 
 
 def get_latest_checkpoint_version(checkpoint_path):

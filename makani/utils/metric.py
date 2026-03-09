@@ -29,7 +29,7 @@ from makani.utils.dataloaders.data_helpers import get_data_normalization
 from makani.utils.losses import LossType
 from makani.utils.metrics.functions import GeometricL1, GeometricRMSE, GeometricACC, GeometricSpread, GeometricSSR, GeometricCRPS, GeometricRankHistogram, Quadrature
 import torch.distributed as dist
-from physicsnemo.distributed.utils import compute_split_shapes
+from torch_harmonics.distributed import compute_split_shapes
 from physicsnemo.distributed.mappings import gather_from_parallel_region, reduce_from_parallel_region
 
 

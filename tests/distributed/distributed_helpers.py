@@ -19,13 +19,9 @@ import torch
 import torch.distributed as dist
 
 import torch_harmonics.distributed as thd
+from torch_harmonics.distributed import split_tensor_along_dim
 
 from makani.utils import comm
-
-from physicsnemo.distributed.utils import split_tensor_along_dim
-from physicsnemo.distributed.mappings import gather_from_parallel_region, scatter_to_parallel_region, \
-    reduce_from_parallel_region
-
 from makani.utils.YParams import ParamsBase
 
 H5_PATH = "fields"

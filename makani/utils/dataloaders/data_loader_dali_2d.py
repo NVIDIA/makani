@@ -14,25 +14,16 @@
 # limitations under the License.
 
 import os
-import logging
-import glob
 import torch
-import random
 import numpy as np
 import torch
-from torch import Tensor
-import math
-
-# import cv2
 
 # DALI stuff
 from nvidia.dali.pipeline import Pipeline
 import nvidia.dali.fn as fn
-import nvidia.dali.types as dali_types
 from nvidia.dali.plugin.pytorch import DALIGenericIterator, LastBatchPolicy
 
 # distributed stuff
-import torch.distributed as dist
 from makani.utils import comm
 
 # es helper

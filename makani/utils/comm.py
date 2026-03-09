@@ -13,12 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
-import time
-import logging
 import math
-from typing import Union
-import numpy as np
 
 # we are using the distributed manager from physicsnemo
 from physicsnemo.distributed.manager import DistributedManager
@@ -93,6 +88,10 @@ def get_comm_names():
         return [name for name in _DM.group_names if (not name.startswith("__orthogonal_to"))]
     else:
         return []
+
+
+def get_grid_coords():
+    return {name: get_rank(name) for name in get_comm_names()}
 
 
 def get_model_comm_names():

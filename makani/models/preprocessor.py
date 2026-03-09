@@ -13,16 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from functools import partial
 from typing import Union, Tuple
-
-import numpy as np
 
 import torch
 import torch.nn as nn
 
 from makani.utils import comm
-from makani.utils.grids import GridConverter
 from physicsnemo.distributed.mappings import reduce_from_parallel_region, copy_to_parallel_region
 
 from makani.models.preprocessor_helpers import get_bias_correction, get_static_features
@@ -322,12 +318,8 @@ class Preprocessor2D(nn.Module):
             return x
 
         xdim = x.dim()
-        if xdim == 4:
-            b_, c_, h_, w_ = x.shape
-            xr = torch.reshape(x, (b_, (self.n_history + 1), c_ // (self.n_history + 1), h_, w_))
-        else:
+        if xdim == 5:
             xshape = x.shape
-            xr = x
             x = self.flatten_history(x)
 
         # normalize

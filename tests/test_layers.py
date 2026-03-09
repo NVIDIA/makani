@@ -23,8 +23,6 @@ import torch
 from makani.models.networks.pangu import EarthAttention3D
 from makani.models.common.layers import SeededDropout2d
 
-from makani.utils import functions as fn
-
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from .testutils import disable_tf32, get_default_parameters, compare_tensors
 

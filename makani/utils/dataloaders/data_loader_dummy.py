@@ -17,7 +17,6 @@ import logging
 from typing import Optional, List, Tuple
 import glob
 import torch
-import random
 import numpy as np
 import h5py
 import torch
@@ -27,7 +26,7 @@ import math
 from makani.utils import comm
 
 # we need this
-from physicsnemo.distributed.utils import compute_split_shapes
+from torch_harmonics.distributed import compute_split_shapes
 
 # for grid conversion
 from makani.utils.grids import GridConverter

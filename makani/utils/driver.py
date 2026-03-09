@@ -27,7 +27,6 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.optim.lr_scheduler as lr_scheduler
-import torch.distributed as dist
 
 import logging
 import wandb
@@ -44,9 +43,6 @@ from makani.utils.checkpoint_helpers import (
     scatter_optimizer_state_dict,
     prepend_prefix_to_state_dict,
 )
-
-# for flexible checkpoints
-from physicsnemo.distributed.utils import split_tensor_along_dim
 
 
 class Driver(metaclass=abc.ABCMeta):

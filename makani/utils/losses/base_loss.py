@@ -17,7 +17,6 @@ from typing import Optional, Tuple, List
 from dataclasses import dataclass
 
 from abc import ABCMeta, abstractmethod
-import math
 
 import torch
 import torch.nn as nn
@@ -28,7 +27,7 @@ import torch_harmonics.distributed as thd
 from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature
 from makani.utils import comm
 from makani.utils.features import get_wind_channels
-from physicsnemo.distributed.utils import compute_split_shapes, split_tensor_along_dim
+from torch_harmonics.distributed import split_tensor_along_dim
 
 
 def _compute_channel_weighting_helper(channel_names: List[str], channel_weight_type: str, time_diff_scale: torch.Tensor = None) -> torch.Tensor:
