@@ -28,7 +28,7 @@ import torch
 import torch_harmonics.distributed as thd
 
 from makani.utils import comm
-from physicsnemo.distributed.utils import compute_split_shapes
+from torch_harmonics.distributed import compute_split_shapes
 
 from makani.utils import MetricsHandler
 

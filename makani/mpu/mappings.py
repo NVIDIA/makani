@@ -13,9 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import types
-from typing import Any
-
 import torch
 from torch.amp import custom_fwd, custom_bwd
 import torch.distributed as dist

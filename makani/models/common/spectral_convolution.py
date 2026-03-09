@@ -15,8 +15,6 @@
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import numpy as np
 import math
 
 from torch import amp
@@ -24,10 +22,8 @@ from torch import amp
 # import convenience functions for factorized tensors
 from makani.utils import comm
 from makani.models.common import ComplexReLU
-from makani.models.common.contractions import _contract_rank
 from makani.models.common.factorizations import get_contract_fun
 
-import torch_harmonics as th
 import torch_harmonics.distributed as thd
 
 

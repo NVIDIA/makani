@@ -14,7 +14,6 @@
 # limitations under the License.
 
 import os
-import sys
 import gc
 import time
 from typing import Optional
@@ -26,7 +25,6 @@ import torch
 from torch import amp
 import torch.distributed as dist
 
-import logging
 import wandb
 
 # timers

@@ -15,7 +15,6 @@
 
 from typing import Optional, List
 from functools import partial
-import math
 
 import numpy as np
 

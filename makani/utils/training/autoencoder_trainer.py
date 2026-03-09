@@ -14,8 +14,6 @@
 # limitations under the License.
 
 import os
-import sys
-import gc
 import time
 from typing import Optional
 import numpy as np
