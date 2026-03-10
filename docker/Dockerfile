@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-ARG DLFW_VERSION
+ARG DLFW_VERSION=25.12
 FROM nvcr.io/nvidia/pytorch:${DLFW_VERSION}-py3
 
 # update repo info
