@@ -22,7 +22,7 @@ from makani.utils.losses.base_loss import SpectralBaseLoss
 
 # distributed stuff
 from makani.utils import comm
-from physicsnemo.distributed.mappings import reduce_from_parallel_region
+from makani.mpu.mappings import reduce_from_parallel_region
 
 
 # Adjusted Mean Squared Error Loss

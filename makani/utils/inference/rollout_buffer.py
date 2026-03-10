@@ -27,7 +27,7 @@ from makani.utils import comm
 from makani.models.common import RealFFT1
 from makani.mpu.fft import DistributedRealFFT1
 from torch_harmonics.distributed import compute_split_shapes, split_tensor_along_dim
-from physicsnemo.distributed.mappings import reduce_from_parallel_region
+from makani.mpu.mappings import reduce_from_parallel_region
 
 # get torch_harmonics for spectra
 import torch_harmonics as th

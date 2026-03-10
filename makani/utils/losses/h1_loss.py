@@ -22,7 +22,7 @@ from makani.utils.losses.base_loss import SpectralBaseLoss
 # distributed stuff
 from makani.utils import comm
 from torch_harmonics.distributed import split_tensor_along_dim
-from physicsnemo.distributed.mappings import reduce_from_parallel_region
+from makani.mpu.mappings import reduce_from_parallel_region
 
 
 # TODO: convert this to the seminorm
