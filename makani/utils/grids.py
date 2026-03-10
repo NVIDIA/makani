@@ -19,7 +19,7 @@ from torch_harmonics.quadrature import legendre_gauss_weights, clenshaw_curtiss_
 
 from makani.utils import comm
 from torch_harmonics.distributed import compute_split_shapes
-from physicsnemo.distributed.mappings import reduce_from_parallel_region
+from makani.mpu.mappings import reduce_from_parallel_region
 
 
 def grid_to_quadrature_rule(grid_type):

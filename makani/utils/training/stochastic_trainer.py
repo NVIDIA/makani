@@ -46,7 +46,7 @@ from makani.mpu.helpers import sync_params, gather_uneven
 
 # for counting model parameters
 from makani.models.helpers import count_parameters
-from physicsnemo.distributed.mappings import reduce_from_parallel_region
+from makani.mpu.mappings import reduce_from_parallel_region
 
 # checkpoint helpers
 from makani.utils.checkpoint_helpers import get_latest_checkpoint_version
@@ -192,7 +192,6 @@ class StochasticTrainer(Driver):
                 find_unused_parameters=self.params["enable_grad_anomaly_detection"],
                 gradient_as_bucket_view=True,
                 static_graph=False,
-                verbose=True,
             )
 
         # lets get one sample from the dataloader:

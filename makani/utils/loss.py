@@ -23,7 +23,7 @@ from torch import nn
 
 from makani.utils import comm
 from makani.utils.dataloaders.data_helpers import get_data_normalization
-from physicsnemo.distributed.mappings import gather_from_parallel_region, reduce_from_parallel_region
+from makani.mpu.mappings import gather_from_parallel_region, reduce_from_parallel_region
 
 from .losses import LossType, GeometricLpLoss, SpectralH1Loss, SpectralAMSELoss, HydrostaticBalanceLoss
 from .losses import EnsembleCRPSLoss, EnsembleSpectralCRPSLoss, EnsembleNLLLoss, EnsembleMMDLoss

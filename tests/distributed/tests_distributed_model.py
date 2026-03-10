@@ -29,7 +29,7 @@ from makani.utils import checkpoint_helpers
 from makani.utils import LossHandler
 from makani.models import model_registry
 from makani.mpu.mappings import init_gradient_reduction_hooks
-from physicsnemo.distributed.mappings import reduce_from_parallel_region
+from makani.mpu.mappings import reduce_from_parallel_region
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 from .distributed_helpers import get_default_parameters, split_helper, gather_helper

@@ -41,7 +41,7 @@ from makani.mpu.layers import DistributedMLP, DistributedEncoderDecoder
 from makani.utils import comm
 
 # layer normalization
-from physicsnemo.distributed.mappings import scatter_to_parallel_region, gather_from_parallel_region
+from makani.mpu.mappings import scatter_to_parallel_region, gather_from_parallel_region
 from makani.mpu.layer_norm import DistributedInstanceNorm2d, DistributedLayerNorm, DistributedGeometricInstanceNormS2
 
 # for annotation of models
