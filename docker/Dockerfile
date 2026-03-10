@@ -67,14 +67,17 @@ ENV NUMBA_DISABLE_CUDA=1
 # scoring tools
 RUN pip install xskillscore properscoring
 
+# weatherbench2
+RUN pip install "git+https://github.com/google-research/weatherbench2.git"
+
 # some useful scripts from mlperf
 RUN pip install --ignore-installed "git+https://github.com/NVIDIA/mlperf-common.git"
 
 # torch-harmonics
 ENV FORCE_CUDA_EXTENSION 1
-ENV TORCH_CUDA_ARCH_LIST "8.0 8.6 8.7 9.0 10.0+PTX"
-ENV HARMONICS_VERSION 0.8.1
-RUN cd /opt && git clone -b bbonev/disco-modal-normalization https://github.com/NVIDIA/torch-harmonics.git && \
+ENV TORCH_CUDA_ARCH_LIST "8.0 8.6 8.7 9.0 10.0 12.0+PTX"
+ENV HARMONICS_VERSION 0.8.5
+RUN cd /opt && git clone https://github.com/NVIDIA/torch-harmonics.git && \
     cd torch-harmonics && \
     pip install --no-build-isolation -e .
 
