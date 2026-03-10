@@ -1,0 +1,183 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# This Dockerfile adds S3 support to HDF5 so that makani can read datasets from AWS storage.
+# Since it requires installing a lot of dependencies, we decided to keep it in a separate file
+
+ARG DLFW_VERSION
+FROM nvcr.io/nvidia/pytorch:${DLFW_VERSION}-py3
+
+# update repo info
+RUN apt update -y && apt install -y libibmad5
+
+# upgrade cmake
+RUN apt remove cmake -y && \
+    pip install cmake --upgrade
+
+# install mpi4py
+RUN SETUPTOOLS_USE_DISTUTILS=local pip install mpi4py
+
+# install onnx
+RUN pip install onnx onnxruntime onnxruntime-gpu
+
+# install AWS prereqs for HDF5
+RUN cd /opt && git clone https://github.com/awslabs/aws-c-common.git && \
+    cd aws-c-common && \
+    mkdir build && cd build && \
+    cmake .. -DCMAKE_BUILD_TYPE=Release && \
+    make -j$(nproc) && \
+    make install
+
+# 2. aws-checksums
+RUN cd /opt && git clone https://github.com/awslabs/aws-checksums.git && \
+    cd aws-checksums && \
+    mkdir build && cd build && \
+    cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=/usr && \
+    make -j$(nproc) && \
+    make install
+
+# 2.5. s2n-tls (required by aws-c-io)
+RUN cd /opt && git clone https://github.com/aws/s2n-tls.git && \
+    cd s2n-tls && \
+    mkdir build && cd build && \
+    cmake .. -DCMAKE_BUILD_TYPE=Release -GNinja && \
+    ninja -j$(nproc) && \
+    ninja install
+
+# 3. aws-c-cal (crypto abstraction layer)
+RUN cd /opt && git clone https://github.com/awslabs/aws-c-cal.git && \
+    cd aws-c-cal && \
+    mkdir build && cd build && \
+    cmake .. -DCMAKE_BUILD_TYPE=Release && \
+    make -j$(nproc) && \
+    make install
+
+# 3.1 aws-c-sdkutils (new dependency for auth/http/s3)
+RUN cd /opt && \
+    git clone https://github.com/awslabs/aws-c-sdkutils.git && \
+    cd aws-c-sdkutils && \
+    mkdir build && cd build && \
+    cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=/usr/local && \
+    make -j$(nproc) && \
+    make install
+
+# 5. aws-c-io (needs common + checksums)
+RUN cd /opt && git clone https://github.com/awslabs/aws-c-io.git && \
+    cd aws-c-io && \
+    mkdir build && cd build && \
+    cmake .. -DCMAKE_BUILD_TYPE=Release && \
+    make -j$(nproc) && \
+    make install
+
+# 2.7 aws-c-compression (depends on aws-c-common)
+RUN cd /opt && \
+    git clone https://github.com/awslabs/aws-c-compression.git && \
+    cd aws-c-compression && \
+    mkdir build && cd build && \
+    cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=/usr/local && \
+    make -j$(nproc) && \
+    make install
+
+# 6. aws-c-http (needs io + auth)
+RUN cd /opt && git clone https://github.com/awslabs/aws-c-http.git && \
+    cd aws-c-http && \
+    mkdir build && cd build && \
+    cmake .. -DCMAKE_BUILD_TYPE=Release && \
+    make -j$(nproc) && \
+    make install
+    
+# 4. aws-c-auth
+RUN cd /opt && git clone https://github.com/awslabs/aws-c-auth.git && \
+    cd aws-c-auth && \
+    mkdir build && cd build && \
+    cmake .. -DCMAKE_BUILD_TYPE=Release && \
+    make -j$(nproc) && \
+    make install
+
+# 7. aws-c-s3 (final target for HDF5)
+RUn cd /opt && git clone https://github.com/awslabs/aws-c-s3.git && \
+    cd aws-c-s3 && \
+    mkdir build && cd build && \
+    cmake .. -DCMAKE_BUILD_TYPE=Release && \
+    make -j$(nproc) && \
+    make install
+
+# hdf5 and h5py
+ENV HDF5_VERSION=2.0.0
+RUN cd /tmp && wget https://support.hdfgroup.org/releases/hdf5/v2_0/v2_0_0/downloads/hdf5-${HDF5_VERSION}.tar.gz && \
+    gzip -cd hdf5-${HDF5_VERSION}.tar.gz | tar xvf - && \
+    mkdir hdf5-${HDF5_VERSION}/build && cd hdf5-${HDF5_VERSION}/build && \
+    cmake -DCMAKE_INSTALL_PREFIX=/opt/hdf5 \
+    -DHDF5_ENABLE_OPTIMIZATION=ON \
+    -DHDF5_ENABLE_ZLIB_SUPPORT=ON \
+    -DHDF5_ENABLE_DIRECT_VFD=ON \
+    -DHDF5_ENABLE_ROS3_VFD=ON \
+    -DHDF5_ENABLE_PARALLEL=ON \
+    -DHDF5_TEST_API=ON \
+    -DHDF5_TEST_VFD=ON \
+    -DHDF5_TEST_PARALLEL=ON \
+    .. && \
+    make -j 8 && make install && \
+    mkdir -p /opt/hdf5/lib/plugin
+RUN CC="mpicc" HDF5_MPI=ON H5PY_ROS3=1 H5PY_DIRECT_VFD=1 HDF5_DIR=/opt/hdf5 pip install --no-build-isolation --no-binary=h5py h5py==3.15.1
+ENV PATH=/opt/hdf5/bin:${PATH}
+
+# install cdsapi for downloading the dataset
+RUN pip install cdsapi>=0.7.2
+
+# install zarr and data stuff
+RUN pip install more_itertools zarr xarray pandas gcsfs boto3
+
+# moviepy imageio for wandb video logging
+RUN pip install moviepy imageio
+
+# other python stuff
+RUN pip install --upgrade wandb ruamel.yaml tqdm progressbar2
+
+# numba
+RUN pip install numba
+ENV NUMBA_DISABLE_CUDA=1
+
+# scoring tools
+RUN pip install xskillscore properscoring
+
+# weatherbench2
+RUN pip install "git+https://github.com/google-research/weatherbench2.git"
+
+# some useful scripts from mlperf
+RUN pip install --ignore-installed "git+https://github.com/NVIDIA/mlperf-common.git"
+
+# torch-harmonics
+ENV FORCE_CUDA_EXTENSION 1
+ENV TORCH_CUDA_ARCH_LIST "8.0 8.6 8.7 9.0 10.0 12.0+PTX"
+ENV HARMONICS_VERSION 0.8.5
+RUN cd /opt && git clone https://github.com/NVIDIA/torch-harmonics.git && \
+    cd torch-harmonics && \
+    pip install --no-build-isolation -e .
+
+# physicsnemo
+RUN pip install git+https://github.com/NVIDIA/physicsnemo.git@v1.1.1
+
+# copy source code
+RUN mkdir -p /opt/makani
+COPY config /opt/makani/config
+COPY docker /opt/makani/docker
+COPY data_process /opt/makani/data_process
+COPY datasets /opt/makani/datasets
+COPY makani /opt/makani/makani
+COPY tests /opt/makani/tests
+COPY pyproject.toml /opt/makani/pyproject.toml
+COPY README.md /opt/makani/README.md
+RUN cd /opt/makani && pip install -e .
