@@ -16,7 +16,7 @@
 # This Dockerfile adds S3 support to HDF5 so that makani can read datasets from AWS storage.
 # Since it requires installing a lot of dependencies, we decided to keep it in a separate file
 
-ARG DLFW_VERSION
+ARG DLFW_VERSION=25.12
 FROM nvcr.io/nvidia/pytorch:${DLFW_VERSION}-py3
 
 # update repo info
