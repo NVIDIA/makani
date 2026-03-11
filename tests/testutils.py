@@ -127,8 +127,7 @@ def init_dataset(
 
     # create lon lat grid
     longitude = np.linspace(0, 360, img_size_w, endpoint=False)
-    latitude = np.linspace(-90, 90, img_size_h, endpoint=True)
-    latitude = latitude[::-1]
+    latitude = np.linspace(90, -90, img_size_h, endpoint=True)
 
     # channels names
     channel_names = [f"chan_{idx}" for idx in range(num_channels)]
