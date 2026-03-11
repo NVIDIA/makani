@@ -20,6 +20,14 @@ import numpy as np
 from .aws_connector import AWSConnector
 
 
+# this is a small helper to get the latitude and longitude grid consistently across 
+# functions
+def get_lat_lon_grid(img_shape):
+    latitude = np.linspace(90, -90, img_shape[0], endpoint=True)
+    longitude = np.linspace(0, 360, img_shape[1], endpoint=False)
+    return latitude, longitude
+
+
 def get_data_normalization(params):
 
     bias = None

@@ -31,6 +31,9 @@ from torch_harmonics.distributed import compute_split_shapes
 # for grid conversion
 from makani.utils.grids import GridConverter
 
+# data helpers
+from .data_helpers import get_lat_lon_grid
+
 
 class DummyLoader(object):
     def __init__(self,
@@ -95,8 +98,7 @@ class DummyLoader(object):
 
         # set lat_lon
         if self.lat_lon is None:
-            longitude = np.linspace(0, 360, self.img_shape[1], endpoint=False)
-            latitude = np.linspace(90, -90, self.img_shape[0], endpoint=True)
+            latitude, longitude = get_lat_lon_grid(self.img_shape)
             self.lat_lon = (latitude.tolist(), longitude.tolist())
 
         # get local lat lon
