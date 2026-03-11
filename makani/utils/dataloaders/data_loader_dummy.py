@@ -95,10 +95,8 @@ class DummyLoader(object):
 
         # set lat_lon
         if self.lat_lon is None:
-            resolution = 360.0 / float(self.img_shape[1])
-            longitude = np.arange(0, 360, resolution)
-            latitude = np.arange(-90, 90 + resolution, resolution)
-            latitude = latitude[::-1]
+            longitude = np.linspace(0, 360, self.img_shape[1], endpoint=False)
+            latitude = np.linspace(90, -90, self.img_shape[0], endpoint=True)
             self.lat_lon = (latitude.tolist(), longitude.tolist())
 
         # get local lat lon
