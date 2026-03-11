@@ -38,6 +38,7 @@ from makani.utils.metrics.functions import (
     GeometricSSR, 
     GeometricRankHistogram,
 )
+from makani.utils.dataloaders.data_helpers import get_lat_lon_grid
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from .testutils import disable_tf32, get_default_parameters, compare_arrays
@@ -1167,8 +1168,7 @@ class ComparetMetricsWB2(unittest.TestCase):
         fct = torch.randn(batch_size, ensemble_size, num_channels, nlat, nlon, device=self.device)
 
         # create xarray datasets according to wb2 specification
-        latitude = np.linspace(-90, 90, nlat, endpoint=True)
-        longitude = np.linspace(0, 360, nlon, endpoint=False)
+        latitude, longitude = get_lat_lon_grid((nlat, nlon))
         xr_obs = xr.Dataset(
             data_vars=dict(var=(["batch", "channel", "latitude", "longitude"], obs.cpu().numpy())),
             coords=dict(latitude=latitude, longitude=longitude),
@@ -1201,8 +1201,7 @@ class ComparetMetricsWB2(unittest.TestCase):
         fct = torch.randn(batch_size, ensemble_size, num_channels, nlat, nlon, device=self.device)
 
         # create xarray datasets according to wb2 specification
-        latitude = np.linspace(-90, 90, nlat, endpoint=True)
-        longitude = np.linspace(0, 360, nlon, endpoint=False)
+        latitude, longitude = get_lat_lon_grid((nlat, nlon))
         xr_obs = xr.Dataset(
             data_vars=dict(var=(["batch", "channel", "latitude", "longitude"], obs.cpu().numpy())),
             coords=dict(latitude=latitude, longitude=longitude),
