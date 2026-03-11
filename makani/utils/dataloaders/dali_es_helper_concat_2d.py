@@ -25,7 +25,7 @@ from itertools import groupby
 import torch
 
 # we need this for the zenith angle feature
-from .data_helpers import get_date_from_string, get_date_from_timestamp, get_date_ranges
+from .data_helpers import get_lat_lon_grid, get_date_from_string, get_date_from_timestamp, get_date_ranges
 
 # import splitting logic
 from torch_harmonics.distributed import compute_split_shapes
@@ -139,8 +139,7 @@ class GeneralConcatES(object):
 
         # we need some additional static fields in this case
         if self.lat_lon is None:
-            latitude = np.linspace(90, -90, self.img_shape[0], endpoint=True)
-            longitude = np.linspace(0, 360, self.img_shape[1], endpoint=False)
+            latitude, longitude = get_lat_lon_grid(self.img_shape)
             self.lat_lon = (latitude.tolist(), longitude.tolist())
 
         # compute local grid
