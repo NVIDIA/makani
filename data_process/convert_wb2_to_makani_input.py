@@ -27,7 +27,7 @@ import xarray as xr
 # MPI
 from mpi4py import MPI
 
-from .wb2_helpers import surface_variables, atmospheric_variables, split_convert_channel_names, DistributedProgressBar, gcs_storage_options
+from .wb2_helpers import split_convert_channel_names, DistributedProgressBar, gcs_storage_options
 
 
 def convert(input_file: str, output_dir: str, metadata_file: str, years: List[int],
