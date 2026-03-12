@@ -105,10 +105,6 @@ def convert(file_names_to_convert: List[str], output_file: str, batch_size: Opti
     longitudes = comm.bcast(longitudes, root=0)
     timestamps = comm.bcast(timestamps, root=0)
     entries_per_year = comm.bcast(entries_per_year, root=0)
-
-    # IMPORTANT! ECMWF convention flips the latitudes, so that they start on the south pole
-    # we use co-latitude definition, where 90 degrees is the north pole
-    latitudes = np.flip(latitudes)
                 
     # total hours:
     total_entries = sum(entries_per_year)
