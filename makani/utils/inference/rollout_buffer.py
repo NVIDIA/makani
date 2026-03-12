@@ -13,14 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 from typing import Optional, List, Tuple, Union
 from abc import ABCMeta, abstractmethod
 
 import torch
 import numpy as np
 import h5py as h5
-import makani.utils.constants as const
 
 # distributed computing stuff
 from torch import amp
@@ -28,9 +26,8 @@ import torch.distributed as dist
 from makani.utils import comm
 from makani.models.common import RealFFT1
 from makani.mpu.fft import DistributedRealFFT1
-from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature
-from physicsnemo.distributed.utils import compute_split_shapes, split_tensor_along_dim
-from physicsnemo.distributed.mappings import gather_from_parallel_region, reduce_from_parallel_region
+from torch_harmonics.distributed import compute_split_shapes, split_tensor_along_dim
+from makani.mpu.mappings import reduce_from_parallel_region
 
 # get torch_harmonics for spectra
 import torch_harmonics as th

@@ -15,34 +15,7 @@
 
 import torch
 import torch.distributed as dist
-
-from physicsnemo.distributed.utils import split_tensor_along_dim
 from makani.utils import comm
-
-
-def _transpose(tensor, dim0, dim1, dim1_split_sizes, group=None, async_op=False):
-
-    # get comm params
-    comm_size = dist.get_world_size(group=group)
-    comm_rank = dist.get_rank(group=group)
-
-    # split and local transposition
-    tsplit = split_tensor_along_dim(tensor, dim=dim0, num_chunks=comm_size)
-    x_send = [y.contiguous() for y in tsplit]
-    x_send_shapes = [x.shape for x in x_send]
-    x_recv = []
-    x_shape = list(x_send_shapes[comm_rank])
-    for dim1_len in dim1_split_sizes:
-        x_shape[dim1] = dim1_len
-        x_recv.append(torch.empty(x_shape, dtype=tensor.dtype, device=tensor.device))
-
-    # global transposition
-    req = dist.all_to_all(x_recv, x_send, group=group, async_op=async_op)
-
-    # get dim0 split sizes
-    dim0_split_sizes = [x[dim0] for x in x_send_shapes]
-
-    return x_recv, dim0_split_sizes, req
 
 
 def gather_uneven(tensor, dim, comm_name):

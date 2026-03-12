@@ -16,12 +16,10 @@
 import math
 import torch
 import torch.nn as nn
-import torch.special as special
 import torch.amp as amp
 from torch.utils.checkpoint import checkpoint
 
 from functools import partial
-from itertools import groupby
 
 # helpers
 from makani.models.common import DropPath, LayerScale, MLP, EncoderDecoder, SpectralConv
@@ -33,7 +31,7 @@ import torch_harmonics.distributed as thd
 
 # get pre-formulated layers
 #from makani.models.common import GeometricInstanceNormS2
-from makani.mpu.layers import DistributedMLP, DistributedEncoderDecoder
+from makani.mpu.layers import DistributedMLP
 
 # more distributed stuff
 from makani.utils import comm

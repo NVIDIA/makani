@@ -26,10 +26,13 @@ import math
 from makani.utils import comm
 
 # we need this
-from physicsnemo.distributed.utils import compute_split_shapes
+from torch_harmonics.distributed import compute_split_shapes
 
 # for grid conversion
 from makani.utils.grids import GridConverter
+
+# data helpers
+from .data_helpers import get_lat_lon_grid
 
 
 class DummyLoader(object):
@@ -95,10 +98,7 @@ class DummyLoader(object):
 
         # set lat_lon
         if self.lat_lon is None:
-            resolution = 360.0 / float(self.img_shape[1])
-            longitude = np.arange(0, 360, resolution)
-            latitude = np.arange(-90, 90 + resolution, resolution)
-            latitude = latitude[::-1]
+            latitude, longitude = get_lat_lon_grid(self.img_shape)
             self.lat_lon = (latitude.tolist(), longitude.tolist())
 
         # get local lat lon

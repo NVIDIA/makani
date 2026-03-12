@@ -17,7 +17,7 @@ import os
 import logging
 from typing import Optional, List, Tuple, Union
 import glob
-from itertools import groupby, accumulate
+from itertools import accumulate
 import operator
 from bisect import bisect_right
 import math
@@ -29,13 +29,13 @@ from torch.utils.data import Dataset
 import h5py
 
 # for data normalization
-from makani.utils.dataloaders.data_helpers import get_data_normalization, get_timestamp, get_date_from_timestamp, get_timedelta_from_timestamp, get_default_aws_connector
+from makani.utils.dataloaders.data_helpers import get_date_from_timestamp, get_timedelta_from_timestamp, get_default_aws_connector
 
 # for grid conversion
 from makani.utils.grids import GridConverter
 
 # import splitting logic
-from physicsnemo.distributed.utils import compute_split_shapes
+from torch_harmonics.distributed import compute_split_shapes
 
 
 class MultifilesDataset(Dataset):

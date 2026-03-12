@@ -18,11 +18,11 @@ import torch.nn as nn
 
 from torch import amp
 
-from typing import Tuple, List, Optional
+from typing import Tuple, Optional
 
 # for spatial model-parallelism
 from makani.utils import comm
-from physicsnemo.distributed.mappings import gather_from_parallel_region, copy_to_parallel_region
+from makani.mpu.mappings import gather_from_parallel_region, copy_to_parallel_region
 
 # quadrature stuff
 from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature

@@ -14,7 +14,6 @@
 # limitations under the License.
 
 import time
-import sys
 import os
 import glob
 from functools import partial
@@ -31,10 +30,10 @@ from bisect import bisect_right
 import torch
 
 # import splitting logic
-from physicsnemo.distributed.utils import compute_split_shapes
+from torch_harmonics.distributed import compute_split_shapes
 
 # data helpers
-from .data_helpers import get_date_from_string, get_timestamp, get_date_from_timestamp, get_date_ranges, get_default_aws_connector
+from .data_helpers import get_lat_lon_grid, get_date_from_string, get_timestamp, get_date_from_timestamp, get_date_ranges, get_default_aws_connector
 
 
 class GeneralES(object):
@@ -162,8 +161,7 @@ class GeneralES(object):
 
         # we need some additional static fields in this case
         if self.lat_lon is None:
-            latitude = np.linspace(90, -90, self.img_shape[0], endpoint=True)
-            longitude = np.linspace(0, 360, self.img_shape[1], endpoint=False)
+            latitude, longitude = get_lat_lon_grid(self.img_shape)
             self.lat_lon = (latitude.tolist(), longitude.tolist())
 
         # compute local grid

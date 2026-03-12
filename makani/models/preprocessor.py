@@ -13,10 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from functools import partial
 from typing import Union, Tuple
 
-import math
 import numpy as np
 
 import torch
@@ -24,7 +22,7 @@ import torch.nn as nn
 
 from makani.utils import comm
 from makani.utils.grids import GridQuadrature, grid_to_quadrature_rule
-from physicsnemo.distributed.mappings import copy_to_parallel_region
+from makani.mpu.mappings import copy_to_parallel_region
 
 from makani.models.preprocessor_helpers import get_bias_correction, get_static_features
 

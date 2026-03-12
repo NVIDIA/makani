@@ -20,8 +20,6 @@ import unittest
 from parameterized import parameterized
 import tempfile
 
-import numpy as np
-
 import torch
 from torch import nn
 

@@ -24,6 +24,7 @@ import h5py as h5
 from typing import Optional
 
 from makani.utils.inference.rollout_buffer import TemporalAverageBuffer
+from makani.utils.dataloaders.data_helpers import get_lat_lon_grid
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from .testutils import disable_tf32, init_dataset, get_default_parameters, compare_arrays, H5_PATH, IMG_SIZE_H, IMG_SIZE_W
@@ -139,9 +140,7 @@ class TestRolloutBuffers(unittest.TestCase):
         self.local_offset = (0, 0)
         
         # Create lat/lon grid
-        self.longitude = np.linspace(0, 360, IMG_SIZE_W, endpoint=False)
-        self.latitude = np.linspace(90, -90, IMG_SIZE_H, endpoint=True)
-
+        self.latitude, self.longitude = get_lat_lon_grid(self.img_shape)
         self.lat_lon = (self.latitude.tolist(), self.longitude.tolist())
 
     @parameterized.expand(

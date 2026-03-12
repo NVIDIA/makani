@@ -14,8 +14,6 @@
 # limitations under the License.
 
 import os
-import sys
-import gc
 import time
 from typing import Optional
 import numpy as np
@@ -185,7 +183,6 @@ class AutoencoderTrainer(Driver):
                 find_unused_parameters=self.params["enable_grad_anomaly_detection"],
                 gradient_as_bucket_view=True,
                 static_graph=False,
-                verbose=True,
             )
 
         # lets get one sample from the dataloader:

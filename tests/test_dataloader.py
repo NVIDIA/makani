@@ -19,7 +19,6 @@ import sys
 import glob
 import copy
 import math
-from re import sub
 import tempfile
 import datetime as dt
 from typing import Optional

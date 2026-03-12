@@ -14,18 +14,15 @@
 # limitations under the License.
 
 from typing import Optional, Tuple, List
-import math
 
 import torch
-import torch.nn as nn
 from torch import amp
 
 from makani.utils.losses.base_loss import SpectralBaseLoss
 
 # distributed stuff
 from makani.utils import comm
-from physicsnemo.distributed.utils import split_tensor_along_dim
-from physicsnemo.distributed.mappings import reduce_from_parallel_region
+from makani.mpu.mappings import reduce_from_parallel_region
 
 
 # Adjusted Mean Squared Error Loss

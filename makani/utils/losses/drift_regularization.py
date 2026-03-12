@@ -16,12 +16,11 @@
 from typing import Optional, Tuple, List
 
 import torch
-import torch.nn as nn
 
 from makani.utils.losses.base_loss import GeometricBaseLoss, LossType
 
 from makani.utils import comm
-from physicsnemo.distributed.mappings import reduce_from_parallel_region
+from makani.mpu.mappings import reduce_from_parallel_region
 
 
 class DriftRegularization(GeometricBaseLoss):

@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-ARG DLFW_VERSION
+ARG DLFW_VERSION=25.12
 FROM nvcr.io/nvidia/pytorch:${DLFW_VERSION}-py3
 
 # update repo info
@@ -30,21 +30,22 @@ RUN SETUPTOOLS_USE_DISTUTILS=local pip install mpi4py
 RUN pip install onnx onnxruntime onnxruntime-gpu
 
 # hdf5 and h5py
-ENV HDF5_VERSION=1.14.6
-RUN cd /tmp && wget https://support.hdfgroup.org/releases/hdf5/v1_14/v1_14_6/downloads/hdf5-${HDF5_VERSION}.tar.gz && \
+ENV HDF5_VERSION=2.0.0
+RUN cd /tmp && wget https://support.hdfgroup.org/releases/hdf5/v2_0/v2_0_0/downloads/hdf5-${HDF5_VERSION}.tar.gz && \
     gzip -cd hdf5-${HDF5_VERSION}.tar.gz | tar xvf - && \
     mkdir hdf5-${HDF5_VERSION}/build && cd hdf5-${HDF5_VERSION}/build && \
     cmake -DCMAKE_INSTALL_PREFIX=/opt/hdf5 \
     -DHDF5_ENABLE_OPTIMIZATION=ON \
+    -DHDF5_ENABLE_ZLIB_SUPPORT=ON \
     -DHDF5_ENABLE_DIRECT_VFD=ON \
-    -DHDF5_ENABLE_ROS3_VFD=ON \
     -DHDF5_ENABLE_PARALLEL=ON \
     -DHDF5_TEST_API=ON \
     -DHDF5_TEST_VFD=ON \
     -DHDF5_TEST_PARALLEL=ON \
     .. && \
-    make -j 8 && make install
-RUN CC="mpicc" HDF5_MPI=ON H5PY_ROS3=1 H5PY_DIRECT_VFD=1 HDF5_DIR=/opt/hdf5 pip install --no-build-isolation --no-binary=h5py h5py==3.13.0
+    make -j 8 && make install && \
+    mkdir -p /opt/hdf5/lib/plugin
+RUN CC="mpicc" HDF5_MPI=ON H5PY_DIRECT_VFD=1 HDF5_DIR=/opt/hdf5 pip install --no-build-isolation --no-binary=h5py h5py==3.15.1
 ENV PATH=/opt/hdf5/bin:${PATH}
 
 # install cdsapi for downloading the dataset
@@ -66,13 +67,16 @@ ENV NUMBA_DISABLE_CUDA=1
 # scoring tools
 RUN pip install xskillscore properscoring
 
+# weatherbench2
+RUN pip install "git+https://github.com/google-research/weatherbench2.git"
+
 # some useful scripts from mlperf
 RUN pip install --ignore-installed "git+https://github.com/NVIDIA/mlperf-common.git"
 
 # torch-harmonics
 ENV FORCE_CUDA_EXTENSION 1
-ENV TORCH_CUDA_ARCH_LIST "8.0 8.6 9.0 10.0 12.0+PTX"
-ENV HARMONICS_VERSION 0.8.3
+ENV TORCH_CUDA_ARCH_LIST "8.0 8.6 8.7 9.0 10.0 12.0+PTX"
+ENV HARMONICS_VERSION 0.8.5
 RUN cd /opt && git clone https://github.com/NVIDIA/torch-harmonics.git && \
     cd torch-harmonics && \
     pip install --no-build-isolation -e .

@@ -14,7 +14,6 @@
 # limitations under the License.
 
 import os
-import sys
 import gc
 import time
 from typing import Optional
@@ -26,7 +25,6 @@ import torch
 from torch import amp
 import torch.distributed as dist
 
-import logging
 import wandb
 
 # timers
@@ -209,7 +207,6 @@ class Trainer(Driver):
                     find_unused_parameters=self.params["enable_grad_anomaly_detection"],
                     gradient_as_bucket_view=True,
                     static_graph=False,
-                    verbose=True,
                 )
         self.timers["reduction hooks init"] = timer.time
 

@@ -14,7 +14,6 @@
 # limitations under the License.
 
 import os
-import glob
 import abc
 import gc
 
@@ -27,7 +26,6 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.optim.lr_scheduler as lr_scheduler
-import torch.distributed as dist
 
 import logging
 import wandb
@@ -46,7 +44,7 @@ from makani.utils.checkpoint_helpers import (
 )
 
 # for flexible checkpoints
-from physicsnemo.distributed.utils import split_tensor_along_dim
+from torch_harmonics.distributed import split_tensor_along_dim
 
 
 class Driver(metaclass=abc.ABCMeta):

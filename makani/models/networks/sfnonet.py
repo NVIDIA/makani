@@ -30,6 +30,7 @@ from makani.models.common import SpectralConv, SpectralAttention
 # get spectral transforms from torch_harmonics
 import torch_harmonics as th
 import torch_harmonics.distributed as thd
+from torch_harmonics.distributed import compute_split_shapes
 
 # wrap fft, to unify interface to spectral transforms
 from makani.models.common import RealFFT2, InverseRealFFT2, GeometricInstanceNormS2
@@ -40,7 +41,7 @@ from makani.mpu.layers import DistributedMLP, DistributedEncoderDecoder
 from makani.utils import comm
 
 # layer normalization
-from physicsnemo.distributed.mappings import scatter_to_parallel_region, gather_from_parallel_region
+from makani.mpu.mappings import scatter_to_parallel_region, gather_from_parallel_region
 from makani.mpu.layer_norm import DistributedInstanceNorm2d, DistributedLayerNorm, DistributedGeometricInstanceNormS2
 
 # for annotation of models
