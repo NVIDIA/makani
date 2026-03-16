@@ -176,9 +176,9 @@ def convert(file_names_to_convert: List[str], output_file: str, batch_size: Opti
             for ioff in range(ne_start, ne_end, batch_size):
             
                 # shape
+                nsamples = min(batch_size, ne_end - ioff)
                 start = global_off + ioff
-                end = min(start + batch_size, ne_end)
-                nsamples = end - start
+                end = start + nsamples
 
                 if verbose:
                     print(f"{comm_rank}: file={filename}, ne={ne}, start={start}, end={end}, ne_start={ne_start}, ne_end={ne_end}, ne_local={ne_local}, batch_size={batch_size}")
@@ -187,7 +187,7 @@ def convert(file_names_to_convert: List[str], output_file: str, batch_size: Opti
                 chunk_data_arrays = {}
                 for sc in surface_channel_names:
                     idc = channel_names.index(sc)
-                    data = f[entry_key][start:end, :, :, idc, ...]
+                    data = f[entry_key][ioff:ioff+nsamples, :, :, idc, ...]
                     # transpose dims 1 und 2
                     data = np.transpose(data, axes=(0, 2, 1, 3, 4))
                     
@@ -200,7 +200,7 @@ def convert(file_names_to_convert: List[str], output_file: str, batch_size: Opti
                     data = np.empty((nsamples, ensemble_size, lead_time, nlevels, nlat, nlon), dtype=dataset_dtype)
                     for idl, level in enumerate(atmospheric_levels):
                         idc = channel_names.index(ac+str(level))
-                        tmpdata = f[entry_key][start:end, :, :, idc, :, :]
+                        tmpdata = f[entry_key][ioff:ioff+nsamples, :, :, idc, :, :]
                         tmpdata = np.transpose(tmpdata, axes=(0, 2, 1, 3, 4))
                         data[..., idl, :, :] = tmpdata[...]
                     
