@@ -168,15 +168,15 @@ def convert(file_names_to_convert: List[str], output_file: str, batch_size: Opti
         # update local size
         ne_local = ne_end - ne_start
         # protect against negative batch sizes which happen on ranks which have nothing to do
-        batch_size = max(min(batch_size, ne_local), 1)
+        local_batch_size = max(min(batch_size, ne_local), 1)
         
         with h5.File(filename, "r") as f:
             
             # loop over batches
-            for ioff in range(ne_start, ne_end, batch_size):
-            
+            for ioff in range(ne_start, ne_end, local_batch_size):
+
                 # shape
-                nsamples = min(batch_size, ne_end - ioff)
+                nsamples = min(local_batch_size, ne_end - ioff)
                 start = global_off + ioff
                 end = start + nsamples
 
