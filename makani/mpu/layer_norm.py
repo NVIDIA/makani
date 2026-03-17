@@ -77,16 +77,16 @@ def _welford_kernel(vars: torch.Tensor, means: torch.Tensor, counts: torch.Tenso
     return var, mean, count
 
 
-def distributed_welford_variance(var: torch.Tensor, mean: torch.Tensor, count: torch.Tensor, group: str) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def distributed_welford_variance(var: torch.Tensor, mean: torch.Tensor, count: torch.Tensor, comm_id: str) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Computes the statistics locally, then uses the Welford online algorithm to reduce them"""
 
     # concatenate:
     # this has the shape [3, 1, ...]
-    var_mean_count = torch.stack([var, mean, count], dim=0).unsqueeze(1)
+    var_mean_count = torch.stack([var, mean, count], dim=0).unsqueeze(1).contiguous()
 
     # gather
     # this has the shape [3, spatial_size, ...], we split it up directly into individual tensors again
-    vars_means_counts = gather_from_parallel_region(var_mean_count, dim=1, shapes=None, group=group)
+    vars_means_counts = gather_from_parallel_region(var_mean_count, dim=1, shapes=None, comm_id=comm_id)
 
     # split up
     vars = vars_means_counts[0, ...]
