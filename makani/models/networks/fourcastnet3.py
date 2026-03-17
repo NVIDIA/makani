@@ -56,6 +56,53 @@ def _soft_clamp(x: torch.Tensor, offset: float = 0.0):
     return y
 
 
+@torch.compiler.disable(recursive=True)
+def _get_norm_layer_handle(
+    h,
+    w,
+    embed_dim,
+    normalization_layer="none",
+    sht_grid_type="legendre-gauss",
+):
+    """
+    get the handle for ionitializing normalization layers
+    """
+    # pick norm layer
+    if normalization_layer == "layer_norm":
+        from makani.mpu.layer_norm import DistributedLayerNorm
+        norm_layer_handle = partial(DistributedLayerNorm, normalized_shape=(embed_dim), elementwise_affine=True, eps=1e-6)
+    elif normalization_layer == "instance_norm":
+        if comm.get_size("spatial") > 1:
+            from makani.mpu.layer_norm import DistributedInstanceNorm2d
+            norm_layer_handle = partial(DistributedInstanceNorm2d, num_features=embed_dim, eps=1e-6, affine=True)
+        else:
+            norm_layer_handle = partial(nn.InstanceNorm2d, num_features=embed_dim, eps=1e-6, affine=True, track_running_stats=False)
+    elif normalization_layer == "instance_norm_s2":
+        if comm.get_size("spatial") > 1:
+            from makani.mpu.layer_norm import DistributedGeometricInstanceNormS2
+            norm_layer_handle = DistributedGeometricInstanceNormS2
+        else:
+            from makani.models.common import GeometricInstanceNormS2
+            norm_layer_handle = GeometricInstanceNormS2
+        norm_layer_handle = partial(
+            norm_layer_handle,
+            img_shape=(h, w),
+            crop_shape=(h, w),
+            crop_offset=(0, 0),
+            grid_type=sht_grid_type,
+            pole_mask=0,
+            num_features=embed_dim,
+            eps=1e-6,
+            affine=True,
+        )
+    elif normalization_layer == "none":
+        norm_layer_handle = nn.Identity
+    else:
+        raise NotImplementedError(f"Error, normalization {normalization_layer} not implemented.")
+
+    return norm_layer_handle
+
+
 class DiscreteContinuousEncoder(nn.Module):
     def __init__(
         self,
@@ -240,7 +287,7 @@ class NeuralOperatorBlock(nn.Module):
         mlp_drop_rate=0.0,
         path_drop_rate=0.0,
         act_layer=nn.GELU,
-        norm_layer=nn.Identity,
+        normalization_layer="none",
         num_groups=1,
         skip="identity",
         layer_scale=True,
@@ -307,8 +354,16 @@ class NeuralOperatorBlock(nn.Module):
         else:
             raise ValueError(f"Unknown convolution type {conv_type}")
 
-        # norm layer
-        self.norm = norm_layer()
+        # get normalization layer handles and instances
+        norm_layer_handle = _get_norm_layer_handle(
+            self.inp_shape[0],
+            self.inp_shape[1],
+            inp_chans,
+            normalization_layer=normalization_layer,
+            sht_grid_type=forward_transform.grid,
+        )
+        self.norm1 = norm_layer_handle()
+        self.norm2 = norm_layer_handle()
 
         if use_mlp == True:
             MLPH = DistributedMLP if (comm.get_size("matmul") > 1) else MLP
@@ -356,13 +411,16 @@ class NeuralOperatorBlock(nn.Module):
         Updated NO block
         """
 
+        # apply normalization layer 1
+        x = self.norm1(x)
+
         if hasattr(self, "global_conv"):
             dx, _ = self.global_conv(x)
         elif hasattr(self, "local_conv"):
             dx = self.local_conv(x)
 
-        if hasattr(self, "norm"):
-            dx = self.norm(dx)
+        # apply normalization layer 2
+        dx = self.norm2(dx)
 
         if hasattr(self, "mlp"):
             dx = self.mlp(dx)
@@ -563,8 +621,6 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         self.pos_drop = nn.Dropout(p=pos_drop_rate) if pos_drop_rate > 0.0 else nn.Identity()
         dpr = [x.item() for x in torch.linspace(0, path_drop_rate, num_layers)]
 
-        # get the handle for the normalization layer
-        norm_layer = self._get_norm_layer_handle(self.h, self.w, self.total_embed_dim, normalization_layer=normalization_layer, sht_grid_type=sht_grid_type)
 
         # Internal NO blocks
         self.blocks = nn.ModuleList([])
@@ -588,7 +644,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
                 mlp_drop_rate=mlp_drop_rate,
                 path_drop_rate=dpr[i],
                 act_layer=activation_function,
-                norm_layer=norm_layer,
+                normalization_layer=normalization_layer,
                 skip="identity",
                 layer_scale=layer_scale,
                 use_mlp=use_mlp,
@@ -672,52 +728,6 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         self.sht = sht_handle(self.h, self.w, lmax=modes_lat, mmax=modes_lon, grid=sht_grid_type).float()
         self.isht = isht_handle(self.h, self.w, lmax=modes_lat, mmax=modes_lon, grid=sht_grid_type).float()
 
-    @torch.compiler.disable(recursive=True)
-    def _get_norm_layer_handle(
-        self,
-        h,
-        w,
-        embed_dim,
-        normalization_layer="none",
-        sht_grid_type="legendre-gauss",
-    ):
-        """
-        get the handle for ionitializing normalization layers
-        """
-        # pick norm layer
-        if normalization_layer == "layer_norm":
-            from makani.mpu.layer_norm import DistributedLayerNorm
-            norm_layer_handle = partial(DistributedLayerNorm, normalized_shape=(embed_dim), elementwise_affine=True, eps=1e-6)
-        elif normalization_layer == "instance_norm":
-            if comm.get_size("spatial") > 1:
-                from makani.mpu.layer_norm import DistributedInstanceNorm2d
-                norm_layer_handle = partial(DistributedInstanceNorm2d, num_features=embed_dim, eps=1e-6, affine=True)
-            else:
-                norm_layer_handle = partial(nn.InstanceNorm2d, num_features=embed_dim, eps=1e-6, affine=True, track_running_stats=False)
-        elif normalization_layer == "instance_norm_s2":
-            if comm.get_size("spatial") > 1:
-                from makani.mpu.layer_norm import DistributedGeometricInstanceNormS2
-                norm_layer_handle = DistributedGeometricInstanceNormS2
-            else:
-                from makani.models.common import GeometricInstanceNormS2
-                norm_layer_handle = GeometricInstanceNormS2
-            norm_layer_handle = partial(
-                norm_layer_handle,
-                img_shape=(h, w),
-                crop_shape=(h, w),
-                crop_offset=(0, 0),
-                grid_type=sht_grid_type,
-                pole_mask=0,
-                num_features=embed_dim,
-                eps=1e-6,
-                affine=True,
-            )
-        elif normalization_layer == "none":
-            norm_layer_handle = nn.Identity
-        else:
-            raise NotImplementedError(f"Error, normalization {normalization_layer} not implemented.")
-
-        return norm_layer_handle
 
     @torch.compiler.disable(recursive=True)
     def _precompute_channel_groups(
