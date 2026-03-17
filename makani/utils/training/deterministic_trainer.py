@@ -641,22 +641,6 @@ class Trainer(Driver):
 
                     # preprocess
                     inp, tar = self.preprocessor.cache_unpredicted_features(*gdata)
-
-                    # --- diagnose channel 0 before any further processing ---
-                    # tar shape: (B, T, C, H, W) — check channel 0 across all timesteps
-                    for _t in range(tar.shape[1]):
-                        ch0 = tar[0, _t, 0, :, :]  # (H, W)
-                        print(f"[dbg] tar raw t={_t} ch=0 ({self.params.channel_names[0]}): "
-                              f"min={ch0.min().item():.6f}, mean={ch0.mean().item():.6f}, max={ch0.max().item():.6f}, "
-                              f"std={ch0.std().item():.6f}")
-                    # also show inp channel 0 for comparison
-                    # inp shape at this point: (B, T, C, H, W) still (not yet flattened)
-                    ch0_inp = inp[0, -1, 0, :, :]  # last time step, channel 0, (H, W)
-                    print(f"[dbg] inp raw t=-1 ch=0 ({self.params.channel_names[0]}): "
-                          f"min={ch0_inp.min().item():.6f}, mean={ch0_inp.mean().item():.6f}, max={ch0_inp.max().item():.6f}, "
-                          f"std={ch0_inp.std().item():.6f}")
-                    # --- end channel 0 diagnosis ---
-
                     inp = self.preprocessor.flatten_history(inp)
 
                     # split list of targets
@@ -680,15 +664,9 @@ class Trainer(Driver):
                                 pred_gather = pred[0, ...].clone()
                                 targ_gather = targ[0, ...].clone()
 
-                                print(f"pred {idt} before gather: min={torch.min(pred_gather[0, ...]).item()}, mean={torch.mean(pred_gather[0, ...]).item()}, max={torch.max(pred_gather[0, ...]).item()}")
-                                print(f"targ {idt} before gather: min={torch.min(targ_gather[0, ...]).item()}, mean={torch.mean(targ_gather[0, ...]).item()}, max={torch.max(targ_gather[0, ...]).item()}")
-
                                 # gather if necessary
                                 pred_gather = self.metrics._gather_input(pred_gather)
                                 targ_gather = self.metrics._gather_input(targ_gather)
-
-                                print(f"pred {idt} after gather: min={torch.min(pred_gather[0, ...]).item()}, mean={torch.mean(pred_gather[0, ...]).item()}, max={torch.max(pred_gather[0, ...]).item()}")
-                                print(f"targ {idt} after gather: min={torch.min(targ_gather[0, ...]).item()}, mean={torch.mean(targ_gather[0, ...]).item()}, max={torch.max(targ_gather[0, ...]).item()}")
 
                                 if self.viz_stream is not None:
                                     self.viz_stream.wait_stream(torch.cuda.current_stream())
@@ -701,9 +679,6 @@ class Trainer(Driver):
                                 pred_cpu = self.viz_prediction_cpu.to(torch.float32).numpy()
                                 targ_cpu = self.viz_target_cpu.to(torch.float32).numpy()
 
-                                print(f"pred {idt} after copy: min={np.min(pred_cpu[0, ...])}, mean={np.mean(pred_cpu[0, ...])}, max={np.max(pred_cpu[0, ...])}")
-                                print(f"targ {idt} after copy: min={np.min(targ_cpu[0, ...])}, mean={np.mean(targ_cpu[0, ...])}, max={np.max(targ_cpu[0, ...])}")
-
                                 tag = f"step{eval_steps}_time{str(idt).zfill(3)}"
                                 self.visualizer.add(tag, pred_cpu, targ_cpu)
 
@@ -712,8 +687,6 @@ class Trainer(Driver):
 
                         # append history
                         inpt = self.preprocessor.append_history(inpt, pred, idt)
-
-                    sys.exit()
 
                     if torch.cuda.is_available():
                         torch.cuda.nvtx.range_pop()
