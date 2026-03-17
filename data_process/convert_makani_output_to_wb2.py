@@ -220,7 +220,7 @@ def convert(file_names_to_convert: List[str], output_file: str, batch_size: Opti
                         "latitude": slice(0, nlat),
                         "longitude": slice(0, nlon),
                     },
-                    mode="a"
+                    mode="r+",
                 )
 
             # we need a barrier here
