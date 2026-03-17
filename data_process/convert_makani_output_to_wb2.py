@@ -233,6 +233,16 @@ def convert(file_names_to_convert: List[str], output_file: str, batch_size: Opti
             if comm_rank == 0:
                 pbar.update(global_off)
 
+    # consolidate metadata
+    comm.Barrier()
+
+    if comm_rank == 0:
+        import zarr
+        zarr.consolidate_metadata(output_file)
+
+    # sync one last time
+    comm.Barrier()
+
     # end time
     end_time = time.perf_counter()
     run_time = str(dt.timedelta(seconds=end_time-start_time))
