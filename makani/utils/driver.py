@@ -689,3 +689,72 @@ class Driver(metaclass=abc.ABCMeta):
             scheduler = lr_scheduler.SequentialLR(optimizer, [warmup_scheduler, scheduler], milestones=[params.lr_warmup_steps])
 
         return scheduler
+
+    def init_visualizer(self,
+        params: YParams,
+        lat_lon_global: Tuple[float, float],
+        out_bias: torch.Tensor,
+        out_scale: torch.Tensor,
+        device: torch.Device,
+    ):
+        """
+        Initialize the visualizer
+        """
+        from makani.utils import visualize
+
+        # windspeed
+        cnames = params.channel_names
+        u10m_channel_index = cnames.index("u10m") if "u10m" in cnames else None
+        v10m_channel_index = cnames.index("v10m") if "v10m" in cnames else None
+        if u10m_channel_index is not None and v10m_channel_index is not None:
+            plot_list = [
+                {
+                    "name": "windspeed_uv10",
+                    "functor": f"lambda x: np.sqrt(np.square(x[{u10m_channel_index}, ...]) + np.square(x[{v10m_channel_index}, ...]))",
+                    "diverging": False
+                }
+            ]
+        else:
+            plot_list = []
+
+        # z500
+        channel_index = cnames.index("z500") if "z500" in cnames else None
+        if channel_index is not None:
+            plot_list += [
+                {
+                    "name": "geopotential_z500", 
+                    "functor": f"lambda x: x[{channel_index}, ...]", 
+                    "diverging": False
+                }
+            ]
+
+        if plot_list:
+            visualizer = visualize.VisualizationWrapper(
+                params.log_to_wandb,
+                path=None,
+                prefix=None,
+                plot_list=plot_list,
+                lat=np.deg2rad(lat_lon_global[0]),
+                lon=np.deg2rad(lat_lon_global[1]) - np.pi,
+                scale=out_scale[0, ...],
+                bias=out_bias[0, ...],
+                num_workers=params.num_visualization_workers,
+            )
+            # allocate pinned tensors for faster copy:
+            if device.type == "cuda":
+                visualizer.stream = torch.Stream(device="cuda")
+                pin_memory = True
+            else:
+                visualizer.stream = None
+                pin_memory = False
+
+            visualizer.prediction_cpu = torch.empty(
+                ((params.N_target_channels // (params.n_future + 1)), params.img_shape_x_resampled, params.img_shape_y_resampled), device="cpu", pin_memory=pin_memory
+                )
+            visualizer.target_cpu = torch.empty(
+                ((params.N_target_channels // (params.n_future + 1)), params.img_shape_x_resampled, params.img_shape_y_resampled), device="cpu", pin_memory=pin_memory
+            )
+        else:
+            visualizer = None
+
+        return visualizer
