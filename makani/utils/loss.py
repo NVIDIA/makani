@@ -184,7 +184,15 @@ class LossHandler(nn.Module):
             self.rng_gpu.manual_seed(seed)
 
     @torch.compiler.disable(recursive=False)
-    def _compute_multistep_weight(self, weight_type: str, **kwargs) -> torch.Tensor:
+    def _compute_multistep_weight(self, **kwargs) -> torch.Tensor:
+
+        # select default for weight_type
+        if "weight_type" in kwargs:
+            weight_type = kwargs["weight_type"]
+        else:
+            weight_type = "constant"
+
+        # compute weights:
         if weight_type == "constant":
             # uniform weighting factor for the case of multistep training
             multistep_weight = torch.ones(self.n_future + 1, dtype=torch.float32) / float(self.n_future + 1)
