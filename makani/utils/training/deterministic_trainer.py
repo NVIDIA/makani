@@ -234,14 +234,14 @@ class Trainer(Driver):
         with Timer() as timer:
 
             # windspeed
-            u10m_channel_index = self.params.data_channel_names.index("u10m")
-            v10m_channel_index = self.params.data_channel_names.index("v10m")
+            u10m_channel_index = self.params.channel_names.index("u10m")
+            v10m_channel_index = self.params.channel_names.index("v10m")
             if u10m_channel_index is not None and v10m_channel_index is not None:
                 plot_list = [{"name": "windspeed_uv10", "functor": f"lambda x: np.sqrt(np.square(x[{u10m_channel_index}, ...]) + np.square(x[{v10m_channel_index}, ...]))", "diverging": False}]
             else:
                 plot_list = []
             # z500
-            channel_index = self.params.data_channel_names.index("z500")
+            channel_index = self.params.channel_names.index("z500")
             if channel_index is not None:
                 plot_list += [{"name": "geopotential_z500", "functor": f"lambda x: x[{channel_index}, ...]", "diverging": False}]
 
