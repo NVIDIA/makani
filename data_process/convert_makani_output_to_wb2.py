@@ -181,7 +181,7 @@ def convert(file_names_to_convert: List[str], output_file: str, batch_size: Opti
                 end = start + nsamples
 
                 if verbose:
-                    print(f"{comm_rank}: file={filename}, ne={ne}, start={start}, end={end}, ne_start={ne_start}, ne_end={ne_end}, ne_local={ne_local}, batch_size={batch_size}")
+                    print(f"{comm_rank}: file={filename}, ne={ne}, start={start}, end={end}, ne_start={ne_start}, ne_end={ne_end}, ne_local={ne_local}, local_batch_size={local_batch_size}, nsamples={nsamples}")
                 
                 # surface channel
                 chunk_data_arrays = {}
