@@ -17,7 +17,7 @@ import os
 import abc
 import gc
 
-from typing import Optional, Dict
+from typing import Optional, Dict, Tuple
 from collections import OrderedDict
 
 import numpy as np
@@ -692,7 +692,7 @@ class Driver(metaclass=abc.ABCMeta):
 
     def init_visualizer(self,
         params: YParams,
-        lat_lon_global: Tuple[float, float],
+        lat_lon_global: Tuple[np.ndarray, np.ndarray],
         out_bias: torch.Tensor,
         out_scale: torch.Tensor,
         device: torch.Device,
