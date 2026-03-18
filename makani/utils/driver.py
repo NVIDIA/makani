@@ -695,7 +695,7 @@ class Driver(metaclass=abc.ABCMeta):
         lat_lon_global: Tuple[np.ndarray, np.ndarray],
         out_bias: torch.Tensor,
         out_scale: torch.Tensor,
-        device: torch.Device,
+        device: torch.device,
     ):
         """
         Initialize the visualizer
