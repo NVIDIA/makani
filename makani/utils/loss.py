@@ -204,8 +204,8 @@ class LossHandler(nn.Module):
             multistep_weight[-1] = 1.0
         elif weight_type == "custom":
             # custom weighting factor for the case of multistep training
-            multistep_weights = torch.as_tensor(kwargs["weights"], dtype=torch.float32)
-            assert multistep_weights.shape[0] == self.n_future + 1, "Number of multistep weights must match n_future+1"
+            multistep_weight = torch.as_tensor(kwargs["weights"], dtype=torch.float32)
+            assert multistep_weight.shape[0] == self.n_future + 1, "Number of multistep weights must match n_future+1"
         else:
             raise ValueError(f"Unknown multistep loss weight type: {weight_type}")
 
