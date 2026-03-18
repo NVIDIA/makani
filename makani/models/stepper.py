@@ -61,7 +61,8 @@ class MultiStepWrapper(nn.Module):
         self.preprocessor = Preprocessor2D(params)
         self.model = model_handle()
         self.residual_mode = True if (params.target == "target") else False
-        self.push_forward_mode = params.get("multistep_push_forward", False)
+        multistep_parameters = params.get("multistep", {"push_forward": False})
+        self.push_forward_mode = multistep_parameters["push_forward"]
 
         # collect parameters for history
         self.n_future = params.n_future
