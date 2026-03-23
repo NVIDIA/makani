@@ -224,7 +224,7 @@ class IsotropicGaussianRandomFieldS2(BaseNoiseS2):
         cstate = cstate.reshape(batch_size, self.num_time_steps * self.num_channels, self.lmax_local, self.mmax_local)
 
         # transform
-        with amp.autocast(device_type="cuda", enabled=False):
+        with amp.autocast(device_type=cstate.device.type, enabled=False):
             eta = self.isht(cstate)
 
         # expand history
@@ -383,7 +383,7 @@ class DiffusionNoiseS2(BaseNoiseS2):
 
         # create single occurence
         with torch.no_grad():
-            with torch.amp.autocast(device_type="cuda", enabled=False):
+            with amp.autocast(device_type=self.state.device.type, enabled=False):
                 nsteps = self.num_time_steps if replace_state else 1
                 if batch_size is None:
                     batch_size = self.state.shape[0]
@@ -434,7 +434,7 @@ class DiffusionNoiseS2(BaseNoiseS2):
         cstate = cstate.reshape(batch_size, self.num_time_steps * self.num_channels, self.lmax_local, self.mmax_local)
 
         # transform
-        with amp.autocast(device_type="cuda", enabled=False):
+        with amp.autocast(device_type=cstate.device.type, enabled=False):
             eta = self.isht(cstate)
 
         # expand history

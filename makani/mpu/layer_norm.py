@@ -139,17 +139,17 @@ class DistributedInstanceNorm2d(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
 
         xtype = x.dtype
-        with amp.autocast(device_type="cuda", enabled=False):
-            x = x.to(torch.float32)
+        with amp.autocast(device_type=x.device.type, enabled=False):
+            xf = x.to(torch.float32)
 
             # start by computing std and mean
-            var, mean = self._stats_welford(x)
+            var, mean = self._stats_welford(xf)
 
             # this is absolutely necessary to get the correct graph in the backward pass
             mean = copy_to_parallel_region(mean, "spatial")
             var = copy_to_parallel_region(var, "spatial")
 
-        x = x.to(xtype)
+        # convert back
         mean = mean.to(xtype)
         var = var.to(xtype)
 
@@ -219,17 +219,17 @@ class DistributedGeometricInstanceNormS2(DistributedInstanceNorm2d):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
 
         xtype = x.dtype
-        with amp.autocast(device_type="cuda", enabled=False):
-            x = x.to(torch.float32)
+        with amp.autocast(device_type=x.device.type, enabled=False):
+            xf = x.to(torch.float32)
 
             # start by computing std and mean
-            var, mean = self._stats_welford(x)
+            var, mean = self._stats_welford(xf)
 
             # this is absolutely necessary to get the correct graph in the backward pass
             mean = copy_to_parallel_region(mean, "spatial")
             var = copy_to_parallel_region(var, "spatial")
 
-        x = x.to(xtype)
+        # convert back
         mean = mean.to(xtype)
         var = var.to(xtype)
 

@@ -109,12 +109,9 @@ class DiscreteContinuousEncoder(nn.Module):
             )
 
     def forward(self, x):
-        dtype = x.dtype
 
-        with amp.autocast(device_type="cuda", enabled=False):
-            x = x.float()
-            x = self.conv(x)
-            x = x.to(dtype=dtype)
+        # perform conv
+        x = self.conv(x)
 
         if hasattr(self, "act"):
             x = self.act(x)
