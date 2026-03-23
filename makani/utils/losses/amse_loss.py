@@ -53,9 +53,10 @@ class SpectralAMSELoss(SpectralBaseLoss):
     def forward(self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None) -> torch.Tensor:
 
         # compute the sht
-        prd = prd.float()
-        tar = tar.float()
-        with amp.autocast(device_type="cuda", enabled=False):
+        ptype = prd.dtype
+        with amp.autocast(device_type=prd.device.type, enabled=False):
+            prd = prd.to(torch.float32)
+            tar = tar.to(torch.float32)
             xcoeffs = self.sht(prd)
             ycoeffs = self.sht(tar)
         
@@ -63,6 +64,11 @@ class SpectralAMSELoss(SpectralBaseLoss):
         xcoeffssq = torch.square(torch.abs(xcoeffs))
         ycoeffssq = torch.square(torch.abs(ycoeffs))
         xycohcoeffssq = torch.real(xcoeffs * ycoeffs.conj())
+
+        # convert back
+        xcoeffssq = xcoeffssq.to(dtype=ptype)
+        ycoeffssq = ycoeffssq.to(dtype=ptype)
+        xycohcoeffssq = xycohcoeffssq.to(dtype=ptype)
 
         if wgt is not None:
             xcoeffssq = xcoeffssq * wgt

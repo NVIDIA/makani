@@ -728,6 +728,17 @@ class Driver(metaclass=abc.ABCMeta):
                 }
             ]
 
+        # q100
+        channel_index = cnames.index("q100") if "q100" in cnames else None
+        if channel_index is not None:
+            plot_list += [
+                {
+                    "name": "specific_humidity_q100", 
+                    "functor": f"lambda x: x[{channel_index}, ...]", 
+                    "diverging": False
+                }
+            ]
+
         if plot_list:
             visualizer = visualize.VisualizationWrapper(
                 params.log_to_wandb,

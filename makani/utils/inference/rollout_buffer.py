@@ -726,7 +726,7 @@ class SpectrumAverageBuffer(MeanStdBuffer):
 
             # perform SHT in FP32 to be safe
             dtype = datap.dtype
-            with amp.autocast(device_type="cuda", enabled=False):
+            with amp.autocast(device_type=datap.device.type, enabled=False):
                 sdatap = self.sht(datap.to(torch.float32))
 
                 # compute power spectrum:
@@ -962,7 +962,7 @@ class ZonalSpectrumAverageBuffer(MeanStdBuffer):
 
             # distributed FFT
             dtype = datap.dtype
-            with amp.autocast(device_type="cuda", enabled=False):
+            with amp.autocast(device_type=datap.device.type, enabled=False):
                 sdatap = self.rfft(datap.to(torch.float32), norm="forward")
 
                 # compute power spectrum:

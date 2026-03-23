@@ -596,11 +596,11 @@ class SphericalFourierNeuralOperatorNet(nn.Module):
                 xtype = x.dtype
                 # only take the predicted channels as residual
                 residual = x.to(torch.float32)
-                with amp.autocast(device_type="cuda", enabled=False):
+                with amp.autocast(device_type=residual.device.type, enabled=False):
                     residual = self.trans_down(residual)
                     residual = residual.contiguous()
                     residual = self.itrans_up(residual)
-                    residual = residual.to(dtype=xtype)
+                residual = residual.to(dtype=xtype)
             else:
                 # only take the predicted channels
                 residual = x

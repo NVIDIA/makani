@@ -165,12 +165,9 @@ class DiscreteContinuousEncoder(nn.Module):
             )
 
     def forward(self, x):
-        dtype = x.dtype
-
-        with amp.autocast(device_type="cuda", enabled=False):
-            x = x.float()
-            x = self.conv(x)
-            x = x.to(dtype=dtype)
+        
+        # convolution
+        x = self.conv(x)
 
         if hasattr(self, "act"):
             x = self.act(x)
@@ -266,11 +263,11 @@ class DiscreteContinuousDecoder(nn.Module):
         if hasattr(self, "mlp"):
             x = self.mlp(x)
 
-        with amp.autocast(device_type="cuda", enabled=False):
-            x = x.float()
+        with amp.autocast(device_type=x.device.type, enabled=False):
+            x = x.to(torch.float32)
             x = self.upsample(x)
             x = self.conv(x)
-            x = x.to(dtype=dtype)
+        x = x.to(dtype=dtype)
 
         return x
 
