@@ -121,7 +121,6 @@ class SpectralConv(nn.Module):
                 residual = self.inverse_transform(x)
         
         # convert back
-        x = x.to(dtype=dtype)
         if self.scale_residual:
             residual = residual.to(dtype=dtype)
 
@@ -131,7 +130,6 @@ class SpectralConv(nn.Module):
         x = xp.reshape(B, self.out_channels, H, W).contiguous()
 
         with amp.autocast(device_type=x.device.type, enabled=False):
-            x = x.to(torch.float32)
             x = self.inverse_transform(x)
         
         # convert back
@@ -261,7 +259,6 @@ class SpectralAttention(nn.Module):
     def forward(self, x):
         dtype = x.dtype
         residual = x
-        x = x.to(torch.float32)
 
         # FWD transform
         with amp.autocast(device_type=x.device.type, enabled=False):
