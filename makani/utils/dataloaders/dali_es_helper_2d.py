@@ -658,7 +658,9 @@ class GeneralES(object):
         end_y = start_y + self.read_shape[1]
 
         # read data
+        torch.cuda.nvtx.range_push("GeneralES::get_data_handle")
         inp, tar = self.get_data_handle(dset, local_idx, start_x, end_x, start_y, end_y)
+        torch.cuda.nvtx.range_pop()
 
         # compute time stamps
         if self.zenith_angle or self.return_timestamp:
