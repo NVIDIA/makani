@@ -95,6 +95,7 @@ class DistributedProgressBar(object):
         if self.comm.Get_rank() == 0:
             # set up pbar
             self.pbar = progressbar.ProgressBar(maxval=num_entries)
+            self.pbar.start()
         self.reset()
 
     def __del__(self):
@@ -125,4 +126,4 @@ class DistributedProgressBar(object):
     def update_progress(self):
         if self.comm.Get_rank() == 0:
             count = self.get_counter()
-            self.pbar.update(count)
+            self.pbar.update(min(count, self.pbar.maxval))
