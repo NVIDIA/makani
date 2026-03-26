@@ -184,6 +184,28 @@ def scatter_optimizer_state_dict(model: nn.Module, optimizer: Optimizer, optimiz
     return optimizer_state_dict
 
 
+def get_model_state_dict_prefix(model: nn.Module) -> str:
+    """Return the key prefix that the model's state_dict uses.
+
+    torch.compile wraps a model in OptimizedModule (keys gain ``_orig_mod.``),
+    and DDP wraps it in DistributedDataParallel (keys gain ``module.``).
+    These wrappers may be nested in any combination, so we walk the wrapper
+    chain and accumulate the prefix in order.
+    """
+    prefix = ""
+    m = model
+    while True:
+        if hasattr(m, "_orig_mod"):
+            prefix += "_orig_mod."
+            m = m._orig_mod
+        elif isinstance(m, nn.parallel.DistributedDataParallel):
+            prefix += "module."
+            m = m.module
+        else:
+            break
+    return prefix
+
+
 def prepend_prefix_to_state_dict(
     state_dict: Dict[str, Any],
     prefix: str,
