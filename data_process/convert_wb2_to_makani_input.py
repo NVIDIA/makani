@@ -111,10 +111,12 @@ def convert(input_file: str, output_dir: str, metadata_file: str, years: List[in
     if coord_mode == 'match':
         wb2_data = wb2_data.sel(latitude=lat, longitude=lon)
     elif coord_mode == 'force-flip-lat':
-        warnings.warn("coord_mode='force-flip-lat': flipping latitude axis without coordinate matching")
+        if comm_rank == 0:
+            warnings.warn("coord_mode='force-flip-lat': flipping latitude axis without coordinate matching")
         wb2_data = wb2_data.isel(latitude=slice(None, None, -1))
     elif coord_mode == 'force-noflip':
-        warnings.warn("coord_mode='force-noflip': reading data as-is, assuming ordering matches metadata")
+        if comm_rank == 0:
+            warnings.warn("coord_mode='force-noflip': reading data as-is, assuming ordering matches metadata")
     else:
         raise ValueError(f"Unknown coord_mode: {coord_mode}. Must be one of: match, force-flip-lat, force-noflip")
 
