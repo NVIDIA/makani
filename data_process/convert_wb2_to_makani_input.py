@@ -70,7 +70,7 @@ def convert(input_file: str, output_dir: str, metadata_file: str, years: List[in
         How to align input lat/lon to the metadata grid. One of:
         - "match": use xarray .sel() to reorder input data to match metadata coords (default).
         - "force-flip-lat": flip the latitude axis of the input data without coordinate matching.
-        - "force-noflip": read data as-is, assume ordering already matches metadata.
+        - "force": read data as-is, assume ordering already matches metadata.
     force_overwrite: bool
         Setting this flag to True will overwrite existing files.
     skip_missing_channels: bool
@@ -114,11 +114,11 @@ def convert(input_file: str, output_dir: str, metadata_file: str, years: List[in
         if comm_rank == 0:
             warnings.warn("coord_mode='force-flip-lat': flipping latitude axis without coordinate matching")
         wb2_data = wb2_data.isel(latitude=slice(None, None, -1))
-    elif coord_mode == 'force-noflip':
+    elif coord_mode == 'force':
         if comm_rank == 0:
-            warnings.warn("coord_mode='force-noflip': reading data as-is, assuming ordering matches metadata")
+            warnings.warn("coord_mode='force': reading data as-is, assuming ordering matches metadata")
     else:
-        raise ValueError(f"Unknown coord_mode: {coord_mode}. Must be one of: match, force-flip-lat, force-noflip")
+        raise ValueError(f"Unknown coord_mode: {coord_mode}. Must be one of: match, force-flip-lat, force")
 
     # check total number of entries:
     num_entries_total = 0
@@ -313,8 +313,8 @@ if __name__ == '__main__':
     parser.add_argument("--metadata_file", type=str, help="Local file with metadata.", required=True)
     parser.add_argument("--years", type=int, nargs='+', help="Which years to convert", required=True)
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size for writing chunks")
-    parser.add_argument("--coord_mode", type=str, default="match", choices=["match", "force-flip-lat", "force-noflip"],
-                        help="How to align input lat/lon to metadata: match (default), force-flip-lat, force-noflip")
+    parser.add_argument("--coord_mode", type=str, default="match", choices=["match", "force-flip-lat", "force"],
+                        help="How to align input lat/lon to metadata: match (default), force-flip-lat, force")
     parser.add_argument("--skip_missing_channels", action="store_true", help="Skip missing channels and do not fail")
     parser.add_argument("--impute_missing_timestamps", action="store_true", help="Impute missing timestamps")
     parser.add_argument("--force_overwrite", action="store_true", help="Overwrite existing files")
