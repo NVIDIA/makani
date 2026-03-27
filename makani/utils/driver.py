@@ -41,10 +41,8 @@ from makani.utils.checkpoint_helpers import (
     gather_optimizer_state_dict,
     scatter_optimizer_state_dict,
     prepend_prefix_to_state_dict,
+    get_model_state_dict_prefix,
 )
-
-# for flexible checkpoints
-from torch_harmonics.distributed import split_tensor_along_dim
 
 
 class Driver(metaclass=abc.ABCMeta):
@@ -416,9 +414,9 @@ class Driver(metaclass=abc.ABCMeta):
         # if all those test pass, we are good to go
         # this is reworked to avoid loading modules related to the SHT
         state_dict = checkpoint["model_state"]
-        if isinstance(model, nn.parallel.DistributedDataParallel):
-            # prepend module prefix to state dict:
-            prepend_prefix_to_state_dict(state_dict, "module.")
+        prefix = get_model_state_dict_prefix(model)
+        if prefix:
+            prepend_prefix_to_state_dict(state_dict, prefix)
 
         # load state dict
         model.load_state_dict(state_dict, strict=strict)
@@ -457,9 +455,9 @@ class Driver(metaclass=abc.ABCMeta):
         # this is reworked to avoid loading modules related to the SHT
         state_dict = checkpoint["model_state"]
 
-        if isinstance(model, nn.parallel.DistributedDataParallel):
-            # prepend module prefix to state dict:
-            prepend_prefix_to_state_dict(state_dict, "module.")
+        prefix = get_model_state_dict_prefix(model)
+        if prefix:
+            prepend_prefix_to_state_dict(state_dict, prefix)
 
         if comm.get_size("model") > 1:
             state_dict = scatter_model_state_dict(model, state_dict, strict)
@@ -528,9 +526,11 @@ class Driver(metaclass=abc.ABCMeta):
         # attach sharding information to model state:
         state_dict = model.state_dict()
 
-        # drop module prefix in case if DDP is being used
-        if isinstance(model, nn.parallel.DistributedDataParallel):
-            nn.modules.utils.consume_prefix_in_state_dict_if_present(state_dict, "module.")
+        # strip all wrapper prefixes (torch.compile -> "_orig_mod.", DDP -> "module.")
+        # so checkpoints are always stored in canonical form without wrapper-specific keys
+        prefix = get_model_state_dict_prefix(model)
+        if prefix:
+            nn.modules.utils.consume_prefix_in_state_dict_if_present(state_dict, prefix)
 
         # check for model parallelism
         for param, sk in zip(model.parameters(), state_dict.keys()):
@@ -584,9 +584,11 @@ class Driver(metaclass=abc.ABCMeta):
         else:
             state_dict = model.state_dict()
 
-        # drop module prefix in case if DDP is being used
-        if isinstance(model, nn.parallel.DistributedDataParallel):
-            nn.modules.utils.consume_prefix_in_state_dict_if_present(state_dict, "module.")
+        # strip all wrapper prefixes (torch.compile -> "_orig_mod.", DDP -> "module.")
+        # so checkpoints are always stored in canonical form without wrapper-specific keys
+        prefix = get_model_state_dict_prefix(model)
+        if prefix:
+            nn.modules.utils.consume_prefix_in_state_dict_if_present(state_dict, prefix)
 
         store_dict = {"model_state": state_dict}
 
