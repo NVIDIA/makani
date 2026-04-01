@@ -205,7 +205,7 @@ class Inferencer(Driver):
 
     # shorthand for inference range running over the full dataset
     def inference_epoch(
-            self, rollout_steps: int, compute_metrics: bool = False, output_channels: List[str] = [], output_file: Optional[str] = None, output_memory_buffer_size: Optional[int] = None, bias_file: Optional[str] = None, spectrum_file: Optional[str] = None, zonal_spectrum_file: Optional[str] = None, wb2_compatible: Optional[bool] = False, profiler=None
+            self, rollout_steps: int, dhours: int, compute_metrics: bool = False, output_channels: List[str] = [], output_file: Optional[str] = None, output_memory_buffer_size: Optional[int] = None, bias_file: Optional[str] = None, spectrum_file: Optional[str] = None, zonal_spectrum_file: Optional[str] = None, wb2_compatible: Optional[bool] = False, profiler=None
     ):
         """
         Runs the model in autoregressive inference mode on the entire validation dataset. Computes metrics and scores the model.
@@ -226,6 +226,7 @@ class Inferencer(Driver):
             end,
             1,
             rollout_steps=rollout_steps,
+            dhours=dhours,
             batch_size=self.params.batch_size,
             compute_metrics=compute_metrics,
             output_channels=output_channels,
@@ -247,6 +248,7 @@ class Inferencer(Driver):
         end: int,
         step: int,
         rollout_steps: int,
+        dhours: int,
         batch_size: int,
         compute_metrics: bool = False,
         metrics_file: Optional[str] = None,
@@ -267,6 +269,7 @@ class Inferencer(Driver):
         logs = self.inference_indexlist(
             indices,
             rollout_steps=rollout_steps,
+            dhours=dhours,
             batch_size=batch_size,
             compute_metrics=compute_metrics,
             metrics_file=metrics_file,
@@ -286,6 +289,7 @@ class Inferencer(Driver):
         self,
         indices: Union[List[int], torch.Tensor],
         rollout_steps: int,
+        dhours: int,
         batch_size: int,
         compute_metrics: bool = False,
         metrics_file: Optional[str] = None,
@@ -343,7 +347,7 @@ class Inferencer(Driver):
                 num_samples=len(indices),
                 batch_size=batch_size,
                 num_rollout_steps=rollout_steps,
-                rollout_dt=self.params.dt,
+                rollout_dt=self.params.dt * dhours,
                 ensemble_size=self.params.local_ensemble_size,
                 img_shape=img_shape,
                 local_shape=local_shape,
@@ -813,6 +817,7 @@ class Inferencer(Driver):
             start,
             end,
             step,
+            dhours=self.valid_dataset.dhours,
             rollout_steps=rollout_steps,
             batch_size=self.params.batch_size,
             compute_metrics=True,
