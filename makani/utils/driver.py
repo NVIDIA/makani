@@ -533,9 +533,14 @@ class Driver(metaclass=abc.ABCMeta):
             nn.modules.utils.consume_prefix_in_state_dict_if_present(state_dict, prefix)
 
         # check for model parallelism
-        for param, sk in zip(model.parameters(), state_dict.keys()):
-            if hasattr(param, "sharded_dims_mp"):
-                state_dict[sk].sharded_dims_mp = param.sharded_dims_mp
+        # Build a name-keyed map using the same prefix that was stripped from the
+        # state dict, so lookups are safe regardless of parameter iteration order.
+        # removeprefix is a no-op when prefix is "", so no guard needed.
+        param_map = {name.removeprefix(prefix): param for name, param in model.named_parameters()}
+        for sk, tensor in state_dict.items():
+            param = param_map.get(sk)
+            if param is not None and hasattr(param, "sharded_dims_mp"):
+                tensor.sharded_dims_mp = param.sharded_dims_mp
 
         # add model state dict to store dict
         store_dict = {"model_state": state_dict}
