@@ -235,6 +235,7 @@ class DiscreteContinuousDecoder(nn.Module):
         out_chans=2,
         kernel_shape=(3, 3),
         basis_type="morlet",
+        inverse_transform=None,
         use_mlp=False,
         mlp_ratio=2.0,
         activation_function=nn.GELU,
@@ -243,50 +244,83 @@ class DiscreteContinuousDecoder(nn.Module):
     ):
         super().__init__()
 
-        if use_mlp:
-            self.mlp = EncoderDecoder(
-                num_layers=1, input_dim=inp_chans, output_dim=inp_chans, hidden_dim=int(mlp_ratio * inp_chans), act_layer=activation_function, input_format="nchw", gain=2.0
-            )
-
-            self.act = activation_function()
-
         # init distributed torch-harmonics if needed
         if comm.get_size("spatial") > 1:
             polar_group = None if (comm.get_size("h") == 1) else comm.get_group("h")
             azimuth_group = None if (comm.get_size("w") == 1) else comm.get_group("w")
             thd.init(polar_group, azimuth_group)
 
-        # spatial parallelism in the SHT
-        if upsample_sht:
-            # set up sht for upsampling
-            sht_handle = thd.DistributedRealSHT if comm.get_size("spatial") > 1 else th.RealSHT
-            isht_handle = thd.DistributedInverseRealSHT if comm.get_size("spatial") > 1 else th.InverseRealSHT
-
-            # set upsampling module
-            self.sht = sht_handle(*inp_shape, grid=grid_in).float()
-            self.isht = isht_handle(*out_shape, lmax=self.sht.lmax, mmax=self.sht.mmax, grid=grid_out).float()
-            self.upsample = nn.Sequential(self.sht, self.isht)
-        else:
-            resample_handle = thd.DistributedResampleS2 if comm.get_size("spatial") > 1 else th.ResampleS2
-
-            self.upsample = resample_handle(*inp_shape, *out_shape, grid_in=grid_in, grid_out=grid_out, mode="bilinear")
-
-        # heuristic for finding theta_cutoff
-        # nto entirely clear if out or in shape should be used here with a non-conv method for upsampling
-        theta_cutoff = _compute_cutoff_radius(nlat=out_shape[0], kernel_shape=kernel_shape, basis_type=basis_type)
-
-        # set up DISCO convolution
         attn_handle = thd.DistributedNeighborhoodAttentionS2 if comm.get_size("spatial") > 1 else th.NeighborhoodAttentionS2
-        self.attn = attn_handle(
-            in_channels=inp_chans,
-            out_channels=out_chans,
-            in_shape=out_shape,
-            out_shape=out_shape,
-            grid_in=grid_out,
-            grid_out=grid_out,
-            bias=bias,
-            theta_cutoff=theta_cutoff,
-        )
+
+        if inverse_transform is not None:
+            # Perceiver-style: learnable spectral query projected to the output grid,
+            # cross-attending to the low-res latent as keys/values. Symmetric to the encoder.
+            self.isht_out = inverse_transform
+
+            # local spectral mode counts — mirrors the encoder's latent_query_spec pattern
+            if isinstance(self.isht_out, thd.DistributedInverseRealSHT):
+                modes_lat_local = self.isht_out.l_shapes[comm.get_rank("h")]
+                modes_lon_local = self.isht_out.m_shapes[comm.get_rank("w")]
+            else:
+                modes_lat_local = self.isht_out.lmax
+                modes_lon_local = self.isht_out.mmax
+
+            # learnable query in spherical harmonic space: grid-agnostic Perceiver-style latent.
+            # iSHT maps spectral coefficients to the decoder output grid, so the query is
+            # band-limited and independent of the specific output grid type or resolution.
+            # zero-init: isht(0)=0 → uniform attention → average-pool starting point
+            self.latent_query_spec = nn.Parameter(
+                torch.zeros(1, inp_chans, modes_lat_local, modes_lon_local, dtype=torch.complex64)
+            )
+            # sharding annotation: lat modes sharded in "h", lon modes sharded in "w"
+            self.latent_query_spec.is_shared_mp = ["matmul"]
+            self.latent_query_spec.sharded_dims_mp = [None, None, "h", "w"]
+
+            # theta_cutoff based on the latent (kv) grid resolution
+            theta_cutoff = _compute_cutoff_radius(nlat=inp_shape[0], kernel_shape=kernel_shape, basis_type=basis_type)
+
+            # cross-attention: high-res output queries attend to low-res latent keys/values
+            self.attn = attn_handle(
+                in_channels=inp_chans,
+                out_channels=out_chans,
+                in_shape=inp_shape,
+                out_shape=out_shape,
+                grid_in=grid_in,
+                grid_out=grid_out,
+                bias=bias,
+                theta_cutoff=theta_cutoff,
+            )
+        else:
+            # classic path: optional pre-mlp on the latent, explicit spatial upsample, self-attention
+            if use_mlp:
+                self.mlp = EncoderDecoder(
+                    num_layers=1, input_dim=inp_chans, output_dim=inp_chans, hidden_dim=int(mlp_ratio * inp_chans), act_layer=activation_function, input_format="nchw", gain=2.0
+                )
+                self.act = activation_function()
+
+            if upsample_sht:
+                sht_handle = thd.DistributedRealSHT if comm.get_size("spatial") > 1 else th.RealSHT
+                isht_handle = thd.DistributedInverseRealSHT if comm.get_size("spatial") > 1 else th.InverseRealSHT
+                self.sht = sht_handle(*inp_shape, grid=grid_in).float()
+                self.isht = isht_handle(*out_shape, lmax=self.sht.lmax, mmax=self.sht.mmax, grid=grid_out).float()
+                self.upsample = nn.Sequential(self.sht, self.isht)
+            else:
+                resample_handle = thd.DistributedResampleS2 if comm.get_size("spatial") > 1 else th.ResampleS2
+                self.upsample = resample_handle(*inp_shape, *out_shape, grid_in=grid_in, grid_out=grid_out, mode="bilinear")
+
+            theta_cutoff = _compute_cutoff_radius(nlat=out_shape[0], kernel_shape=kernel_shape, basis_type=basis_type)
+
+            self.attn = attn_handle(
+                in_channels=inp_chans,
+                out_channels=out_chans,
+                in_shape=out_shape,
+                out_shape=out_shape,
+                grid_in=grid_out,
+                grid_out=grid_out,
+                bias=bias,
+                theta_cutoff=theta_cutoff,
+            )
+
         if comm.get_size("spatial") > 1:
             self.attn.q_weights.is_shared_mp = ["spatial"]
             self.attn.q_weights.sharded_dims_mp = [None, None, None, None]
@@ -308,21 +342,25 @@ class DiscreteContinuousDecoder(nn.Module):
                 self.attn.bias.sharded_dims_mp = [None]
 
     def forward(self, x):
-        dtype = x.dtype
-
-        if hasattr(self, "act"):
-            x = self.act(x)
-
-        if hasattr(self, "mlp"):
-            x = self.mlp(x)
-
-        with amp.autocast(device_type=x.device.type, enabled=False):
-            x = x.to(torch.float32)
-            x = self.upsample(x)
-        x = x.to(dtype=dtype)
-
-        x = self.attn(x)
-
+        if hasattr(self, "latent_query_spec"):
+            # Perceiver-style: project spectral query to output grid, cross-attend to latent
+            with amp.autocast(device_type=x.device.type, enabled=False):
+                query = self.latent_query_spec.to(torch.complex64).expand(x.shape[0], -1, -1, -1).contiguous()
+                query = self.isht_out(query)
+            query = query.to(dtype=x.dtype)
+            x = self.attn(query=query, key=x, value=x)
+        else:
+            # classic path: optional pre-mlp, upsample, self-attention
+            dtype = x.dtype
+            if hasattr(self, "act"):
+                x = self.act(x)
+            if hasattr(self, "mlp"):
+                x = self.mlp(x)
+            with amp.autocast(device_type=x.device.type, enabled=False):
+                x = x.to(torch.float32)
+                x = self.upsample(x)
+            x = x.to(dtype=dtype)
+            x = self.attn(x)
         return x
 
 
@@ -524,6 +562,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         checkpointing_level=0,
         freeze_encoder=False,
         freeze_processor=False,
+        perceiver_decoder=True,
         **kwargs,
     ):
         super().__init__()
@@ -545,6 +584,19 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
 
         # initialize spectral transforms
         self._init_spectral_transforms(model_grid_type, sht_grid_type, hard_thresholding_fraction, max_modes)
+
+        # iSHT that maps the latent spectral modes to the output grid resolution.
+        # Used by the Perceiver-style decoder to produce band-limited output queries.
+        if perceiver_decoder:
+            isht_out_handle = thd.DistributedInverseRealSHT if comm.get_size("spatial") > 1 else th.InverseRealSHT
+            self.isht_out = isht_out_handle(
+                out_shape[0], out_shape[1],
+                lmax=self.modes_lat, mmax=self.modes_lon,
+                grid=model_grid_type,
+            ).float()
+            decoder_inv_transform = self.isht_out
+        else:
+            decoder_inv_transform = None
 
         # compute static permutations to extract
         self._precompute_channel_groups(channel_names, aux_channel_names)
@@ -610,6 +662,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
             grid_out=model_grid_type,
             kernel_shape=kernel_shape,
             basis_type=filter_basis_type,
+            inverse_transform=decoder_inv_transform,
             activation_function=activation_function,
             bias=bias,
             use_mlp=encoder_mlp,
@@ -627,6 +680,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
                 grid_out=model_grid_type,
                 kernel_shape=kernel_shape,
                 basis_type=filter_basis_type,
+                inverse_transform=decoder_inv_transform,
                 activation_function=activation_function,
                 bias=bias,
                 use_mlp=encoder_mlp,
@@ -759,6 +813,8 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         # set up
         self.sht = sht_handle(self.h, self.w, lmax=modes_lat, mmax=modes_lon, grid=sht_grid_type).float()
         self.isht = isht_handle(self.h, self.w, lmax=modes_lat, mmax=modes_lon, grid=sht_grid_type).float()
+        self.modes_lat = modes_lat
+        self.modes_lon = modes_lon
 
 
     @torch.compiler.disable(recursive=True)
