@@ -78,3 +78,37 @@ def _contract_sep_lmwise_real(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 def _contract_sep_lwise_real(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     res = torch.einsum("bgixys,gix->bgoxys", a, b).contiguous()
     return res
+
+
+def _contract_dense_pytorch(x, weight, separable=False, operator_type="diagonal", complex=True):
+    """Dense spectral convolution contraction dispatching to the appropriate compiled einsum kernel."""
+    x = x.contiguous()
+
+    if separable:
+        if operator_type == "diagonal":
+            if complex:
+                x = _contract_sep_lmwise(x, weight)
+            else:
+                x = _contract_sep_lmwise_real(x, weight)
+        elif operator_type == "dhconv":
+            if complex:
+                x = _contract_sep_lwise(x, weight)
+            else:
+                x = _contract_sep_lwise_real(x, weight)
+        else:
+            raise ValueError(f"Unknown operator type {operator_type}")
+    else:
+        if operator_type == "diagonal":
+            if complex:
+                x = _contract_lmwise(x, weight)
+            else:
+                x = _contract_lmwise_real(x, weight)
+        elif operator_type == "dhconv":
+            if complex:
+                x = _contract_lwise(x, weight)
+            else:
+                x = _contract_lwise_real(x, weight)
+        else:
+            raise ValueError(f"Unknown operator type {operator_type}")
+
+    return x.contiguous()
