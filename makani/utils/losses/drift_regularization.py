@@ -63,9 +63,17 @@ class DriftRegularization(GeometricBaseLoss):
 
         if prd.dim() > tar.dim():
             tar = tar.unsqueeze(1)
+        if wgt is not None and prd.dim() > wgt.dim():
+            wgt = wgt.unsqueeze(1)
 
-        # compute difference between the means output has dims
-        loss = torch.abs(self.quadrature(prd) -  self.quadrature(tar)).pow(self.p)
+        # compute difference between the weighted spatial means
+        if wgt is not None:
+            prd_mean = self.quadrature(prd * wgt)
+            tar_mean = self.quadrature(tar * wgt)
+        else:
+            prd_mean = self.quadrature(prd)
+            tar_mean = self.quadrature(tar)
+        loss = torch.abs(prd_mean - tar_mean).pow(self.p)
 
         # if ensemble
         if prd.dim() == 5:
