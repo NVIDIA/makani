@@ -27,6 +27,7 @@ import torch
 from makani.utils import LossHandler
 from makani.utils.losses import (
     EnsembleCRPSLoss,
+    EnsembleMMDLoss,
     GeometricLpLoss,
     SpectralL2Loss,
     SpectralH1Loss,
@@ -114,7 +115,9 @@ def _rand(batch=_BATCH, channels=_NUM_CH, requires_grad=False):
 # ---------------------------------------------------------------------------
 
 # Losses expected to be elementwise non-negative.
-# EnsembleNLLLoss is excluded: the NLL score is a proper scoring rule that can be negative.
+# EnsembleNLLLoss excluded: proper scoring rule that can be negative.
+# EnsembleMMDLoss excluded: the unbiased U-statistic MMD² can be negative
+#   (e.g., all E members = obs with E=5 gives mmd² = (3-E)/(E-1) = -0.5).
 _COMMON_NONNEG = [
     ("geometric_l2",), ("geometric_l1",),
     ("spectral_l2",), ("spectral_h1",), ("spectral_amse",),
@@ -123,9 +126,10 @@ _COMMON_NONNEG = [
 ]
 
 # Losses expected to be (near) zero when prd perfectly matches tar.
-# EnsembleNLLLoss excluded: with a perfect degenerate ensemble sigma is clipped to eps,
+# EnsembleNLLLoss excluded: with a degenerate ensemble sigma is clipped to eps,
 #   leaving a residual log(eps^2)/2 term that is large and negative.
-# crps_gauss included: with sigma clamped to eps the residual is ≈ eps * 0.23 ≈ 2e-6,
+# EnsembleMMDLoss excluded: perfect prediction gives mmd² = (3-E)/(E-1) ≠ 0.
+# crps_gauss included: with sigma clamped to eps the residual ≈ eps * 0.23 ≈ 2e-6,
 #   well within atol=1e-4.
 _COMMON_ZERO_PERFECT = [
     ("geometric_l2",), ("geometric_l1",),
@@ -135,12 +139,14 @@ _COMMON_ZERO_PERFECT = [
 ]
 
 # All losses participate in the batch-size independence test.
+# EnsembleMMDLoss is tested with squared=True to avoid sqrt of potentially negative mmd².
 _COMMON_BATCHSIZE = [
     ("geometric_l2",), ("geometric_l1",),
     ("spectral_l2",), ("spectral_h1",), ("spectral_amse",),
     ("drift_regularization",),
     ("crps_cdf",), ("crps_gauss",),
     ("nll",),
+    ("mmd",),
 ]
 
 
@@ -183,6 +189,9 @@ class TestLossCommon(unittest.TestCase):
                                     spatial_distributed=False, ensemble_distributed=False, eps=1e-5)
         if name == "nll":
             return EnsembleNLLLoss(**_GEOM_KWARGS)
+        if name == "mmd":
+            # squared=True: avoids sqrt of potentially negative mmd² values in common tests
+            return EnsembleMMDLoss(**_GEOM_KWARGS, squared=True)
         raise ValueError(f"Unknown loss name: {name!r}")
 
     @classmethod
@@ -190,7 +199,7 @@ class TestLossCommon(unittest.TestCase):
         """Return *(prd, tar)*.  Ensemble losses get a 5-D prd; others 4-D."""
         E = cls._E
         tar = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
-        if name in ("crps_cdf", "crps_gauss", "nll"):
+        if name in ("crps_cdf", "crps_gauss", "nll", "mmd"):
             if perfect:
                 # all E members equal the observation
                 prd = tar.unsqueeze(1).expand(_BATCH, E, _NUM_CH, _IMG_H, _IMG_W).clone()
@@ -531,6 +540,74 @@ class TestEnsembleNLLLoss(unittest.TestCase):
         self.assertGreater(
             nll_loose, nll_tight,
             f"Loose NLL ({nll_loose:.4f}) should exceed tight NLL ({nll_tight:.4f})",
+        )
+
+
+# ===========================================================================
+class TestEnsembleMMDLoss(unittest.TestCase):
+    """Specific tests for EnsembleMMDLoss.
+
+    Note: the unbiased U-statistic MMD² can be negative (e.g., perfect prediction
+    with E=5 gives mmd² = (3-E)/(E-1) = -0.5), so nonneg and zero-on-perfect tests
+    do not apply.  Tested properties: squared-flag consistency, spread ordering,
+    backward pass, and the E=1 code-path.
+    """
+
+    _E = 5
+
+    def setUp(self):
+        disable_tf32()
+        torch.manual_seed(42)
+
+    def test_squared_flag_consistency(self):
+        """For a wide ensemble where mmd² > 0, sqrt(mmd²) must equal the unsquared loss."""
+        fn_sq   = EnsembleMMDLoss(**_GEOM_KWARGS, squared=True)
+        fn_unsq = EnsembleMMDLoss(**_GEOM_KWARGS, squared=False)
+        # use a large-offset ensemble so that k(y_m, obs) ≈ 0 → mmd² > 0
+        obs = torch.zeros(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
+        fc  = obs.unsqueeze(1) + 10.0 * torch.randn(_BATCH, _E, _NUM_CH, _IMG_H, _IMG_W)
+        mmd2   = fn_sq(fc, obs)
+        mmd    = fn_unsq(fc, obs)
+        self.assertTrue(
+            compare_tensors("squared flag", torch.sqrt(mmd2), mmd, atol=1e-5, rtol=1e-4),
+        )
+
+    def test_spread_increases_mmd(self):
+        """A wide ensemble farther from the observation must have a larger MMD²
+        than a tight ensemble concentrated near it."""
+        fn = EnsembleMMDLoss(**_GEOM_KWARGS, squared=True)
+        obs = torch.zeros(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
+        torch.manual_seed(7)
+        noise = torch.randn(_BATCH, _E, _NUM_CH, _IMG_H, _IMG_W)
+        fc_tight = obs.unsqueeze(1) + 0.01 * noise  # k(y_m, obs) ≈ 1 → negative mmd²
+        fc_wide  = obs.unsqueeze(1) + 10.0 * noise  # k(y_m, obs) ≈ 0 → positive mmd²
+        mmd_tight = fn(fc_tight, obs).mean().item()
+        mmd_wide  = fn(fc_wide,  obs).mean().item()
+        self.assertLess(
+            mmd_tight, mmd_wide,
+            f"Tight MMD² ({mmd_tight:.4f}) should be < wide MMD² ({mmd_wide:.4f})",
+        )
+
+    def test_backward(self):
+        """Gradients through the double-loop MMD kernel must be finite and free of NaNs."""
+        fn = EnsembleMMDLoss(**_GEOM_KWARGS, squared=True)
+        fc  = torch.randn(_BATCH, _E, _NUM_CH, _IMG_H, _IMG_W, requires_grad=True)
+        obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
+        fn(fc, obs).sum().backward()
+        self.assertIsNotNone(fc.grad)
+        self.assertFalse(torch.isnan(fc.grad).any(), "NaN in fc.grad")
+        self.assertFalse(torch.isinf(fc.grad).any(), "Inf in fc.grad")
+
+    def test_e1_special_case(self):
+        """With E=1 the code takes a direct kernel path: mmd = k(obs, fc).
+        When obs == fc the RBF kernel equals 1, so the spatially-averaged loss
+        must equal 1 (squared=True) or 1 (squared=False, sqrt(1)=1)."""
+        fn = EnsembleMMDLoss(**_GEOM_KWARGS, squared=True)
+        obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
+        fc  = obs.unsqueeze(1)  # E=1, all members = obs
+        loss = fn(fc, obs)
+        self.assertTrue(
+            compare_tensors("e1 perfect", loss, torch.ones_like(loss), atol=1e-5),
         )
 
 
