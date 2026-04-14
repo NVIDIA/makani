@@ -376,6 +376,125 @@ class TestSpectralH1Loss(unittest.TestCase):
 
 
 # ===========================================================================
+class TestSpectralRelativeLoss(unittest.TestCase):
+    """Tests for the relative mode of SpectralL2Loss and SpectralH1Loss.
+
+    The relative loss is defined as  ||SHT(prd - tar)|| / ||SHT(tar)||
+    (with the H1 weighting for SpectralH1Loss).  The tests below verify
+    mathematical properties that hold regardless of the spherical geometry.
+    """
+
+    def setUp(self):
+        disable_tf32()
+        torch.manual_seed(42)
+
+    @staticmethod
+    def _make(cls, squared=False):
+        return cls(**_SPEC_KWARGS, relative=True, squared=squared)
+
+    # --- zero on perfect prediction ---
+
+    def test_l2_zero_on_perfect_prediction(self):
+        fn  = self._make(SpectralL2Loss)
+        tar = _rand()
+        loss = fn(tar.clone(), tar)
+        self.assertTrue(
+            compare_tensors("l2 rel perfect", loss, torch.zeros_like(loss), atol=1e-5),
+        )
+
+    def test_h1_zero_on_perfect_prediction(self):
+        fn  = self._make(SpectralH1Loss)
+        tar = _rand()
+        loss = fn(tar.clone(), tar)
+        self.assertTrue(
+            compare_tensors("h1 rel perfect", loss, torch.zeros_like(loss), atol=1e-5),
+        )
+
+    # --- unity when prd = 2 * tar  (||2t - t|| = ||t||, so ratio = 1) ---
+
+    def test_l2_unity_when_prd_equals_twice_tar(self):
+        fn  = self._make(SpectralL2Loss)
+        tar = _rand()
+        loss = fn(2.0 * tar, tar)
+        self.assertTrue(
+            compare_tensors("l2 rel 2x", loss, torch.ones_like(loss), atol=1e-4, rtol=1e-3),
+        )
+
+    def test_h1_unity_when_prd_equals_twice_tar(self):
+        fn  = self._make(SpectralH1Loss)
+        tar = _rand()
+        loss = fn(2.0 * tar, tar)
+        self.assertTrue(
+            compare_tensors("h1 rel 2x", loss, torch.ones_like(loss), atol=1e-4, rtol=1e-3),
+        )
+
+    # --- squared flag consistency in relative mode ---
+
+    def test_l2_squared_flag_consistency(self):
+        """rel(squared=False)² must equal rel(squared=True)."""
+        fn_unsq = self._make(SpectralL2Loss, squared=False)
+        fn_sq   = self._make(SpectralL2Loss, squared=True)
+        prd, tar = _rand(), _rand()
+        self.assertTrue(
+            compare_tensors("l2 rel squared", fn_unsq(prd, tar) ** 2, fn_sq(prd, tar), atol=1e-5, rtol=1e-4),
+        )
+
+    def test_h1_squared_flag_consistency(self):
+        fn_unsq = self._make(SpectralH1Loss, squared=False)
+        fn_sq   = self._make(SpectralH1Loss, squared=True)
+        prd, tar = _rand(), _rand()
+        self.assertTrue(
+            compare_tensors("h1 rel squared", fn_unsq(prd, tar) ** 2, fn_sq(prd, tar), atol=1e-5, rtol=1e-4),
+        )
+
+    # --- larger error → larger relative loss ---
+
+    def test_l2_monotone_in_error(self):
+        """A prediction farther from the target must have a larger relative loss."""
+        fn  = self._make(SpectralL2Loss)
+        tar = _rand()
+        torch.manual_seed(7)
+        noise = torch.randn_like(tar)
+        loss_small = fn(tar + 0.1 * noise, tar).mean().item()
+        loss_large = fn(tar + 2.0 * noise, tar).mean().item()
+        self.assertLess(loss_small, loss_large,
+                        f"L2 rel: small-error loss {loss_small:.4f} should be < large-error {loss_large:.4f}")
+
+    def test_h1_monotone_in_error(self):
+        fn  = self._make(SpectralH1Loss)
+        tar = _rand()
+        torch.manual_seed(7)
+        noise = torch.randn_like(tar)
+        loss_small = fn(tar + 0.1 * noise, tar).mean().item()
+        loss_large = fn(tar + 2.0 * noise, tar).mean().item()
+        self.assertLess(loss_small, loss_large,
+                        f"H1 rel: small-error loss {loss_small:.4f} should be < large-error {loss_large:.4f}")
+
+    # --- spectral-space weights in relative mode ---
+
+    def test_l2_zero_weight_kills_loss(self):
+        """A zero spectral weight tensor must produce zero relative loss."""
+        fn  = self._make(SpectralL2Loss)
+        prd, tar = _rand(), _rand()
+        lmax, mmax = fn.sht.lmax, fn.sht.mmax
+        wgt = torch.zeros(_BATCH, _NUM_CH, lmax, mmax)
+        loss = fn(prd, tar, wgt)
+        self.assertTrue(
+            compare_tensors("l2 rel zero wgt", loss, torch.zeros_like(loss), atol=1e-6),
+        )
+
+    def test_h1_zero_weight_kills_loss(self):
+        fn  = self._make(SpectralH1Loss)
+        prd, tar = _rand(), _rand()
+        lmax, mmax = fn.sht.lmax, fn.sht.mmax
+        wgt = torch.zeros(_BATCH, _NUM_CH, lmax, mmax)
+        loss = fn(prd, tar, wgt)
+        self.assertTrue(
+            compare_tensors("h1 rel zero wgt", loss, torch.zeros_like(loss), atol=1e-6),
+        )
+
+
+# ===========================================================================
 class TestSpectralAMSELoss(unittest.TestCase):
 
     def setUp(self):
