@@ -71,11 +71,11 @@ def get_earth_position_index(window_size, ndim=3):
 
     # Change the order of the index to calculate the index in total
     if ndim == 3:
-        coords_1 = torch.stack(torch.meshgrid([coords_zi, coords_hi, coords_w]))
-        coords_2 = torch.stack(torch.meshgrid([coords_zj, coords_hj, coords_w]))
+        coords_1 = torch.stack(torch.meshgrid([coords_zi, coords_hi, coords_w], indexing="ij"))
+        coords_2 = torch.stack(torch.meshgrid([coords_zj, coords_hj, coords_w], indexing="ij"))
     elif ndim == 2:
-        coords_1 = torch.stack(torch.meshgrid([coords_hi, coords_w]))
-        coords_2 = torch.stack(torch.meshgrid([coords_hj, coords_w]))
+        coords_1 = torch.stack(torch.meshgrid([coords_hi, coords_w], indexing="ij"))
+        coords_2 = torch.stack(torch.meshgrid([coords_hj, coords_w], indexing="ij"))
     coords_flatten_1 = torch.flatten(coords_1, 1)
     coords_flatten_2 = torch.flatten(coords_2, 1)
     coords = coords_flatten_1[:, :, None] - coords_flatten_2[:, None, :]

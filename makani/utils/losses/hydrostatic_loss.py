@@ -106,7 +106,8 @@ class HydrostaticBalanceLoss(GeometricBaseLoss):
         # get sparse tensor
         indices = torch.as_tensor([row_indices, col_indices], dtype=torch.long)
         values = torch.as_tensor(values, dtype=torch.float32)
-        cmat = torch.sparse_coo_tensor(indices, values, size=(len(self.t_idx) - 1, len(channel_names))).coalesce().to_dense()
+        with torch.sparse.check_sparse_tensor_invariants(enable=False):
+            cmat = torch.sparse_coo_tensor(indices, values, size=(len(self.t_idx) - 1, len(channel_names))).coalesce().to_dense()
 
         # register buffer
         self.register_buffer("cmat", cmat, persistent=False)
