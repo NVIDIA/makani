@@ -157,15 +157,15 @@ class LossHandler(nn.Module):
 
         channel_weights = torch.cat(channel_weights, dim=1)
         ncw = channel_weights.shape[1]
-        self.register_buffer("channel_weights", channel_weights)
+        self.register_buffer("channel_weights", channel_weights, persistent=False)
 
         # set up tensor to track running stats
         # those need to have the same dimensions as the
         # the m2 buffer is filled with a very small non-zero value to avoid division by zero early on
         stats_buffer_shape = (self.n_future + 1) * channel_weights.shape[-1]
-        self.register_buffer("running_mean", torch.zeros(stats_buffer_shape))
-        self.register_buffer("running_var", torch.ones(stats_buffer_shape))
-        self.register_buffer("num_batches_tracked", torch.LongTensor([0]))
+        self.register_buffer("running_mean", torch.zeros(stats_buffer_shape), persistent=True)
+        self.register_buffer("running_var", torch.ones(stats_buffer_shape), persistent=True)
+        self.register_buffer("num_batches_tracked", torch.tensor([0], dtype=torch.long), persistent=True)
 
         # weighting factor for multistep, by default a uniform weight is used
         multistep_params = params.get("multistep", {"weight_type": "constant"})
@@ -173,7 +173,7 @@ class LossHandler(nn.Module):
 
         # tile multistep_weights in channel_dim, but channel_dim needs to be fastest dim
         multistep_weight = torch.repeat_interleave(multistep_weight.reshape(1, -1), ncw, dim=1)
-        self.register_buffer("multistep_weight", multistep_weight)
+        self.register_buffer("multistep_weight", multistep_weight, persistent=False)
 
         # generator objects:
         seed = seed

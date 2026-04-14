@@ -669,7 +669,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         if clamp_water:
             water_chans = get_water_channels(channel_names)
             if len(water_chans) > 0:
-                self.register_buffer("water_channels", torch.LongTensor(water_chans), persistent=False)
+                self.register_buffer("water_channels", torch.tensor(water_chans, dtype=torch.long), persistent=False)
 
         # freeze the encoder/decoder
         if freeze_encoder:
@@ -746,9 +746,9 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         if len(atmo_chans) % self.n_atmo_groups:
             raise ValueError(f"Expected number of atmospheric variables to be divisible by number of atmospheric groups but got {len(atmo_chans)} and {self.n_atmo_groups}")
 
-        self.register_buffer("atmo_channels", torch.LongTensor(atmo_chans), persistent=False)
-        self.register_buffer("surf_channels", torch.LongTensor(surf_chans), persistent=False)
-        self.register_buffer("aux_channels", torch.LongTensor(aux_chans), persistent=False)
+        self.register_buffer("atmo_channels", torch.tensor(atmo_chans, dtype=torch.long), persistent=False)
+        self.register_buffer("surf_channels", torch.tensor(surf_chans, dtype=torch.long), persistent=False)
+        self.register_buffer("aux_channels", torch.tensor(aux_chans, dtype=torch.long), persistent=False)
 
         self.n_surf_chans = self.surf_channels.shape[0]
         self.n_aux_chans = self.aux_channels.shape[0]

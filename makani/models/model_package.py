@@ -127,10 +127,10 @@ class ModelWrapper(torch.nn.Module):
         out_bias = torch.as_tensor(bias[:, self.params.out_channels]).to(torch.float32)
         out_scale = torch.as_tensor(scale[:, self.params.out_channels]).to(torch.float32)
 
-        self.register_buffer("in_bias", in_bias)
-        self.register_buffer("in_scale", in_scale)
-        self.register_buffer("out_bias", out_bias)
-        self.register_buffer("out_scale", out_scale)
+        self.register_buffer("in_bias", in_bias, persistent=True)
+        self.register_buffer("in_scale", in_scale, persistent=True)
+        self.register_buffer("out_bias", out_bias, persistent=True)
+        self.register_buffer("out_scale", out_scale, persistent=True)
 
     @property
     def in_channels(self):
