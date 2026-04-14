@@ -159,6 +159,7 @@ class DiscreteContinuousEncoder(nn.Module):
                 self.attn.v_bias.sharded_dims_mp = [None]
             if self.attn.proj_bias is not None:
                 self.attn.proj_bias.is_shared_mp = ["spatial"]
+                self.attn.proj_bias.sharded_dims_mp = [None]
 
         # learnable query in spherical harmonic space: grid-agnostic Perceiver-style latent.
         # iSHT maps the spectral coefficients to the encoder output grid, so the query is
@@ -330,16 +331,18 @@ class DiscreteContinuousDecoder(nn.Module):
             self.attn.v_weights.sharded_dims_mp = [None, None, None, None]
             self.attn.proj_weights.is_shared_mp = ["spatial"]
             self.attn.proj_weights.sharded_dims_mp = [None, None, None, None]
-            if bias:
+            if self.attn.q_bias is not None:
                 self.attn.q_bias.is_shared_mp = ["spatial"]
                 self.attn.q_bias.sharded_dims_mp = [None]
+            if self.attn.k_bias is not None:
                 self.attn.k_bias.is_shared_mp = ["spatial"]
                 self.attn.k_bias.sharded_dims_mp = [None]
+            if self.attn.v_bias is not None:
                 self.attn.v_bias.is_shared_mp = ["spatial"]
                 self.attn.v_bias.sharded_dims_mp = [None]
+            if self.attn.proj_bias is not None:
                 self.attn.proj_bias.is_shared_mp = ["spatial"]
                 self.attn.proj_bias.sharded_dims_mp = [None]
-                self.attn.bias.sharded_dims_mp = [None]
 
     def forward(self, x):
         if hasattr(self, "latent_query_spec"):
@@ -421,13 +424,16 @@ class NeuralOperatorBlock(nn.Module):
                 self.attn.v_weights.sharded_dims_mp = [None, None, None, None]
                 self.attn.proj_weights.is_shared_mp = ["spatial"]
                 self.attn.proj_weights.sharded_dims_mp = [None, None, None, None]
-                if bias:
+                if self.attn.q_bias is not None:
                     self.attn.q_bias.is_shared_mp = ["spatial"]
                     self.attn.q_bias.sharded_dims_mp = [None]
+                if self.attn.k_bias is not None:
                     self.attn.k_bias.is_shared_mp = ["spatial"]
                     self.attn.k_bias.sharded_dims_mp = [None]
+                if self.attn.v_bias is not None:
                     self.attn.v_bias.is_shared_mp = ["spatial"]
                     self.attn.v_bias.sharded_dims_mp = [None]
+                if self.attn.proj_bias is not None:
                     self.attn.proj_bias.is_shared_mp = ["spatial"]
                     self.attn.proj_bias.sharded_dims_mp = [None]
 
@@ -563,6 +569,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         freeze_encoder=False,
         freeze_processor=False,
         perceiver_decoder=True,
+        num_groups=1,
         **kwargs,
     ):
         super().__init__()
