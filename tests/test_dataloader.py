@@ -109,7 +109,7 @@ class TestDataLoader(unittest.TestCase):
         tmp_path = cls.tmpdir.name
 
         # init datasets and stats
-        cls.train_path, cls.num_train, cls.valid_path, cls.num_valid, cls.stats_path, cls.metadata_path = init_dataset(tmp_path)
+        cls.train_path, cls.num_train, cls.valid_path, cls.num_valid, cls.stats_path, cls.metadata_path, _ = init_dataset(tmp_path)
 
     @classmethod
     def tearDownClass(cls):

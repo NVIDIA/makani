@@ -42,12 +42,12 @@ class TestAnnotateDataset(unittest.TestCase):
         # Create unannotated dataset
         path = os.path.join(tmp_path, "data")
         os.makedirs(path, exist_ok=True)
-        cls.train_path, cls.num_train, cls.test_path, cls.num_test, _, cls.metadata_path = init_dataset(path, nan_fraction=0.0, annotate=False)
+        cls.train_path, cls.num_train, cls.test_path, cls.num_test, _, cls.metadata_path, _ = init_dataset(path, nan_fraction=0.0, annotate=False)
 
         # Create reference dataset with annotations
         ref_path = os.path.join(tmp_path, "ref_data")
         os.makedirs(ref_path, exist_ok=True)
-        cls.ref_train_path, cls.ref_num_train, cls.ref_test_path, cls.ref_num_test, _, _ = init_dataset(ref_path, annotate=True)
+        cls.ref_train_path, cls.ref_num_train, cls.ref_test_path, cls.ref_num_test, _, _, _ = init_dataset(ref_path, annotate=True)
 
     @classmethod
     def tearDownClass(cls):
@@ -125,7 +125,7 @@ class TestConcatenateDataset(unittest.TestCase):
         # Create dataset
         path = os.path.join(tmp_path, "data")
         os.makedirs(path, exist_ok=True)
-        cls.train_path, cls.num_train, cls.test_path, cls.num_test, _, cls.metadata_path = init_dataset(path, annotate=True)
+        cls.train_path, cls.num_train, cls.test_path, cls.num_test, _, cls.metadata_path, _ = init_dataset(path, annotate=True)
 
     @classmethod
     def tearDownClass(cls):
@@ -220,12 +220,12 @@ class TestGetStats(unittest.TestCase):
         # Create dataset
         path = os.path.join(tmp_path, "data")
         os.makedirs(path, exist_ok=True)
-        cls.train_path, cls.num_train, cls.test_path, cls.num_test, _, cls.metadata_path = init_dataset(path, annotate=True)
+        cls.train_path, cls.num_train, cls.test_path, cls.num_test, _, cls.metadata_path, _ = init_dataset(path, annotate=True)
 
         # Create dataset with annotations and NaNs:
         nan_path = os.path.join(tmp_path, "nan_data")
         os.makedirs(nan_path, exist_ok=True)
-        cls.nan_train_path, cls.nan_num_train, cls.nan_test_path, cls.nan_num_test, _, _ = init_dataset(nan_path, nan_fraction=0.1, annotate=True)
+        cls.nan_train_path, cls.nan_num_train, cls.nan_test_path, cls.nan_num_test, _, _, _ = init_dataset(nan_path, nan_fraction=0.1, annotate=True)
 
     @classmethod
     def tearDownClass(cls):
