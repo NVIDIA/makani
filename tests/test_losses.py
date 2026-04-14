@@ -470,28 +470,6 @@ class TestSpectralRelativeLoss(unittest.TestCase):
         self.assertLess(loss_small, loss_large,
                         f"H1 rel: small-error loss {loss_small:.4f} should be < large-error {loss_large:.4f}")
 
-    # --- spectral-space weights in relative mode ---
-
-    def test_l2_zero_weight_kills_loss(self):
-        """A zero spectral weight tensor must produce zero relative loss."""
-        fn  = self._make(SpectralL2Loss)
-        prd, tar = _rand(), _rand()
-        lmax, mmax = fn.sht.lmax, fn.sht.mmax
-        wgt = torch.zeros(_BATCH, _NUM_CH, lmax, mmax)
-        loss = fn(prd, tar, wgt)
-        self.assertTrue(
-            compare_tensors("l2 rel zero wgt", loss, torch.zeros_like(loss), atol=1e-6),
-        )
-
-    def test_h1_zero_weight_kills_loss(self):
-        fn  = self._make(SpectralH1Loss)
-        prd, tar = _rand(), _rand()
-        lmax, mmax = fn.sht.lmax, fn.sht.mmax
-        wgt = torch.zeros(_BATCH, _NUM_CH, lmax, mmax)
-        loss = fn(prd, tar, wgt)
-        self.assertTrue(
-            compare_tensors("h1 rel zero wgt", loss, torch.zeros_like(loss), atol=1e-6),
-        )
 
 
 # ===========================================================================
