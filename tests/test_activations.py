@@ -18,8 +18,9 @@ import unittest
 from parameterized import parameterized
 
 import torch
+import torch.nn as nn
 
-from makani.models.common.activations import ComplexReLU
+from makani.models.common.activations import ComplexReLU, ComplexActivation, MagnitudePreservingSiLU
 
 import sys, os
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
@@ -45,291 +46,325 @@ _ALL_MODES = [("cartesian",), ("modulus",), ("halfplane",), ("real",)]
 
 
 # ===========================================================================
-# 1. Shape and dtype preservation
+# TestComplexReLU
 # ===========================================================================
-class TestComplexReLUShapeDtype(unittest.TestCase):
-    """Output shape and dtype must match the input for every mode."""
+class TestComplexReLU(unittest.TestCase):
+    """Tests for ComplexReLU covering all four modes:
+    'real', 'cartesian', 'modulus', 'halfplane'."""
 
     def setUp(self):
         disable_tf32()
         torch.manual_seed(0)
 
-    @parameterized.expand(_ALL_MODES)
-    def test_shape_dtype_preserved(self, mode):
-        fn = ComplexReLU(mode=mode)
-        z  = _cx_randn(*SHAPE)
-        out = fn(z)
-        self.assertEqual(out.shape, z.shape,   f"{mode}: shape changed")
-        self.assertEqual(out.dtype, z.dtype,   f"{mode}: dtype changed")
+    # --- helpers ---
 
-
-# ===========================================================================
-# 2. "real" mode: imaginary part is unchanged, real part is ReLU-clipped
-# ===========================================================================
-class TestComplexReLUReal(unittest.TestCase):
-
-    def setUp(self):
-        disable_tf32()
-        torch.manual_seed(1)
-
-    def test_real_part_clipped(self):
-        fn = ComplexReLU(mode="real", negative_slope=0.0)
-        # mix of positive and negative real parts
-        real = torch.tensor([-2.0, -1.0, 0.0, 1.0, 2.0])
-        imag = torch.tensor([ 3.0,  4.0, 5.0, 6.0, 7.0])
-        z   = _cx(real, imag)
-        out = fn(z)
-        expected_real = real.clamp(min=0.0)
-        self.assertTrue(
-            compare_tensors("real mode real part", out.real, expected_real, atol=1e-6),
-        )
-
-    def test_imaginary_part_unchanged(self):
-        """The imaginary part must pass through unmodified regardless of sign."""
-        fn = ComplexReLU(mode="real", negative_slope=0.0)
-        real = torch.tensor([-2.0, -1.0, 0.0, 1.0, 2.0])
-        imag = torch.tensor([-3.0,  4.0, -5.0, 6.0, -7.0])
-        z   = _cx(real, imag)
-        out = fn(z)
-        self.assertTrue(
-            compare_tensors("real mode imag part", out.imag, imag, atol=1e-6),
-            "imaginary part was modified in 'real' mode",
-        )
-
-
-# ===========================================================================
-# 3. "cartesian" mode: both real and imaginary parts independently clipped
-# ===========================================================================
-class TestComplexReLUCartesian(unittest.TestCase):
-
-    def setUp(self):
-        disable_tf32()
-        torch.manual_seed(2)
-
-    def test_real_part_clipped(self):
-        fn = ComplexReLU(mode="cartesian", negative_slope=0.0)
-        real = torch.tensor([-2.0, -1.0, 0.0, 1.0, 2.0])
-        imag = torch.tensor([ 3.0,  4.0, 5.0, 6.0, 7.0])
-        z   = _cx(real, imag)
-        out = fn(z)
-        self.assertTrue(
-            compare_tensors("cartesian real part", out.real, real.clamp(min=0.0), atol=1e-6),
-        )
-
-    def test_imaginary_part_clipped(self):
-        """Unlike 'real' mode, negative imaginary parts are zeroed."""
-        fn = ComplexReLU(mode="cartesian", negative_slope=0.0)
-        real = torch.tensor([1.0, 1.0, 1.0, 1.0, 1.0])
-        imag = torch.tensor([-3.0, -1.0, 0.0, 1.0, 3.0])
-        z   = _cx(real, imag)
-        out = fn(z)
-        self.assertTrue(
-            compare_tensors("cartesian imag part", out.imag, imag.clamp(min=0.0), atol=1e-6),
-        )
-
-    def test_differs_from_real_mode_on_negative_imag(self):
-        """'cartesian' zeros negative imaginary parts; 'real' preserves them."""
-        fn_cx   = ComplexReLU(mode="cartesian", negative_slope=0.0)
-        fn_real = ComplexReLU(mode="real",      negative_slope=0.0)
-        real = torch.tensor([1.0])
-        imag = torch.tensor([-1.0])   # negative imag — the two modes must differ
-        z = _cx(real, imag)
-        out_cx   = fn_cx(z)
-        out_real = fn_real(z)
-        self.assertFalse(
-            torch.allclose(out_cx.imag, out_real.imag),
-            "cartesian and real modes should differ on negative imaginary input",
-        )
-
-
-# ===========================================================================
-# 4. "modulus" mode: phase preserved, modulus activated
-# ===========================================================================
-class TestComplexReLUModulus(unittest.TestCase):
-
-    def setUp(self):
-        disable_tf32()
-        torch.manual_seed(3)
-
-    def _make_fn(self, bias_val=0.0):
+    def _make_modulus_fn(self, bias_val=0.0):
         fn = ComplexReLU(mode="modulus", bias_shape=(1,), scale=bias_val)
-        # override bias to an exact value for reproducible tests
         with torch.no_grad():
             fn.bias.fill_(bias_val)
         return fn
 
-    def test_phase_preserved_when_nonzero(self):
-        """When |z| + bias > 0 the output phase must equal the input phase."""
-        fn = self._make_fn(bias_val=0.0)
-        # use inputs well away from zero so phase is numerically stable
-        z = _cx_randn(10) * 5.0 + (2.0 + 2.0j)
-        out = fn(z)
-        nonzero = out.abs() > 1e-6
-        self.assertTrue(
-            compare_tensors(
-                "modulus phase",
-                torch.angle(out)[nonzero],
-                torch.angle(z)[nonzero],
-                atol=1e-4,
-            ),
-            "phase changed in 'modulus' mode",
-        )
-
-    def test_modulus_activated(self):
-        """Output modulus equals max(|z| + bias, 0)."""
-        fn = self._make_fn(bias_val=1.0)
-        z   = _cx_randn(20) * 3.0
-        out = fn(z)
-        zabs = z.abs()
-        expected_abs = (zabs + 1.0).clamp(min=0.0)
-        self.assertTrue(
-            compare_tensors("modulus abs", out.abs(), expected_abs, atol=1e-5),
-        )
-
-    def test_zero_when_modulus_plus_bias_nonpositive(self):
-        """When |z| + bias ≤ 0 the output must be zero."""
-        fn = self._make_fn(bias_val=-10.0)   # bias so negative that all outputs should be 0
-        z = _cx_randn(20)                     # |z| ~ 1, so |z| + (-10) < 0
-        out = fn(z)
-        self.assertTrue(
-            compare_tensors("modulus zero", out.abs(), torch.zeros_like(out.abs()), atol=1e-6),
-        )
-
-
-# ===========================================================================
-# 5. "halfplane" mode: passthrough vs scale based on angle
-# ===========================================================================
-class TestComplexReLUHalfplane(unittest.TestCase):
-
-    def setUp(self):
-        disable_tf32()
-        torch.manual_seed(4)
-
-    def _make_fn(self, bias_angle=0.0, negative_slope=0.0):
+    def _make_halfplane_fn(self, bias_angle=0.0, negative_slope=0.0):
         fn = ComplexReLU(mode="halfplane", negative_slope=negative_slope, bias_shape=(1,))
         with torch.no_grad():
             fn.bias.fill_(bias_angle)
         return fn
 
     def _z_at_angle(self, angle_rad, magnitude=1.0):
-        """Return a complex scalar at the given angle."""
         r = torch.tensor([math.cos(angle_rad), math.sin(angle_rad)], dtype=torch.float32) * magnitude
         return torch.complex(r[0:1], r[1:2])
 
-    def test_passthrough_in_window(self):
-        """Inputs whose angle falls in [bias, bias + π/2) must pass through unchanged."""
-        fn = self._make_fn(bias_angle=0.0)
-        # angle = π/4 is well inside [0, π/2)
-        z   = self._z_at_angle(math.pi / 4)
-        out = fn(z)
-        self.assertTrue(compare_tensors("halfplane passthrough", out, z, atol=1e-6))
+    # --- shape / dtype ---
 
-    def test_scaled_outside_window(self):
+    @parameterized.expand(_ALL_MODES)
+    def test_shape_dtype_preserved(self, mode):
+        fn  = ComplexReLU(mode=mode)
+        z   = _cx_randn(*SHAPE)
+        out = fn(z)
+        self.assertEqual(out.shape, z.shape, f"{mode}: shape changed")
+        self.assertEqual(out.dtype, z.dtype, f"{mode}: dtype changed")
+
+    # --- "real" mode ---
+
+    def test_real_real_part_clipped(self):
+        fn   = ComplexReLU(mode="real", negative_slope=0.0)
+        real = torch.tensor([-2.0, -1.0, 0.0, 1.0, 2.0])
+        imag = torch.tensor([ 3.0,  4.0, 5.0, 6.0, 7.0])
+        out  = fn(_cx(real, imag))
+        self.assertTrue(compare_tensors("real real part", out.real, real.clamp(min=0.0), atol=1e-6))
+
+    def test_real_imaginary_part_unchanged(self):
+        """Imaginary part must pass through unmodified regardless of sign."""
+        fn   = ComplexReLU(mode="real", negative_slope=0.0)
+        real = torch.tensor([-2.0, -1.0, 0.0,  1.0, 2.0])
+        imag = torch.tensor([-3.0,  4.0, -5.0, 6.0, -7.0])
+        out  = fn(_cx(real, imag))
+        self.assertTrue(compare_tensors("real imag part", out.imag, imag, atol=1e-6))
+
+    # --- "cartesian" mode ---
+
+    def test_cartesian_real_part_clipped(self):
+        fn   = ComplexReLU(mode="cartesian", negative_slope=0.0)
+        real = torch.tensor([-2.0, -1.0, 0.0, 1.0, 2.0])
+        imag = torch.tensor([ 3.0,  4.0, 5.0, 6.0, 7.0])
+        out  = fn(_cx(real, imag))
+        self.assertTrue(compare_tensors("cartesian real part", out.real, real.clamp(min=0.0), atol=1e-6))
+
+    def test_cartesian_imaginary_part_clipped(self):
+        """Unlike 'real' mode, negative imaginary parts are zeroed."""
+        fn   = ComplexReLU(mode="cartesian", negative_slope=0.0)
+        real = torch.tensor([1.0,  1.0,  1.0, 1.0, 1.0])
+        imag = torch.tensor([-3.0, -1.0, 0.0, 1.0, 3.0])
+        out  = fn(_cx(real, imag))
+        self.assertTrue(compare_tensors("cartesian imag part", out.imag, imag.clamp(min=0.0), atol=1e-6))
+
+    def test_cartesian_differs_from_real_on_negative_imag(self):
+        """'cartesian' zeros negative imaginary parts; 'real' preserves them."""
+        fn_cx   = ComplexReLU(mode="cartesian", negative_slope=0.0)
+        fn_real = ComplexReLU(mode="real",      negative_slope=0.0)
+        z = _cx(torch.tensor([1.0]), torch.tensor([-1.0]))
+        self.assertFalse(
+            torch.allclose(fn_cx(z).imag, fn_real(z).imag),
+            "cartesian and real modes should differ on negative imaginary input",
+        )
+
+    # --- "modulus" mode ---
+
+    def test_modulus_phase_preserved_when_nonzero(self):
+        """When |z| + bias > 0 the output phase must equal the input phase."""
+        fn  = self._make_modulus_fn(bias_val=0.0)
+        z   = _cx_randn(10) * 5.0 + (2.0 + 2.0j)
+        out = fn(z)
+        nonzero = out.abs() > 1e-6
+        self.assertTrue(
+            compare_tensors("modulus phase", torch.angle(out)[nonzero], torch.angle(z)[nonzero], atol=1e-4),
+        )
+
+    def test_modulus_output_magnitude(self):
+        """Output modulus equals max(|z| + bias, 0)."""
+        fn  = self._make_modulus_fn(bias_val=1.0)
+        z   = _cx_randn(20) * 3.0
+        out = fn(z)
+        self.assertTrue(
+            compare_tensors("modulus abs", out.abs(), (z.abs() + 1.0).clamp(min=0.0), atol=1e-5),
+        )
+
+    def test_modulus_zero_when_nonpositive(self):
+        """When |z| + bias ≤ 0 the output must be zero."""
+        fn  = self._make_modulus_fn(bias_val=-10.0)
+        out = fn(_cx_randn(20))
+        self.assertTrue(compare_tensors("modulus zero", out.abs(), torch.zeros_like(out.abs()), atol=1e-6))
+
+    # --- "halfplane" mode ---
+
+    def test_halfplane_passthrough_in_window(self):
+        """Inputs whose angle falls in [bias, bias + π/2) pass through unchanged."""
+        fn  = self._make_halfplane_fn(bias_angle=0.0)
+        z   = self._z_at_angle(math.pi / 4)   # well inside [0, π/2)
+        self.assertTrue(compare_tensors("halfplane passthrough", fn(z), z, atol=1e-6))
+
+    def test_halfplane_scaled_outside_window(self):
         """Inputs outside the window are multiplied by negative_slope."""
         slope = 0.1
-        fn = self._make_fn(bias_angle=0.0, negative_slope=slope)
-        # angle = π (well outside [0, π/2))
-        z   = self._z_at_angle(math.pi)
-        out = fn(z)
-        self.assertTrue(compare_tensors("halfplane scaled", out, slope * z, atol=1e-6))
+        fn  = self._make_halfplane_fn(bias_angle=0.0, negative_slope=slope)
+        z   = self._z_at_angle(math.pi)        # well outside [0, π/2)
+        self.assertTrue(compare_tensors("halfplane scaled", fn(z), slope * z, atol=1e-6))
 
-    def test_zero_slope_kills_outside_window(self):
+    def test_halfplane_zero_slope_kills_outside_window(self):
         """With negative_slope=0, inputs outside the window collapse to zero."""
-        fn = self._make_fn(bias_angle=0.0, negative_slope=0.0)
-        z   = self._z_at_angle(math.pi)   # angle = π, outside [0, π/2)
-        out = fn(z)
-        self.assertTrue(compare_tensors("halfplane zero", out, torch.zeros_like(z), atol=1e-6))
+        fn  = self._make_halfplane_fn(bias_angle=0.0, negative_slope=0.0)
+        z   = self._z_at_angle(math.pi)
+        self.assertTrue(compare_tensors("halfplane zero", fn(z), torch.zeros_like(z), atol=1e-6))
 
-    def test_bias_shifts_window(self):
-        """Shifting bias by π/4 makes angle=π/4 fall at the window boundary (excluded)."""
-        fn = self._make_fn(bias_angle=math.pi / 2)
-        # angle = π/4 is now below bias → outside window
-        z   = self._z_at_angle(math.pi / 4)
-        out = fn(z)
-        # negative_slope=0 → output should be zero
-        self.assertTrue(compare_tensors("halfplane bias shift", out, torch.zeros_like(z), atol=1e-6))
+    def test_halfplane_bias_shifts_window(self):
+        """Shifting bias by π/2 puts angle=π/4 outside the window."""
+        fn  = self._make_halfplane_fn(bias_angle=math.pi / 2, negative_slope=0.0)
+        z   = self._z_at_angle(math.pi / 4)    # now below bias → outside
+        self.assertTrue(compare_tensors("halfplane bias shift", fn(z), torch.zeros_like(z), atol=1e-6))
 
-
-# ===========================================================================
-# 6. negative_slope effect on "real" and "cartesian"
-# ===========================================================================
-class TestComplexReLUNegativeSlope(unittest.TestCase):
-
-    def setUp(self):
-        disable_tf32()
-        torch.manual_seed(5)
+    # --- negative_slope on "real" / "cartesian" ---
 
     @parameterized.expand([("real",), ("cartesian",)])
-    def test_negative_real_scaled_by_slope(self, mode):
+    def test_negative_slope_scales_negative_real(self, mode):
         slope = 0.2
-        fn = ComplexReLU(mode=mode, negative_slope=slope)
-        real = torch.tensor([-3.0])
-        imag = torch.tensor([ 0.0])
-        z   = _cx(real, imag)
-        out = fn(z)
-        expected_real = torch.tensor([slope * -3.0])
+        fn  = ComplexReLU(mode=mode, negative_slope=slope)
+        out = fn(_cx(torch.tensor([-3.0]), torch.tensor([0.0])))
         self.assertTrue(
-            compare_tensors(f"{mode} leaky slope", out.real, expected_real, atol=1e-6),
+            compare_tensors(f"{mode} leaky slope", out.real, torch.tensor([slope * -3.0]), atol=1e-6),
         )
 
     @parameterized.expand([("real",), ("cartesian",)])
-    def test_positive_real_unaffected_by_slope(self, mode):
-        fn = ComplexReLU(mode=mode, negative_slope=0.2)
-        real = torch.tensor([3.0])
-        imag = torch.tensor([0.0])
-        z   = _cx(real, imag)
-        out = fn(z)
+    def test_negative_slope_leaves_positive_real_unchanged(self, mode):
+        fn  = ComplexReLU(mode=mode, negative_slope=0.2)
+        out = fn(_cx(torch.tensor([3.0]), torch.tensor([0.0])))
         self.assertTrue(
-            compare_tensors(f"{mode} positive unaffected", out.real, real, atol=1e-6),
+            compare_tensors(f"{mode} positive unaffected", out.real, torch.tensor([3.0]), atol=1e-6),
         )
 
-
-# ===========================================================================
-# 7. Unknown mode raises NotImplementedError
-# ===========================================================================
-class TestComplexReLUUnknownMode(unittest.TestCase):
+    # --- unknown mode ---
 
     def test_unknown_mode_raises(self):
         fn = ComplexReLU(mode="unknown_mode")
-        z  = _cx_randn(4)
         with self.assertRaises(NotImplementedError):
-            fn(z)
+            fn(_cx_randn(4))
 
-
-# ===========================================================================
-# 8. Backward pass — finite, NaN-free gradients for all modes
-# ===========================================================================
-class TestComplexReLUBackward(unittest.TestCase):
-
-    def setUp(self):
-        disable_tf32()
-        torch.manual_seed(6)
+    # --- backward ---
 
     @parameterized.expand(_ALL_MODES)
     def test_backward(self, mode):
         fn = ComplexReLU(mode=mode)
-        # keep inputs away from zero to avoid gradient singularities in modulus mode
         z  = _cx_randn(*SHAPE) * 2.0 + (1.0 + 1.0j)
-        # ComplexReLU operates on complex tensors; autograd works through view_as_real
         zr = torch.view_as_real(z).requires_grad_(True)
-        zc = torch.view_as_complex(zr)
-        out = fn(zc)
-        torch.view_as_real(out).sum().backward()
-        self.assertIsNotNone(zr.grad,                           f"{mode}: grad is None")
-        self.assertFalse(torch.isnan(zr.grad).any(),            f"{mode}: NaN in grad")
-        self.assertFalse(torch.isinf(zr.grad).any(),            f"{mode}: Inf in grad")
+        torch.view_as_real(fn(torch.view_as_complex(zr))).sum().backward()
+        self.assertIsNotNone(zr.grad,                f"{mode}: grad is None")
+        self.assertFalse(torch.isnan(zr.grad).any(), f"{mode}: NaN in grad")
+        self.assertFalse(torch.isinf(zr.grad).any(), f"{mode}: Inf in grad")
 
     def test_modulus_backward_near_zero(self):
-        """The modulus mode divides by |z|; verify gradients remain finite near zero."""
+        """The modulus mode divides by |z|; gradients must stay finite near zero."""
         fn = ComplexReLU(mode="modulus")
         with torch.no_grad():
-            fn.bias.fill_(1.0)   # ensure |z| + bias > 0 even near z=0
-        z_small = _cx_randn(16) * 1e-3   # very small magnitude
-        zr = torch.view_as_real(z_small).requires_grad_(True)
-        zc = torch.view_as_complex(zr)
-        torch.view_as_real(fn(zc)).sum().backward()
+            fn.bias.fill_(1.0)
+        zr = torch.view_as_real(_cx_randn(16) * 1e-3).requires_grad_(True)
+        torch.view_as_real(fn(torch.view_as_complex(zr))).sum().backward()
         self.assertFalse(torch.isnan(zr.grad).any(), "NaN in grad near zero (modulus mode)")
         self.assertFalse(torch.isinf(zr.grad).any(), "Inf in grad near zero (modulus mode)")
+
+
+# ===========================================================================
+# TestComplexActivation
+# ===========================================================================
+class TestComplexActivation(unittest.TestCase):
+    """Tests for ComplexActivation covering all three modes:
+    'cartesian', 'modulus', and the identity fall-through."""
+
+    def setUp(self):
+        disable_tf32()
+        torch.manual_seed(10)
+
+    # --- shape / dtype ---
+
+    @parameterized.expand([("cartesian",), ("modulus",), ("identity",)])
+    def test_shape_dtype_preserved(self, mode):
+        fn  = ComplexActivation(nn.ReLU(), mode=mode)
+        z   = _cx_randn(*SHAPE)
+        out = fn(z)
+        self.assertEqual(out.shape, z.shape, f"{mode}: shape changed")
+        self.assertEqual(out.dtype, z.dtype, f"{mode}: dtype changed")
+
+    # --- cartesian mode ---
+
+    def test_cartesian_real_part_activated(self):
+        fn   = ComplexActivation(nn.ReLU(), mode="cartesian")
+        real = torch.tensor([-2.0, -1.0, 0.0, 1.0, 2.0])
+        imag = torch.tensor([ 3.0,  4.0, 5.0, 6.0, 7.0])
+        out  = fn(_cx(real, imag))
+        self.assertTrue(
+            compare_tensors("cartesian real", out.real, real.clamp(min=0.0), atol=1e-6),
+        )
+
+    def test_cartesian_imaginary_part_activated(self):
+        fn   = ComplexActivation(nn.ReLU(), mode="cartesian")
+        real = torch.tensor([1.0, 1.0, 1.0, 1.0, 1.0])
+        imag = torch.tensor([-3.0, -1.0, 0.0, 1.0, 3.0])
+        out  = fn(_cx(real, imag))
+        self.assertTrue(
+            compare_tensors("cartesian imag", out.imag, imag.clamp(min=0.0), atol=1e-6),
+        )
+
+    # --- modulus mode ---
+
+    def test_modulus_phase_preserved(self):
+        """When the activated modulus is non-zero, the output phase equals the input phase."""
+        fn = ComplexActivation(nn.ReLU(), mode="modulus")
+        with torch.no_grad():
+            fn.bias.fill_(0.0)
+        z   = _cx_randn(20) * 3.0 + (2.0 + 2.0j)
+        out = fn(z)
+        nonzero = out.abs() > 1e-6
+        self.assertTrue(
+            compare_tensors("modulus phase", torch.angle(out)[nonzero], torch.angle(z)[nonzero], atol=1e-4),
+        )
+
+    def test_modulus_output_magnitude(self):
+        """Output modulus equals act(|z| + bias)."""
+        fn = ComplexActivation(nn.ReLU(), mode="modulus")
+        with torch.no_grad():
+            fn.bias.fill_(1.0)
+        z   = _cx_randn(20) * 2.0
+        out = fn(z)
+        self.assertTrue(
+            compare_tensors("modulus abs", out.abs(), torch.relu(z.abs() + 1.0), atol=1e-5),
+        )
+
+    def test_modulus_bias_shape_none(self):
+        fn = ComplexActivation(nn.ReLU(), mode="modulus", bias_shape=None)
+        self.assertEqual(fn.bias.shape, torch.Size([1]))
+
+    def test_modulus_bias_shape_respected(self):
+        fn = ComplexActivation(nn.ReLU(), mode="modulus", bias_shape=(4,))
+        self.assertEqual(fn.bias.shape, torch.Size([4]))
+
+    # --- identity fall-through ---
+
+    def test_identity_passthrough(self):
+        fn  = ComplexActivation(nn.ReLU(), mode="identity")
+        z   = _cx_randn(*SHAPE)
+        self.assertTrue(compare_tensors("identity", fn(z), z, atol=1e-7))
+
+    # --- backward ---
+
+    @parameterized.expand([("cartesian",), ("modulus",), ("identity",)])
+    def test_backward(self, mode):
+        fn = ComplexActivation(nn.ReLU(), mode=mode)
+        z  = _cx_randn(*SHAPE) * 2.0 + (1.0 + 1.0j)
+        zr = torch.view_as_real(z).requires_grad_(True)
+        torch.view_as_real(fn(torch.view_as_complex(zr))).sum().backward()
+        self.assertIsNotNone(zr.grad,                f"{mode}: grad is None")
+        self.assertFalse(torch.isnan(zr.grad).any(), f"{mode}: NaN in grad")
+        self.assertFalse(torch.isinf(zr.grad).any(), f"{mode}: Inf in grad")
+
+
+# ===========================================================================
+# TestMagnitudePreservingSiLU
+# ===========================================================================
+class TestMagnitudePreservingSiLU(unittest.TestCase):
+
+    def setUp(self):
+        disable_tf32()
+        torch.manual_seed(20)
+
+    def test_shape_dtype_preserved(self):
+        fn  = MagnitudePreservingSiLU()
+        x   = torch.randn(2, 4, 6, 5)
+        out = fn(x)
+        self.assertEqual(out.shape, x.shape)
+        self.assertEqual(out.dtype, x.dtype)
+
+    def test_output_equals_scaled_silu(self):
+        """Output must equal silu(x) / normalization_factor."""
+        norm = 0.596
+        fn   = MagnitudePreservingSiLU(normalization_factor=norm)
+        x    = torch.randn(8, 16)
+        self.assertTrue(
+            compare_tensors("mp_silu value", fn(x), torch.nn.functional.silu(x) / norm, atol=1e-6),
+        )
+
+    def test_custom_normalization_factor(self):
+        norm = 0.75
+        fn   = MagnitudePreservingSiLU(normalization_factor=norm)
+        x    = torch.randn(8)
+        self.assertTrue(
+            compare_tensors("mp_silu custom", fn(x), torch.nn.functional.silu(x) / norm, atol=1e-6),
+        )
+
+    def test_backward(self):
+        fn = MagnitudePreservingSiLU()
+        x  = torch.randn(4, 8, requires_grad=True)
+        fn(x).sum().backward()
+        self.assertIsNotNone(x.grad)
+        self.assertFalse(torch.isnan(x.grad).any(), "NaN in grad")
+        self.assertFalse(torch.isinf(x.grad).any(), "Inf in grad")
 
 
 if __name__ == "__main__":
