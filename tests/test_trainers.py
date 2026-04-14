@@ -142,7 +142,7 @@ class TestTrainer(unittest.TestCase):
         os.mkdir(os.path.join(exp_path, "training_checkpoints"))
 
         self.params = init_params(
-            exp_path, self.train_path, self.valid_path, self.stats_path, batch_size=2, ensemble_size=3, stochastic_size=5, n_history=0, n_future=0, normalization="zscore", num_data_workers=1
+            exp_path, self.train_path, self.valid_path, self.stats_path, batch_size=2, ensemble_size=3, stochastic_size=5, n_history=0, n_future=0, normalization="zscore", num_data_workers=0
         )
 
         self.params.multifiles = True
