@@ -777,6 +777,7 @@ class Pangu(nn.Module):
         # Add static channels to surface
         self.num_aux = len(self.aux_channel_names)
         N_total_surface = self.num_aux + self.num_surface
+        self.has_surface = (N_total_surface > 0)
 
         # compute static permutations to extract
         self._precompute_channel_groups(self.channel_names, self.aux_channel_names)
@@ -962,7 +963,7 @@ class Pangu(nn.Module):
             surface = self.patchembed2d(surface_aux) 
             atmospheric = self.patchembed3d(atmospheric)
 
-        if surface.shape[1] == 0:
+        if not self.has_surface:
             x = atmospheric
         else:
             x = torch.concat([surface.unsqueeze(2), atmospheric], dim=2)
@@ -989,14 +990,14 @@ class Pangu(nn.Module):
 
         output = torch.concat([x, skip], dim=-1)
         output = output.transpose(1, 2).reshape(B, -1, Pl, Lat, Lon)
-        if surface.shape[1] == 0:
+        if not self.has_surface:
             output_surface = None
             output_atmospheric = output
         else:
             output_surface = output[:, :, 0, :, :]
             output_atmospheric = output[:, :, 1:, :, :]
 
-        if surface.shape[1] == 0:
+        if not self.has_surface:
             output_surface = None
             if self.checkpointing_level >= 4:
                 output_atmospheric = checkpoint(self.patchrecovery3d, output_atmospheric, use_reentrant=False)

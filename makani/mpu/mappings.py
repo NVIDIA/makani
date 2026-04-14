@@ -14,7 +14,6 @@
 # limitations under the License.
 
 import torch
-from torch.amp import custom_fwd, custom_bwd
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 from torch_harmonics.distributed import compute_split_shapes
@@ -35,19 +34,22 @@ from makani.mpu.config import config
 class _DistributedTranspose(torch.autograd.Function):
 
     @staticmethod
-    @custom_fwd(device_type="cuda")
-    def forward(ctx, x, dims, dim1_split_sizes, comm_id):
+    def forward(x, dims, dim1_split_sizes, comm_id):
         # WAR for a potential contig check torch bug for channels last contig tensors
         x = x.contiguous()
-        xlist, dim0_split_sizes, _ = _transpose(x, dims[0], dims[1], dim1_split_sizes, group=comm.get_group(comm_id))
+        xlist, _, _ = _transpose(x, dims[0], dims[1], dim1_split_sizes, group=comm.get_group(comm_id))
         x = torch.cat(xlist, dim=dims[1]).contiguous()
-        ctx.dims = dims
-        ctx.dim0_split_sizes = dim0_split_sizes
-        ctx.comm_id = comm_id
         return x
 
     @staticmethod
-    @custom_bwd(device_type="cuda")
+    def setup_context(ctx, inputs, output):
+        x, dims, dim1_split_sizes, comm_id = inputs
+        ctx.dims = dims
+        ctx.comm_id = comm_id
+        # dim0_split_sizes is what _transpose would compute from splitting x along dims[0]
+        ctx.dim0_split_sizes = compute_split_shapes(x.shape[dims[0]], comm.get_size(comm_id))
+
+    @staticmethod
     def backward(ctx, go):
         dims = ctx.dims
         dim0_split_sizes = ctx.dim0_split_sizes
@@ -66,13 +68,15 @@ class _CopyToParallelRegion(torch.autograd.Function):
         return input_
 
     @staticmethod
-    @custom_fwd(device_type="cuda")
-    def forward(ctx, input_, comm_id_):
-        ctx.comm_id = comm_id_
+    def forward(input_, comm_id_):
         return input_
 
     @staticmethod
-    @custom_bwd(device_type="cuda")
+    def setup_context(ctx, inputs, output):
+        _, comm_id_ = inputs
+        ctx.comm_id = comm_id_
+
+    @staticmethod
     def backward(ctx, grad_output):
         return _reduce(grad_output, group=comm.get_group(ctx.comm_id)), None
 
@@ -85,12 +89,14 @@ class _ReduceFromParallelRegion(torch.autograd.Function):
         return _reduce(input_, group=comm.get_group(comm_id_))
 
     @staticmethod
-    @custom_fwd(device_type="cuda")
-    def forward(ctx, input_, comm_id_):
+    def forward(input_, comm_id_):
         return _reduce(input_, group=comm.get_group(comm_id_))
 
     @staticmethod
-    @custom_bwd(device_type="cuda")
+    def setup_context(ctx, inputs, output):
+        pass  # nothing needed for backward
+
+    @staticmethod
     def backward(ctx, grad_output):
         return grad_output, None
 
@@ -103,17 +109,17 @@ class _ScatterToParallelRegion(torch.autograd.Function):
         return _split(input_, dim_, group=comm.get_group(comm_id_))
 
     @staticmethod
-    @custom_fwd(device_type="cuda")
-    def forward(ctx, input_, dim_, comm_id_):
-        ctx.dim = dim_
-        ctx.comm_id = comm_id_
-        ctx.split_shapes = compute_split_shapes(
-            input_.shape[dim_], comm.get_size(comm_id_)
-        )
+    def forward(input_, dim_, comm_id_):
         return _split(input_, dim_, group=comm.get_group(comm_id_))
 
     @staticmethod
-    @custom_bwd(device_type="cuda")
+    def setup_context(ctx, inputs, output):
+        input_, dim_, comm_id_ = inputs
+        ctx.dim = dim_
+        ctx.comm_id = comm_id_
+        ctx.split_shapes = compute_split_shapes(input_.shape[dim_], comm.get_size(comm_id_))
+
+    @staticmethod
     def backward(ctx, grad_output):
         return (
             _gather(
@@ -137,16 +143,16 @@ class _GatherFromParallelRegion(torch.autograd.Function):
         )
 
     @staticmethod
-    @custom_fwd(device_type="cuda")
-    def forward(ctx, input_, dim_, shapes_, comm_id_):
-        ctx.dim = dim_
-        ctx.comm_id = comm_id_
-        return _gather(
-            input_, dim_, shapes_, group=comm.get_group(comm_id_)
-        )
+    def forward(input_, dim_, shapes_, comm_id_):
+        return _gather(input_, dim_, shapes_, group=comm.get_group(comm_id_))
 
     @staticmethod
-    @custom_bwd(device_type="cuda")
+    def setup_context(ctx, inputs, output):
+        input_, dim_, shapes_, comm_id_ = inputs
+        ctx.dim = dim_
+        ctx.comm_id = comm_id_
+
+    @staticmethod
     def backward(ctx, grad_output):
         return (
             _split(grad_output, ctx.dim, group=comm.get_group(ctx.comm_id)),
@@ -159,26 +165,31 @@ class _GatherFromParallelRegion(torch.autograd.Function):
 # -----------------
 # Helper functions.
 # -----------------
+@torch.compiler.disable
 def copy_to_parallel_region(input, comm_id):
     """Copy input"""
     return _CopyToParallelRegion.apply(input, comm_id)
 
 
+@torch.compiler.disable
 def reduce_from_parallel_region(input, comm_id):
     """All-reduce the input from the matmul parallel region."""
     return _ReduceFromParallelRegion.apply(input, comm_id)
 
 
+@torch.compiler.disable
 def scatter_to_parallel_region(input, dim, comm_id):
     """Split the input and keep only the corresponding chuck to the rank."""
     return _ScatterToParallelRegion.apply(input, dim, comm_id)
 
 
+@torch.compiler.disable
 def gather_from_parallel_region(input, dim, shapes, comm_id):
     """Gather the input from matmul parallel region and concatenate."""
     return _GatherFromParallelRegion.apply(input, dim, shapes, comm_id)
 
 
+@torch.compiler.disable
 def distributed_transpose(x, dims, shapes, comm_id):
     return _DistributedTranspose.apply(x, dims, shapes, comm_id)
 
