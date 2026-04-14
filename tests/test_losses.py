@@ -565,7 +565,7 @@ class TestEnsembleMMDLoss(unittest.TestCase):
         fn_unsq = EnsembleMMDLoss(**_GEOM_KWARGS, squared=False)
         # use a large-offset ensemble so that k(y_m, obs) ≈ 0 → mmd² > 0
         obs = torch.zeros(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
-        fc  = obs.unsqueeze(1) + 10.0 * torch.randn(_BATCH, _E, _NUM_CH, _IMG_H, _IMG_W)
+        fc  = obs.unsqueeze(1) + 10.0 * torch.randn(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W)
         mmd2   = fn_sq(fc, obs)
         mmd    = fn_unsq(fc, obs)
         self.assertTrue(
@@ -578,7 +578,7 @@ class TestEnsembleMMDLoss(unittest.TestCase):
         fn = EnsembleMMDLoss(**_GEOM_KWARGS, squared=True)
         obs = torch.zeros(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
         torch.manual_seed(7)
-        noise = torch.randn(_BATCH, _E, _NUM_CH, _IMG_H, _IMG_W)
+        noise = torch.randn(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W)
         fc_tight = obs.unsqueeze(1) + 0.01 * noise  # k(y_m, obs) ≈ 1 → negative mmd²
         fc_wide  = obs.unsqueeze(1) + 10.0 * noise  # k(y_m, obs) ≈ 0 → positive mmd²
         mmd_tight = fn(fc_tight, obs).mean().item()
@@ -591,7 +591,7 @@ class TestEnsembleMMDLoss(unittest.TestCase):
     def test_backward(self):
         """Gradients through the double-loop MMD kernel must be finite and free of NaNs."""
         fn = EnsembleMMDLoss(**_GEOM_KWARGS, squared=True)
-        fc  = torch.randn(_BATCH, _E, _NUM_CH, _IMG_H, _IMG_W, requires_grad=True)
+        fc  = torch.randn(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W, requires_grad=True)
         obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
         fn(fc, obs).sum().backward()
         self.assertIsNotNone(fc.grad)
