@@ -17,12 +17,13 @@ import torch
 import torch.nn as nn
 import math
 
+from functools import partial
 from torch import amp
 
 # import convenience functions for factorized tensors
 from makani.utils import comm
 from makani.models.common import ComplexReLU
-from makani.models.common.factorizations import get_contract_fun
+from makani.models.common.contractions import _contract_dense_pytorch
 
 import torch_harmonics.distributed as thd
 
@@ -103,7 +104,7 @@ class SpectralConv(nn.Module):
             self.weight.sharded_dims_mp[-2] = "h"
 
         # get the contraction handle. This should return a pyTorch contraction
-        self._contract = get_contract_fun(self.weight, implementation="factorized", separable=separable, complex=True, operator_type=operator_type)
+        self._contract = partial(_contract_dense_pytorch, separable=separable, complex=True, operator_type=operator_type)
 
         if bias == True:
             self.bias = nn.Parameter(torch.zeros(1, self.out_channels, 1, 1))
@@ -126,7 +127,7 @@ class SpectralConv(nn.Module):
 
         B, C, H, W = x.shape
         x = x.reshape(B, self.num_groups, C // self.num_groups, H, W)
-        xp = self._contract(x, self.weight, separable=self.separable, operator_type=self.operator_type)
+        xp = self._contract(x, self.weight)
         x = xp.reshape(B, self.out_channels, H, W).contiguous()
 
         with amp.autocast(device_type=x.device.type, enabled=False):
