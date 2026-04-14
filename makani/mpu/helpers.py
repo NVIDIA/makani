@@ -18,6 +18,7 @@ import torch.distributed as dist
 from makani.utils import comm
 
 
+@torch.compiler.disable
 def gather_uneven(tensor, dim, comm_name):
     if comm.get_size(comm_name) == 1:
         return tensor

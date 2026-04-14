@@ -18,8 +18,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed as dist
-from torch.amp import custom_fwd, custom_bwd
-
 from makani.utils import comm
 
 # parallel helpers
@@ -31,12 +29,7 @@ from makani.mpu.mappings import copy_to_parallel_region
 
 class _DistMatmulHelper(torch.autograd.Function):
     @staticmethod
-    @custom_fwd(device_type="cuda")
-    def forward(ctx, X, weight, bias, inp_group_name, out_group_name):
-        # store some variables
-        ctx.save_for_backward(X, weight, bias)
-        ctx.out_group_name = out_group_name
-
+    def forward(X, weight, bias, inp_group_name, out_group_name):
         # matrix multiplication
         xconv = F.conv2d(X, weight, bias=None)
 
@@ -53,7 +46,12 @@ class _DistMatmulHelper(torch.autograd.Function):
         return xconvbias
 
     @staticmethod
-    @custom_bwd(device_type="cuda")
+    def setup_context(ctx, inputs, output):
+        X, weight, bias, inp_group_name, out_group_name = inputs
+        ctx.save_for_backward(X, weight, bias)
+        ctx.out_group_name = out_group_name
+
+    @staticmethod
     def backward(ctx, grad_out):
         X, weight, bias = ctx.saved_tensors
         gname = ctx.out_group_name
