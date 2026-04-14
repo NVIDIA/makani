@@ -166,7 +166,7 @@ class GeometricACC(GeometricBaseMetric):
                 bias = split_tensor_along_dim(bias, dim=-1, num_chunks=comm.get_size("w"))[comm.get_rank("w")]
             if comm.get_size("h") > 1:
                 bias = split_tensor_along_dim(bias, dim=-2, num_chunks=comm.get_size("h"))[comm.get_rank("h")]
-            self.register_buffer("bias", bias)
+            self.register_buffer("bias", bias, persistent=False)
 
     def compute_counts(self, inp: torch.Tensor, weight: Optional[torch.Tensor] = None) -> torch.Tensor:
         counts = super().compute_counts(inp, weight)

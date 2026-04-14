@@ -531,7 +531,7 @@ class SphericalNeuralOperatorNet(nn.Module):
         if clamp_water:
             water_chans = get_water_channels(channel_names)
             if len(water_chans) > 0:
-                self.register_buffer("water_channels", torch.LongTensor(water_chans), persistent=False)
+                self.register_buffer("water_channels", torch.tensor(water_chans, dtype=torch.long), persistent=False)
 
         # finally, freeze part of the model if requested
         if freeze_processor:

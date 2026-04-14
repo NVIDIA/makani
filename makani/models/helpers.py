@@ -55,7 +55,7 @@ def compare_model_parameters(model1, model2):
     """Checks whether both models have the same parameters"""
 
     for p1, p2 in zip(model1.parameters(), model2.parameters()):
-        if p1.data.ne(p2.data).any():
+        if not torch.equal(p1.detach(), p2.detach()):
             return False
     return True
 

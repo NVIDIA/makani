@@ -58,8 +58,8 @@ class PanguOnnx(OnnxWrapper):
         if len(atmo_chans) % self.n_atmo_groups:
             raise ValueError(f"Expected number of atmospheric variables to be divisible by number of atmospheric groups but got {len(atmo_chans)} and {self.n_atmo_groups}")
 
-        self.register_buffer("atmo_channels", torch.LongTensor(atmo_chans), persistent=False)
-        self.register_buffer("surf_channels", torch.LongTensor(surf_chans), persistent=False)
+        self.register_buffer("atmo_channels", torch.tensor(atmo_chans, dtype=torch.long), persistent=False)
+        self.register_buffer("surf_channels", torch.tensor(surf_chans, dtype=torch.long), persistent=False)
 
         return
 
