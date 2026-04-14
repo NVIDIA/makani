@@ -202,6 +202,19 @@ def _make_concat_es(file_path, **overrides):
     return es
 
 
+def _ts_to_posix(t):
+    """Normalise a timestamp to a POSIX float.
+
+    GeneralES._compute_timestamps() returns numpy float64 (seconds since epoch).
+    GeneralConcatES._compute_timestamps_and_zenith_angle() returns datetime objects
+    (slices of self.timestamps).  This helper handles both.
+    """
+    try:
+        return float(t.timestamp())   # datetime path
+    except AttributeError:
+        return float(t)               # float / np.float64 path
+
+
 # ===========================================================================
 # Shared test logic (mixin)
 # ===========================================================================
@@ -387,6 +400,27 @@ class _BaseESTests:
             compare_arrays("unsorted channel reorder", inp[0], expected, verbose=True)
         )
 
+    # ---- 7b. unsorted out_channels reordered ----------------------------
+
+    def test_unsorted_out_channels_reordered(self):
+        """
+        With out_channels=[3,1,0,2] and channel c having constant value (c+1):
+          tar output position 0 → channel 3 → value 4
+          tar output position 1 → channel 1 → value 2
+          tar output position 2 → channel 0 → value 1
+          tar output position 3 → channel 2 → value 3
+        """
+        sel = [3, 1, 0, 2]
+        es = self._make_distinctive(out_channels=np.array(sel))
+        _inp, tar = self._call0(es)
+        vals = [4.0, 2.0, 1.0, 3.0]
+        expected = np.empty((len(sel), _IMG_H, _IMG_W), dtype=np.float32)
+        for pos, val in enumerate(vals):
+            expected[pos] = val
+        self.assertTrue(
+            compare_arrays("unsorted out_channel reorder", tar[0], expected, verbose=True)
+        )
+
     # ---- 8. zenith angle ------------------------------------------------
 
     def test_zenith_angle_appended(self):
@@ -426,18 +460,124 @@ class _BaseESTests:
         result = self._call0(es)
         self.assertEqual(len(result), 6)   # inp, tar, zen_inp, zen_tar, inp_t, tar_t
 
-    # ---- 11. StopIteration at epoch end ---------------------------------
+    # ---- 11. pickle round-trip ------------------------------------------
+
+    def test_pickle_roundtrip(self):
+        """
+        Simulates the DALI main-process → worker-process transfer.
+
+        Main-process state: __init__ has run but no file handles are open and
+        no buffers are allocated (is_parallel=True).  After pickle.loads the
+        worker calls __setstate__, which opens the file, installs the data
+        handle, and allocates buffers.  The restored ES must produce the same
+        output as a freshly constructed (worker-state) ES.
+        """
+        import pickle
+        es_ref      = self._make()             # worker-process state (our simulation)
+        es_restored = pickle.loads(pickle.dumps(self._make_for_pickle()))
+
+        inp_ref, tar_ref = self._call0(es_ref)
+        inp_res, tar_res = self._call0(es_restored)
+
+        with self.subTest(desc="inp"):
+            self.assertTrue(compare_arrays("pickled inp", inp_res, inp_ref, verbose=True))
+        with self.subTest(desc="tar"):
+            self.assertTrue(compare_arrays("pickled tar", tar_res, tar_ref, verbose=True))
+
+    # ---- 12. StopIteration at epoch end ---------------------------------
 
     def test_stop_iteration_at_epoch_end(self):
         es = self._make()
         with self.assertRaises(StopIteration):
             es(_SampleInfo(iteration=es.num_steps_per_epoch))
 
-    # ---- 12. n_samples_total --------------------------------------------
+    # ---- 12. n_samples_total / max_samples ------------------------------
+
+    def test_max_samples_limits_dataset(self):
+        """max_samples caps the usable sample count."""
+        max_s = 50
+        es_full   = self._make()
+        es_capped = self._make(max_samples=max_s)
+        self.assertLess(es_capped.n_samples_total, es_full.n_samples_total)
+        self.assertLessEqual(es_capped.n_samples_total, max_s)
 
     def test_n_samples_total(self):
         es = self._make()
         self.assertEqual(es.n_samples_total, _N_VALID)
+
+    def test_shuffle_epoch_cycle(self):
+        """
+        Exercises train=True (shuffled) with a short epoch and max_samples cap.
+
+        Setup
+        -----
+        max_samples = N_SAMPLES + 1  →  n_samples_total = N_SAMPLES = 50
+        samples_per_epoch = EPOCH_LEN = 10, batch_size = 1
+        → num_steps_per_epoch = 10, num_steps_per_cycle = 50
+
+        DALI epoch model
+        ----------------
+        iteration resets to 0 at the start of each epoch.
+        idx_in_epoch and epoch_idx together form global_sample_idx, which
+        walks through the shuffle permutation across epochs.
+        5 epochs × 10 steps = 50 total steps = 1 full cycle  →  every sample
+        visited exactly once.
+
+        Assertions
+        ----------
+        1. StopIteration is raised after exactly EPOCH_LEN steps in each epoch.
+        2. Across all epochs, exactly N_SAMPLES samples are loaded.
+        3. Every sample is visited exactly once (no repeats, no omissions):
+           the collected timestamp set equals es.timestamps[es.indices_select].
+        """
+        N_SAMPLES = 50
+        EPOCH_LEN = 10
+        N_EPOCHS  = N_SAMPLES // EPOCH_LEN   # 5 full epochs = 1 cycle
+
+        es = self._make(
+            train=True,
+            max_samples=N_SAMPLES + 1,       # +1: samples_end = (N+1) - 1 = N
+            samples_per_epoch=EPOCH_LEN,
+            batch_size=1,
+            return_timestamp=True,
+        )
+        self.assertEqual(es.n_samples_total,     N_SAMPLES)
+        self.assertEqual(es.num_steps_per_epoch, EPOCH_LEN)
+
+        loaded_ts = []
+
+        for epoch_idx in range(N_EPOCHS):
+            # --- normal steps for this epoch ---
+            for step in range(EPOCH_LEN):
+                result = es(_SampleInfo(
+                    idx_in_epoch=step,
+                    epoch_idx=epoch_idx,
+                    iteration=step,          # iteration resets to 0 each epoch
+                ))
+                inp_time = result[2]         # (inp, tar, inp_time, tar_time)
+                loaded_ts.append(_ts_to_posix(inp_time[0]))
+
+            # --- StopIteration fires when iteration reaches EPOCH_LEN ---
+            with self.subTest(desc=f"StopIteration epoch {epoch_idx}"):
+                with self.assertRaises(StopIteration):
+                    es(_SampleInfo(
+                        idx_in_epoch=0,
+                        epoch_idx=epoch_idx,
+                        iteration=EPOCH_LEN,
+                    ))
+
+        # 1. Correct total count
+        with self.subTest(desc="total samples loaded"):
+            self.assertEqual(len(loaded_ts), N_SAMPLES)
+
+        # 2. No sample repeated
+        with self.subTest(desc="no repeated samples"):
+            self.assertEqual(len(set(loaded_ts)), N_SAMPLES)
+
+        # 3. Loaded set == complete valid-sample set (all indices_select covered)
+        expected_ts = {_ts_to_posix(ts) for ts in es.timestamps[es.indices_select]}
+        with self.subTest(desc="complete coverage"):
+            self.assertEqual(set(loaded_ts), expected_ts)
 
     # ---- 13. timestamp boundary list ------------------------------------
 
@@ -483,6 +623,14 @@ class TestGeneralES(_BaseESTests, unittest.TestCase):
     def _make_distinctive(self, **overrides):
         return _make_general_es(self._dc_path, **overrides)
 
+    def _make_for_pickle(self, **overrides):
+        """Main-process state: __init__ done, no file handles, no buffers."""
+        from makani.utils.dataloaders.dali_es_helper_2d import GeneralES
+        kw = _default_kwargs(self._train_path)
+        kw["is_parallel"] = True   # buffers not yet allocated; __setstate__ will do it
+        kw.update(overrides)
+        return GeneralES(**kw)
+
     def test_missing_directory_raises(self):
         with self.assertRaises(IOError):
             _make_general_es(os.path.join(self._tmpdir.name, "does_not_exist"))
@@ -508,6 +656,14 @@ class TestGeneralConcatES(_BaseESTests, unittest.TestCase):
 
     def _make_distinctive(self, **overrides):
         return _make_concat_es(self._file_dc, **overrides)
+
+    def _make_for_pickle(self, **overrides):
+        """Main-process state: __init__ done, vfile=None, no buffers."""
+        from makani.utils.dataloaders.dali_es_helper_concat_2d import GeneralConcatES
+        kw = _default_kwargs(self._file)
+        kw["is_parallel"] = True   # buffers not yet allocated; __setstate__ will do it
+        kw.update(overrides)
+        return GeneralConcatES(**kw)
 
     def test_missing_file_raises(self):
         with self.assertRaises(IOError):
