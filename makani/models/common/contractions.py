@@ -16,16 +16,6 @@
 import torch
 
 
-# for the factorized spectral convolution
-@torch.compile
-def _contract_rank(xc: torch.Tensor, wc: torch.Tensor, ac: torch.Tensor, bc: torch.Tensor) -> torch.Tensor:
-    resc = torch.einsum("bixy,ior,xr,yr->boxy", xc, wc, ac, bc)
-    return resc
-
-
-# new contractions set to replace older ones. We use complex
-
-
 @torch.compile
 def _contract_lmwise(ac: torch.Tensor, bc: torch.Tensor) -> torch.Tensor:
     resc = torch.einsum("bgixy,gioxy->bgoxy", ac, bc)
@@ -39,20 +29,14 @@ def _contract_lwise(ac: torch.Tensor, bc: torch.Tensor) -> torch.Tensor:
 
 
 @torch.compile
-def _contract_mwise(ac: torch.Tensor, bc: torch.Tensor) -> torch.Tensor:
-    resc = torch.einsum("bgixy,gioy->bgoxy", ac, bc)
-    return resc
-
-
-@torch.compile
 def _contract_sep_lmwise(ac: torch.Tensor, bc: torch.Tensor) -> torch.Tensor:
-    resc = torch.einsum("bgixy,gixy->bgoxy", ac, bc)
+    resc = torch.einsum("bgixy,gixy->bgixy", ac, bc)
     return resc
 
 
 @torch.compile
 def _contract_sep_lwise(ac: torch.Tensor, bc: torch.Tensor) -> torch.Tensor:
-    resc = torch.einsum("bgixy,gix->bgoxy", ac, bc)
+    resc = torch.einsum("bgixy,gix->bgixy", ac, bc)
     return resc
 
 
@@ -70,13 +54,13 @@ def _contract_lwise_real(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 
 @torch.compile
 def _contract_sep_lmwise_real(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    res = torch.einsum("bgixys,gixy->bgoxys", a, b).contiguous()
+    res = torch.einsum("bgixys,gixy->bgixys", a, b).contiguous()
     return res
 
 
 @torch.compile
 def _contract_sep_lwise_real(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    res = torch.einsum("bgixys,gix->bgoxys", a, b).contiguous()
+    res = torch.einsum("bgixys,gix->bgixys", a, b).contiguous()
     return res
 
 
