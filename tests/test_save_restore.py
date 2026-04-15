@@ -28,7 +28,7 @@ from makani.utils.driver import Driver
 from makani.utils.checkpoint_helpers import get_latest_checkpoint_version
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from .testutils import disable_tf32, get_default_parameters, compare_arrays
+from .testutils import disable_tf32, set_seed, get_default_parameters, compare_arrays
 
 
 class TestSaveRestore(unittest.TestCase):
@@ -36,6 +36,7 @@ class TestSaveRestore(unittest.TestCase):
     def setUp(self):
 
         disable_tf32()
+        set_seed(333)
 
         self.params = get_default_parameters()
 

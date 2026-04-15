@@ -17,6 +17,7 @@ from packaging import version
 import os
 import json
 import datetime as dt
+import random
 from typing import Optional
 
 import numpy as np
@@ -37,6 +38,16 @@ NUM_SAMPLES_PER_YEAR = 365
 TRAIN_YEARS = [2017, 2018]
 TEST_YEARS  = [2019]
 DHOURS = (365 * 24) // NUM_SAMPLES_PER_YEAR  # 24
+
+
+def set_seed(seed=333):
+    """Seed torch, torch.cuda, and numpy for reproducible tests."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+    return
 
 
 def disable_tf32():

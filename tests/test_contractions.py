@@ -32,7 +32,7 @@ from makani.models.common.contractions import (
 
 import sys, os
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from .testutils import disable_tf32, compare_tensors
+from .testutils import disable_tf32, set_seed, compare_tensors
 
 # ---------------------------------------------------------------------------
 # Fixed small dimensions — tests run on CPU
@@ -124,7 +124,7 @@ class TestContractionShape(unittest.TestCase):
 
     def setUp(self):
         disable_tf32()
-        torch.manual_seed(0)
+        set_seed(333)
 
     @parameterized.expand([(name, fn, mk, shape) for name, fn, _, mk, shape in _KERNEL_CASES])
     def test_output_shape(self, name, fn, make_inputs, expected_shape):
@@ -147,7 +147,7 @@ class TestContractionCorrectness(unittest.TestCase):
 
     @parameterized.expand([(name, fn, ref, mk) for name, fn, ref, mk, _ in _KERNEL_CASES])
     def test_compile_correctness(self, name, fn, ref_fn, make_inputs):
-        torch.manual_seed(abs(hash(name)) & 0xFFFF)
+        set_seed(333)
         x, w = make_inputs()
         self.assertTrue(
             compare_tensors(f"{name} compile", fn(x, w), ref_fn(x, w), atol=1e-5, rtol=1e-4),
@@ -164,13 +164,13 @@ class TestContractionDispatcher(unittest.TestCase):
 
     def setUp(self):
         disable_tf32()
-        torch.manual_seed(1)
+        set_seed(333)
 
     @parameterized.expand(
         [(f"sep{s}_op{op}_cx{cx}", s, op, cx, kname) for s, op, cx, kname in _DISPATCHER_CASES]
     )
     def test_routing(self, _label, separable, operator_type, complex_, kernel_name):
-        torch.manual_seed(42)
+        set_seed(333)
         x, w = _MAKER[kernel_name]()
         expected = _REF[kernel_name](x, w)
         got = _contract_dense_pytorch(x, w, separable=separable, operator_type=operator_type, complex=complex_)
@@ -198,7 +198,7 @@ class TestContractionConsistency(unittest.TestCase):
 
     def setUp(self):
         disable_tf32()
-        torch.manual_seed(2)
+        set_seed(333)
 
     def test_lmwise_diagonal_weight_equals_sep_lmwise(self):
         """Non-separable lmwise with diagonal (I==O) weight must equal sep_lmwise."""
@@ -273,7 +273,7 @@ class TestContractionBackward(unittest.TestCase):
 
     @parameterized.expand([(name, fn, mk) for name, fn, _, mk, _ in _KERNEL_CASES])
     def test_backward(self, name, fn, make_inputs):
-        torch.manual_seed(abs(hash(name)) & 0xFFFF)
+        set_seed(333)
         x, w = make_inputs()
         x = x.detach().requires_grad_(True)
         w = w.detach().requires_grad_(True)

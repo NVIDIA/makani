@@ -25,7 +25,7 @@ from makani.utils.losses.hydrostatic_loss import HydrostaticBalanceLoss
 from makani.models.parametrizations import ConstraintsWrapper
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from .testutils import disable_tf32
+from .testutils import disable_tf32, set_seed
 
 class TestConstraints(unittest.TestCase):
 
@@ -34,8 +34,7 @@ class TestConstraints(unittest.TestCase):
         disable_tf32()
 
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        torch.manual_seed(333)
-        torch.cuda.manual_seed(333)
+        set_seed(333)
 
         # load the data:
         data_dir = os.path.join(os.path.dirname(__file__), "data")
