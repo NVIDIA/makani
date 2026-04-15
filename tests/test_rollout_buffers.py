@@ -27,7 +27,7 @@ from makani.utils.inference.rollout_buffer import TemporalAverageBuffer
 from makani.utils.dataloaders.data_helpers import get_lat_lon_grid
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from .testutils import disable_tf32, init_dataset, get_default_parameters, compare_arrays, H5_PATH, IMG_SIZE_H, IMG_SIZE_W
+from .testutils import disable_tf32, set_seed, init_dataset, get_default_parameters, compare_arrays, H5_PATH, IMG_SIZE_H, IMG_SIZE_W
 
 
 def init_dataset_params(
@@ -84,8 +84,7 @@ class TestRolloutBuffers(unittest.TestCase):
         cls.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
         # Set random seed for reproducibility
-        torch.manual_seed(333)
-        np.random.seed(333)
+        set_seed(333)
 
         # create temporary directory
         cls.tmpdir = tempfile.TemporaryDirectory(dir=path)

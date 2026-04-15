@@ -28,7 +28,7 @@ from makani import Trainer, EnsembleTrainer, StochasticTrainer, AutoencoderTrain
 from makani.utils import comm
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from .testutils import disable_tf32, get_default_parameters, init_dataset
+from .testutils import disable_tf32, set_seed, get_default_parameters, init_dataset
 from .testutils import H5_PATH, compare_tensors
 
 
@@ -132,6 +132,7 @@ class TestTrainer(unittest.TestCase):
     def setUp(self, path: Optional[str] = "/tmp"):
 
         disable_tf32()
+        set_seed(333)
 
         # create temporary directory
         self.tmpdir = tempfile.TemporaryDirectory(dir=path)

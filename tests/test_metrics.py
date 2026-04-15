@@ -41,7 +41,7 @@ from makani.utils.metrics.functions import (
 from makani.utils.dataloaders.data_helpers import get_lat_lon_grid
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from .testutils import disable_tf32, get_default_parameters, compare_arrays
+from .testutils import disable_tf32, set_seed, get_default_parameters, compare_arrays
 
 # check consistency with weatherbench2 if it is installed
 _have_wb2 = importlib.util.find_spec("weatherbench2") is not None
@@ -185,8 +185,7 @@ class TestMetrics(unittest.TestCase):
         disable_tf32()
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        torch.manual_seed(333)
-        torch.cuda.manual_seed(333)
+        set_seed(333)
 
         return
 
@@ -375,8 +374,7 @@ class TestMetricsAggregation(unittest.TestCase):
 
     def setUp(self):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        torch.manual_seed(333)
-        torch.cuda.manual_seed(333)
+        set_seed(333)
 
         return
 
@@ -686,8 +684,7 @@ class TestMetricsHandler(unittest.TestCase):
     
     def setUp(self):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        torch.manual_seed(333)
-        torch.cuda.manual_seed(333)
+        set_seed(333)
 
         self.params = get_default_parameters()
         self.params["dhours"] = 1
@@ -1148,8 +1145,7 @@ class ComparetMetricsWB2(unittest.TestCase):
     def setUp(self):
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        torch.manual_seed(333)
-        torch.cuda.manual_seed(333)
+        set_seed(333)
 
     # same as above but compare to wb2
     @parameterized.expand(_wb2_metrics_params, skip_on_empty=True)

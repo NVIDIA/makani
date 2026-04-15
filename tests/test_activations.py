@@ -24,7 +24,7 @@ from makani.models.common.activations import ComplexReLU, ComplexActivation, Mag
 
 import sys, os
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from .testutils import disable_tf32, compare_tensors
+from .testutils import disable_tf32, set_seed, compare_tensors
 
 # ---------------------------------------------------------------------------
 # Shared input shape
@@ -54,7 +54,7 @@ class TestComplexReLU(unittest.TestCase):
 
     def setUp(self):
         disable_tf32()
-        torch.manual_seed(0)
+        set_seed(333)
 
     # --- helpers ---
 
@@ -240,7 +240,7 @@ class TestComplexActivation(unittest.TestCase):
 
     def setUp(self):
         disable_tf32()
-        torch.manual_seed(10)
+        set_seed(333)
 
     # --- shape / dtype ---
 
@@ -332,7 +332,7 @@ class TestMagnitudePreservingSiLU(unittest.TestCase):
 
     def setUp(self):
         disable_tf32()
-        torch.manual_seed(20)
+        set_seed(333)
 
     def test_shape_dtype_preserved(self):
         fn  = MagnitudePreservingSiLU()

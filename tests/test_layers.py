@@ -24,7 +24,7 @@ from makani.models.networks.pangu import EarthAttention3D
 from makani.models.common.layers import SeededDropout2d
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from .testutils import disable_tf32, get_default_parameters, compare_tensors
+from .testutils import disable_tf32, set_seed, get_default_parameters, compare_tensors
 
 class TestLayers(unittest.TestCase):
 
@@ -53,8 +53,7 @@ class TestLayers(unittest.TestCase):
 
         # set device and seed
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        torch.manual_seed(333)
-        torch.cuda.manual_seed(333)
+        set_seed(333)
 
         return
 
@@ -146,7 +145,7 @@ class TestLayers(unittest.TestCase):
 
     def test_seeded_dropout2d_deterministic_mask(self, atol=1e-8, rtol=1e-8, verbose=True):
         """Two dropout layers with the same seed should produce identical masks."""
-        torch.manual_seed(123)
+        set_seed(333)
         x = torch.randn(2, 3, 4, 4, device=self.device)
 
         drop1 = SeededDropout2d(drop_prob=0.5, seed=999).to(self.device).train()

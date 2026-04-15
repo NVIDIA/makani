@@ -37,7 +37,7 @@ from makani.utils.losses import (
 )
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from .testutils import disable_tf32, get_default_parameters, compare_tensors, compare_arrays
+from .testutils import disable_tf32, set_seed, get_default_parameters, compare_tensors, compare_arrays
 
 from properscoring import crps_ensemble, crps_gaussian
 
@@ -164,7 +164,7 @@ class TestLossCommon(unittest.TestCase):
 
     def setUp(self):
         disable_tf32()
-        torch.manual_seed(333)
+        set_seed(333)
 
     @staticmethod
     def _make(name: str):
@@ -253,7 +253,7 @@ class TestGeometricLpLoss(unittest.TestCase):
 
     def setUp(self):
         disable_tf32()
-        torch.manual_seed(333)
+        set_seed(333)
 
     def test_squared_flag_consistency(self):
         """For p=2, loss(squared=False)^2 must equal loss(squared=True)."""
@@ -293,7 +293,7 @@ class TestSpectralL2Loss(unittest.TestCase):
 
     def setUp(self):
         disable_tf32()
-        torch.manual_seed(333)
+        set_seed(333)
 
     def test_squared_flag_consistency(self):
         """loss(squared=False)^2 must equal loss(squared=True)."""
@@ -330,7 +330,7 @@ class TestSpectralH1Loss(unittest.TestCase):
 
     def setUp(self):
         disable_tf32()
-        torch.manual_seed(333)
+        set_seed(333)
 
     def test_squared_flag_consistency(self):
         fn_unsq = SpectralH1Loss(**_SPEC_KWARGS, squared=False)
@@ -386,7 +386,7 @@ class TestSpectralRelativeLoss(unittest.TestCase):
 
     def setUp(self):
         disable_tf32()
-        torch.manual_seed(42)
+        set_seed(333)
 
     @staticmethod
     def _make(cls, squared=False):
@@ -452,8 +452,8 @@ class TestSpectralRelativeLoss(unittest.TestCase):
     def test_l2_monotone_in_error(self):
         """A prediction farther from the target must have a larger relative loss."""
         fn  = self._make(SpectralL2Loss)
+        set_seed(333)
         tar = _rand()
-        torch.manual_seed(7)
         noise = torch.randn_like(tar)
         loss_small = fn(tar + 0.1 * noise, tar).mean().item()
         loss_large = fn(tar + 2.0 * noise, tar).mean().item()
@@ -462,8 +462,8 @@ class TestSpectralRelativeLoss(unittest.TestCase):
 
     def test_h1_monotone_in_error(self):
         fn  = self._make(SpectralH1Loss)
+        set_seed(333)
         tar = _rand()
-        torch.manual_seed(7)
         noise = torch.randn_like(tar)
         loss_small = fn(tar + 0.1 * noise, tar).mean().item()
         loss_large = fn(tar + 2.0 * noise, tar).mean().item()
@@ -477,7 +477,7 @@ class TestSpectralAMSELoss(unittest.TestCase):
 
     def setUp(self):
         disable_tf32()
-        torch.manual_seed(333)
+        set_seed(333)
 
     def _fn(self):
         return SpectralAMSELoss(**_SPEC_KWARGS)
@@ -512,7 +512,7 @@ class TestDriftRegularization(unittest.TestCase):
 
     def setUp(self):
         disable_tf32()
-        torch.manual_seed(333)
+        set_seed(333)
 
     def _fn(self, p=1.0):
         return DriftRegularization(**_GEOM_KWARGS, p=p)
@@ -571,7 +571,7 @@ class TestEnsembleNLLLoss(unittest.TestCase):
 
     def setUp(self):
         disable_tf32()
-        torch.manual_seed(333)
+        set_seed(333)
 
     def _fn(self, eps=1e-5):
         return EnsembleNLLLoss(**_GEOM_KWARGS, eps=eps)
@@ -627,7 +627,7 @@ class TestEnsembleNLLLoss(unittest.TestCase):
         E = 20
         obs = torch.ones(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
 
-        torch.manual_seed(99)
+        set_seed(333)
         noise = torch.randn(_BATCH, E, _NUM_CH, _IMG_H, _IMG_W)
         fc_tight = obs.unsqueeze(1) + 0.1 * noise
         fc_loose = obs.unsqueeze(1) + 2.0 * noise
@@ -654,7 +654,7 @@ class TestEnsembleMMDLoss(unittest.TestCase):
 
     def setUp(self):
         disable_tf32()
-        torch.manual_seed(42)
+        set_seed(333)
 
     def test_squared_flag_consistency(self):
         """For a wide ensemble where mmd² > 0, sqrt(mmd²) must equal the unsquared loss."""
@@ -674,7 +674,7 @@ class TestEnsembleMMDLoss(unittest.TestCase):
         than a tight ensemble concentrated near it."""
         fn = EnsembleMMDLoss(**_GEOM_KWARGS, squared=True)
         obs = torch.zeros(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
-        torch.manual_seed(7)
+        set_seed(333)
         noise = torch.randn(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W)
         fc_tight = obs.unsqueeze(1) + 0.01 * noise  # k(y_m, obs) ≈ 1 → negative mmd²
         fc_wide  = obs.unsqueeze(1) + 10.0 * noise  # k(y_m, obs) ≈ 0 → positive mmd²
@@ -715,7 +715,7 @@ class TestCRPSLoss(unittest.TestCase):
 
     def setUp(self):
         disable_tf32()
-        torch.manual_seed(333)
+        set_seed(333)
 
     def test_cdf_matches_properscoring(self):
         crps_func = EnsembleCRPSLoss(
@@ -791,7 +791,7 @@ class TestSpectralLossWeighted(unittest.TestCase):
 
     def setUp(self):
         disable_tf32()
-        torch.manual_seed(333)
+        set_seed(333)
 
     @staticmethod
     def _make(loss_type):
@@ -870,8 +870,7 @@ class TestLossHandler(unittest.TestCase):
 
         disable_tf32()
 
-        torch.manual_seed(333)
-        torch.cuda.manual_seed(333)
+        set_seed(333)
 
         self.params = get_default_parameters()
 
