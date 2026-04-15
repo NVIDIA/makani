@@ -18,7 +18,7 @@ import os
 import json
 import datetime as dt
 import random
-from typing import Optional
+from typing import List, Optional
 
 import numpy as np
 import h5py as h5
@@ -115,6 +115,57 @@ def get_default_parameters():
     params.log_to_wandb = False
 
     return params
+
+
+def init_dataset_metadata(
+    path: str,
+    dataset_name: str = "testing",
+    h5_path: str = H5_PATH,
+    dhours: int = DHOURS,
+    channel_names: Optional[List[str]] = None,
+    lat: Optional[List[float]] = None,
+    lon: Optional[List[float]] = None,
+    grid_type: str = "equiangular",
+    attrs: Optional[dict] = None,
+    analysis_epoch_start_dates: Optional[List[str]] = None,
+) -> str:
+    """Write a dataset metadata JSON to <path>/data.json and return the file path.
+
+    This is the canonical way to create a metadata fixture for tests.  It is
+    also called internally by ``init_dataset`` so that both produce identical
+    JSON layouts (including the ``attrs`` key required by
+    ``parse_dataset_metadata``).
+    """
+    if channel_names is None:
+        channel_names = [f"chan_{i}" for i in range(NUM_CHANNELS)]
+    if lat is None:
+        lat = np.linspace(90, -90, IMG_SIZE_H, endpoint=True).tolist()
+    if lon is None:
+        lon = np.linspace(0, 360, IMG_SIZE_W, endpoint=False).tolist()
+    if attrs is None:
+        attrs = {"description": "A synthetic test dataset."}
+
+    metadata = dict(
+        dataset_name=dataset_name,
+        h5_path=h5_path,
+        dims=["time", "channel", "lat", "lon"],
+        dhours=dhours,
+        attrs=attrs,
+        coords=dict(
+            grid_type=grid_type,
+            lat=lat,
+            lon=lon,
+            channel=channel_names,
+        ),
+    )
+    if analysis_epoch_start_dates is not None:
+        metadata["analysis_epoch_start_dates"] = analysis_epoch_start_dates
+
+    os.makedirs(path, exist_ok=True)
+    file_path = os.path.join(path, "data.json")
+    with open(file_path, "w") as f:
+        json.dump(metadata, f)
+    return file_path
 
 
 def init_dataset(
@@ -282,19 +333,15 @@ def init_dataset(
         concat_train_path = None
 
     # create metadata file:
-    metadata = dict(dataset_name="testing",
-                    h5_path=H5_PATH,
-                    dims=["time", "channel", "lat", "lon"],
-                    dhours=dhours,
-                    coords=dict(
-                        grid_type="equiangular",
-                        lat=latitude.tolist(),
-                        lon=longitude.tolist(),
-                        channel=channel_names,
-                    )
+    init_dataset_metadata(
+        path=metadata_path,
+        dataset_name="testing",
+        h5_path=H5_PATH,
+        dhours=dhours,
+        channel_names=channel_names,
+        lat=latitude.tolist(),
+        lon=longitude.tolist(),
     )
-    with open(os.path.join(metadata_path, "data.json"), "w") as f:
-        json.dump(metadata, f)
 
     return train_path, num_train, test_path, num_test, stats_path, metadata_path, concat_train_path
 
