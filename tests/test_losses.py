@@ -27,6 +27,7 @@ import torch
 from makani.utils import LossHandler
 from makani.utils.losses import (
     EnsembleCRPSLoss,
+    EnsembleSpectralCRPSLoss,
     EnsembleMMDLoss,
     GeometricLpLoss,
     SpectralL2Loss,
@@ -1055,6 +1056,324 @@ class TestLossHandler(unittest.TestCase):
             self.assertTrue(compare_tensors("mean", mean, expected_mean))
         with self.subTest(desc="var"):
             self.assertTrue(compare_tensors("var", var, expected_var))
+
+
+# ===========================================================================
+class TestEnsembleCRPSLossExtended(unittest.TestCase):
+    """Additional coverage for EnsembleCRPSLoss: error paths, weight branches,
+    and the skillspread kernel validation against properscoring."""
+
+    _E = 5
+
+    def setUp(self):
+        disable_tf32()
+        set_seed(333)
+
+    def _fn(self, crps_type="cdf", **kw):
+        return EnsembleCRPSLoss(
+            **_GEOM_KWARGS,
+            crps_type=crps_type,
+            spatial_distributed=False,
+            ensemble_distributed=False,
+            **kw,
+        )
+
+    # ------ alpha < 1.0 raises for non-skillspread types (line 210) ------
+
+    def test_alpha_lt1_raises_for_cdf(self):
+        with self.assertRaises(NotImplementedError):
+            self._fn("cdf", alpha=0.5)
+
+    def test_alpha_lt1_raises_for_gauss(self):
+        with self.assertRaises(NotImplementedError):
+            self._fn("gauss", alpha=0.5)
+
+    # ------ ensemble_weights registered as buffer (lines 220-221) ------
+
+    def test_ensemble_weights_registered_as_buffer(self):
+        """Supplying ensemble_weights must register it as a named buffer."""
+        ew = torch.ones(self._E)
+        fn = self._fn("cdf", ensemble_weights=ew)
+        self.assertIn("ensemble_weights", dict(fn.named_buffers()))
+
+    # ------ dim validation in forward (lines 232, 236-238) ------
+
+    def test_wrong_forecast_dims_raises(self):
+        """4-D forecasts tensor must raise ValueError (5-D expected)."""
+        fn  = self._fn()
+        fc  = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)   # missing ensemble dim
+        obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
+        with self.assertRaises(ValueError):
+            fn(fc, obs)
+
+    def test_spatial_weight_dim_mismatch_raises(self):
+        """spatial_weights with fewer dims than observations must raise ValueError."""
+        fn  = self._fn()
+        fc  = torch.randn(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W)
+        obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
+        bad_wgt = torch.ones(_NUM_CH, _IMG_H, _IMG_W)   # 3-D; observations are 4-D
+        with self.assertRaises(ValueError):
+            fn(fc, obs, spatial_weights=bad_wgt)
+
+    # ------ CDF with custom ensemble_weights (line 276) ------
+
+    def test_cdf_with_custom_ensemble_weights_produces_finite_output(self):
+        """CDF kernel must execute without error when ensemble_weights is provided."""
+        E  = self._E
+        ew = torch.ones(E)
+        fn = self._fn("cdf", ensemble_weights=ew)
+        fc  = torch.randn(_BATCH, E, _NUM_CH, _IMG_H, _IMG_W)
+        obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
+        out = fn(fc, obs)
+        self.assertEqual(tuple(out.shape), (_BATCH, _NUM_CH))
+        self.assertTrue(torch.isfinite(out).all())
+
+    # ------ skillspread + ensemble_weights raises (line 284) ------
+
+    def test_skillspread_with_ensemble_weights_raises(self):
+        """skillspread kernel does not support custom ensemble_weights."""
+        E  = self._E
+        ew = torch.ones(E)
+        fn = self._fn("skillspread", ensemble_weights=ew)
+        fc  = torch.randn(_BATCH, E, _NUM_CH, _IMG_H, _IMG_W)
+        obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
+        with self.assertRaises(NotImplementedError):
+            fn(fc, obs)
+
+    # ------ gauss + ensemble_weights → NameError (line 292, known bug) ------
+
+    def test_gauss_with_ensemble_weights_raises_nameerror(self):
+        """Known bug: gauss branch references undefined `idx` when ensemble_weights is set."""
+        E  = self._E
+        ew = torch.ones(E)
+        fn = self._fn("gauss", ensemble_weights=ew)
+        fc  = torch.randn(_BATCH, E, _NUM_CH, _IMG_H, _IMG_W)
+        obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
+        with self.assertRaises(NameError):
+            fn(fc, obs)
+
+    # ------ unknown crps_type raises ValueError (line 299) ------
+
+    def test_unknown_crps_type_raises_in_forward(self):
+        """Unknown crps_type must raise ValueError in forward."""
+        fn = self._fn("cdf")
+        fn.crps_type = "bogus"   # bypass __init__ guard; trigger the forward-time check
+        fc  = torch.randn(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W)
+        obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
+        with self.assertRaises(ValueError):
+            fn(fc, obs)
+
+    # ------ skillspread(alpha=0) matches properscoring.crps_ensemble ------
+
+    def test_skillspread_alpha0_matches_properscoring(self):
+        """crps_skillspread(alpha=0.0) is the biased CRPS and must match properscoring."""
+        E  = self._E
+        fn = self._fn("skillspread", alpha=0.0)
+        set_seed(333)
+        fc  = torch.randn(_BATCH, E, _NUM_CH, _IMG_H, _IMG_W)
+        obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
+        result = fn(fc, obs).cpu().numpy()
+
+        fc_np  = fc.cpu().numpy()
+        obs_np = obs.cpu().numpy()
+        result_proper = crps_ensemble(obs_np, fc_np, weights=None, issorted=False, axis=1)
+        quad_weight_arr = fn.quadrature.quad_weight.cpu().numpy()
+        result_proper = np.sum(result_proper * quad_weight_arr, axis=(2, 3))
+
+        self.assertTrue(compare_arrays("skillspread vs properscoring", result, result_proper, atol=1e-5))
+
+    # ------ CDF == skillspread(alpha=0) exactly for all ensemble sizes ------
+
+    @parameterized.expand([(2,), (5,), (10,)])
+    def test_cdf_equals_skillspread_alpha0(self, ensemble_size):
+        """CDF CRPS and skillspread(alpha=0) are the same formula; they must agree
+        up to float32 rounding for every ensemble size, including E=2."""
+        fn_cdf   = self._fn("cdf")
+        fn_skill = self._fn("skillspread", alpha=0.0)
+        set_seed(333)
+        fc  = torch.randn(_BATCH, ensemble_size, _NUM_CH, _IMG_H, _IMG_W)
+        obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
+        result_cdf   = fn_cdf(fc, obs)
+        result_skill = fn_skill(fc, obs)
+        self.assertTrue(
+            compare_tensors("cdf vs skillspread(alpha=0)", result_cdf, result_skill, atol=1e-5, rtol=1e-4),
+            f"E={ensemble_size}: CDF and skillspread(alpha=0) diverged beyond float32 rounding",
+        )
+
+    # ------ fair CRPS (alpha=1) < biased CRPS (alpha=0) for spread ensemble ------
+
+    def test_fair_crps_less_than_biased_for_spread_ensemble(self):
+        """Fair CRPS (alpha=1) penalises ensemble spread less than biased CRPS (alpha=0)."""
+        E = self._E
+        fn_fair   = self._fn("skillspread", alpha=1.0)
+        fn_biased = self._fn("skillspread", alpha=0.0)
+        set_seed(333)
+        obs = torch.zeros(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
+        fc  = torch.randn(_BATCH, E, _NUM_CH, _IMG_H, _IMG_W)
+        self.assertLess(
+            fn_fair(fc, obs).mean().item(),
+            fn_biased(fc, obs).mean().item(),
+        )
+
+
+# ===========================================================================
+class TestEnsembleSpectralCRPSLoss(unittest.TestCase):
+    """Full coverage for EnsembleSpectralCRPSLoss (lines 339-509)."""
+
+    _E = 5
+
+    def setUp(self):
+        disable_tf32()
+        set_seed(333)
+
+    def _fn(self, crps_type="skillspread", absolute=True, **kw):
+        return EnsembleSpectralCRPSLoss(
+            **_SPEC_KWARGS,
+            crps_type=crps_type,
+            spatial_distributed=False,
+            ensemble_distributed=False,
+            absolute=absolute,
+            **kw,
+        )
+
+    # ------ type property (line 393) ------
+
+    def test_type_property(self):
+        from makani.utils.losses.base_loss import LossType
+        fn = self._fn()
+        self.assertEqual(fn.type, LossType.Probabilistic)
+
+    # ------ output shape: (B, C) for all three kernels ------
+
+    @parameterized.expand([("cdf",), ("skillspread",), ("gauss",)])
+    def test_output_shape(self, crps_type):
+        fn  = self._fn(crps_type)
+        fc  = torch.randn(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W)
+        obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
+        out = fn(fc, obs)
+        self.assertEqual(tuple(out.shape), (_BATCH, _NUM_CH))
+
+    # ------ non-negative output ------
+
+    @parameterized.expand([("cdf",), ("skillspread",), ("gauss",)])
+    def test_nonneg(self, crps_type):
+        fn  = self._fn(crps_type)
+        fc  = torch.randn(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W)
+        obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
+        out = fn(fc, obs)
+        self.assertTrue(
+            (out >= -1e-6).all(),
+            f"{crps_type}: found negative values, min={out.min().item():.4e}",
+        )
+
+    # ------ zero on perfect prediction for cdf and skillspread ------
+
+    @parameterized.expand([("cdf",), ("skillspread",)])
+    def test_zero_on_perfect_prediction(self, crps_type):
+        """Perfect ensemble (all members = observation) must give zero loss."""
+        fn  = self._fn(crps_type)
+        obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
+        fc  = obs.unsqueeze(1).expand(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W).clone()
+        out = fn(fc, obs)
+        self.assertTrue(
+            compare_tensors(f"spectral {crps_type} zero", out, torch.zeros_like(out), atol=1e-4),
+        )
+
+    # ------ absolute=False path (lines 419-426) ------
+
+    def test_absolute_false_shape(self):
+        """absolute=False folds real/imag into channels; output must still be (B, C)."""
+        fn  = self._fn("skillspread", absolute=False)
+        fc  = torch.randn(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W)
+        obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
+        out = fn(fc, obs)
+        self.assertEqual(tuple(out.shape), (_BATCH, _NUM_CH))
+
+    def test_absolute_false_nonneg(self):
+        fn  = self._fn("skillspread", absolute=False)
+        fc  = torch.randn(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W)
+        obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
+        out = fn(fc, obs)
+        self.assertTrue((out >= -1e-6).all())
+
+    def test_absolute_true_and_false_differ(self):
+        """absolute=True and absolute=False must give different numerical results."""
+        fn_abs  = self._fn("cdf", absolute=True)
+        fn_real = self._fn("cdf", absolute=False)
+        set_seed(333)
+        fc  = torch.randn(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W)
+        obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
+        self.assertFalse(torch.allclose(fn_abs(fc, obs), fn_real(fc, obs)))
+
+    # ------ dim validation in forward (lines 398-403) ------
+
+    def test_wrong_forecast_dims_raises(self):
+        fn  = self._fn()
+        fc  = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)   # 4-D, not 5-D
+        obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
+        with self.assertRaises(ValueError):
+            fn(fc, obs)
+
+    def test_spectral_weight_dim_mismatch_raises(self):
+        fn  = self._fn()
+        fc  = torch.randn(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W)
+        obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
+        bad_wgt = torch.ones(_NUM_CH, fn.sht.lmax, fn.sht.mmax)   # 3-D; obs are 4-D
+        with self.assertRaises(ValueError):
+            fn(fc, obs, spectral_weights=bad_wgt)
+
+    # ------ error paths inside forward ------
+
+    def test_alpha_lt1_raises_for_cdf(self):
+        with self.assertRaises(NotImplementedError):
+            self._fn("cdf", alpha=0.5)
+
+    def test_skillspread_with_ensemble_weights_raises(self):
+        E  = self._E
+        ew = torch.ones(E)
+        fn = EnsembleSpectralCRPSLoss(
+            **_SPEC_KWARGS,
+            crps_type="skillspread",
+            spatial_distributed=False,
+            ensemble_distributed=False,
+            ensemble_weights=ew,
+            absolute=True,
+        )
+        fc  = torch.randn(_BATCH, E, _NUM_CH, _IMG_H, _IMG_W)
+        obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
+        with self.assertRaises(NotImplementedError):
+            fn(fc, obs)
+
+    def test_unknown_crps_type_raises_in_forward(self):
+        fn = self._fn("cdf")
+        fn.crps_type = "bogus"
+        fc  = torch.randn(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W)
+        obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
+        with self.assertRaises(ValueError):
+            fn(fc, obs)
+
+    # ------ E=1 shortcut (lines 440-443) ------
+
+    def test_e1_gives_zero_for_perfect_prediction(self):
+        """With E=1, spectral CRPS = |SHT(obs - fc)| which is 0 when obs == fc."""
+        fn  = self._fn("skillspread")
+        obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
+        fc  = obs.unsqueeze(1).clone()   # (B, 1, C, H, W)
+        out = fn(fc, obs)
+        self.assertTrue(
+            compare_tensors("spectral e1 zero", out, torch.zeros_like(out), atol=1e-4),
+        )
+
+    # ------ backward pass produces finite gradients ------
+
+    def test_backward_finite(self):
+        fn  = self._fn("skillspread")
+        fc  = torch.randn(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W, requires_grad=True)
+        obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
+        fn(fc, obs).sum().backward()
+        self.assertIsNotNone(fc.grad)
+        self.assertFalse(torch.isnan(fc.grad).any(), "NaN in fc.grad")
+        self.assertFalse(torch.isinf(fc.grad).any(), "Inf in fc.grad")
 
 
 if __name__ == "__main__":
