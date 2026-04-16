@@ -31,6 +31,10 @@ class Preprocessor2D(nn.Module):
     def __init__(self, params):
         super().__init__()
 
+        # image shape — must be set first; used by quadrature and noise constructors below
+        self.img_shape = [params.img_shape_x, params.img_shape_y]
+        self.img_shape_resampled = [params.img_shape_x_resampled, params.img_shape_y_resampled]
+
         self.subsampling_factor = params.get("subsampling_factor", 1)
         self.n_history = params.n_history
         self.history_normalization_mode = params.history_normalization_mode
@@ -70,10 +74,6 @@ class Preprocessor2D(nn.Module):
                 self.register_buffer("residual_scale", residual_scale, persistent=False)
         else:
             self.residual_scale = None
-
-        # image shape
-        self.img_shape = [params.img_shape_x, params.img_shape_y]
-        self.img_shape_resampled = [params.img_shape_x_resampled, params.img_shape_y_resampled]
 
         # unpredicted input channels:
         self.unpredicted_inp_train = None
