@@ -195,9 +195,9 @@ class Preprocessor2D(nn.Module):
                 dx = dx * self.residual_scale
 
             # add residual: deal with history
-            x = self.expand_history(x, nhist=self.n_history + 1)
-            x[:, -1, ...] = x[:, -1, ...] + dx
-            x = self.flatten_history(x)
+            # fully out-of-place: cat the unchanged prefix with the updated last step
+            x5 = self.expand_history(x, nhist=self.n_history + 1)
+            x = self.flatten_history(torch.cat([x5[:, :-1], (x5[:, -1:] + dx.unsqueeze(1))], dim=1))
         else:
             x = dx
 
@@ -272,7 +272,10 @@ class Preprocessor2D(nn.Module):
             if self.input_noise_mode == "concatenate":
                 xc = torch.cat([xc, n], dim=2)
             elif self.input_noise_mode == "perturb":
-                x[:, :, self.perturb_channels] = x[:, :, self.perturb_channels] + n
+                # fully out-of-place: build a zero noise field and add to all channels
+                noise_full = torch.zeros_like(x)
+                noise_full[:, :, self.perturb_channels] = n
+                x = x + noise_full
 
         # concatenate
         xo = torch.cat([x, xc], dim=2)
@@ -316,16 +319,19 @@ class Preprocessor2D(nn.Module):
                 xr = x
 
             # mean
-            # compute weighted mean over dim 1, but sum over dim=3,4
+            # quadrature reduces (H, W) → (B, T, C); weighted sum over T with keepdim → (B, 1, C)
             self.history_mean = torch.sum(self.quadrature(xr * self.history_normalization_weights), dim=1, keepdim=True)
+            # reshape to (B, 1, C, 1, 1) so it broadcasts with xr (B, T, C, H, W)
+            b_, _, c_ = self.history_mean.shape
+            self.history_mean = self.history_mean.reshape(b_, 1, c_, 1, 1)
 
-            # compute std
+            # compute std: (B, T, C, H, W) - (B, 1, C, 1, 1) broadcasts correctly
             self.history_std = torch.sum(self.quadrature(torch.square(xr - self.history_mean) * self.history_normalization_weights), dim=1, keepdim=True)
-            self.history_std = torch.sqrt(self.history_std)
+            self.history_std = torch.sqrt(self.history_std.reshape(b_, 1, c_, 1, 1))
 
-            # squeeze
-            self.history_mean = torch.squeeze(self.history_mean, dim=1)
-            self.history_std = torch.squeeze(self.history_std, dim=1)
+            # squeeze T dim → (B, C, 1, 1); spatial singletons broadcast in history_normalize
+            self.history_mean = self.history_mean.reshape(b_, c_, 1, 1)
+            self.history_std = self.history_std.reshape(b_, c_, 1, 1)
 
             # copy to parallel region
             self.history_mean = copy_to_parallel_region(self.history_mean, "spatial")
