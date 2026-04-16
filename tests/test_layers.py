@@ -64,7 +64,7 @@ class TestLayers(unittest.TestCase):
             (1, 16, 2, 1e-7, 1e-5),
         ], skip_on_empty=True
     )
-    def test_earth_attention_3d(self, batch_size, num_channels, num_heads, atol, rtol, verbose=True):
+    def test_earth_attention_3d(self, batch_size, num_channels, num_heads, atol, rtol, verbose=False):
         """
         Tests initialization of all the models and the forward and backward pass
         """
@@ -143,7 +143,7 @@ class TestLayers(unittest.TestCase):
                     self.assertTrue(compare_tensors(f"weight gradient {skey}", sgrad, ngrad, atol=atol, rtol=rtol, verbose=verbose))
 
 
-    def test_seeded_dropout2d_deterministic_mask(self, atol=1e-8, rtol=1e-8, verbose=True):
+    def test_seeded_dropout2d_deterministic_mask(self, atol=1e-8, rtol=1e-8, verbose=False):
         """Two dropout layers with the same seed should produce identical masks."""
         set_seed(333)
         x = torch.randn(2, 3, 4, 4, device=self.device)

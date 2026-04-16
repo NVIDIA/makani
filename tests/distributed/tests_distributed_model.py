@@ -143,7 +143,7 @@ class TestDistributedModel(unittest.TestCase):
         ],
         skip_on_empty=True,
     )
-    def test_distributed_model_checkpoint_restore(self, nettype, verbose=True):
+    def test_distributed_model_checkpoint_restore(self, nettype, verbose=False):
         """
         Tests initialization of all the models and the forward and backward pass
         """
@@ -208,7 +208,7 @@ class TestDistributedModel(unittest.TestCase):
         ],
         skip_on_empty=True,
     )
-    def test_distributed_model_fwd_bwd(self, nettype, tol, verbose=True):
+    def test_distributed_model_fwd_bwd(self, nettype, tol, verbose=False):
         """
         Tests forward backward pass of distributed model vs serial model
         """
@@ -338,7 +338,7 @@ class TestDistributedModel(unittest.TestCase):
         ],
         skip_on_empty=True,
     )
-    def test_distributed_model_gradient_accumulation(self, nettype, atol, rtol, verbose=True):
+    def test_distributed_model_gradient_accumulation(self, nettype, atol, rtol, verbose=False):
         """
         Tests gradient accumulation with distributed models
         """

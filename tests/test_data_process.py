@@ -240,7 +240,7 @@ class TestGetStats(unittest.TestCase):
         ], skip_on_empty=False
     )
     @unittest.skipUnless(importlib.util.find_spec("mpi4py") is not None, "mpi4py needs to be installed for this test")
-    def test_get_stats(self, batch_size, allow_nan, verbose=True):
+    def test_get_stats(self, batch_size, allow_nan, verbose=False):
         # import necessary modules
         from data_process.get_stats import welford_combine, get_file_stats, mask_data
 

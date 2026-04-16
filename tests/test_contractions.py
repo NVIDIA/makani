@@ -146,11 +146,11 @@ class TestContractionCorrectness(unittest.TestCase):
         disable_tf32()
 
     @parameterized.expand([(name, fn, ref, mk) for name, fn, ref, mk, _ in _KERNEL_CASES])
-    def test_compile_correctness(self, name, fn, ref_fn, make_inputs):
+    def test_compile_correctness(self, name, fn, ref_fn, make_inputs, verbose=False):
         set_seed(333)
         x, w = make_inputs()
         self.assertTrue(
-            compare_tensors(f"{name} compile", fn(x, w), ref_fn(x, w), atol=1e-5, rtol=1e-4),
+            compare_tensors(f"{name} compile", fn(x, w), ref_fn(x, w), atol=1e-5, rtol=1e-4, verbose=verbose),
             f"{name}: compiled result differs from reference einsum",
         )
 
@@ -169,13 +169,13 @@ class TestContractionDispatcher(unittest.TestCase):
     @parameterized.expand(
         [(f"sep{s}_op{op}_cx{cx}", s, op, cx, kname) for s, op, cx, kname in _DISPATCHER_CASES]
     )
-    def test_routing(self, _label, separable, operator_type, complex_, kernel_name):
+    def test_routing(self, _label, separable, operator_type, complex_, kernel_name, verbose=False):
         set_seed(333)
         x, w = _MAKER[kernel_name]()
         expected = _REF[kernel_name](x, w)
         got = _contract_dense_pytorch(x, w, separable=separable, operator_type=operator_type, complex=complex_)
         self.assertTrue(
-            compare_tensors(f"dispatcher {kernel_name}", got, expected, atol=1e-5, rtol=1e-4),
+            compare_tensors(f"dispatcher {kernel_name}", got, expected, atol=1e-5, rtol=1e-4, verbose=verbose),
             f"dispatcher mismatch: separable={separable}, op={operator_type}, complex={complex_}",
         )
 
@@ -200,7 +200,7 @@ class TestContractionConsistency(unittest.TestCase):
         disable_tf32()
         set_seed(333)
 
-    def test_lmwise_diagonal_weight_equals_sep_lmwise(self):
+    def test_lmwise_diagonal_weight_equals_sep_lmwise(self, verbose=False):
         """Non-separable lmwise with diagonal (I==O) weight must equal sep_lmwise."""
         x     = _cx(B, G, I, H, W)
         w_sep = _cx(G, I, H, W)
@@ -212,11 +212,11 @@ class TestContractionConsistency(unittest.TestCase):
                 "lmwise diag == sep_lmwise",
                 _contract_lmwise(x, w_full),
                 _contract_sep_lmwise(x, w_sep),
-                atol=1e-5, rtol=1e-4,
+                atol=1e-5, rtol=1e-4, verbose=verbose,
             )
         )
 
-    def test_lwise_diagonal_weight_equals_sep_lwise(self):
+    def test_lwise_diagonal_weight_equals_sep_lwise(self, verbose=False):
         """Non-separable lwise with diagonal weight must equal sep_lwise."""
         x     = _cx(B, G, I, H, W)
         w_sep = _cx(G, I, H)
@@ -228,11 +228,11 @@ class TestContractionConsistency(unittest.TestCase):
                 "lwise diag == sep_lwise",
                 _contract_lwise(x, w_full),
                 _contract_sep_lwise(x, w_sep),
-                atol=1e-5, rtol=1e-4,
+                atol=1e-5, rtol=1e-4, verbose=verbose,
             )
         )
 
-    def test_lwise_equals_lmwise_mconst_weight(self):
+    def test_lwise_equals_lmwise_mconst_weight(self, verbose=False):
         """lwise (no m-dim in weight) must equal lmwise when the weight is
         constant across m."""
         x    = _cx(B, G, I, H, W)
@@ -243,11 +243,11 @@ class TestContractionConsistency(unittest.TestCase):
                 "lwise == lmwise mconst",
                 _contract_lwise(x, w_l),
                 _contract_lmwise(x, w_lm),
-                atol=1e-5, rtol=1e-4,
+                atol=1e-5, rtol=1e-4, verbose=verbose,
             )
         )
 
-    def test_lwise_real_equals_lmwise_real_mconst_weight(self):
+    def test_lwise_real_equals_lmwise_real_mconst_weight(self, verbose=False):
         """Same m-constant consistency check for the real-valued kernel pair."""
         x    = _re(B, G, I, H, W, 2)
         w_l  = _re(G, I, O, H)
@@ -257,7 +257,7 @@ class TestContractionConsistency(unittest.TestCase):
                 "lwise_real == lmwise_real mconst",
                 _contract_lwise_real(x, w_l),
                 _contract_lmwise_real(x, w_lm),
-                atol=1e-5, rtol=1e-4,
+                atol=1e-5, rtol=1e-4, verbose=verbose,
             )
         )
 

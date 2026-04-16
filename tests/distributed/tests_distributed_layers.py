@@ -105,7 +105,7 @@ class TestDistributedLayers(unittest.TestCase):
         ],
         skip_on_empty=True,
     )
-    def test_distributed_spectral_conv(self, nlat_in, nlon_in, nlat_out, nlon_out, batch_size, num_chan, tol, verbose=True):
+    def test_distributed_spectral_conv(self, nlat_in, nlon_in, nlat_out, nlon_out, batch_size, num_chan, tol, verbose=False):
         B, C, Hi, Wi, Ho, Wo = batch_size, num_chan, nlat_in, nlon_in, nlat_out, nlon_out
 
         from makani.models.common import SpectralConv
@@ -232,7 +232,7 @@ class TestDistributedLayers(unittest.TestCase):
         ],
         skip_on_empty=True,
     )
-    def test_distributed_instance_norm_2d(self, nlat, nlon, batch_size, num_chan, affine, tol, verbose=True):
+    def test_distributed_instance_norm_2d(self, nlat, nlon, batch_size, num_chan, affine, tol, verbose=False):
         B, C, H, W = batch_size, num_chan, nlat, nlon
 
         set_seed(333)
@@ -360,7 +360,7 @@ class TestDistributedLayers(unittest.TestCase):
         ],
         skip_on_empty=True,
     )
-    def test_distributed_geometric_instance_norm_s2(self, nlat, nlon, batch_size, num_chan, grid_type, affine, tol, verbose=True):
+    def test_distributed_geometric_instance_norm_s2(self, nlat, nlon, batch_size, num_chan, grid_type, affine, tol, verbose=False):
         B, C, H, W = batch_size, num_chan, nlat, nlon
 
         # set up layer norm parameters

@@ -180,7 +180,7 @@ class TestTrainer(unittest.TestCase):
         ]
     
     @parameterized.expand(test_parameters, skip_on_empty=True)
-    def test_trainer(self, trainer_handle, test_train, test_eval, devstring):
+    def test_trainer(self, trainer_handle, test_train, test_eval, devstring, verbose=False):
 
         # create device
         device = torch.device(devstring)
@@ -230,20 +230,20 @@ class TestTrainer(unittest.TestCase):
             out = self.trainer_restored.model(inp)
             out_ref = self.trainer.model(inp)
             with self.subTest(desc="test output vs reference"):
-                self.assertTrue(compare_tensors("test output vs reference", out, out_ref))
+                self.assertTrue(compare_tensors("test output vs reference", out, out_ref, verbose=verbose))
 
         # redo this but in train mode
         if test_train:
             self.trainer._set_train()
             out = self.trainer.model(inp)
             with self.subTest(desc="train output vs reference roundtrip 1"):
-                self.assertTrue(compare_tensors("train output vs reference roundtrip 1", out, out_ref))
+                self.assertTrue(compare_tensors("train output vs reference roundtrip 1", out, out_ref, verbose=verbose))
             out_ref = out
 
             self.trainer_restored._set_train()
             out = self.trainer_restored.model(inp)
             with self.subTest(desc="train output vs reference roundtrip 2"):
-                self.assertTrue(compare_tensors("train output vs reference roundtrip 2", out, out_ref))
+                self.assertTrue(compare_tensors("train output vs reference roundtrip 2", out, out_ref, verbose=verbose))
 
 
 if __name__ == "__main__":
