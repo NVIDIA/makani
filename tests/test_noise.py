@@ -145,6 +145,127 @@ class TestDummyNoiseS2(unittest.TestCase):
         self.assertFalse(torch.isnan(out).any())
         self.assertFalse(torch.isinf(out).any())
 
+    def test_forward_always_zero(self):
+        """DummyNoiseS2.forward() must always return an all-zero tensor."""
+        out = self.noise.forward()
+        self.assertTrue(torch.all(out == 0),
+                        "DummyNoiseS2 forward output should always be all zeros")
+
+    def test_update_internal_state_flag(self):
+        """forward(update_internal_state=True) exercises the flag path and still returns zeros."""
+        out = self.noise.forward(update_internal_state=True)
+        self.assertFalse(torch.isnan(out).any())
+        self.assertFalse(torch.isinf(out).any())
+        self.assertTrue(torch.all(out == 0),
+                        "DummyNoiseS2 must return zeros even with update_internal_state=True")
+
+    def test_unknown_mode_raises(self):
+        """Constructing with an unknown mode raises ValueError."""
+        with self.assertRaises(ValueError):
+            DummyNoiseS2(
+                img_shape=IMG_SHAPE, batch_size=self.B, num_channels=self.C,
+                num_time_steps=self.T, mode="invalid_mode",
+            )
+
+
+# ===========================================================================
+# 2b. DummyNoiseS2 — constant_random mode
+# ===========================================================================
+class TestDummyNoiseS2ConstantRandom(unittest.TestCase):
+    """DummyNoiseS2(mode='constant_random'): fixed non-zero noise redrawn on each update()."""
+
+    def setUp(self):
+        disable_tf32()
+        set_seed(333)
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.B = BATCH_SIZE
+        self.T = NUM_TIME_STEPS
+        self.C = NUM_CHANNELS
+        self.noise = DummyNoiseS2(
+            img_shape=IMG_SHAPE,
+            batch_size=self.B,
+            num_channels=self.C,
+            num_time_steps=self.T,
+            mode="constant_random",
+            seed=333,
+        ).to(self.device)
+
+    def test_is_stateful(self):
+        self.assertFalse(self.noise.is_stateful())
+
+    def test_forward_shape(self):
+        self.noise.update()
+        out = self.noise.forward()
+        self.assertEqual(tuple(out.shape),
+                         (self.B, self.T, self.C, IMG_SHAPE[0], IMG_SHAPE[1]))
+
+    def test_forward_finite(self):
+        self.noise.update()
+        out = self.noise.forward()
+        self.assertFalse(torch.isnan(out).any())
+        self.assertFalse(torch.isinf(out).any())
+
+    def test_initial_state_is_zero_before_first_update(self):
+        """State buffer is initialised to zeros before the first update()."""
+        self.assertTrue(torch.all(self.noise.state == 0.0))
+
+    def test_forward_nonzero_after_update(self):
+        """After update(), constant_random output must be non-zero."""
+        self.noise.update()
+        out = self.noise.forward()
+        self.assertFalse(torch.all(out == 0),
+                         "constant_random mode should produce a non-zero output after update()")
+
+    def test_forward_stable_between_updates(self):
+        """Two consecutive forward() calls without an intermediate update() return the same tensor."""
+        self.noise.update()
+        out1 = self.noise.forward().clone()
+        out2 = self.noise.forward()
+        self.assertTrue(torch.equal(out1, out2),
+                        "forward() should return the same fixed tensor between update() calls")
+
+    def test_update_changes_state(self):
+        """A second update() draws a new random state."""
+        self.noise.update()
+        state1 = self.noise.state.clone()
+        self.noise.update()
+        self.assertFalse(torch.equal(state1, self.noise.state),
+                         "A second update() should produce a different random state")
+
+    def test_reproducibility_same_seed(self):
+        """Two instances with the same seed produce identical output after the first update()."""
+        def _make(seed):
+            return DummyNoiseS2(
+                img_shape=IMG_SHAPE, batch_size=self.B, num_channels=self.C,
+                num_time_steps=self.T, mode="constant_random", seed=seed,
+            ).to(self.device)
+
+        n1, n2 = _make(42), _make(42)
+        n1.update()
+        n2.update()
+        self.assertTrue(torch.equal(n1.forward(), n2.forward()))
+
+    def test_different_seeds_differ(self):
+        """Two instances with different seeds produce different outputs."""
+        def _make(seed):
+            return DummyNoiseS2(
+                img_shape=IMG_SHAPE, batch_size=self.B, num_channels=self.C,
+                num_time_steps=self.T, mode="constant_random", seed=seed,
+            ).to(self.device)
+
+        n1, n2 = _make(1), _make(2)
+        n1.update()
+        n2.update()
+        self.assertFalse(torch.equal(n1.forward(), n2.forward()))
+
+    def test_update_internal_state_flag(self):
+        """forward(update_internal_state=True) advances the state after returning the current one."""
+        self.noise.update()
+        state_before = self.noise.state.clone()
+        self.noise.forward(update_internal_state=True)
+        self.assertFalse(torch.equal(state_before, self.noise.state),
+                         "State should change after forward(update_internal_state=True)")
+
 
 # ===========================================================================
 # 3. IsotropicGaussianRandomFieldS2
@@ -289,6 +410,97 @@ class TestIsotropicGRF(unittest.TestCase):
         empirical_mean = out.mean().item()
         self.assertAlmostEqual(empirical_mean, 0.0, delta=0.2,
                                msg=f"Expected mean ≈ 0, got {empirical_mean:.4f}")
+
+    # -----------------------------------------------------------------------
+    # reset() — covers BaseNoiseS2 lines 92-99
+    # -----------------------------------------------------------------------
+    def test_reset_zeros_state(self):
+        """reset() zeroes the spectral state regardless of prior content."""
+        noise = self._make_noise()
+        noise.update()   # fills state with non-zero values
+        noise.reset()
+        self.assertTrue(torch.all(noise.state == 0.0),
+                        "reset() should zero out the state")
+
+    def test_reset_with_new_batch_size(self):
+        """reset(batch_size=N) reallocates the state tensor to the new batch size."""
+        noise = self._make_noise()
+        new_B = 7
+        noise.reset(batch_size=new_B)
+        self.assertEqual(noise.state.shape[0], new_B)
+        self.assertTrue(torch.all(noise.state == 0.0),
+                        "reset(batch_size=N) should produce an all-zero state")
+
+    # -----------------------------------------------------------------------
+    # learnable=True — covers noise.py line 210
+    # -----------------------------------------------------------------------
+    def test_learnable_sigma_l_is_parameter(self):
+        """With learnable=True, sigma_l is registered as an nn.Parameter."""
+        noise = IsotropicGaussianRandomFieldS2(
+            img_shape=IMG_SHAPE,
+            batch_size=self.B,
+            num_channels=self.C,
+            num_time_steps=self.T,
+            sigma=self.sigma,
+            seed=333,
+            learnable=True,
+        ).to(self.device)
+        self.assertIsInstance(noise.sigma_l, torch.nn.Parameter,
+                              "sigma_l should be an nn.Parameter when learnable=True")
+
+    def test_learnable_gradient_flows_through_sigma_l(self):
+        """Gradient of output sum flows back to sigma_l when learnable=True."""
+        noise = IsotropicGaussianRandomFieldS2(
+            img_shape=IMG_SHAPE,
+            batch_size=self.B,
+            num_channels=self.C,
+            num_time_steps=self.T,
+            sigma=self.sigma,
+            seed=333,
+            learnable=True,
+        ).to(self.device)
+        noise.update()
+        out = noise.forward()   # sigma_l is multiplied in forward(), so grad flows
+        out.sum().backward()
+        self.assertIsNotNone(noise.sigma_l.grad, "sigma_l should have a gradient")
+        self.assertFalse(torch.isnan(noise.sigma_l.grad).any(), "NaN in sigma_l.grad")
+        self.assertFalse(torch.isinf(noise.sigma_l.grad).any(), "Inf in sigma_l.grad")
+
+    # -----------------------------------------------------------------------
+    # Spectral decay — covers the alpha path and is a meaningful sanity check
+    # -----------------------------------------------------------------------
+    def test_spectral_decay_alpha_smoother_than_white(self):
+        """Higher alpha decays high angular modes and produces a spatially smoother output.
+
+        Smoothness proxy: mean squared longitudinal finite differences.
+        A smoother field (alpha=4) must have strictly smaller roughness than white noise (alpha=0).
+        """
+        B_stat = 100
+
+        def _sample(alpha):
+            n = IsotropicGaussianRandomFieldS2(
+                img_shape=IMG_SHAPE,
+                batch_size=B_stat,
+                num_channels=1,
+                num_time_steps=1,
+                sigma=1.0,
+                alpha=alpha,
+                seed=333,
+            ).to(self.device)
+            n.update()
+            return n.forward()   # (B_stat, 1, 1, H, W)
+
+        out_white  = _sample(alpha=0.0)
+        out_smooth = _sample(alpha=4.0)
+
+        roughness_white  = torch.diff(out_white,  dim=-1).pow(2).mean().item()
+        roughness_smooth = torch.diff(out_smooth, dim=-1).pow(2).mean().item()
+
+        self.assertLess(
+            roughness_smooth, roughness_white,
+            msg=f"alpha=4 roughness {roughness_smooth:.4f} should be < "
+                f"alpha=0 roughness {roughness_white:.4f}",
+        )
 
 
 # ===========================================================================
@@ -453,6 +665,152 @@ class TestDiffusionNoiseS2(unittest.TestCase):
 
         self.assertAlmostEqual(corr, phi_expected, delta=0.05,
                                msg=f"Expected temporal correlation ≈ {phi_expected:.4f}, got {corr:.4f}")
+
+    # -----------------------------------------------------------------------
+    # reset() — BaseNoiseS2 lines 92-99
+    # -----------------------------------------------------------------------
+    def test_reset_zeros_state(self):
+        """reset() zeroes the spectral state regardless of prior content."""
+        noise = self._make_noise()
+        noise.update(replace_state=True)  # fills state with non-zero values
+        noise.reset()
+        self.assertTrue(torch.all(noise.state == 0.0),
+                        "reset() should zero out the state")
+
+    def test_reset_with_new_batch_size(self):
+        """reset(batch_size=N) reallocates the state tensor to the new batch size."""
+        noise = self._make_noise()
+        new_B = 7
+        noise.reset(batch_size=new_B)
+        self.assertEqual(noise.state.shape[0], new_B)
+        self.assertTrue(torch.all(noise.state == 0.0),
+                        "reset(batch_size=N) should produce an all-zero state")
+
+    # -----------------------------------------------------------------------
+    # Per-channel kT / lambd lists — noise.py lines 305-319
+    # -----------------------------------------------------------------------
+    def test_per_channel_kT_list(self):
+        """kT given as a list of length num_channels constructs and runs without error."""
+        kT_list = [0.001, 0.002]   # two distinct spatial correlation lengths
+        noise = DiffusionNoiseS2(
+            img_shape=IMG_SHAPE,
+            batch_size=self.B,
+            num_channels=2,
+            num_time_steps=1,
+            kT=kT_list,
+            lambd=self.lambd,
+            seed=333,
+        ).to(self.device)
+        noise.update(replace_state=True)
+        out = noise.forward()
+        self.assertEqual(tuple(out.shape), (self.B, 1, 2, IMG_SHAPE[0], IMG_SHAPE[1]))
+        self.assertFalse(torch.isnan(out).any())
+        self.assertFalse(torch.isinf(out).any())
+
+    def test_per_channel_lambd_list(self):
+        """lambd given as a list of length num_channels constructs and runs without error."""
+        lambd_list = [0.3, 0.7]   # two distinct temporal decay rates
+        noise = DiffusionNoiseS2(
+            img_shape=IMG_SHAPE,
+            batch_size=self.B,
+            num_channels=2,
+            num_time_steps=1,
+            lambd=lambd_list,
+            seed=333,
+        ).to(self.device)
+        noise.update(replace_state=True)
+        out = noise.forward()
+        self.assertEqual(tuple(out.shape), (self.B, 1, 2, IMG_SHAPE[0], IMG_SHAPE[1]))
+        self.assertFalse(torch.isnan(out).any())
+        self.assertFalse(torch.isinf(out).any())
+
+    # -----------------------------------------------------------------------
+    # learnable=True — noise.py lines 345-354
+    # -----------------------------------------------------------------------
+    def test_learnable_constructs_phi_and_sigma_l_as_parameters(self):
+        """learnable=True registers phi and sigma_l as nn.Parameters."""
+        noise = DiffusionNoiseS2(
+            img_shape=IMG_SHAPE,
+            batch_size=self.B,
+            num_channels=self.C,
+            num_time_steps=1,
+            lambd=self.lambd,
+            seed=333,
+            learnable=True,
+        ).to(self.device)
+        self.assertIsInstance(noise.phi, torch.nn.Parameter,
+                              "phi should be an nn.Parameter when learnable=True")
+        self.assertIsInstance(noise.sigma_l, torch.nn.Parameter,
+                              "sigma_l should be an nn.Parameter when learnable=True")
+
+    # -----------------------------------------------------------------------
+    # num_time_steps > 1 — noise.py lines 364-376 (init) and 405-417 (update)
+    # -----------------------------------------------------------------------
+    def test_num_time_steps_gt1_has_discount_buffer(self):
+        """num_time_steps>1 creates a 'discount' buffer of shape (C, T, T)."""
+        T = 3
+        noise = DiffusionNoiseS2(
+            img_shape=IMG_SHAPE,
+            batch_size=self.B,
+            num_channels=self.C,
+            num_time_steps=T,
+            lambd=self.lambd,
+            seed=333,
+        ).to(self.device)
+        self.assertTrue(hasattr(noise, "discount"),
+                        "discount buffer should exist when num_time_steps>1")
+        self.assertEqual(tuple(noise.discount.shape), (self.C, T, T))
+
+    def test_num_time_steps_gt1_state_shape(self):
+        """With num_time_steps=3 the state time dimension is 3."""
+        T = 3
+        noise = DiffusionNoiseS2(
+            img_shape=IMG_SHAPE,
+            batch_size=self.B,
+            num_channels=self.C,
+            num_time_steps=T,
+            lambd=self.lambd,
+            seed=333,
+        ).to(self.device)
+        self.assertEqual(noise.state.shape[1], T,
+                         f"Expected state.shape[1]=={T}, got {noise.state.shape[1]}")
+
+    def test_num_time_steps_gt1_advance_rolls_history(self):
+        """update(replace_state=False) shifts time history: old[1:] becomes new[:-1]."""
+        T = 3
+        noise = DiffusionNoiseS2(
+            img_shape=IMG_SHAPE,
+            batch_size=self.B,
+            num_channels=self.C,
+            num_time_steps=T,
+            lambd=self.lambd,
+            seed=333,
+        ).to(self.device)
+        noise.update(replace_state=True)
+        state_before = noise.state.clone()
+
+        noise.update(replace_state=False)
+        state_after = noise.state.clone()
+
+        # After rolling, state_before[:, 1:, ...] must equal state_after[:, :-1, ...]
+        self.assertTrue(
+            torch.equal(state_after[:, :-1, ...], state_before[:, 1:, ...]),
+            "Time history roll: state_after[:, :-1] should equal state_before[:, 1:]",
+        )
+
+    # -----------------------------------------------------------------------
+    # update_internal_state=True — noise.py line 445
+    # -----------------------------------------------------------------------
+    def test_update_internal_state_advances_after_forward(self):
+        """forward(update_internal_state=True) advances the AR(1) state after returning."""
+        noise = self._make_noise()
+        noise.update(replace_state=True)
+        state_before = noise.state.clone()
+        noise.forward(update_internal_state=True)
+        self.assertFalse(
+            torch.equal(state_before, noise.state),
+            "State should have changed after forward(update_internal_state=True)",
+        )
 
 
 if __name__ == "__main__":
