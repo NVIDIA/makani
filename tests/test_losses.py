@@ -265,7 +265,7 @@ class TestGeometricLpLoss(unittest.TestCase):
             compare_tensors("squared flag", fn_unsq(prd, tar) ** 2, fn_sq(prd, tar), atol=1e-5, rtol=1e-4, verbose=verbose),
         )
 
-    @parameterized.expand([(1.0,), (2.0,)])
+    @parameterized.expand([(1.0,), (2.0,), (4.0,)])
     def test_analytic_constant_difference(self, p, verbose=False):
         """Lp loss (squared=False) of a spatially constant difference c over a normalised
         grid equals c, because the quadrature integrates a constant field to 1."""
@@ -287,6 +287,43 @@ class TestGeometricLpLoss(unittest.TestCase):
         tar = torch.zeros_like(prd)
         diff = abs(fn_l1(prd, tar).mean().item() - fn_l2(prd, tar).mean().item())
         self.assertGreater(diff, 1e-3, "L1 and L2 norms should differ for a sparse input")
+
+    @parameterized.expand([(1.0,), (4.0,)])
+    def test_squared_flag_general(self, p, verbose=False):
+        """For arbitrary p: loss(squared=False)^p must equal loss(squared=True)."""
+        fn_unsq = GeometricLpLoss(**_GEOM_KWARGS, p=p, squared=False)
+        fn_sq   = GeometricLpLoss(**_GEOM_KWARGS, p=p, squared=True)
+        prd, tar = _rand(), _rand()
+        self.assertTrue(
+            compare_tensors(f"squared flag p={p}", fn_unsq(prd, tar) ** p, fn_sq(prd, tar),
+                            atol=1e-4, rtol=1e-3, verbose=verbose),
+        )
+
+    @parameterized.expand([(1.0,), (2.0,), (4.0,)])
+    def test_relative_loss_double_target(self, p, verbose=False):
+        """relative=True: prd = 2*tar gives loss = 1 for any p.
+
+        Proof: relative loss = (∫|2t-t|^p / ∫|t|^p)^(1/p) = (∫|t|^p / ∫|t|^p)^(1/p) = 1.
+        """
+        fn = GeometricLpLoss(**_GEOM_KWARGS, p=p, relative=True, squared=False)
+        set_seed(333)
+        tar = _rand() + 2.0   # shift away from zero to keep denominator well-conditioned
+        prd = 2.0 * tar
+        loss = fn(prd, tar)
+        self.assertTrue(
+            compare_tensors(f"relative L{p} double-target", loss, torch.ones_like(loss),
+                            atol=1e-4, rtol=1e-4, verbose=verbose),
+        )
+
+    @parameterized.expand([(1.0,), (4.0,)])
+    def test_gradient_flow(self, p):
+        """abs() mode must produce finite, non-NaN gradients for p=1 and p=4."""
+        fn  = GeometricLpLoss(**_GEOM_KWARGS, p=p, squared=False)
+        prd = _rand(requires_grad=True)
+        tar = _rand()
+        fn(prd, tar).sum().backward()
+        self.assertFalse(torch.isnan(prd.grad).any(), f"p={p}: NaN in gradient")
+        self.assertFalse(torch.isinf(prd.grad).any(), f"p={p}: Inf in gradient")
 
 
 # ===========================================================================
