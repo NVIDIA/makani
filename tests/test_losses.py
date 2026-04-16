@@ -1200,6 +1200,51 @@ class TestEnsembleCRPSLossExtended(unittest.TestCase):
             f"E={ensemble_size}: CDF and skillspread(alpha=0) diverged beyond float32 rounding",
         )
 
+    # ------ CDF == skillspread(alpha=0) gradients ------
+
+    @parameterized.expand([(2,), (5,), (10,)])
+    def test_cdf_equals_skillspread_alpha0_gradients(self, ensemble_size):
+        """CDF and skillspread(alpha=0) compute the same function; their gradients
+        w.r.t. the ensemble forecasts must agree up to float32 rounding."""
+        fn_cdf   = self._fn("cdf")
+        fn_skill = self._fn("skillspread", alpha=0.0)
+        set_seed(333)
+        fc_cdf   = torch.randn(_BATCH, ensemble_size, _NUM_CH, _IMG_H, _IMG_W, requires_grad=True)
+        fc_skill = fc_cdf.detach().clone().requires_grad_(True)
+        obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
+
+        fn_cdf(fc_cdf, obs).sum().backward()
+        fn_skill(fc_skill, obs).sum().backward()
+
+        self.assertIsNotNone(fc_cdf.grad)
+        self.assertIsNotNone(fc_skill.grad)
+        self.assertTrue(
+            compare_tensors(
+                f"cdf vs skillspread(alpha=0) gradients E={ensemble_size}",
+                fc_cdf.grad, fc_skill.grad, atol=1e-4, rtol=1e-3,
+            ),
+            f"E={ensemble_size}: CDF and skillspread(alpha=0) gradients diverged",
+        )
+
+    @parameterized.expand([("cdf",), ("skillspread",)])
+    def test_gradient_sum_zero_on_perfect_prediction(self, crps_type, verbose=True):
+        """Gradients summed over the ensemble dim must be zero at every pixel for a
+        perfect forecast (all members == observation).  For the CDF kernel this
+        requires the tail-line fix; for skillspread the antisymmetric rank
+        coefficients already guarantee a zero sum, so this serves as a regression
+        test for both."""
+        fn  = self._fn(crps_type, alpha=0.0) if crps_type == "skillspread" else self._fn(crps_type)
+        obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
+        fc  = obs.unsqueeze(1).expand(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W).clone()
+        fc.requires_grad_(True)
+        fn(fc, obs).sum().backward()
+        self.assertFalse(torch.isnan(fc.grad).any(), f"NaN in {crps_type} gradient at perfect forecast")
+        self.assertFalse(torch.isinf(fc.grad).any(), f"Inf in {crps_type} gradient at perfect forecast")
+        grad_sum = fc.grad.sum(dim=1)  # sum over ensemble dim → (B, C, H, W)
+        self.assertTrue(
+            compare_tensors(f"{crps_type} grad ensemble sum at perfect forecast", grad_sum, torch.zeros_like(grad_sum), atol=1e-3, verbose=verbose),
+        )
+
     # ------ fair CRPS (alpha=1) < biased CRPS (alpha=0) for spread ensemble ------
 
     def test_fair_crps_less_than_biased_for_spread_ensemble(self):
