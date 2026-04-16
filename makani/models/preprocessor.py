@@ -344,9 +344,7 @@ class Preprocessor2D(nn.Module):
             return x
 
         xdim = x.dim()
-        if xdim == 4:
-            pass
-        else:
+        if xdim == 5:
             xshape = x.shape
             x = self.flatten_history(x)
 
