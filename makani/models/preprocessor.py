@@ -345,11 +345,9 @@ class Preprocessor2D(nn.Module):
 
         xdim = x.dim()
         if xdim == 4:
-            b_, c_, h_, w_ = x.shape
-            xr = torch.reshape(x, (b_, (self.n_history + 1), c_ // (self.n_history + 1), h_, w_))
+            pass
         else:
             xshape = x.shape
-            xr = x
             x = self.flatten_history(x)
 
         # normalize
@@ -399,22 +397,22 @@ class Preprocessor2D(nn.Module):
             if (self.unpredicted_inp_train is not None) and (xz is not None) and (self.unpredicted_inp_train.shape == xz.shape):
                 self.unpredicted_inp_train.copy_(xz)
             else:
-                self.unpredicted_inp_train = xz
+                self.unpredicted_inp_train = xz.clone() if xz is not None else None
 
             if (self.unpredicted_tar_train is not None) and (yz is not None) and (self.unpredicted_tar_train.shape == yz.shape):
                 self.unpredicted_tar_train.copy_(yz)
             else:
-                self.unpredicted_tar_train = yz
+                self.unpredicted_tar_train = yz.clone() if yz is not None else None
         else:
             if (self.unpredicted_inp_eval is not None) and (xz is not None) and (self.unpredicted_inp_eval.shape == xz.shape):
                 self.unpredicted_inp_eval.copy_(xz)
             else:
-                self.unpredicted_inp_eval = xz
+                self.unpredicted_inp_eval = xz.clone() if xz is not None else None
 
             if (self.unpredicted_tar_eval is not None) and (yz is not None) and (self.unpredicted_tar_eval.shape == yz.shape):
                 self.unpredicted_tar_eval.copy_(yz)
             else:
-                self.unpredicted_tar_eval = yz
+                self.unpredicted_tar_eval = yz.clone() if yz is not None else None
 
         return x, y
 
