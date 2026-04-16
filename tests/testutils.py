@@ -114,6 +114,16 @@ def get_default_parameters():
     params.log_to_screen = False
     params.log_to_wandb = False
 
+    # preprocessor fields — required by Preprocessor2D; tests that need different
+    # values override these in their own setUp after calling get_default_parameters()
+    params.img_shape_x = IMG_SIZE_H
+    params.img_shape_y = IMG_SIZE_W
+    params.img_shape_x_resampled = IMG_SIZE_H
+    params.img_shape_y_resampled = IMG_SIZE_W
+    params.history_normalization_mode = "none"
+    params.history_normalization_decay = 0.5
+    params.normalize_residual = False
+
     return params
 
 
