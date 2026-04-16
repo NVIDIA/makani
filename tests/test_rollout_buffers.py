@@ -149,7 +149,7 @@ class TestRolloutBuffers(unittest.TestCase):
         ],
         skip_on_empty=True,
     )
-    def test_temporal_averaging_buffer(self, batch_size, num_rollout_steps, scale_bias):
+    def test_temporal_averaging_buffer(self, batch_size, num_rollout_steps, scale_bias, verbose=False):
         """
         Test TemporalAverageBuffer by feeding data one tensor at a time and comparing
         with manual mean and variance calculations
@@ -247,19 +247,19 @@ class TestRolloutBuffers(unittest.TestCase):
         # Verify lead times
         expected_lead_times = np.arange(self.rollout_dt, (num_rollout_steps + 1) * self.rollout_dt, self.rollout_dt, dtype=np.float64)
         with self.subTest(desc="lead times"):
-            self.assertTrue(compare_arrays("lead times", lead_time, expected_lead_times, atol=0.0, rtol=1e-6))
+            self.assertTrue(compare_arrays("lead times", lead_time, expected_lead_times, atol=0.0, rtol=1e-6, verbose=verbose))
 
         # Verify lat/lon coordinates
         with self.subTest(desc="latitudes"):
-            self.assertTrue(compare_arrays("latitudes", lats, self.latitude, atol=0.0, rtol=1e-6))
+            self.assertTrue(compare_arrays("latitudes", lats, self.latitude, atol=0.0, rtol=1e-6, verbose=verbose))
         with self.subTest(desc="longitudes"):
-            self.assertTrue(compare_arrays("longitudes", lons, self.longitude, atol=0.0, rtol=1e-6))
+            self.assertTrue(compare_arrays("longitudes", lons, self.longitude, atol=0.0, rtol=1e-6, verbose=verbose))
 
         # Compare with buffer output
         with self.subTest(desc="mean"):
-            self.assertTrue(compare_arrays("mean", buffer_mean, manual_mean, atol=0.0, rtol=1e-5))
+            self.assertTrue(compare_arrays("mean", buffer_mean, manual_mean, atol=0.0, rtol=1e-5, verbose=verbose))
         with self.subTest(desc="std"):
-            self.assertTrue(compare_arrays("std", buffer_std, manual_std, atol=0.0, rtol=1e-5))
+            self.assertTrue(compare_arrays("std", buffer_std, manual_std, atol=0.0, rtol=1e-5, verbose=verbose))
 
 
 if __name__ == "__main__":

@@ -101,7 +101,7 @@ class TestModels(unittest.TestCase):
         ],
         skip_on_empty=True,
     )
-    def test_gradient_accumulation(self, nettype, atol, rtol, verbose=True):
+    def test_gradient_accumulation(self, nettype, atol, rtol, verbose=False):
         """
         Tests initialization of all the models and the forward and backward pass
         """

@@ -367,7 +367,7 @@ class TestDistributedLoss(unittest.TestCase):
             [129, 256, 1, 10, 4, "skillspread_crps", True, 5e-4],
         ], skip_on_empty=True
     )
-    def test_distributed_spectral_crps(self, nlat, nlon, batch_size, num_chan, ens_size, loss_type, absolute, tol, verbose=True):
+    def test_distributed_spectral_crps(self, nlat, nlon, batch_size, num_chan, ens_size, loss_type, absolute, tol, verbose=False):
         B, E, C, H, W = batch_size, ens_size, num_chan, nlat, nlon
 
         # generate gauss random distributed around 1, with sigma=2

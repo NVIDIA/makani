@@ -268,7 +268,7 @@ class _BaseESTests:
         self.assertEqual(inp.shape, (1, _N_CH, math.ceil(_IMG_H / 4), math.ceil(_IMG_W / 4)))
         self.assertEqual(tar.shape, (1, _N_CH, math.ceil(_IMG_H / 4), math.ceil(_IMG_W / 4)))
 
-    def test_subsampling_matches_manual_subsample(self):
+    def test_subsampling_matches_manual_subsample(self, verbose=False):
         """ES subsampling == slicing the full-res sample every S pixels."""
         S = 2
         es_full = self._make()
@@ -276,9 +276,9 @@ class _BaseESTests:
         inp_full, tar_full = self._call0(es_full)
         inp_sub,  tar_sub  = self._call0(es_sub)
         self.assertTrue(compare_arrays(
-            "subsampled inp", inp_sub, inp_full[:, :, ::S, ::S], verbose=True))
+            "subsampled inp", inp_sub, inp_full[:, :, ::S, ::S], verbose=verbose))
         self.assertTrue(compare_arrays(
-            "subsampled tar", tar_sub, tar_full[:, :, ::S, ::S], verbose=True))
+            "subsampled tar", tar_sub, tar_full[:, :, ::S, ::S], verbose=verbose))
 
     # ---- 5. spatial crop ------------------------------------------------
 
@@ -296,7 +296,7 @@ class _BaseESTests:
         inp, _tar = self._call0(es)
         self.assertEqual(inp.shape, (1, _N_CH, crop_h, crop_w))
 
-    def test_crop_matches_manual_crop(self):
+    def test_crop_matches_manual_crop(self, verbose=False):
         """ES crop (zero anchor) == slicing the full-res sample."""
         crop_h, crop_w = _IMG_H // 2, _IMG_W // 2
         es_full = self._make()
@@ -304,11 +304,11 @@ class _BaseESTests:
         inp_full, tar_full = self._call0(es_full)
         inp_crop, tar_crop = self._call0(es_crop)
         self.assertTrue(compare_arrays(
-            "cropped inp", inp_crop, inp_full[:, :, :crop_h, :crop_w], verbose=True))
+            "cropped inp", inp_crop, inp_full[:, :, :crop_h, :crop_w], verbose=verbose))
         self.assertTrue(compare_arrays(
-            "cropped tar", tar_crop, tar_full[:, :, :crop_h, :crop_w], verbose=True))
+            "cropped tar", tar_crop, tar_full[:, :, :crop_h, :crop_w], verbose=verbose))
 
-    def test_crop_with_anchor_matches_manual_crop(self):
+    def test_crop_with_anchor_matches_manual_crop(self, verbose=False):
         """ES crop with nonzero anchor == slicing full-res at the anchor offset."""
         crop_h, crop_w     = _IMG_H // 2, _IMG_W // 2
         anchor_h, anchor_w = 4, 8
@@ -320,18 +320,18 @@ class _BaseESTests:
             "anchored crop inp",
             inp_crop,
             inp_full[:, :, anchor_h:anchor_h + crop_h, anchor_w:anchor_w + crop_w],
-            verbose=True,
+            verbose=verbose,
         ))
         self.assertTrue(compare_arrays(
             "anchored crop tar",
             tar_crop,
             tar_full[:, :, anchor_h:anchor_h + crop_h, anchor_w:anchor_w + crop_w],
-            verbose=True,
+            verbose=verbose,
         ))
 
     # ---- 6. temporal window consistency ---------------------------------
 
-    def test_window_matches_individual_samples(self):
+    def test_window_matches_individual_samples(self, verbose=False):
         """
         Load one windowed sample at index i with n_history=1, n_future=3.
         The resulting (inp, tar) should equal 6 individually loaded frames
@@ -360,11 +360,11 @@ class _BaseESTests:
 
         for t in range(N_HIST + 1):
             self.assertTrue(compare_arrays(
-                f"inp t={t}", inp_win[t], singles[t], verbose=True,
+                f"inp t={t}", inp_win[t], singles[t], verbose=verbose,
             ))
         for t in range(N_FUT + 1):
             self.assertTrue(compare_arrays(
-                f"tar t={t}", tar_win[t], singles[N_HIST + 1 + t], verbose=True,
+                f"tar t={t}", tar_win[t], singles[N_HIST + 1 + t], verbose=verbose,
             ))
 
     # ---- 7. channel subset ----------------------------------------------
@@ -380,7 +380,7 @@ class _BaseESTests:
 
     # ---- 7. unsorted channels reordered ---------------------------------
 
-    def test_unsorted_channels_reordered(self):
+    def test_unsorted_channels_reordered(self, verbose=False):
         """
         With in_channels=[3,1,0,2] and channel c having constant value (c+1):
           output position 0 → channel 3 → value 4
@@ -397,12 +397,12 @@ class _BaseESTests:
         for pos, val in enumerate(vals):
             expected[pos] = val
         self.assertTrue(
-            compare_arrays("unsorted channel reorder", inp[0], expected, verbose=True)
+            compare_arrays("unsorted channel reorder", inp[0], expected, verbose=verbose)
         )
 
     # ---- 7b. unsorted out_channels reordered ----------------------------
 
-    def test_unsorted_out_channels_reordered(self):
+    def test_unsorted_out_channels_reordered(self, verbose=False):
         """
         With out_channels=[3,1,0,2] and channel c having constant value (c+1):
           tar output position 0 → channel 3 → value 4
@@ -418,7 +418,7 @@ class _BaseESTests:
         for pos, val in enumerate(vals):
             expected[pos] = val
         self.assertTrue(
-            compare_arrays("unsorted out_channel reorder", tar[0], expected, verbose=True)
+            compare_arrays("unsorted out_channel reorder", tar[0], expected, verbose=verbose)
         )
 
     # ---- 8. zenith angle ------------------------------------------------
@@ -462,7 +462,7 @@ class _BaseESTests:
 
     # ---- 11. pickle round-trip ------------------------------------------
 
-    def test_pickle_roundtrip(self):
+    def test_pickle_roundtrip(self, verbose=False):
         """
         Simulates the DALI main-process → worker-process transfer.
 
@@ -480,9 +480,9 @@ class _BaseESTests:
         inp_res, tar_res = self._call0(es_restored)
 
         with self.subTest(desc="inp"):
-            self.assertTrue(compare_arrays("pickled inp", inp_res, inp_ref, verbose=True))
+            self.assertTrue(compare_arrays("pickled inp", inp_res, inp_ref, verbose=verbose))
         with self.subTest(desc="tar"):
-            self.assertTrue(compare_arrays("pickled tar", tar_res, tar_ref, verbose=True))
+            self.assertTrue(compare_arrays("pickled tar", tar_res, tar_ref, verbose=verbose))
 
     # ---- 12. StopIteration at epoch end ---------------------------------
 

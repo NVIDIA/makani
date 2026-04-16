@@ -295,7 +295,7 @@ class TestDistributedRealFFT(unittest.TestCase):
         ],
         skip_on_empty=True,
     )
-    def test_distributed_ifft2_3(self, nlat, nlon, nalt, batch_size, num_chan, tol, verbose=True):
+    def test_distributed_ifft2_3(self, nlat, nlon, nalt, batch_size, num_chan, tol, verbose=False):
         B, C, D, H, W = batch_size, num_chan, nalt, nlat, nlon
 
         if D > 0:

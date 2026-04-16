@@ -82,7 +82,7 @@ class TestSaveRestore(unittest.TestCase):
 
 
     @parameterized.expand(["legacy", "flexible"])
-    def test_save_restore(self, checkpoint_mode):
+    def test_save_restore(self, checkpoint_mode, verbose=False):
         """
         Tests initialization of all the models and the forward and backward pass
         """
@@ -136,7 +136,7 @@ class TestSaveRestore(unittest.TestCase):
         out_after = model(inp).detach().cpu().numpy()
 
         # compare
-        self.assertTrue(compare_arrays("output", out_before, out_after, rtol=1e-6, atol=1e-6))
+        self.assertTrue(compare_arrays("output", out_before, out_after, rtol=1e-6, atol=1e-6, verbose=verbose))
 
 
 if __name__ == "__main__":
