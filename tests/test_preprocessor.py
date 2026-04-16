@@ -110,7 +110,7 @@ class TestPreprocessor2DBasic(unittest.TestCase):
         out = self.pp.add_residual(x, dx)
         self.assertTrue(compare_tensors("add_residual default", out, dx, verbose=verbose))
 
-    def test_add_residual_residual_mode_adds_to_last_step(self, verbose=True):
+    def test_add_residual_residual_mode_adds_to_last_step(self, verbose=False):
         """In residual mode, add_residual adds dx to the last time-step of x."""
         params = get_default_parameters()
         params.target = "residual"
