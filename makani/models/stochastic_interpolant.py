@@ -356,7 +356,13 @@ class StochasticInterpolantWrapper(nn.Module):
         return x
 
     def forward(self, inp, tar=None, n_samples=1, n_steps=1):
-        self.preprocessor.update_internal_state(replace_state=True)
+        # Keep both noise sources sized to the current input batch so callers that
+        # fold an ensemble dim into the batch (e.g. stochastic_trainer.validate_one_epoch)
+        # can hand us a (B*E, ...) input without any state-resize plumbing of their own.
+        # Drawing a fresh stationary state here also means the very first noise read
+        # inside _forward_train / _forward_eval sees a non-trivial sample.
+        self.preprocessor.update_internal_state(replace_state=True, batch_size=inp.shape[0])
+        self.noise_module.update(replace_state=True, batch_size=inp.shape[0])
         if self.training:
             return self._forward_train(inp, tar, n_samples=n_samples)
         else:

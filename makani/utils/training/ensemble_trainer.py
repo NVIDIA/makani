@@ -32,6 +32,7 @@ from makani.utils.profiling import Timer
 
 # makani depenedencies
 from makani.utils import LossHandler, MetricsHandler
+from makani.utils.functions import expand_ensemble
 from makani.utils.driver import Driver
 from makani.utils.training import Trainer
 from makani.utils.dataloader import get_dataloader
@@ -454,11 +455,9 @@ class EnsembleTrainer(Trainer):
         E = self.params.local_ensemble_size
         B = inp.shape[0]
 
-        if E > 1:
-            # (B, C, H, W) -> (B, 1, C, H, W) -> (B, E, C, H, W) -> (B*E, C, H, W)
-            inp_flat = inp.unsqueeze(1).repeat_interleave(E, dim=1).reshape(B * E, *inp.shape[1:])
-        else:
-            inp_flat = inp
+        # (B, C, H, W) -> (B*E, C, H, W) with ensemble dim folded into batch
+        # (E==1 short-circuits inside expand_ensemble, no allocation)
+        inp_flat = expand_ensemble(inp, E)
 
         # pre-adjust the preprocessor's noise state to the folded batch; the model is then
         # called with update_state=False so it consumes this fresh state directly.
@@ -508,10 +507,9 @@ class EnsembleTrainer(Trainer):
             # semantics below); y stays at its original batch since the loss expects (B, E, ...)
             # pred vs (B, ...) target.
             E = self.params.local_ensemble_size
-            if E > 1 and len(gdata) == 4:
-                B_xz = gdata[2].shape[0]
-                gdata[2] = gdata[2].unsqueeze(1).repeat_interleave(E, dim=1).reshape(B_xz * E, *gdata[2].shape[1:])
-                gdata[3] = gdata[3].unsqueeze(1).repeat_interleave(E, dim=1).reshape(B_xz * E, *gdata[3].shape[1:])
+            if len(gdata) == 4:
+                gdata[2] = expand_ensemble(gdata[2], E)
+                gdata[3] = expand_ensemble(gdata[3], E)
 
             # do preprocessing
             inp, tar = self.preprocessor.cache_unpredicted_features(*gdata)
@@ -657,10 +655,9 @@ class EnsembleTrainer(Trainer):
                     # (y) stays at the original batch — the loss expects (B, E, ...) pred against
                     # (B, ...) target.
                     E = self.params.local_ensemble_size
-                    if E > 1 and len(gdata) == 4:
-                        B_xz = gdata[2].shape[0]
-                        gdata[2] = gdata[2].unsqueeze(1).repeat_interleave(E, dim=1).reshape(B_xz * E, *gdata[2].shape[1:])
-                        gdata[3] = gdata[3].unsqueeze(1).repeat_interleave(E, dim=1).reshape(B_xz * E, *gdata[3].shape[1:])
+                    if len(gdata) == 4:
+                        gdata[2] = expand_ensemble(gdata[2], E)
+                        gdata[3] = expand_ensemble(gdata[3], E)
 
                     # preprocess
                     inp, tar = self.preprocessor.cache_unpredicted_features(*gdata)
@@ -669,8 +666,7 @@ class EnsembleTrainer(Trainer):
                     B = inp.shape[0]
 
                     # expand the input batch to (B*E, ...) for the folded-batch forward
-                    if E > 1:
-                        inp = inp.unsqueeze(1).repeat_interleave(E, dim=1).reshape(B * E, *inp.shape[1:])
+                    inp = expand_ensemble(inp, E)
 
                     # split list of targets (stays at batch B)
                     tarlist = torch.split(tar, 1, dim=1)
