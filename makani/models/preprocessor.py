@@ -186,6 +186,12 @@ class Preprocessor2D(nn.Module):
     def expand_history(self, x, nhist):
         if x.dim() == 4:
             b_, ct_, h_, w_ = x.shape
+            if ct_ % nhist != 0:
+                raise ValueError(
+                    f"expand_history: channel dim {ct_} is not divisible by nhist={nhist}. "
+                    f"The flattened-history input may not match the preprocessor's expected "
+                    f"n_history={self.n_history} (so ct_ should be a multiple of n_history+1={nhist})."
+                )
             x = torch.reshape(x, (b_, nhist, ct_ // nhist, h_, w_))
         return x
 
@@ -262,6 +268,16 @@ class Preprocessor2D(nn.Module):
         # x-dimension
         xdim = x.dim()
 
+        # Batch alignment between input and cached unpredicted features.
+        # If these diverge, the `cat` below would fail with a cryptic message —
+        # raise up-front with context about the likely cause.
+        if x.shape[0] != xc.shape[0]:
+            raise ValueError(
+                f"_append_channels: batch mismatch between input ({x.shape[0]}) and "
+                f"cached unpredicted features ({xc.shape[0]}). "
+                f"Did you cache xz/yz at a different batch size than the current forward?"
+            )
+
         # expand history
         x = self.expand_history(x, self.n_history + 1)
         xc = self.expand_history(xc, self.n_history + 1)
@@ -269,6 +285,13 @@ class Preprocessor2D(nn.Module):
         # this routine also adds noise every time a channel gets appended
         if hasattr(self, "input_noise"):
             n = self.input_noise()
+            if n.shape[0] != x.shape[0]:
+                raise ValueError(
+                    f"_append_channels: batch mismatch between input_noise state "
+                    f"({n.shape[0]}) and input ({x.shape[0]}). "
+                    f"Did you call update_internal_state(batch_size=...) at a different "
+                    f"batch than the current forward pass?"
+                )
             if self.input_noise_mode == "concatenate":
                 xc = torch.cat([xc, n], dim=2)
             elif self.input_noise_mode == "perturb":
@@ -390,27 +413,33 @@ class Preprocessor2D(nn.Module):
 
         return x
 
+    def _ensure_cached(self, name: str, tensor):
+        """
+        Centralized rebind for the cached unpredicted-feature attributes.
+
+        - tensor is None: the cached attribute is cleared to None.
+        - current is None or has a different shape: store a fresh clone.
+        - shapes match: in-place ``copy_`` to reuse the existing memory.
+
+        These are plain attributes (not registered buffers): they are per-step scratch
+        populated from dataloader output on-device, and should not appear in ``state_dict``.
+        """
+        current = getattr(self, name)
+        if tensor is None:
+            setattr(self, name, None)
+            return
+        if (current is not None) and (current.shape == tensor.shape):
+            current.copy_(tensor)
+        else:
+            setattr(self, name, tensor.clone())
+
     def cache_unpredicted_features(self, x, y, xz=None, yz=None):
         if self.training:
-            if (self.unpredicted_inp_train is not None) and (xz is not None) and (self.unpredicted_inp_train.shape == xz.shape):
-                self.unpredicted_inp_train.copy_(xz)
-            else:
-                self.unpredicted_inp_train = xz.clone() if xz is not None else None
-
-            if (self.unpredicted_tar_train is not None) and (yz is not None) and (self.unpredicted_tar_train.shape == yz.shape):
-                self.unpredicted_tar_train.copy_(yz)
-            else:
-                self.unpredicted_tar_train = yz.clone() if yz is not None else None
+            self._ensure_cached("unpredicted_inp_train", xz)
+            self._ensure_cached("unpredicted_tar_train", yz)
         else:
-            if (self.unpredicted_inp_eval is not None) and (xz is not None) and (self.unpredicted_inp_eval.shape == xz.shape):
-                self.unpredicted_inp_eval.copy_(xz)
-            else:
-                self.unpredicted_inp_eval = xz.clone() if xz is not None else None
-
-            if (self.unpredicted_tar_eval is not None) and (yz is not None) and (self.unpredicted_tar_eval.shape == yz.shape):
-                self.unpredicted_tar_eval.copy_(yz)
-            else:
-                self.unpredicted_tar_eval = yz.clone() if yz is not None else None
+            self._ensure_cached("unpredicted_inp_eval", xz)
+            self._ensure_cached("unpredicted_tar_eval", yz)
 
         return x, y
 

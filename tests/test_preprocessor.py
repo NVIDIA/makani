@@ -1236,6 +1236,56 @@ class TestPreprocessor2DBasic(unittest.TestCase):
         self.assertTrue(compare_tensors("history_normalize cpu vs gpu", xn_cpu, xn_gpu,
                                         atol=1e-5, rtol=1e-4, verbose=verbose))
 
+    # -----------------------------------------------------------------------
+    # Hardening: controlled-fail shape / batch checks
+    # -----------------------------------------------------------------------
+
+    def test_expand_history_raises_on_non_divisible_channels(self):
+        """expand_history raises ValueError when the channel dim isn't divisible by nhist."""
+        params = get_default_parameters()
+        params.n_history = 2  # nhist = 3
+        pp = Preprocessor2D(params)
+        # channels = 5, not divisible by 3
+        x_bad = torch.randn(self.B, 5, self.H, self.W)
+        with self.assertRaises(ValueError) as cm:
+            pp.expand_history(x_bad, nhist=pp.n_history + 1)
+        self.assertIn("not divisible", str(cm.exception))
+
+    def test_append_channels_raises_on_input_cache_batch_mismatch(self):
+        """_append_channels raises ValueError when input and cached xz have different batch sizes."""
+        self.pp.train()
+        # cache xz/yz at the preprocessor's configured batch
+        x_cache = self._rand(self.B, self.C, self.H, self.W)
+        xz = self._rand(self.B, 1, 1, self.H, self.W)
+        yz = self._rand(self.B, 1, 1, self.H, self.W)
+        self.pp.cache_unpredicted_features(x_cache, x_cache, xz=xz, yz=yz)
+        # now pass an input with a DIFFERENT batch size
+        x_mismatch = self._rand(self.B + 1, self.C, self.H, self.W)
+        with self.assertRaises(ValueError) as cm:
+            self.pp.append_unpredicted_features(x_mismatch, target=False)
+        self.assertIn("batch mismatch", str(cm.exception))
+        self.assertIn("cached unpredicted features", str(cm.exception))
+
+    def test_append_channels_raises_on_noise_state_batch_mismatch(self):
+        """_append_channels raises ValueError when input_noise state and input batch disagree."""
+        params = get_default_parameters()
+        params.input_noise = {"type": "dummy", "mode": "concatenate", "n_channels": 1}
+        pp = Preprocessor2D(params)
+        pp.train()
+        # cache xz at batch B and pass input at batch B so the first check passes;
+        # bump noise state to a different batch to hit the second (noise) check.
+        x = self._rand(self.B, self.C, self.H, self.W)
+        xz = self._rand(self.B, 1, 1, self.H, self.W)
+        yz = self._rand(self.B, 1, 1, self.H, self.W)
+        pp.cache_unpredicted_features(x, x, xz=xz, yz=yz)
+        pp.update_internal_state(replace_state=True, batch_size=self.B + 2)
+
+        with self.assertRaises(ValueError) as cm:
+            pp.append_unpredicted_features(x, target=False)
+        msg = str(cm.exception)
+        self.assertIn("batch mismatch", msg)
+        self.assertIn("input_noise state", msg)
+
 
 if __name__ == "__main__":
     unittest.main()
