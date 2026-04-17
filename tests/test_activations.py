@@ -124,7 +124,7 @@ class TestComplexReLU(unittest.TestCase):
         fn_real = ComplexReLU(mode="real",      negative_slope=0.0)
         z = _cx(torch.tensor([1.0]), torch.tensor([-1.0]))
         self.assertFalse(
-            torch.allclose(fn_cx(z).imag, fn_real(z).imag),
+            compare_tensors("cartesian vs real imag", fn_cx(z).imag, fn_real(z).imag),
             "cartesian and real modes should differ on negative imaginary input",
         )
 

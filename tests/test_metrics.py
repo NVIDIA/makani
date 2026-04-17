@@ -196,7 +196,7 @@ class TestMetrics(unittest.TestCase):
         flat_vector = torch.ones(batch_size, num_channels, nlat, nlon, device=self.device)
         integral = torch.mean(quad(flat_vector)).item()
 
-        self.assertTrue(np.allclose(integral, 1.0, rtol=1e-5, atol=0))
+        self.assertTrue(compare_arrays("weight normalization", np.asarray(integral), np.asarray(1.0), rtol=1e-5, atol=0))
 
     @parameterized.expand(_deterministic_metrics_params, skip_on_empty=True)
     def test_weighted_rmse(self, grid_type, batch_size, num_channels, nlat, nlon, verbose=False):

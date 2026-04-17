@@ -259,7 +259,7 @@ class TestDistributedMetricHandler(unittest.TestCase):
             val_dist = metrics_dist[key]
             if verbose:
                 print(f"log metric {key}: local={val_local}, dist={val_dist}")
-            self.assertTrue(np.allclose(val_local, val_dist))
+            self.assertTrue(compare_arrays(f"log metric {key}", np.asarray(val_local), np.asarray(val_dist), verbose=verbose))
 
         # compare rollouts
         rollouts_local = logs_local["metrics"]["rollouts"]

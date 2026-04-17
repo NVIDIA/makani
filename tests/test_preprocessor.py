@@ -828,6 +828,250 @@ class TestPreprocessor2DBasic(unittest.TestCase):
         self.assertEqual(tuple(pp.history_mean.shape), expected)
         self.assertEqual(tuple(pp.history_std.shape), expected)
 
+    # -----------------------------------------------------------------------
+    # history_compute_stats — known-answer tests
+    # -----------------------------------------------------------------------
+
+    def test_history_compute_stats_constant_field_mean_mode(self, verbose=False):
+        """Constant field value c → history_mean == c, history_std == 0 (mean mode)."""
+        pp = self._make_pp_mean(n_history=1)
+        T = pp.n_history + 1
+        value = 3.7
+        x = torch.full((self.B, T * self.C, self.H, self.W), value, dtype=torch.float32)
+        pp.history_compute_stats(x)
+        self.assertTrue(compare_tensors("constant-field mean",
+                                        pp.history_mean,
+                                        torch.full_like(pp.history_mean, value),
+                                        atol=1e-5, verbose=verbose))
+        self.assertTrue(compare_tensors("constant-field std",
+                                        pp.history_std,
+                                        torch.zeros_like(pp.history_std),
+                                        atol=1e-5, verbose=verbose))
+
+    def test_history_compute_stats_constant_field_exponential_mode(self, verbose=False):
+        """Constant field → mean == value, std == 0 (exponential mode)."""
+        params = get_default_parameters()
+        params.n_history = 2
+        params.history_normalization_mode = "exponential"
+        params.history_normalization_decay = 0.5
+        pp = Preprocessor2D(params)
+        T = pp.n_history + 1
+        value = -1.25
+        x = torch.full((self.B, T * self.C, self.H, self.W), value, dtype=torch.float32)
+        pp.history_compute_stats(x)
+        self.assertTrue(compare_tensors("constant-field mean (exponential)",
+                                        pp.history_mean,
+                                        torch.full_like(pp.history_mean, value),
+                                        atol=1e-5, verbose=verbose))
+        self.assertTrue(compare_tensors("constant-field std (exponential)",
+                                        pp.history_std,
+                                        torch.zeros_like(pp.history_std),
+                                        atol=1e-5, verbose=verbose))
+
+    def test_history_compute_stats_per_channel_constants_mean_mode(self, verbose=False):
+        """Per-channel constants: history_mean[:, c] equals channel c's constant value."""
+        pp = self._make_pp_mean(n_history=1)
+        T = pp.n_history + 1
+        # every spatial/time value of channel c is (c + 1.0)
+        x5 = torch.zeros(self.B, T, self.C, self.H, self.W, dtype=torch.float32)
+        for c in range(self.C):
+            x5[:, :, c, :, :] = float(c + 1)
+        x = pp.flatten_history(x5)
+        pp.history_compute_stats(x)
+        expected_mean = torch.arange(1, self.C + 1, dtype=torch.float32).reshape(1, self.C, 1, 1)
+        self.assertTrue(compare_tensors("per-channel mean", pp.history_mean, expected_mean,
+                                        atol=1e-5, verbose=verbose))
+        self.assertTrue(compare_tensors("per-channel std",
+                                        pp.history_std,
+                                        torch.zeros_like(pp.history_std),
+                                        atol=1e-5, verbose=verbose))
+
+    def test_history_compute_stats_matches_analytical_weighted_mean_exponential(self, verbose=False):
+        """Spatially-constant-per-step fields: history_mean recovers the analytical weighted temporal average."""
+        params = get_default_parameters()
+        params.n_history = 2
+        params.history_normalization_mode = "exponential"
+        params.history_normalization_decay = 0.5
+        pp = Preprocessor2D(params)
+        T = pp.n_history + 1
+        # spatially constant per (time, channel) but distinct across time & channel
+        values = (torch.arange(T * self.C, dtype=torch.float32) + 1.0).reshape(T, self.C)
+        x5 = torch.zeros(self.B, T, self.C, self.H, self.W, dtype=torch.float32)
+        for t in range(T):
+            for c in range(self.C):
+                x5[:, t, c, :, :] = values[t, c]
+        x = pp.flatten_history(x5)
+        pp.history_compute_stats(x)
+        # reconstruct weights exactly as the preprocessor does: first element is oldest
+        w = torch.exp(-0.5 * torch.arange(start=T - 1, end=-1, step=-1, dtype=torch.float32))
+        w = w / w.sum()
+        expected_mean = (w.unsqueeze(-1) * values).sum(dim=0).reshape(1, self.C, 1, 1)
+        self.assertTrue(compare_tensors("analytical weighted mean", pp.history_mean, expected_mean,
+                                        atol=1e-5, rtol=1e-5, verbose=verbose))
+
+    # -----------------------------------------------------------------------
+    # Gradient flow through train-path ops
+    # -----------------------------------------------------------------------
+
+    def test_add_residual_grad_flows_default_mode(self):
+        """Default (non-residual) mode: gradient of sum(out) w.r.t. dx is 1 everywhere."""
+        x  = self._rand(self.B, self.C, self.H, self.W)
+        dx = self._rand(self.B, self.C, self.H, self.W).requires_grad_(True)
+        out = self.pp.add_residual(x, dx)
+        out.sum().backward()
+        self.assertIsNotNone(dx.grad)
+        self.assertTrue(torch.all(dx.grad == 1.0).item())
+
+    def test_add_residual_grad_flows_residual_mode(self):
+        """Residual mode: gradient flows into both the history x and the increment dx."""
+        params = get_default_parameters()
+        params.target = "residual"
+        params.n_history = 1
+        params.normalize_residual = False
+        pp = Preprocessor2D(params)
+        T = 2
+        x  = self._rand(self.B, T * self.C, self.H, self.W).requires_grad_(True)
+        dx = self._rand(self.B, self.C, self.H, self.W).requires_grad_(True)
+        out = pp.add_residual(x, dx)
+        out.sum().backward()
+        self.assertIsNotNone(x.grad)
+        self.assertIsNotNone(dx.grad)
+        self.assertTrue(torch.isfinite(x.grad).all().item())
+        self.assertTrue(torch.isfinite(dx.grad).all().item())
+        # sum(out) = sum(x) + sum(dx) → d/dx = 1 everywhere, d/ddx = 1 everywhere
+        self.assertTrue(torch.all(x.grad == 1.0).item())
+        self.assertTrue(torch.all(dx.grad == 1.0).item())
+
+    def test_append_channels_grad_flows_concatenate_noise(self):
+        """_append_channels with concatenate noise preserves autograd w.r.t. x."""
+        params = get_default_parameters()
+        params.input_noise = {"type": "dummy", "mode": "concatenate", "n_channels": 1}
+        pp = Preprocessor2D(params)
+        pp.train()
+        x_base = self._rand(self.B, self.C, self.H, self.W)
+        xz = self._rand(self.B, 1, 1, self.H, self.W)
+        yz = self._rand(self.B, 1, 1, self.H, self.W)
+        pp.cache_unpredicted_features(x_base, x_base, xz=xz, yz=yz)
+        x = x_base.clone().requires_grad_(True)
+        out = pp.append_unpredicted_features(x, target=False)
+        out.sum().backward()
+        self.assertIsNotNone(x.grad)
+        # Each element of x appears exactly once in the output → gradient is 1
+        self.assertTrue(torch.all(x.grad == 1.0).item())
+
+    def test_append_channels_grad_flows_perturb_noise(self):
+        """_append_channels with perturb noise still preserves autograd w.r.t. x."""
+        params = get_default_parameters()
+        params.input_noise = {"type": "dummy", "mode": "perturb",
+                              "perturb_channels": ["u10m"]}
+        pp = Preprocessor2D(params)
+        pp.train()
+        x_base = self._rand(self.B, self.C, self.H, self.W)
+        xz = self._rand(self.B, 1, 1, self.H, self.W)
+        yz = self._rand(self.B, 1, 1, self.H, self.W)
+        pp.cache_unpredicted_features(x_base, x_base, xz=xz, yz=yz)
+        x = x_base.clone().requires_grad_(True)
+        out = pp.append_unpredicted_features(x, target=False)
+        out.sum().backward()
+        self.assertIsNotNone(x.grad)
+        self.assertTrue(torch.isfinite(x.grad).all().item())
+        self.assertTrue(torch.all(x.grad == 1.0).item())
+
+    def test_history_normalize_grad_flows_mean_mode(self):
+        """history_normalize is differentiable w.r.t. its input (mean mode)."""
+        pp = self._make_pp_mean(n_history=1)
+        T = pp.n_history + 1
+        stats_x = self._rand(self.B, T * self.C, self.H, self.W)
+        pp.history_compute_stats(stats_x)
+        x = self._rand(self.B, T * self.C, self.H, self.W).requires_grad_(True)
+        out = pp.history_normalize(x)
+        out.sum().backward()
+        self.assertIsNotNone(x.grad)
+        self.assertTrue(torch.isfinite(x.grad).all().item())
+        # d/dx of (x - m)/s summed = 1/s broadcast; grad must be non-zero everywhere
+        self.assertTrue((x.grad.abs() > 0).all().item())
+
+    def test_history_normalize_grad_flows_5d_mean_mode(self):
+        """history_normalize is differentiable on 5-D input too."""
+        pp = self._make_pp_mean(n_history=1)
+        T = pp.n_history + 1
+        stats_x = self._rand(self.B, T, self.C, self.H, self.W)
+        pp.history_compute_stats(stats_x)
+        x = self._rand(self.B, T, self.C, self.H, self.W).requires_grad_(True)
+        out = pp.history_normalize(x)
+        out.sum().backward()
+        self.assertIsNotNone(x.grad)
+        self.assertTrue(torch.isfinite(x.grad).all().item())
+        self.assertTrue((x.grad.abs() > 0).all().item())
+
+    # -----------------------------------------------------------------------
+    # CPU ↔ GPU numerical consistency
+    # -----------------------------------------------------------------------
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA not available")
+    def test_add_residual_cpu_gpu_match(self, verbose=False):
+        """add_residual produces matching numerics on CPU and GPU (residual mode)."""
+        params = get_default_parameters()
+        params.target = "residual"
+        params.n_history = 1
+        params.normalize_residual = False
+        pp_cpu = Preprocessor2D(params)
+        pp_gpu = Preprocessor2D(params).to("cuda")
+        T = 2
+        x  = self._rand(self.B, T * self.C, self.H, self.W)
+        dx = self._rand(self.B, self.C, self.H, self.W)
+        out_cpu = pp_cpu.add_residual(x, dx)
+        out_gpu = pp_gpu.add_residual(x.to("cuda"), dx.to("cuda")).cpu()
+        self.assertTrue(compare_tensors("add_residual cpu vs gpu", out_cpu, out_gpu,
+                                        atol=1e-6, rtol=1e-5, verbose=verbose))
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA not available")
+    def test_append_unpredicted_features_cpu_gpu_match(self, verbose=False):
+        """append_unpredicted_features matches on CPU and GPU (no noise)."""
+        pp_cpu = Preprocessor2D(get_default_parameters())
+        pp_gpu = Preprocessor2D(get_default_parameters()).to("cuda")
+        pp_cpu.train(); pp_gpu.train()
+        x  = self._rand(self.B, self.C, self.H, self.W)
+        xz = self._rand(self.B, 1, 1, self.H, self.W)
+        yz = self._rand(self.B, 1, 1, self.H, self.W)
+        pp_cpu.cache_unpredicted_features(x, x, xz=xz, yz=yz)
+        pp_gpu.cache_unpredicted_features(x.to("cuda"), x.to("cuda"),
+                                          xz=xz.to("cuda"), yz=yz.to("cuda"))
+        out_cpu = pp_cpu.append_unpredicted_features(x, target=False)
+        out_gpu = pp_gpu.append_unpredicted_features(x.to("cuda"), target=False).cpu()
+        self.assertTrue(compare_tensors("append_unpredicted cpu vs gpu", out_cpu, out_gpu,
+                                        atol=1e-6, rtol=1e-5, verbose=verbose))
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA not available")
+    def test_history_compute_stats_cpu_gpu_match(self, verbose=False):
+        """history_compute_stats produces matching mean/std on CPU and GPU (mean mode)."""
+        pp_cpu = self._make_pp_mean(n_history=1)
+        pp_gpu = self._make_pp_mean(n_history=1).to("cuda")
+        T = pp_cpu.n_history + 1
+        x = self._rand(self.B, T * self.C, self.H, self.W)
+        pp_cpu.history_compute_stats(x)
+        pp_gpu.history_compute_stats(x.to("cuda"))
+        self.assertTrue(compare_tensors("history_mean cpu vs gpu",
+                                        pp_cpu.history_mean, pp_gpu.history_mean.cpu(),
+                                        atol=1e-5, rtol=1e-5, verbose=verbose))
+        self.assertTrue(compare_tensors("history_std cpu vs gpu",
+                                        pp_cpu.history_std, pp_gpu.history_std.cpu(),
+                                        atol=1e-5, rtol=1e-5, verbose=verbose))
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA not available")
+    def test_history_normalize_cpu_gpu_match(self, verbose=False):
+        """history_normalize produces matching output on CPU and GPU (mean mode)."""
+        pp_cpu = self._make_pp_mean(n_history=1)
+        pp_gpu = self._make_pp_mean(n_history=1).to("cuda")
+        T = pp_cpu.n_history + 1
+        x = self._rand(self.B, T * self.C, self.H, self.W)
+        pp_cpu.history_compute_stats(x)
+        pp_gpu.history_compute_stats(x.to("cuda"))
+        xn_cpu = pp_cpu.history_normalize(x)
+        xn_gpu = pp_gpu.history_normalize(x.to("cuda")).cpu()
+        self.assertTrue(compare_tensors("history_normalize cpu vs gpu", xn_cpu, xn_gpu,
+                                        atol=1e-5, rtol=1e-4, verbose=verbose))
+
 
 if __name__ == "__main__":
     unittest.main()
