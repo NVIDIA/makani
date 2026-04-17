@@ -187,6 +187,70 @@ class TestDataLoader(unittest.TestCase):
                 break
 
     @parameterized.expand(_multifiles_params, skip_on_empty=False)
+    def test_content_normalization_zscore(self, multifiles):
+        """With non-trivial means/stds, zscore output equals (raw - mean) / std."""
+        self.params.multifiles = multifiles
+
+        # non-trivial stats: per-channel means/stds distinct from (0, 1)
+        rng = np.random.default_rng(seed=1234)
+        means = rng.normal(loc=0.5, scale=1.0, size=(1, NUM_CHANNELS, 1, 1)).astype(np.float64)
+        stds  = rng.uniform(low=0.5, high=2.0, size=(1, NUM_CHANNELS, 1, 1)).astype(np.float64)
+
+        with tempfile.TemporaryDirectory() as tmp_stats:
+            np.save(os.path.join(tmp_stats, "global_means.npy"), means)
+            np.save(os.path.join(tmp_stats, "global_stds.npy"),  stds)
+            # ancillary stats files: copy defaults from the shared stats dir
+            for fname in ("mins.npy", "maxs.npy", "time_means.npy",
+                          "time_diff_means.npy", "time_diff_stds.npy"):
+                src = os.path.join(self.stats_path, fname)
+                np.save(os.path.join(tmp_stats, fname), np.load(src))
+
+            params = copy.deepcopy(self.params)
+            params.global_means_path    = os.path.join(tmp_stats, "global_means.npy")
+            params.global_stds_path     = os.path.join(tmp_stats, "global_stds.npy")
+            params.min_path             = os.path.join(tmp_stats, "mins.npy")
+            params.max_path             = os.path.join(tmp_stats, "maxs.npy")
+            params.time_means_path      = os.path.join(tmp_stats, "time_means.npy")
+            params.time_diff_means_path = os.path.join(tmp_stats, "time_diff_means.npy")
+            params.time_diff_stds_path  = os.path.join(tmp_stats, "time_diff_stds.npy")
+
+            valid_loader, valid_dataset, _ = get_dataloader(params, params.valid_data_path, mode="eval", device=self.device)
+
+            # the same (B, C, 1, 1) stats broadcast over (B, C, H, W) raw samples
+            means_b = means.astype(np.float32)
+            stds_b  = stds.astype(np.float32)
+
+            for idt, token in enumerate(valid_loader):
+                inp, tar = token
+
+                off = params.batch_size * idt
+                inp_raw = np.stack(
+                    [get_sample(params.valid_data_path, off + b) for b in range(params.batch_size)],
+                    axis=0,
+                ).astype(np.float32)
+                tar_raw = np.stack(
+                    [get_sample(params.valid_data_path, off + b + 1) for b in range(params.batch_size)],
+                    axis=0,
+                ).astype(np.float32)
+
+                # analytical zscore: broadcast (1, C, 1, 1) stats against (B, C, H, W) samples
+                expected_inp = (inp_raw - means_b) / stds_b
+                expected_tar = (tar_raw - means_b) / stds_b
+
+                inp_np = np.squeeze(inp.cpu().numpy())
+                tar_np = np.squeeze(tar.cpu().numpy())
+
+                self.assertTrue(compare_arrays("zscore normalized inp",
+                                               inp_np, np.squeeze(expected_inp),
+                                               atol=1e-5, rtol=1e-4))
+                self.assertTrue(compare_arrays("zscore normalized tar",
+                                               tar_np, np.squeeze(expected_tar),
+                                               atol=1e-5, rtol=1e-4))
+
+                if idt > self.num_steps:
+                    break
+
+    @parameterized.expand(_multifiles_params, skip_on_empty=False)
     def test_channel_ordering(self, multifiles):
 
         # set mutltifiles
