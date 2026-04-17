@@ -210,6 +210,21 @@ class GeneralES(object):
         else:
             self.indices_select = self.indices_full.copy()
 
+        # Data is read per-year from a single file, so the full (n_history,
+        # n_future) window must sit inside one year.  Drop any index whose
+        # window would cross a year boundary; otherwise __call__ would have
+        # to clamp and silently return duplicate samples.
+        year_offsets_arr = np.asarray(self.year_offsets)
+        n_samples_year_arr = np.asarray(self.n_samples_year)
+        year_idx = np.searchsorted(year_offsets_arr, self.indices_select, side="right") - 1
+        local_idx = self.indices_select - year_offsets_arr[year_idx]
+        year_lengths = n_samples_year_arr[year_idx]
+        window_ok = (
+            (local_idx >= self.dt * self.n_history) &
+            (local_idx + self.dt * (self.n_future + 1) <= year_lengths - 1)
+        )
+        self.indices_select = self.indices_select[window_ok]
+
     def _reorder_channels(self, inp, tar):
         # reorder data if requested:
 	# inp
@@ -630,10 +645,6 @@ class GeneralES(object):
         # determine local and sample idx
         sample_idx = self.index_permutation[cycle_sample_idx]
         local_idx, year_idx = self._get_local_year_index_from_global_index(sample_idx)
-
-        # if we are not at least self.dt*n_history timesteps into the prediction
-        local_idx = max(local_idx, self.dt * self.n_history)
-        local_idx = min(local_idx, self.n_samples_year[year_idx] - self.dt * (self.n_future + 1) - 1)
 
         if self.files[year_idx] is None:
 
