@@ -442,13 +442,6 @@ class Inferencer(Driver):
 
         return logs
 
-    def _initialize_noise_states(self):
-        noise_states = []
-        for _ in range(self.params.local_ensemble_size):
-            self.preprocessor.update_internal_state(replace_state=True)
-            noise_states.append(self.preprocessor.get_internal_state(tensor=True))
-        return noise_states
-
     def _inference_indexlist(
         self,
         indices: Union[List[int], torch.Tensor],
@@ -511,9 +504,12 @@ class Inferencer(Driver):
             climatology_iterator = iter(self.climatology_dataloader)
 
         # create loader for the full epoch
-        noise_states = []
-        inptlist = None
+        inp = None        # folded-batch input carried across rollout steps, shape (B*E, C', H, W)
+        inpz = None       # input zenith expanded to (B*E, ...) if add_zenith
+        tinp = None       # input timestamp (unexpanded, shape (B, ...)) kept for date logging / rollout buffer
+        B = None          # unexpanded batch size captured at episode start
         idt = 0
+        E = self.params.local_ensemble_size
         with torch.inference_mode():
             with torch.no_grad():
                 for token in tqdm(subset_dataloader, desc="Inference progress", disable=not self.log_to_screen):
@@ -526,7 +522,7 @@ class Inferencer(Driver):
                         torch.cuda.nvtx.range_push(f"inference step {idt}, rollout step {idte}")
 
                     # move input to GPU
-                    gtoken = map(lambda x: x.to(self.device), token)
+                    gtoken = list(map(lambda x: x.to(self.device), token))
 
                     # get mask
                     if self.mask_dataset is not None:
@@ -551,79 +547,75 @@ class Inferencer(Driver):
                         clims = None
 
                     if idte == 0:
-                        # use the input
+                        # episode start: a new initial condition.
+                        # The ensemble dim is folded into the batch dim for the whole rollout
+                        # (shape (B*E, ...) going into the model). Noise state is reset once
+                        # here and then evolves via AR updates during the rollout.
                         if self.params.add_zenith:
-                            inp, inpz, tinp = gtoken
+                            inp_raw, inpz_raw, tinp = gtoken
                         else:
-                            inp, tinp = gtoken
-                            inpz = None
+                            inp_raw, tinp = gtoken
+                            inpz_raw = None
 
                         dates = date_fn(tinp.flatten().detach().cpu()).tolist()
                         datestring = ", ".join([d.strftime("%Y-%m-%dT%H:%M:%S") for d in dates])
                         print(f"inferencing dates: {datestring}")
 
-                        inp = self.preprocessor.flatten_history(inp)
+                        inp_raw = self.preprocessor.flatten_history(inp_raw)
+                        B = inp_raw.shape[0]
 
-                        # set the batch size
+                        if E > 1:
+                            inp = inp_raw.unsqueeze(1).repeat_interleave(E, dim=1).reshape(B * E, *inp_raw.shape[1:])
+                            if inpz_raw is not None:
+                                inpz = inpz_raw.unsqueeze(1).repeat_interleave(E, dim=1).reshape(B * E, *inpz_raw.shape[1:])
+                            else:
+                                inpz = None
+                        else:
+                            inp = inp_raw
+                            inpz = inpz_raw
+
+                        # reset noise state at the folded batch for this episode
                         self.preprocessor.update_internal_state(replace_state=True, batch_size=inp.shape[0])
 
-                        # reset noise states and input list
-                        noise_states = self._initialize_noise_states()
-                        inptlist = [inp.clone() for _ in range(self.params.local_ensemble_size)]
-
                         if rollout_buffer is not None:
-                            inpt = torch.stack(inptlist, dim=1)
-                            rollout_buffer.update(inpt, tinp[:, 0], idt=idte)
+                            if E > 1:
+                                inpt_viz = inp.reshape(B, E, *inp.shape[1:])
+                            else:
+                                inpt_viz = inp.unsqueeze(1)
+                            rollout_buffer.update(inpt_viz, tinp[:, 0], idt=idte)
 
                     else:
-                        # use this as target
+                        # rollout step
                         if self.params.add_zenith:
-                            tar, tarz, ttar = gtoken
+                            tar, tarz_raw, ttar = gtoken
                         else:
                             tar, ttar = gtoken
-                            tarz = None
+                            tarz_raw = None
                         targ = self.preprocessor.flatten_history(tar)
 
-                        # set unpredicted
+                        # expand target-side zenith to the folded batch for caching
+                        if tarz_raw is not None and E > 1:
+                            tarz = tarz_raw.unsqueeze(1).repeat_interleave(E, dim=1).reshape(B * E, *tarz_raw.shape[1:])
+                        else:
+                            tarz = tarz_raw
+
+                        # set unpredicted features at (B*E, ...) shape to match the folded-batch inp
                         self.preprocessor.cache_unpredicted_features(None, None, inpz, tarz)
 
-                        # do predictions
-                        predlist = []
                         with amp.autocast(device_type="cuda", enabled=self.amp_enabled, dtype=self.amp_dtype):
-                            for e in range(self.params.local_ensemble_size):
+                            # single forward on the folded batch; noise does an AR update
+                            # (replace_state=False) before being consumed this step
+                            pred_flat = self.model(inp, update_state=True, replace_state=False)
 
-                                if torch.cuda.is_available() and (self.params.local_ensemble_size > 1):
-                                    torch.cuda.nvtx.range_push(f"ensemble step {e}")
+                            # advance the input history / unpredicted features once per step
+                            inp = self.preprocessor.append_history(inp, pred_flat, 0, update_state=True)
 
-                                # retrieve input
-                                inpt = inptlist[e]
+                            # reshape back to (B, E, ...) for downstream metrics / loss / buffers
+                            if E > 1:
+                                pred = pred_flat.reshape(B, E, *pred_flat.shape[1:])
+                            else:
+                                pred = pred_flat.unsqueeze(1)
 
-                                # this is different, depending on local ensemble size
-                                if (self.params.local_ensemble_size > 1):
-                                    # restore noise belonging to this ensemble member
-                                    self.preprocessor.set_internal_state(noise_states[e])
-
-                                    # forward pass: never replace state since we do that manually
-                                    pred = self.model(inpt, update_state=(idte!=0), replace_state=False)
-
-                                    # store new state
-                                    noise_states[e] = self.preprocessor.get_internal_state(tensor=True)
-                                else:
-                                    # forward pass: replace state if this is the first step of the rollout
-                                    pred = self.model(inpt, update_state=True, replace_state=(idte==0))
-
-                                # concatenate predictions
-                                predlist.append(pred)
-
-                                # append input to prediction and get the new unpredicted features. idt is 0 here as there is always only one target
-                                last_member = e == self.params.local_ensemble_size - 1
-                                inptlist[e] = self.preprocessor.append_history(inpt, pred, 0, update_state=last_member)
-
-                                if torch.cuda.is_available() and (self.params.local_ensemble_size > 1):
-                                    torch.cuda.nvtx.range_pop()
-
-                            # concatenate
-                            pred = torch.stack(predlist, dim=1)
                             # set weight to None here, since I am not sure what to do for spectral components
                             # in spectral CRPS
                             loss = self.loss_obj(pred, targ, None)
@@ -631,7 +623,7 @@ class Inferencer(Driver):
                             if rollout_buffer is not None:
                                 rollout_buffer.update(pred, ttar[:, 0], idt=idte)
 
-                        # reset zenith angles
+                        # swap zenith/timestamp for the next rollout step
                         inpz = tarz
                         tinp = ttar
 
