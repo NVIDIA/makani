@@ -69,10 +69,6 @@ _DHOURS     = DHOURS
 _YEARS      = TRAIN_YEARS
 _N_TOTAL    = len(_YEARS) * _N_PER_YEAR
 
-# Default config: n_history=0, n_future=0, dt=1, truncate_old=False
-# samples_end = N_TOTAL - dt*(n_future+1) = N_TOTAL - 1
-_N_VALID = _N_TOTAL - 1
-
 # Boundary timestamp = exactly sample 24 of the first training year.
 # lookback_hours = DHOURS*(n_future+1) = DHOURS*1, so the exclusion window
 # is [sample_24_time - DHOURS, sample_24_time), which contains sample 23.
@@ -81,7 +77,6 @@ _BOUNDARY_DT = (
     + dt.timedelta(hours=24 * _DHOURS)   # sample 24
 )
 _BOUNDARY_TS = _BOUNDARY_DT.isoformat()
-_N_VALID_WITH_BOUNDARY = _N_VALID - 1   # sample 23 excluded
 
 
 # ---------------------------------------------------------------------------
@@ -226,7 +221,25 @@ class _BaseESTests:
     Subclasses must implement:
         _make(**overrides)             → ES backed by standard random dataset
         _make_distinctive(**overrides) → ES backed by distinctive-channel dataset
+        _expected_n_valid(dt, n_history, n_future)
+                                       → number of usable samples for the
+                                         given window config.  Differs between
+                                         backends because GeneralES drops
+                                         windows that cross year boundaries
+                                         while GeneralConcatES does not.
     """
+
+    def _expected_n_valid(self, dt, n_history, n_future):
+        raise NotImplementedError
+
+    @property
+    def expected_n_valid(self):
+        return self._expected_n_valid(dt=1, n_history=0, n_future=0)
+
+    @property
+    def expected_n_valid_with_boundary(self):
+        # the boundary-list fixture excludes exactly one extra sample
+        return self.expected_n_valid - 1
 
     def _call0(self, es):
         """Call es at the very first sample of epoch 0."""
@@ -503,7 +516,7 @@ class _BaseESTests:
 
     def test_n_samples_total(self):
         es = self._make()
-        self.assertEqual(es.n_samples_total, _N_VALID)
+        self.assertEqual(es.n_samples_total, self.expected_n_valid)
 
     def test_shuffle_epoch_cycle(self):
         """
@@ -579,6 +592,109 @@ class _BaseESTests:
         with self.subTest(desc="complete coverage"):
             self.assertEqual(set(loaded_ts), expected_ts)
 
+    def test_shuffle_multi_cycle_coverage_and_ordering(self):
+        """
+        Two consecutive cycles must
+          1. each independently cover every valid sample exactly once, and
+          2. use different permutations (cycle seed is base_seed + cycle_idx).
+        """
+        N_SAMPLES          = 50
+        EPOCH_LEN          = 10
+        N_EPOCHS_PER_CYCLE = N_SAMPLES // EPOCH_LEN   # 5
+        N_CYCLES           = 2
+
+        es = self._make(
+            train=True,
+            max_samples=N_SAMPLES + 1,       # samples_end = (N+1) - 1 = N
+            samples_per_epoch=EPOCH_LEN,
+            batch_size=1,
+            return_timestamp=True,
+        )
+
+        per_cycle_ts = []
+        for cycle in range(N_CYCLES):
+            cycle_ts = []
+            for epoch_in_cycle in range(N_EPOCHS_PER_CYCLE):
+                epoch_idx = cycle * N_EPOCHS_PER_CYCLE + epoch_in_cycle
+                for step in range(EPOCH_LEN):
+                    result = es(_SampleInfo(
+                        idx_in_epoch=step,
+                        epoch_idx=epoch_idx,
+                        iteration=step,
+                    ))
+                    cycle_ts.append(_ts_to_posix(result[2][0]))
+            per_cycle_ts.append(cycle_ts)
+
+        expected = {_ts_to_posix(ts) for ts in es.timestamps[es.indices_select]}
+
+        for c, ts_list in enumerate(per_cycle_ts):
+            with self.subTest(desc=f"cycle {c} full coverage"):
+                self.assertEqual(set(ts_list), expected)
+            with self.subTest(desc=f"cycle {c} no intra-cycle repeats"):
+                self.assertEqual(len(ts_list), len(set(ts_list)))
+
+        with self.subTest(desc="cycles use different permutations"):
+            # same sample set, different ordering
+            self.assertNotEqual(per_cycle_ts[0], per_cycle_ts[1])
+
+    def test_shuffle_epoch_not_divisible_by_cycle(self):
+        """
+        Virtual-epoch size does not divide cycle size.  An epoch then
+        spans a cycle boundary mid-epoch; the permutation regenerates
+        partway through and cycle_sample_idx wraps to 0 on the next call.
+
+        Walk 8 epochs of 7 steps = 56 samples, against a 50-sample cycle:
+          - the first 50 samples form cycle 0 (full coverage, no repeats),
+          - the remaining 6 are the start of cycle 1 (distinct permutation).
+        """
+        N_SAMPLES = 50
+        EPOCH_LEN = 7                    # 50 % 7 != 0
+        N_EPOCHS  = 8                    # 56 total steps
+
+        es = self._make(
+            train=True,
+            max_samples=N_SAMPLES + 1,
+            samples_per_epoch=EPOCH_LEN,
+            batch_size=1,
+            return_timestamp=True,
+        )
+        self.assertEqual(es.n_samples_total,     N_SAMPLES)
+        self.assertEqual(es.num_steps_per_epoch, EPOCH_LEN)
+
+        all_ts = []
+        for epoch_idx in range(N_EPOCHS):
+            for step in range(EPOCH_LEN):
+                result = es(_SampleInfo(
+                    idx_in_epoch=step,
+                    epoch_idx=epoch_idx,
+                    iteration=step,
+                ))
+                all_ts.append(_ts_to_posix(result[2][0]))
+
+        expected = {_ts_to_posix(ts) for ts in es.timestamps[es.indices_select]}
+
+        # cycle 0 = first N_SAMPLES calls → full coverage, no repeats
+        cycle0 = all_ts[:N_SAMPLES]
+        with self.subTest(desc="cycle 0 full coverage"):
+            self.assertEqual(set(cycle0), expected)
+        with self.subTest(desc="cycle 0 no repeats"):
+            self.assertEqual(len(cycle0), len(set(cycle0)))
+
+        # cycle 1 prefix = remaining calls → subset of expected, no repeats
+        cycle1_prefix = all_ts[N_SAMPLES:]
+        expected_prefix_len = N_EPOCHS * EPOCH_LEN - N_SAMPLES
+        with self.subTest(desc="cycle 1 prefix length"):
+            self.assertEqual(len(cycle1_prefix), expected_prefix_len)
+        with self.subTest(desc="cycle 1 prefix is a valid subset"):
+            self.assertTrue(set(cycle1_prefix).issubset(expected))
+        with self.subTest(desc="cycle 1 prefix no repeats"):
+            self.assertEqual(len(cycle1_prefix), len(set(cycle1_prefix)))
+
+        # the two permutations must differ: cycle 1's start cannot match
+        # cycle 0's start element-by-element
+        with self.subTest(desc="distinct permutations across boundary"):
+            self.assertNotEqual(cycle1_prefix, cycle0[:expected_prefix_len])
+
     # ---- 13. timestamp boundary list ------------------------------------
 
     def test_timestamp_boundary_excludes_one_sample(self):
@@ -588,12 +704,52 @@ class _BaseESTests:
         """
         es_plain    = self._make()
         es_boundary = self._make(timestamp_boundary_list=[_BOUNDARY_TS])
-        self.assertEqual(es_plain.n_samples_total,    _N_VALID)
-        self.assertEqual(es_boundary.n_samples_total, _N_VALID_WITH_BOUNDARY)
+        self.assertEqual(es_plain.n_samples_total,    self.expected_n_valid)
+        self.assertEqual(es_boundary.n_samples_total, self.expected_n_valid_with_boundary)
 
     def test_empty_boundary_list_unchanged(self):
         es = self._make(timestamp_boundary_list=[])
-        self.assertEqual(es.n_samples_total, _N_VALID)
+        self.assertEqual(es.n_samples_total, self.expected_n_valid)
+
+    # ---- 14. window exclusion across (dt, n_history, n_future) ----------
+
+    def test_window_exclusion_various_settings(self):
+        """
+        Vary dt, n_history, and n_future.  For every combination
+          1. n_samples_total must match the backend-specific formula
+             (dir-based drops the window per year; concat drops it once),
+          2. walking the full non-shuffled epoch must yield unique samples
+             (no silent per-year clamp).
+        """
+        configs = [
+            # (dt, n_history, n_future)
+            (1, 0, 0),
+            (1, 0, 3),
+            (1, 2, 0),
+            (1, 1, 2),
+            (2, 0, 0),
+            (2, 1, 2),
+            (3, 0, 5),
+        ]
+        for dt_, nh, nf in configs:
+            with self.subTest(dt=dt_, n_history=nh, n_future=nf):
+                es = self._make(dt=dt_, n_history=nh, n_future=nf)
+
+                self.assertEqual(
+                    es.n_samples_total,
+                    self._expected_n_valid(dt_, nh, nf),
+                )
+
+                fps = set()
+                for step in range(es.num_steps_per_epoch):
+                    inp, _tar = es(_SampleInfo(
+                        idx_in_epoch=step, epoch_idx=0, iteration=step,
+                    ))
+                    # inp has shape (n_history+1, C, H, W); the last (t=0)
+                    # frame is unique per sample_idx and is cheaper to hash
+                    # than the full window.
+                    fps.add(inp[nh].tobytes())
+                self.assertEqual(len(fps), es.num_steps_per_epoch)
 
 
 # ===========================================================================
@@ -606,6 +762,11 @@ class TestGeneralES(_BaseESTests, unittest.TestCase):
     The main dataset is created by init_dataset() from testutils, which
     produces the same two-year training layout used by the other dataloader tests.
     """
+
+    def _expected_n_valid(self, dt, n_history, n_future):
+        # window must sit inside one year
+        window = dt * (n_history + n_future + 1)
+        return sum(max(0, _N_PER_YEAR - window) for _ in range(len(_YEARS)))
 
     def setUp(self):
         self._tmpdir = tempfile.TemporaryDirectory()
@@ -638,6 +799,12 @@ class TestGeneralES(_BaseESTests, unittest.TestCase):
 
 class TestGeneralConcatES(_BaseESTests, unittest.TestCase):
     """Tests for GeneralConcatES (single concatenated HDF5 file)."""
+
+    def _expected_n_valid(self, dt, n_history, n_future):
+        # single contiguous file: samples_start=dt*n_history, samples_end
+        # trims dt*(n_future+1) off the global tail
+        window = dt * (n_history + n_future + 1)
+        return max(0, _N_TOTAL - window)
 
     def setUp(self):
         self._tmpdir = tempfile.TemporaryDirectory()

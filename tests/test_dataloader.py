@@ -497,5 +497,91 @@ class TestDataLoader(unittest.TestCase):
             if idt > self.num_steps:
                 break
 
+    @unittest.skipUnless(_have_dali, "nvidia.dali is not installed")
+    def test_dali_temporal_window_across_year_boundary_no_duplicates(self):
+        """
+        DALI path, eval mode on the 2-year training set with n_future > 0.
+
+        Invariant: a full non-shuffled epoch must yield distinct samples.
+        The per-year clamp in GeneralES.__call__ silently maps indices near
+        a year boundary to the same frame, which would show up here as
+        duplicate input tensors.  If this test fails, it is flagging exactly
+        that boundary handling.
+        """
+        params = copy.deepcopy(self.params)
+        params.multifiles = False
+        params.valid_autoreg_steps = 3   # n_future=3 in eval mode
+        params.batch_size = 1
+
+        loader, _, _ = get_dataloader(
+            params, params.train_data_path, mode="eval", device=self.device,
+        )
+
+        fingerprints = []
+        for token in loader:
+            inp = token[0]
+            for b in range(inp.shape[0]):
+                fingerprints.append(inp[b].cpu().numpy().tobytes())
+
+        unique = len(set(fingerprints))
+        total  = len(fingerprints)
+        self.assertEqual(
+            unique, total,
+            f"{total - unique} duplicate samples in a non-shuffled DALI epoch "
+            f"(total={total}, unique={unique}).",
+        )
+
+    @unittest.skipUnless(_have_dali, "nvidia.dali is not installed")
+    def test_dali_multi_epoch_reset_state(self):
+        """
+        DALI path, train mode on the 2-year training set.
+
+        Drives the pipeline through two full back-to-back epochs via
+        auto_reset, then a third epoch after an explicit reset_pipeline().
+        Checks
+          - each epoch fully iterates without raising,
+          - each epoch yields distinct samples (no intra-epoch duplicates),
+          - the two shuffled epochs use different permutations (seed is
+            base_seed + cycle_epoch_idx; if the DALI/ES epoch counter got
+            stuck the two epochs would match).
+        """
+        params = copy.deepcopy(self.params)
+        params.multifiles = False
+        params.batch_size = 1
+        params.n_train_samples = 20          # keep the test fast
+        params.n_future = 0
+
+        loader, _, _ = get_dataloader(
+            params, params.train_data_path, mode="train", device=self.device,
+        )
+
+        def _collect_epoch():
+            fps = []
+            for token in loader:
+                inp = token[0]
+                for b in range(inp.shape[0]):
+                    fps.append(inp[b].cpu().numpy().tobytes())
+            return fps
+
+        # auto_reset handles the first-to-second transition
+        fps_ep0 = _collect_epoch()
+        fps_ep1 = _collect_epoch()
+
+        # explicit reset_pipeline() should also produce a valid epoch
+        loader.reset_pipeline()
+        fps_ep2 = _collect_epoch()
+
+        for ep_idx, fps in enumerate((fps_ep0, fps_ep1, fps_ep2)):
+            with self.subTest(desc=f"epoch {ep_idx} non-empty"):
+                self.assertGreater(len(fps), 0)
+            with self.subTest(desc=f"no intra-epoch duplicates in epoch {ep_idx}"):
+                self.assertEqual(len(fps), len(set(fps)))
+
+        # auto_reset must advance the shuffle seed: two consecutive epochs
+        # cannot produce identical orderings.
+        with self.subTest(desc="auto_reset advances shuffle state"):
+            self.assertNotEqual(fps_ep0, fps_ep1)
+
+
 if __name__ == "__main__":
     unittest.main()
