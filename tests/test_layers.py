@@ -21,7 +21,14 @@ from parameterized import parameterized
 import torch
 
 from makani.models.networks.pangu import EarthAttention3D
-from makani.models.common.layers import SeededDropout2d
+from makani.models.common.layers import (
+    SeededDropout2d,
+    LayerScale,
+    UpSample2D,
+    DownSample2D,
+    UpSample3D,
+    DownSample3D,
+)
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from .testutils import disable_tf32, set_seed, get_default_parameters, compare_tensors
@@ -155,6 +162,192 @@ class TestLayers(unittest.TestCase):
         out2 = drop2(x)
 
         self.assertTrue(compare_tensors("output", out1, out2, atol=atol, rtol=rtol, verbose=verbose))
+
+    # ---------------------------------------------------------------------
+    # LayerScale
+    # ---------------------------------------------------------------------
+
+    def test_layerscale_shape_preserved(self):
+        """LayerScale is (B, C, H, W) → (B, C, H, W)."""
+        C, H, W = 4, 8, 12
+        layer = LayerScale(num_chans=C, init_value=0.1).to(self.device)
+        x = torch.randn(2, C, H, W, device=self.device)
+        out = layer(x)
+        self.assertEqual(tuple(out.shape), (2, C, H, W))
+
+    def test_layerscale_init_value_is_constant_multiplier(self, verbose=False):
+        """At init, LayerScale(init_value=v)(x) equals v * x elementwise."""
+        C, H, W = 4, 5, 7
+        v = 0.25
+        layer = LayerScale(num_chans=C, init_value=v).to(self.device)
+        x = torch.randn(3, C, H, W, device=self.device)
+        out = layer(x)
+        self.assertTrue(compare_tensors("layerscale init v*x", out, v * x,
+                                        atol=1e-6, rtol=1e-5, verbose=verbose))
+
+    def test_layerscale_per_channel_weight(self, verbose=False):
+        """Setting a distinct weight per channel scales each channel independently."""
+        C, H, W = 3, 4, 6
+        layer = LayerScale(num_chans=C, init_value=0.0).to(self.device)
+        # inject distinct values [1, 2, 3]
+        with torch.no_grad():
+            layer.weight.copy_(torch.arange(1, C + 1, dtype=torch.float32,
+                                            device=self.device).reshape(C, 1, 1, 1))
+        x = torch.randn(2, C, H, W, device=self.device)
+        out = layer(x)
+        scale = torch.arange(1, C + 1, dtype=torch.float32,
+                             device=self.device).reshape(1, C, 1, 1)
+        self.assertTrue(compare_tensors("layerscale per-channel", out, x * scale,
+                                        atol=1e-6, rtol=1e-5, verbose=verbose))
+
+    def test_layerscale_gradients_flow(self):
+        """LayerScale is differentiable w.r.t. both input and weight."""
+        C, H, W = 3, 5, 5
+        layer = LayerScale(num_chans=C, init_value=0.5).to(self.device)
+        x = torch.randn(2, C, H, W, device=self.device, requires_grad=True)
+        layer(x).sum().backward()
+        self.assertIsNotNone(x.grad)
+        self.assertIsNotNone(layer.weight.grad)
+        self.assertTrue(torch.isfinite(x.grad).all().item())
+        self.assertTrue(torch.isfinite(layer.weight.grad).all().item())
+
+    # ---------------------------------------------------------------------
+    # UpSample2D  (in_dim must equal 2 * out_dim)
+    # ---------------------------------------------------------------------
+
+    def test_upsample2d_shape_3d_input(self):
+        """3-D input (B, N, in_dim) → (B, out_lat, out_lon, out_dim)."""
+        in_dim, out_dim = 16, 8
+        in_res, out_res = (4, 6), (6, 10)
+        layer = UpSample2D(in_dim, out_dim, in_res, out_res).to(self.device)
+        x = torch.randn(2, in_res[0] * in_res[1], in_dim, device=self.device)
+        out = layer(x)
+        self.assertEqual(tuple(out.shape), (2, out_res[0], out_res[1], out_dim))
+
+    def test_upsample2d_shape_4d_input(self):
+        """4-D input (B, in_lat, in_lon, in_dim) → (B, out_lat, out_lon, out_dim)."""
+        in_dim, out_dim = 16, 8
+        in_res, out_res = (4, 6), (6, 10)
+        layer = UpSample2D(in_dim, out_dim, in_res, out_res).to(self.device)
+        x = torch.randn(2, in_res[0], in_res[1], in_dim, device=self.device)
+        out = layer(x)
+        self.assertEqual(tuple(out.shape), (2, out_res[0], out_res[1], out_dim))
+
+    def test_upsample2d_4d_wrong_resolution_raises(self):
+        """4-D input whose (lat, lon) doesn't match input_resolution triggers assertion."""
+        in_dim, out_dim = 16, 8
+        in_res, out_res = (4, 6), (6, 10)
+        layer = UpSample2D(in_dim, out_dim, in_res, out_res).to(self.device)
+        bad = torch.randn(2, 5, 6, in_dim, device=self.device)
+        with self.assertRaises(AssertionError):
+            layer(bad)
+
+    def test_upsample2d_gradients_flow(self):
+        """UpSample2D passes gradients back to the input."""
+        in_dim, out_dim = 16, 8
+        in_res, out_res = (4, 6), (6, 10)
+        layer = UpSample2D(in_dim, out_dim, in_res, out_res).to(self.device)
+        x = torch.randn(2, in_res[0] * in_res[1], in_dim,
+                        device=self.device, requires_grad=True)
+        layer(x).sum().backward()
+        self.assertIsNotNone(x.grad)
+        self.assertTrue(torch.isfinite(x.grad).all().item())
+
+    # ---------------------------------------------------------------------
+    # DownSample2D  (output channel count is 2 * in_dim)
+    # ---------------------------------------------------------------------
+
+    def test_downsample2d_shape_3d_input(self):
+        """3-D input (B, N, in_dim) → (B, out_lat, out_lon, 2*in_dim)."""
+        in_dim = 8
+        in_res, out_res = (6, 10), (4, 8)
+        layer = DownSample2D(in_dim, in_res, out_res).to(self.device)
+        x = torch.randn(2, in_res[0] * in_res[1], in_dim, device=self.device)
+        out = layer(x)
+        self.assertEqual(tuple(out.shape), (2, out_res[0], out_res[1], 2 * in_dim))
+
+    def test_downsample2d_shape_4d_input(self):
+        """4-D input (B, in_lat, in_lon, in_dim) → (B, out_lat, out_lon, 2*in_dim)."""
+        in_dim = 8
+        in_res, out_res = (6, 10), (4, 8)
+        layer = DownSample2D(in_dim, in_res, out_res).to(self.device)
+        x = torch.randn(2, in_res[0], in_res[1], in_dim, device=self.device)
+        out = layer(x)
+        self.assertEqual(tuple(out.shape), (2, out_res[0], out_res[1], 2 * in_dim))
+
+    def test_downsample2d_4d_wrong_resolution_raises(self):
+        """4-D input whose (lat, lon) doesn't match input_resolution triggers assertion."""
+        in_dim = 8
+        in_res, out_res = (6, 10), (4, 8)
+        layer = DownSample2D(in_dim, in_res, out_res).to(self.device)
+        bad = torch.randn(2, 7, 10, in_dim, device=self.device)
+        with self.assertRaises(AssertionError):
+            layer(bad)
+
+    def test_downsample2d_gradients_flow(self):
+        """DownSample2D passes gradients back to the input."""
+        in_dim = 8
+        in_res, out_res = (6, 10), (4, 8)
+        layer = DownSample2D(in_dim, in_res, out_res).to(self.device)
+        x = torch.randn(2, in_res[0] * in_res[1], in_dim,
+                        device=self.device, requires_grad=True)
+        layer(x).sum().backward()
+        self.assertIsNotNone(x.grad)
+        self.assertTrue(torch.isfinite(x.grad).all().item())
+
+    # ---------------------------------------------------------------------
+    # UpSample3D  (in_dim must equal 2 * out_dim; out_pl ≤ in_pl)
+    # ---------------------------------------------------------------------
+
+    def test_upsample3d_shape(self):
+        """3-D output shape: (B, out_pl*out_lat*out_lon, out_dim)."""
+        in_dim, out_dim = 16, 8
+        in_res  = (3, 4, 6)
+        out_res = (3, 6, 10)
+        layer = UpSample3D(in_dim, out_dim, in_res, out_res).to(self.device)
+        N = in_res[0] * in_res[1] * in_res[2]
+        x = torch.randn(2, N, in_dim, device=self.device)
+        out = layer(x)
+        M = out_res[0] * out_res[1] * out_res[2]
+        self.assertEqual(tuple(out.shape), (2, M, out_dim))
+
+    def test_upsample3d_gradients_flow(self):
+        """UpSample3D passes gradients back to the input."""
+        in_dim, out_dim = 16, 8
+        in_res, out_res = (3, 4, 6), (3, 6, 10)
+        layer = UpSample3D(in_dim, out_dim, in_res, out_res).to(self.device)
+        N = in_res[0] * in_res[1] * in_res[2]
+        x = torch.randn(2, N, in_dim, device=self.device, requires_grad=True)
+        layer(x).sum().backward()
+        self.assertIsNotNone(x.grad)
+        self.assertTrue(torch.isfinite(x.grad).all().item())
+
+    # ---------------------------------------------------------------------
+    # DownSample3D  (in_pl == out_pl; output channel count = 2 * in_dim)
+    # ---------------------------------------------------------------------
+
+    def test_downsample3d_shape(self):
+        """3-D output shape: (B, out_pl*out_lat*out_lon, 2*in_dim)."""
+        in_dim = 8
+        in_res  = (3, 6, 10)
+        out_res = (3, 4, 8)
+        layer = DownSample3D(in_dim, in_res, out_res).to(self.device)
+        N = in_res[0] * in_res[1] * in_res[2]
+        x = torch.randn(2, N, in_dim, device=self.device)
+        out = layer(x)
+        M = out_res[0] * out_res[1] * out_res[2]
+        self.assertEqual(tuple(out.shape), (2, M, 2 * in_dim))
+
+    def test_downsample3d_gradients_flow(self):
+        """DownSample3D passes gradients back to the input."""
+        in_dim = 8
+        in_res, out_res = (3, 6, 10), (3, 4, 8)
+        layer = DownSample3D(in_dim, in_res, out_res).to(self.device)
+        N = in_res[0] * in_res[1] * in_res[2]
+        x = torch.randn(2, N, in_dim, device=self.device, requires_grad=True)
+        layer(x).sum().backward()
+        self.assertIsNotNone(x.grad)
+        self.assertTrue(torch.isfinite(x.grad).all().item())
 
 
 if __name__ == "__main__":
