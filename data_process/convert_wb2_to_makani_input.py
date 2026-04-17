@@ -28,7 +28,8 @@ import xarray as xr
 # MPI
 from mpi4py import MPI
 
-from wb2_helpers import split_convert_channel_names, DistributedProgressBar, gcs_storage_options
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from data_process.wb2_helpers import split_convert_channel_names, DistributedProgressBar, gcs_storage_options
 
 
 def convert(input_file: str, output_dir: str, metadata_file: str, years: List[int],
