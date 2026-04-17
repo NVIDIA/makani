@@ -443,17 +443,35 @@ class EnsembleTrainer(Trainer):
         return
 
     def _ensemble_step(self, inp: torch.Tensor, tar: torch.Tensor):
-        predlist = []
-        for _ in range(self.params.local_ensemble_size):
-            # forward pass
-            pred = self.model_train(inp)
-            # store prediction
-            predlist.append(pred)
+        """
+        Single forward on a folded batch of size (B*E, ...).
 
-        # stack predictions along new dim (ensemble dim):
-        pred = torch.stack(predlist, dim=1)
-        # compute loss
-        loss = self.loss_obj(pred, tar, inp=inp)
+        The ensemble dim is carried explicitly as dim 1 through unsqueeze+repeat_interleave,
+        then flattened into dim 0 just for the model forward; the prediction reshapes back
+        to (B, E, ...) for the loss. Noise is drawn once at the folded batch so each
+        (batch, ensemble member) pair sees an independent sample.
+        """
+        E = self.params.local_ensemble_size
+        B = inp.shape[0]
+
+        if E > 1:
+            # (B, C, H, W) -> (B, 1, C, H, W) -> (B, E, C, H, W) -> (B*E, C, H, W)
+            inp_flat = inp.unsqueeze(1).repeat_interleave(E, dim=1).reshape(B * E, *inp.shape[1:])
+        else:
+            inp_flat = inp
+
+        # pre-adjust the preprocessor's noise state to the folded batch; the model is then
+        # called with update_state=False so it consumes this fresh state directly.
+        self.preprocessor.update_internal_state(replace_state=True, batch_size=inp_flat.shape[0])
+
+        pred_flat = self.model_train(inp_flat, update_state=False)
+
+        if E > 1:
+            pred = pred_flat.reshape(B, E, *pred_flat.shape[1:])
+        else:
+            pred = pred_flat.unsqueeze(1)
+
+        loss = self.loss_obj(pred, tar)
 
         return pred, loss
 
@@ -480,8 +498,20 @@ class EnsembleTrainer(Trainer):
 
             torch.cuda.nvtx.range_push(f"train step {train_steps}")
 
-            # map to device
-            gdata = map(lambda x: x.to(self.device), data)
+            # map to device; materialize to list so we can expand zenith features
+            gdata = [x.to(self.device) for x in data]
+
+            # When training with local_ensemble_size > 1 we fold the ensemble dim into the
+            # batch dim for a single forward pass. The cached unpredicted features (xz, yz)
+            # must therefore also carry an ensemble-expanded batch so shapes line up inside
+            # the preprocessor. x is expanded inside _ensemble_step (to preserve `inp.shape[0]`
+            # semantics below); y stays at its original batch since the loss expects (B, E, ...)
+            # pred vs (B, ...) target.
+            E = self.params.local_ensemble_size
+            if E > 1 and len(gdata) == 4:
+                B_xz = gdata[2].shape[0]
+                gdata[2] = gdata[2].unsqueeze(1).repeat_interleave(E, dim=1).reshape(B_xz * E, *gdata[2].shape[1:])
+                gdata[3] = gdata[3].unsqueeze(1).repeat_interleave(E, dim=1).reshape(B_xz * E, *gdata[3].shape[1:])
 
             # do preprocessing
             inp, tar = self.preprocessor.cache_unpredicted_features(*gdata)
@@ -585,13 +615,6 @@ class EnsembleTrainer(Trainer):
 
         return train_time, total_data_gb, logs
 
-    def _initialize_noise_states(self):
-        noise_states = []
-        for _ in range(self.params.local_ensemble_size):
-            self.preprocessor.update_internal_state(replace_state=True)
-            noise_states.append(self.preprocessor.get_internal_state(tensor=True))
-        return noise_states
-
     def validate_one_epoch(self, epoch, profiler=None):
         # set to eval
         self._set_eval()
@@ -625,21 +648,35 @@ class EnsembleTrainer(Trainer):
                     if torch.cuda.is_available():
                         torch.cuda.nvtx.range_push(f"eval step {eval_steps}")
 
-                    # map to gpu
-                    gdata = map(lambda x: x.to(self.device), data)
+                    # map to gpu; materialize to list so we can expand zenith features
+                    gdata = [x.to(self.device) for x in data]
+
+                    # When local_ensemble_size > 1, fold the ensemble dim into the batch dim
+                    # for a single forward pass per rollout step. The zenith features (xz, yz)
+                    # must be expanded so they line up with the folded-batch input; the target
+                    # (y) stays at the original batch — the loss expects (B, E, ...) pred against
+                    # (B, ...) target.
+                    E = self.params.local_ensemble_size
+                    if E > 1 and len(gdata) == 4:
+                        B_xz = gdata[2].shape[0]
+                        gdata[2] = gdata[2].unsqueeze(1).repeat_interleave(E, dim=1).reshape(B_xz * E, *gdata[2].shape[1:])
+                        gdata[3] = gdata[3].unsqueeze(1).repeat_interleave(E, dim=1).reshape(B_xz * E, *gdata[3].shape[1:])
 
                     # preprocess
                     inp, tar = self.preprocessor.cache_unpredicted_features(*gdata)
                     inp = self.preprocessor.flatten_history(inp)
 
-                    # split list of targets
+                    B = inp.shape[0]
+
+                    # expand the input batch to (B*E, ...) for the folded-batch forward
+                    if E > 1:
+                        inp = inp.unsqueeze(1).repeat_interleave(E, dim=1).reshape(B * E, *inp.shape[1:])
+
+                    # split list of targets (stays at batch B)
                     tarlist = torch.split(tar, 1, dim=1)
 
-                    # do autoregression for each ensemble member individually
-                    # do the rollout
-                    # initialize the noise states with random seeds:
-                    noise_states = self._initialize_noise_states()
-                    inptlist = [inp.clone() for _ in range(self.params.local_ensemble_size)]
+                    # draw a fresh stationary noise state at the folded batch for this episode
+                    self.preprocessor.update_internal_state(replace_state=True, batch_size=inp.shape[0])
 
                     # loop over lead times
                     for idt, targ in enumerate(tarlist):
@@ -647,38 +684,25 @@ class EnsembleTrainer(Trainer):
                         # flatten history of the target
                         targ = self.preprocessor.flatten_history(targ)
 
-                        # FW pass
-                        predlist = []
-
                         with amp.autocast(device_type="cuda", enabled=self.amp_enabled, dtype=self.amp_dtype):
-                            # loop over local ensemble members
-                            for e in range(self.params.local_ensemble_size):
-                                # retrieve input
-                                inpt = inptlist[e]
+                            # single forward on the folded batch: at idt==0 the noise state was
+                            # just drawn fresh, so skip the stepper's internal update; for
+                            # subsequent steps run the standard AR update.
+                            pred_flat = self.model_eval(
+                                inp,
+                                update_state=(idt != 0),
+                                replace_state=False,
+                            )
 
-                                # this is different, depending on local ensemble size
-                                if self.params.local_ensemble_size > 1:
-                                    # recover correct state
-                                    self.preprocessor.set_internal_state(noise_states[e])
+                            # advance the input history / unpredicted features once per step
+                            inp = self.preprocessor.append_history(inp, pred_flat, idt, update_state=True)
 
-                                    # forward pass: never replace state since we do that manually
-                                    pred = self.model_eval(inpt, update_state=(idt!=0), replace_state=False)
+                            # reshape back to (B, E, ...) for the loss
+                            if E > 1:
+                                pred = pred_flat.reshape(B, E, *pred_flat.shape[1:])
+                            else:
+                                pred = pred_flat.unsqueeze(1)
 
-                                    # store new state
-                                    noise_states[e] = self.preprocessor.get_internal_state(tensor=True)
-                                else:
-                                    # forward pass: replace state if this is the first step of the rollout
-                                    pred = self.model_eval(inpt, update_state=True, replace_state=(idt==0))
-
-                                # concatenate predictions
-                                predlist.append(pred)
-
-                                # append input to prediction
-                                last_member = e == self.params.local_ensemble_size - 1
-                                inptlist[e] = self.preprocessor.append_history(inpt, pred, idt, update_state=last_member)
-
-                            # concatenate
-                            pred = torch.stack(predlist, dim=1)
                             loss = self.loss_obj(pred, targ)
 
                             # log the loss
