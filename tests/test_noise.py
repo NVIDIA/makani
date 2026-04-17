@@ -28,7 +28,7 @@ from makani.models.noise import (
 
 import sys, os
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from .testutils import disable_tf32, set_seed
+from .testutils import disable_tf32, set_seed, compare_tensors
 
 # -------------------------------------------------------------------------
 # Common test dimensions (small enough to be fast on CPU)
@@ -379,7 +379,7 @@ class TestIsotropicGRF(unittest.TestCase):
         n_reflect = self._make_noise(seed=42, reflect=True)
         n_normal.update()
         n_reflect.update()
-        self.assertTrue(torch.allclose(n_normal.state, -n_reflect.state))
+        self.assertTrue(compare_tensors("reflect negates state", n_normal.state, -n_reflect.state))
 
     # -----------------------------------------------------------------------
     # Statistical tests — require a large batch for reliable estimates
@@ -624,7 +624,7 @@ class TestDiffusionNoiseS2(unittest.TestCase):
         n_reflect = self._make_noise(seed=42, reflect=True)
         n_normal.update(replace_state=True)
         n_reflect.update(replace_state=True)
-        self.assertTrue(torch.allclose(n_normal.state, -n_reflect.state))
+        self.assertTrue(compare_tensors("reflect negates stationary state", n_normal.state, -n_reflect.state))
 
     # -----------------------------------------------------------------------
     # Statistical test — requires a large batch for reliable estimates

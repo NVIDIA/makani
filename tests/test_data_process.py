@@ -83,7 +83,7 @@ class TestAnnotateDataset(unittest.TestCase):
             with h5.File(file_path, "r") as f, h5.File(ref_file_path, "r") as ref_f:
                 # Check data content
                 with self.subTest(desc="data"):
-                    self.assertTrue(np.allclose(f[H5_PATH][...], ref_f[H5_PATH][...]))
+                    self.assertTrue(compare_arrays("data", f[H5_PATH][...], ref_f[H5_PATH][...], verbose=verbose))
 
                 # Check annotations
                 with self.subTest(desc="timestamp"):
@@ -173,15 +173,17 @@ class TestConcatenateDataset(unittest.TestCase):
                     num_samples = f_orig[H5_PATH].shape[0] // dhoursrel
                     
                     # Compare data
-                    self.assertTrue(np.allclose(
+                    self.assertTrue(compare_arrays(
+                        "concat data",
                         f_conc[H5_PATH][current_pos:current_pos + num_samples, ...],
-                        f_orig[H5_PATH][::dhoursrel, ...]
+                        f_orig[H5_PATH][::dhoursrel, ...],
                     ))
-                    
+
                     # Compare timestamps
-                    self.assertTrue(np.allclose(
+                    self.assertTrue(compare_arrays(
+                        "concat timestamp",
                         f_conc["timestamp"][current_pos:current_pos + num_samples, ...],
-                        f_orig["timestamp"][::dhoursrel, ...]
+                        f_orig["timestamp"][::dhoursrel, ...],
                     ))
                     
                     # Update position
@@ -193,9 +195,9 @@ class TestConcatenateDataset(unittest.TestCase):
 
             # Verify metadata
             with self.subTest(desc="lat"):
-                self.assertTrue(np.allclose(f_conc["lat"][...], metadata["coords"]["lat"]))
+                self.assertTrue(compare_arrays("lat", f_conc["lat"][...], np.asarray(metadata["coords"]["lat"])))
             with self.subTest(desc="lon"):
-                self.assertTrue(np.allclose(f_conc["lon"][...], metadata["coords"]["lon"]))
+                self.assertTrue(compare_arrays("lon", f_conc["lon"][...], np.asarray(metadata["coords"]["lon"])))
             with self.subTest(desc="channel"):
                 self.assertEqual([c.decode() for c in f_conc["channel"][...].tolist()], metadata["coords"]["channel"])
 

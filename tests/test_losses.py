@@ -1385,7 +1385,7 @@ class TestEnsembleSpectralCRPSLoss(unittest.TestCase):
         set_seed(333)
         fc  = torch.randn(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W)
         obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
-        self.assertFalse(torch.allclose(fn_abs(fc, obs), fn_real(fc, obs)))
+        self.assertFalse(compare_tensors("abs vs real CDF", fn_abs(fc, obs), fn_real(fc, obs)))
 
     # ------ dim validation in forward (lines 398-403) ------
 

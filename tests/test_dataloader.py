@@ -32,7 +32,7 @@ import h5py as h5
 from makani.utils.dataloader import get_dataloader
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from .testutils import disable_tf32, get_default_parameters, init_dataset
+from .testutils import disable_tf32, get_default_parameters, init_dataset, compare_tensors, compare_arrays
 from .testutils import H5_PATH, NUM_CHANNELS, IMG_SIZE_H, IMG_SIZE_W
 
 _multifiles_params = [True]
@@ -180,8 +180,8 @@ class TestDataLoader(unittest.TestCase):
             inp = np.squeeze(inp.cpu().numpy())
             tar = np.squeeze(tar.cpu().numpy())
 
-            self.assertTrue(np.allclose(inp, test_inp))
-            self.assertTrue(np.allclose(tar, test_tar))
+            self.assertTrue(compare_arrays("test_content inp", inp, test_inp))
+            self.assertTrue(compare_arrays("test_content tar", tar, test_tar))
 
             if idt > self.num_steps:
                 break
@@ -205,13 +205,13 @@ class TestDataLoader(unittest.TestCase):
             inp, tar = token
             inp_flip, tar_flip = token_flip
 
-            self.assertFalse(torch.allclose(inp, inp_flip))
+            self.assertFalse(compare_tensors("inp vs flipped inp", inp, inp_flip))
             inp_flip_flip = torch.flip(inp_flip, dims=(2,))
-            self.assertTrue(torch.allclose(inp, inp_flip_flip))
+            self.assertTrue(compare_tensors("inp vs double-flipped inp", inp, inp_flip_flip))
 
-            self.assertFalse(torch.allclose(tar, tar_flip))
+            self.assertFalse(compare_tensors("tar vs flipped tar", tar, tar_flip))
             tar_flip_flip = torch.flip(tar_flip, dims=(2,))
-            self.assertTrue(torch.allclose(tar, tar_flip_flip))
+            self.assertTrue(compare_tensors("tar vs double-flipped tar", tar, tar_flip_flip))
 
     @parameterized.expand(_multifiles_params, skip_on_empty=False)
     def test_history(self, multifiles):
@@ -374,8 +374,8 @@ class TestDataLoader(unittest.TestCase):
             inp = np.squeeze(inp.cpu().numpy())
             tar = np.squeeze(tar.cpu().numpy())
 
-            self.assertTrue(np.allclose(inp, test_inp))
-            self.assertTrue(np.allclose(tar, test_tar))
+            self.assertTrue(compare_arrays("test_distributed inp", inp, test_inp))
+            self.assertTrue(compare_arrays("test_distributed tar", tar, test_tar))
 
             if idt > self.num_steps:
                 break
@@ -427,8 +427,8 @@ class TestDataLoader(unittest.TestCase):
             inp = np.squeeze(inp.cpu().numpy())
             tar = np.squeeze(tar.cpu().numpy())
 
-            self.assertTrue(np.allclose(inp, test_inp))
-            self.assertTrue(np.allclose(tar, test_tar))
+            self.assertTrue(compare_arrays("test_distributed_subsampling inp", inp, test_inp))
+            self.assertTrue(compare_arrays("test_distributed_subsampling tar", tar, test_tar))
 
             if idt > self.num_steps:
                 break
