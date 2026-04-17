@@ -909,6 +909,170 @@ class TestPreprocessor2DBasic(unittest.TestCase):
         self.assertTrue(compare_tensors("analytical weighted mean", pp.history_mean, expected_mean,
                                         atol=1e-5, rtol=1e-5, verbose=verbose))
 
+    def test_history_compute_stats_linear_ramp_mean_mode_mean(self, verbose=False):
+        """Linear ramp v_t = a_c + b_c * t (spatially constant): history_mean matches a_c + b_c * t_bar."""
+        pp = self._make_pp_mean(n_history=2)
+        T = pp.n_history + 1
+        a = torch.tensor([0.5, 1.0, 1.5, 2.0, 2.5], dtype=torch.float32)[: self.C]
+        b = torch.tensor([1.0, -0.5, 2.0, 0.25, -1.0], dtype=torch.float32)[: self.C]
+        x5 = torch.zeros(self.B, T, self.C, self.H, self.W, dtype=torch.float32)
+        for t in range(T):
+            x5[:, t, :, :, :] = (a + b * t).reshape(1, self.C, 1, 1)
+        x = pp.flatten_history(x5)
+        pp.history_compute_stats(x)
+        t_vec = torch.arange(T, dtype=torch.float32)
+        t_bar = t_vec.mean()
+        expected_mean = (a + b * t_bar).reshape(1, self.C, 1, 1)
+        self.assertTrue(compare_tensors("linear ramp mean", pp.history_mean, expected_mean,
+                                        atol=1e-5, rtol=1e-5, verbose=verbose))
+
+    def test_history_compute_stats_linear_ramp_mean_mode_std(self, verbose=False):
+        """Linear ramp: history_std = |b_c| * sqrt(Var_t) (uniform-weight variance of 0..T-1)."""
+        pp = self._make_pp_mean(n_history=2)
+        T = pp.n_history + 1
+        a = torch.tensor([0.5, 1.0, 1.5, 2.0, 2.5], dtype=torch.float32)[: self.C]
+        b = torch.tensor([1.0, -0.5, 2.0, 0.25, -1.0], dtype=torch.float32)[: self.C]
+        x5 = torch.zeros(self.B, T, self.C, self.H, self.W, dtype=torch.float32)
+        for t in range(T):
+            x5[:, t, :, :, :] = (a + b * t).reshape(1, self.C, 1, 1)
+        x = pp.flatten_history(x5)
+        pp.history_compute_stats(x)
+        t_vec = torch.arange(T, dtype=torch.float32)
+        t_bar = t_vec.mean()
+        var_t = ((t_vec - t_bar) ** 2).mean()
+        expected_std = (b.abs() * torch.sqrt(var_t)).reshape(1, self.C, 1, 1)
+        self.assertTrue(compare_tensors("linear ramp std", pp.history_std, expected_std,
+                                        atol=1e-5, rtol=1e-5, verbose=verbose))
+
+    # -----------------------------------------------------------------------
+    # history_normalize post-condition: weighted temporal mean ≈ 0, weighted L2 ≈ 1
+    # -----------------------------------------------------------------------
+
+    def test_history_normalize_post_condition_mean_mode(self, verbose=False):
+        """After normalize (mean mode): weighted temporal mean ≈ 0, weighted L2 ≈ 1, per channel."""
+        pp = self._make_pp_mean(n_history=1)
+        T = pp.n_history + 1
+        x = self._rand(self.B, T * self.C, self.H, self.W)
+        pp.history_compute_stats(x)
+        xn = pp.history_normalize(x)
+        xn5 = pp.expand_history(xn, nhist=T)
+        # mean-mode weights are uniform 1/T: use plain temporal average of per-time area means
+        quad_xn  = pp.quadrature(xn5)          # (B, T, C)
+        quad_xn2 = pp.quadrature(xn5 ** 2)     # (B, T, C)
+        weighted_mean = quad_xn.mean(dim=1)    # (B, C)
+        weighted_l2   = quad_xn2.mean(dim=1)   # (B, C)
+        self.assertTrue(compare_tensors("normalize weighted mean ≈ 0 (mean mode)",
+                                        weighted_mean, torch.zeros_like(weighted_mean),
+                                        atol=1e-5, rtol=1e-4, verbose=verbose))
+        self.assertTrue(compare_tensors("normalize weighted L2 ≈ 1 (mean mode)",
+                                        weighted_l2, torch.ones_like(weighted_l2),
+                                        atol=1e-4, rtol=1e-4, verbose=verbose))
+
+    def test_history_normalize_post_condition_exponential_mode(self, verbose=False):
+        """After normalize (exponential mode): weighted temporal mean ≈ 0, weighted L2 ≈ 1, per channel."""
+        params = get_default_parameters()
+        params.n_history = 2
+        params.history_normalization_mode = "exponential"
+        params.history_normalization_decay = 0.5
+        pp = Preprocessor2D(params)
+        T = pp.n_history + 1
+        x = self._rand(self.B, T * self.C, self.H, self.W)
+        pp.history_compute_stats(x)
+        xn = pp.history_normalize(x)
+        xn5 = pp.expand_history(xn, nhist=T)
+        # exponential weights: buffer shape is (1, T, 1, 1, 1)
+        w = pp.history_normalization_weights.reshape(1, T, 1)  # broadcasts with (B, T, C)
+        quad_xn  = pp.quadrature(xn5)
+        quad_xn2 = pp.quadrature(xn5 ** 2)
+        weighted_mean = (w * quad_xn).sum(dim=1)
+        weighted_l2   = (w * quad_xn2).sum(dim=1)
+        self.assertTrue(compare_tensors("normalize weighted mean ≈ 0 (exponential)",
+                                        weighted_mean, torch.zeros_like(weighted_mean),
+                                        atol=1e-5, rtol=1e-4, verbose=verbose))
+        self.assertTrue(compare_tensors("normalize weighted L2 ≈ 1 (exponential)",
+                                        weighted_l2, torch.ones_like(weighted_l2),
+                                        atol=1e-4, rtol=1e-4, verbose=verbose))
+
+    # -----------------------------------------------------------------------
+    # Noise determinism end-to-end
+    # -----------------------------------------------------------------------
+
+    def _make_pp_with_constant_random_noise(self):
+        """Build a preprocessor whose input_noise is a seeded DummyNoiseS2 in constant_random mode."""
+        from makani.models.noise import DummyNoiseS2
+        params = get_default_parameters()
+        # construct with dummy-concatenate so the preprocessor is wired for noise
+        params.input_noise = {"type": "dummy", "mode": "concatenate", "n_channels": 1}
+        pp = Preprocessor2D(params)
+        pp.train()
+        # replace with a constant_random DummyNoise so set_rng actually matters
+        pp.input_noise = DummyNoiseS2(
+            img_shape=[self.H, self.W],
+            batch_size=self.B,
+            num_channels=1,
+            num_time_steps=pp.n_history + 1,
+            mode="constant_random",
+        )
+        return pp
+
+    def test_noise_determinism_same_seed_produces_equal_outputs(self, verbose=False):
+        """set_rng(seed=42) twice, each followed by a forward pass, yields identical outputs."""
+        pp = self._make_pp_with_constant_random_noise()
+        x  = self._rand(self.B, self.C, self.H, self.W)
+        xz = self._rand(self.B, 1, 1, self.H, self.W)
+        yz = self._rand(self.B, 1, 1, self.H, self.W)
+        pp.cache_unpredicted_features(x, x, xz=xz, yz=yz)
+
+        pp.set_rng(reset=True, seed=42)
+        pp.update_internal_state()
+        out1 = pp.append_unpredicted_features(x, target=False)
+
+        pp.set_rng(reset=True, seed=42)
+        pp.update_internal_state()
+        out2 = pp.append_unpredicted_features(x, target=False)
+
+        self.assertTrue(compare_tensors("noise same seed", out1, out2, verbose=verbose))
+
+    def test_noise_determinism_different_seed_produces_different_outputs(self, verbose=False):
+        """Two different seeds give different outputs (the noise channels differ)."""
+        pp = self._make_pp_with_constant_random_noise()
+        x  = self._rand(self.B, self.C, self.H, self.W)
+        xz = self._rand(self.B, 1, 1, self.H, self.W)
+        yz = self._rand(self.B, 1, 1, self.H, self.W)
+        pp.cache_unpredicted_features(x, x, xz=xz, yz=yz)
+
+        pp.set_rng(reset=True, seed=42)
+        pp.update_internal_state()
+        out1 = pp.append_unpredicted_features(x, target=False)
+
+        pp.set_rng(reset=True, seed=999)
+        pp.update_internal_state()
+        out2 = pp.append_unpredicted_features(x, target=False)
+
+        self.assertFalse(compare_tensors("noise different seeds", out1, out2, verbose=verbose))
+
+    # -----------------------------------------------------------------------
+    # append_history with out-of-range step
+    # -----------------------------------------------------------------------
+
+    def test_append_history_update_state_out_of_range_step_is_noop(self, verbose=False):
+        """With step >= unpredicted_tar_train.shape[1], the cached inp is not modified (silent no-op)."""
+        pp = Preprocessor2D(get_default_parameters())
+        pp.train()
+        x1 = self._rand(self.B, self.C, self.H, self.W)
+        x2 = self._rand(self.B, self.C, self.H, self.W)
+        xz = self._rand(self.B, 1, 1, self.H, self.W)
+        yz = self._rand(self.B, 1, 1, self.H, self.W)  # shape[1] == 1
+        pp.cache_unpredicted_features(x1, x2, xz=xz, yz=yz)
+
+        inp_before, _ = pp.get_unpredicted_features()
+        # step=5 is far beyond yz.shape[1] == 1 — current behavior is a silent no-op
+        pp.append_history(x1, x2, step=5, update_state=True)
+        inp_after, _ = pp.get_unpredicted_features()
+
+        self.assertTrue(compare_tensors("inp unchanged after out-of-range step",
+                                        inp_after, inp_before, verbose=verbose))
+
     # -----------------------------------------------------------------------
     # Gradient flow through train-path ops
     # -----------------------------------------------------------------------
