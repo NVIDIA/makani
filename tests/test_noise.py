@@ -687,6 +687,54 @@ class TestDiffusionNoiseS2(unittest.TestCase):
                         "reset(batch_size=N) should produce an all-zero state")
 
     # -----------------------------------------------------------------------
+    # Pattern-4 state handling invariants
+    # -----------------------------------------------------------------------
+    def test_state_remains_registered_buffer_after_resize(self):
+        """After a batch-changing update, `state` is still a registered buffer (not a plain
+        attribute) and therefore still moves with `.to(device)`. Guards against a future
+        regression to the raw `self.state = ...` rebind pattern.
+        """
+        noise = self._make_noise()
+        new_B = self.B + 3
+        noise.update(replace_state=True, batch_size=new_B)
+
+        buffer_names = {name for name, _ in noise.named_buffers()}
+        self.assertIn("state", buffer_names,
+                      "state must remain a registered buffer after resize")
+        self.assertEqual(noise.state.shape[0], new_B)
+
+        if torch.cuda.is_available():
+            moved = noise.to(torch.device("cuda"))
+            self.assertEqual(moved.state.device.type, "cuda",
+                             ".to(cuda) must move the state buffer after a resize")
+
+    def test_ensure_state_is_idempotent_on_same_batch(self):
+        """`_ensure_state` with the current batch size is a no-op: the underlying
+        buffer is reused (same data_ptr), not re-registered.
+        """
+        noise = self._make_noise()
+        before_ptr = noise.state.data_ptr()
+        noise._ensure_state(noise.state.shape[0])
+        after_ptr = noise.state.data_ptr()
+        self.assertEqual(before_ptr, after_ptr,
+                         "_ensure_state on the same batch size must not rebind the buffer")
+
+    def test_set_tensor_state_raises_on_shape_suffix_mismatch(self):
+        """`set_tensor_state` must reject any non-batch shape mismatch up-front with a
+        clear ValueError, and must NOT mutate `state` before raising.
+        """
+        noise = self._make_noise()
+        original_shape = tuple(noise.state.shape)
+        # perturb one of the suffix dims (channel count); batch dim may match
+        bad_shape = list(noise.state.shape)
+        bad_shape[2] = bad_shape[2] + 1   # wrong C
+        bad = torch.zeros(tuple(bad_shape), dtype=noise.state.dtype, device=noise.state.device)
+        with self.assertRaises(ValueError):
+            noise.set_tensor_state(bad)
+        self.assertEqual(tuple(noise.state.shape), original_shape,
+                         "state must not be mutated when set_tensor_state raises")
+
+    # -----------------------------------------------------------------------
     # Per-channel kT / lambd lists — noise.py lines 305-319
     # -----------------------------------------------------------------------
     def test_per_channel_kT_list(self):

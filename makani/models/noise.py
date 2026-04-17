@@ -81,8 +81,40 @@ class BaseNoiseS2(nn.Module):
         # generator objects:
         self.set_rng(seed=seed)
 
-        # store the noise state: initialize to None
-        self.register_buffer("state", torch.zeros((batch_size, self.num_time_steps, self.num_channels, self.lmax_local, self.mmax_local, 2), dtype=torch.float32), persistent=False)
+        # allocate the state buffer via the centralized helper; subclasses customize the
+        # per-batch shape by overriding _state_shape_suffix.
+        self._ensure_state(batch_size, device=torch.device("cpu"), dtype=torch.float32)
+
+    @property
+    def _state_shape_suffix(self):
+        """
+        Shape of the state buffer beyond the batch dim. Subclasses override this to
+        customize the layout (e.g. DummyNoiseS2 stores state in spatial, not spectral, form).
+        """
+        return (self.num_time_steps, self.num_channels, self.lmax_local, self.mmax_local, 2)
+
+    def _ensure_state(self, batch_size, device=None, dtype=None):
+        """
+        Single source of truth for (re)allocating ``self.state``.
+
+        This is the only method that (re-)registers the state buffer. Calling it with
+        the same shape as the current state is a no-op; calling it with a different
+        batch size re-registers the buffer so buffer semantics (``.to(device)``,
+        ``state_dict`` membership via ``_buffers``, etc.) are preserved rather than
+        relying on the ``__setattr__`` hook.
+        """
+        if device is None:
+            device = self.state.device if ("state" in self._buffers) else torch.device("cpu")
+        if dtype is None:
+            dtype = self.state.dtype if ("state" in self._buffers) else torch.float32
+
+        target_shape = (batch_size,) + tuple(self._state_shape_suffix)
+        if ("state" not in self._buffers) or (tuple(self.state.shape) != target_shape):
+            self.register_buffer(
+                "state",
+                torch.zeros(target_shape, dtype=dtype, device=device),
+                persistent=False,
+            )
 
     def is_stateful(self):
         raise NotImplementedError("is_stateful method not implemented for this noise class")
@@ -96,23 +128,19 @@ class BaseNoiseS2(nn.Module):
 
     # Resets the internal state. Can be used to change the batch size if required.
     def reset(self, batch_size=None):
-        if self.state is not None:
-
-            if batch_size is not None:
-                self.state = torch.zeros(batch_size, self.num_time_steps, self.num_channels, self.lmax_local, self.mmax_local, 2, dtype=self.state.dtype, device=self.state.device)
-
-            with torch.no_grad():
-                self.state.fill_(0.0)
+        if batch_size is not None:
+            self._ensure_state(batch_size)
+        with torch.no_grad():
+            self.state.zero_()
 
     # this routine generates a noise sample for a single time step and updates the state accordingly, by appending the last time step
     def update(self, replace_state=False, batch_size=None):
-        # Update should always create a new state, so
-        # we don't need to check for replace_state
-        # create single occurence
+
+        if batch_size is not None:
+            self._ensure_state(batch_size)
+
         with torch.no_grad():
-            if batch_size is None:
-                batch_size = self.state.shape[0]
-            newstate = torch.empty((batch_size, self.num_time_steps, self.num_channels, self.lmax_local, self.mmax_local, 2), dtype=self.state.dtype, device=self.state.device)
+            newstate = torch.empty_like(self.state)
             if self.state.is_cuda:
                 newstate.normal_(mean=0.0, std=1.0, generator=self.rng_gpu)
             else:
@@ -121,10 +149,7 @@ class BaseNoiseS2(nn.Module):
             if self.reflect:
                 newstate = -newstate
 
-            if newstate.shape == self.state.shape:
-                self.state.copy_(newstate)
-            else:
-                self.state = newstate
+            self.state.copy_(newstate)
 
         return
 
@@ -148,6 +173,22 @@ class BaseNoiseS2(nn.Module):
         return self.state.detach().clone()
 
     def set_tensor_state(self, newstate):
+        # Validate the state layout (everything beyond the batch dim) matches this
+        # noise module's expected suffix BEFORE touching `self.state`. Only the batch
+        # dim may differ — it is auto-resized via `_ensure_state`. Any other
+        # difference raises `ValueError` up-front with a useful message instead of
+        # silently mutating the state into a bad shape and failing at `copy_()`.
+        expected_suffix = tuple(self._state_shape_suffix)
+        actual_suffix = tuple(newstate.shape[1:]) if newstate.dim() >= 1 else tuple(newstate.shape)
+        if actual_suffix != expected_suffix:
+            raise ValueError(
+                f"set_tensor_state: shape mismatch beyond batch dim. "
+                f"Expected suffix {expected_suffix}, got {actual_suffix} "
+                f"(full newstate.shape={tuple(newstate.shape)}, "
+                f"current state.shape={tuple(self.state.shape)})."
+            )
+        if tuple(newstate.shape) != tuple(self.state.shape):
+            self._ensure_state(newstate.shape[0])
         with torch.no_grad():
             self.state.copy_(newstate)
         return
@@ -368,8 +409,7 @@ class DiffusionNoiseS2(BaseNoiseS2):
             self.register_buffer("phi", phi, persistent=False)
             self.register_buffer("sigma_l", sigma_l, persistent=False)
 
-        # store the noise state: initialize to None
-        self.register_buffer("state", torch.zeros((batch_size, self.num_time_steps, self.num_channels, self.lmax_local, self.mmax_local, 2), dtype=torch.float32), persistent=False)
+        # state buffer is already allocated by BaseNoiseS2.__init__ via _ensure_state
 
         # if num_time_steps > 1, we need the toeplitz matrix for the discounts:
         #            [    1,     0,   0, 0]
@@ -397,14 +437,20 @@ class DiffusionNoiseS2(BaseNoiseS2):
     # this routine generates a noise sample for a single time step and updates the state accordingly, by appending the last time step
     @override
     def update(self, replace_state=False, batch_size=None):
+        if batch_size is not None:
+            self._ensure_state(batch_size)
 
-        # create single occurence
         with torch.no_grad():
             with amp.autocast(device_type=self.state.device.type, enabled=False):
-                nsteps = self.num_time_steps if replace_state else 1
-                if batch_size is None:
-                    batch_size = self.state.shape[0]
-                eta_l = torch.empty((batch_size, nsteps, self.num_channels, self.lmax_local, self.mmax_local, 2), dtype=torch.float32, device=self.state.device)
+                # draw either the full T-step history (replace) or a single step (AR)
+                if replace_state:
+                    eta_l = torch.empty_like(self.state)
+                else:
+                    B = self.state.shape[0]
+                    eta_l = torch.empty(
+                        (B, 1, self.num_channels, self.lmax_local, self.mmax_local, 2),
+                        dtype=self.state.dtype, device=self.state.device,
+                    )
                 if self.state.is_cuda:
                     eta_l.normal_(mean=0.0, std=1.0, generator=self.rng_gpu)
                 else:
@@ -421,8 +467,8 @@ class DiffusionNoiseS2(BaseNoiseS2):
                     # update previous state
                     if self.num_time_steps > 1:
                         last_state = self.state[:, -1, ...].unsqueeze(1)
-                        newstate = self.phi * last_state + eta_l
-                        newstate = torch.cat([self.state[:, 1:, ...], newstate], dim=1)
+                        newstep = self.phi * last_state + eta_l
+                        newstate = torch.cat([self.state[:, 1:, ...], newstep], dim=1)
                     else:
                         newstate = self.phi * self.state + eta_l
                 else:
@@ -433,11 +479,8 @@ class DiffusionNoiseS2(BaseNoiseS2):
                     if self.num_time_steps > 1:
                         newstate = torch.einsum("ctr,brclmu->btclmu", self.discount, newstate).contiguous()
 
-                # update the state
-                if newstate.shape == self.state.shape:
-                    self.state.copy_(newstate)
-                else:
-                    self.state = newstate
+                # shape matches self.state after _ensure_state above
+                self.state.copy_(newstate)
 
         return
 
@@ -521,8 +564,9 @@ class DummyNoiseS2(BaseNoiseS2):
         self.mode = mode
 
         # BaseNoiseS2.__init__ sets up nlat/nlon, comm splits, rng_cpu/rng_gpu, and
-        # registers a spectral state buffer. We replace the state buffer below with
-        # a spatial one of the correct shape.
+        # allocates the state buffer via _ensure_state. The shape is picked up through
+        # our override of _state_shape_suffix below, which gives a spatial (H, W)
+        # layout instead of the spectral (L, M, 2) default.
         super().__init__(
             img_shape=img_shape,
             batch_size=batch_size,
@@ -531,42 +575,22 @@ class DummyNoiseS2(BaseNoiseS2):
             seed=seed,
         )
 
-        # Replace the spectral state buffer (lmax, mmax, 2) with a spatial one (H, W).
-        self.register_buffer(
-            "state",
-            torch.zeros(
-                (batch_size, self.num_time_steps, self.num_channels, self.nlat_local, self.nlon_local),
-                dtype=torch.float32,
-            ),
-            persistent=False,
-        )
+    @property
+    def _state_shape_suffix(self):
+        # spatial (H, W) rather than spectral (L, M, 2)
+        return (self.num_time_steps, self.num_channels, self.nlat_local, self.nlon_local)
 
     @override
     def is_stateful(self):
         return False
 
     @override
-    def reset(self, batch_size=None):
-        if self.state is not None:
-            if batch_size is not None:
-                self.state = torch.zeros(
-                    batch_size, self.num_time_steps, self.num_channels,
-                    self.nlat_local, self.nlon_local,
-                    dtype=self.state.dtype, device=self.state.device,
-                )
-            with torch.no_grad():
-                self.state.fill_(0.0)
-
-    @override
     def update(self, replace_state=False, batch_size=None):
+        if batch_size is not None:
+            self._ensure_state(batch_size)
 
         with torch.no_grad():
-            if batch_size is None:
-                batch_size = self.state.shape[0]
-            newstate = torch.empty(
-                (batch_size, self.num_time_steps, self.num_channels, self.nlat_local, self.nlon_local),
-                dtype=self.state.dtype, device=self.state.device,
-            )
+            newstate = torch.empty_like(self.state)
 
             if self.mode == "constant_zero":
                 newstate.zero_()
@@ -576,10 +600,7 @@ class DummyNoiseS2(BaseNoiseS2):
                 else:
                     newstate.normal_(mean=0.0, std=1.0, generator=self.rng_cpu)
 
-            if newstate.shape == self.state.shape:
-                self.state.copy_(newstate)
-            else:
-                self.state = newstate
+            self.state.copy_(newstate)
 
         return
 
