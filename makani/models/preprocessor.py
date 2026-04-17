@@ -362,9 +362,36 @@ class Preprocessor2D(nn.Module):
 
         return
 
+    def _check_history_stats(self, x, caller: str):
+        """
+        Controlled-fail validation for history normalization paths.
+
+        - Raises RuntimeError if stats haven't been computed yet (caller forgot
+          history_compute_stats before normalize/denormalize).
+        - Raises ValueError if the input batch doesn't match the stats batch,
+          which in the mean/exponential modes is the only shape dim that isn't a
+          broadcast singleton. Common cause: stats were computed on one batch and
+          normalize/denormalize is being invoked on a differently-sized input
+          without a fresh history_compute_stats call.
+        """
+        if self.history_mean is None or self.history_std is None:
+            raise RuntimeError(
+                f"{caller}: history_mean / history_std are None. "
+                f"Call history_compute_stats(x) before {caller} (mode='{self.history_normalization_mode}')."
+            )
+        stats_batch = self.history_mean.shape[0]
+        if stats_batch != x.shape[0]:
+            raise ValueError(
+                f"{caller}: batch mismatch between input ({x.shape[0]}) and cached "
+                f"history stats ({stats_batch}). Did you forget to call "
+                f"history_compute_stats on the current input before {caller}?"
+            )
+
     def history_normalize(self, x, target=False):
         if self.history_normalization_mode in ["none", "timediff"]:
             return x
+
+        self._check_history_stats(x, caller="history_normalize")
 
         xdim = x.dim()
         if xdim == 5:
@@ -390,8 +417,7 @@ class Preprocessor2D(nn.Module):
         if self.history_normalization_mode in ["none", "timediff"]:
             return xn
 
-        assert self.history_mean is not None
-        assert self.history_std is not None
+        self._check_history_stats(xn, caller="history_denormalize")
 
         xndim = xn.dim()
         if xndim == 5:
