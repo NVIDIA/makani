@@ -29,6 +29,7 @@ import wandb
 
 # makani depenedencies
 from makani.utils import LossHandler, MetricsHandler
+from makani.utils.functions import expand_ensemble
 from makani.utils.driver import Driver
 from makani.utils.dataloader import get_dataloader
 from makani.utils.dataloaders.data_helpers import get_climatology
@@ -576,40 +577,50 @@ class StochasticTrainer(Driver):
                 for data in tqdm(self.valid_dataloader, desc=f"Validation progress epoch {self.epoch}", disable=not self.log_to_screen):
                     eval_steps += 1
 
-                    # map to gpu
-                    gdata = map(lambda x: x.to(self.device), data)
+                    # map to gpu; materialize to list so we can expand zenith features
+                    gdata = [x.to(self.device) for x in data]
+
+                    # When local_ensemble_size > 1, fold the ensemble dim into the batch
+                    # dim for a single forward per rollout step. xz / yz (zenith features)
+                    # must be expanded to (B*E, ...) so the preprocessor's cache lines up
+                    # with the folded-batch input; tar stays at the original batch — the
+                    # loss expects (B, E, ...) pred vs (B, ...) target.
+                    E = self.params.local_ensemble_size
+                    if len(gdata) == 4:
+                        gdata[2] = expand_ensemble(gdata[2], E)
+                        gdata[3] = expand_ensemble(gdata[3], E)
 
                     # preprocess
                     inp, tar = self.preprocessor.cache_unpredicted_features(*gdata)
                     inp = self.preprocessor.flatten_history(inp)
 
-                    # split list of targets
+                    B = inp.shape[0]
+
+                    # expand the input batch to (B*E, ...) for the folded-batch forward
+                    inp = expand_ensemble(inp, E)
+
+                    # split list of targets (stays at batch B)
                     tarlist = torch.split(tar, 1, dim=1)
 
-                    # make sure the input has the correct shape
-                    # inpt = inp.unsqueeze(1).repeat(1, self.params.local_ensemble_size, 1, 1, 1)
-                    # do we need to clone here?
-                    inptlist = [inp.clone() for _ in range(self.params.local_ensemble_size)]
                     for idt, targ in enumerate(tarlist):
                         # flatten history of the target
                         targ = self.preprocessor.flatten_history(targ)
 
-                        # FW pass
-                        predlist = []
                         with amp.autocast(device_type="cuda", enabled=self.amp_enabled, dtype=self.amp_dtype):
-                            for ic in range(self.params.local_ensemble_size):
-                                # retrieve input
-                                inpt = inptlist[ic]
+                            # single forward on the folded batch; StochasticInterpolant.forward
+                            # handles the batch-resize of both the preprocessor's input_noise
+                            # and its own noise_module internally.
+                            pred_flat = self.model_eval(inp, n_steps=self.params.stochastic_interpolation_steps)
 
-                                # forward pass
-                                pred = self.model_eval(inpt, n_steps=self.params.stochastic_interpolation_steps)
-                                predlist.append(pred)
+                            # advance the input history / unpredicted features once per step
+                            inp = self.preprocessor.append_history(inp, pred_flat, idt, update_state=True)
 
-                                # append input to prediction
-                                inptlist[ic] = self.preprocessor.append_history(inpt, pred, idt, update_state=(ic == 0))
+                            # reshape back to (B, E, ...) for the loss and downstream buffers
+                            if E > 1:
+                                pred = pred_flat.reshape(B, E, *pred_flat.shape[1:])
+                            else:
+                                pred = pred_flat.unsqueeze(1)
 
-                            # concatenate
-                            pred = torch.stack(predlist, dim=1)
                             loss = self.loss_obj(pred, targ)
 
                         # TODO: move all of this into the visualization handler

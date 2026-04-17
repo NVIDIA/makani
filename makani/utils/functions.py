@@ -22,3 +22,24 @@ def relative_error(tensor1, tensor2):
 # this computes an absolute error compatible with torch.allclose or np.allclose
 def absolute_error(tensor1, tensor2):
     return torch.max(torch.abs(tensor1-tensor2))
+
+
+def expand_ensemble(x: torch.Tensor, ensemble_size: int) -> torch.Tensor:
+    """
+    Replicate each element of ``x`` along a new ensemble dim, then flatten that dim
+    into the batch dim: ``(B, ...) -> (B*E, ...)``.
+
+    Layout is batch-major: the E consecutive entries at positions ``b*E .. b*E+E-1``
+    all correspond to the original batch element ``x[b]``. This pairs with a
+    symmetric ``pred_flat.reshape(B, E, ...)`` on the model output so a single forward
+    on the folded batch produces independent ensemble samples per input.
+
+    ``ensemble_size <= 1`` returns ``x`` unchanged (no allocation).
+    """
+    if ensemble_size <= 1:
+        return x
+    return (
+        x.unsqueeze(1)
+         .repeat_interleave(ensemble_size, dim=1)
+         .reshape(x.shape[0] * ensemble_size, *x.shape[1:])
+    )

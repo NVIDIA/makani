@@ -26,6 +26,7 @@ import torch.utils.data as tud
 
 from makani.utils.driver import Driver
 from makani.utils import LossHandler, MetricsHandler
+from makani.utils.functions import expand_ensemble
 from makani.utils.dataloader import get_dataloader
 from makani.utils.dataloaders.data_loader_multifiles import MultifilesDataset
 from makani.utils.dataloaders.data_helpers import get_date_from_timestamp, get_data_normalization, get_climatology
@@ -564,15 +565,9 @@ class Inferencer(Driver):
                         inp_raw = self.preprocessor.flatten_history(inp_raw)
                         B = inp_raw.shape[0]
 
-                        if E > 1:
-                            inp = inp_raw.unsqueeze(1).repeat_interleave(E, dim=1).reshape(B * E, *inp_raw.shape[1:])
-                            if inpz_raw is not None:
-                                inpz = inpz_raw.unsqueeze(1).repeat_interleave(E, dim=1).reshape(B * E, *inpz_raw.shape[1:])
-                            else:
-                                inpz = None
-                        else:
-                            inp = inp_raw
-                            inpz = inpz_raw
+                        # fold the ensemble dim into the batch dim (no-op when E==1)
+                        inp = expand_ensemble(inp_raw, E)
+                        inpz = expand_ensemble(inpz_raw, E) if inpz_raw is not None else None
 
                         # reset noise state at the folded batch for this episode
                         self.preprocessor.update_internal_state(replace_state=True, batch_size=inp.shape[0])
@@ -594,10 +589,7 @@ class Inferencer(Driver):
                         targ = self.preprocessor.flatten_history(tar)
 
                         # expand target-side zenith to the folded batch for caching
-                        if tarz_raw is not None and E > 1:
-                            tarz = tarz_raw.unsqueeze(1).repeat_interleave(E, dim=1).reshape(B * E, *tarz_raw.shape[1:])
-                        else:
-                            tarz = tarz_raw
+                        tarz = expand_ensemble(tarz_raw, E) if tarz_raw is not None else None
 
                         # set unpredicted features at (B*E, ...) shape to match the folded-batch inp
                         self.preprocessor.cache_unpredicted_features(None, None, inpz, tarz)
