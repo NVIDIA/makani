@@ -16,8 +16,6 @@
 from typing import Optional, List
 from functools import partial
 
-import numpy as np
-
 import torch
 from torch import nn
 

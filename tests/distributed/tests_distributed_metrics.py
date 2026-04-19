@@ -33,13 +33,8 @@ from torch_harmonics.distributed import compute_split_shapes
 from makani.utils import MetricsHandler
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-<<<<<<< HEAD
 from .distributed_helpers import init_grid, split_helper, get_default_parameters
-from ..testutils import compare_arrays
-=======
-from .distributed_helpers import split_helper, get_default_parameters
 from ..testutils import disable_tf32, compare_arrays
->>>>>>> main
 
 # because of physicsnemo/NCCL tear down issues, we can only run one test at a time
 _metric_handler_params = [

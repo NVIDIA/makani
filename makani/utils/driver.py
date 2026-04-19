@@ -603,6 +603,14 @@ class Driver(metaclass=abc.ABCMeta):
             if name in state_dict and hasattr(buf, "sharded_dims_mp"):
                 state_dict[name].sharded_dims_mp = buf.sharded_dims_mp
 
+        # attach sharding metadata to state_dict tensors (same as legacy) so torch.save preserves it
+        for name, param in model.named_parameters():
+            if name in state_dict and hasattr(param, "sharded_dims_mp"):
+                state_dict[name].sharded_dims_mp = param.sharded_dims_mp
+        for name, buf in model.named_buffers():
+            if name in state_dict and hasattr(buf, "sharded_dims_mp"):
+                state_dict[name].sharded_dims_mp = buf.sharded_dims_mp
+
         store_dict = {"model_state": state_dict}
 
         if loss is not None:
