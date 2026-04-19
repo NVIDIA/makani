@@ -15,19 +15,16 @@
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import numpy as np
 import math
 
+from functools import partial
 from torch import amp
 
 # import convenience functions for factorized tensors
 from makani.utils import comm
 from makani.models.common import ComplexReLU
-from makani.models.common.contractions import _contract_rank
-from makani.models.common.factorizations import get_contract_fun
+from makani.models.common.contractions import _contract_dense_pytorch
 
-import torch_harmonics as th
 import torch_harmonics.distributed as thd
 
 
@@ -107,7 +104,7 @@ class SpectralConv(nn.Module):
             self.weight.sharded_dims_mp[-2] = "h"
 
         # get the contraction handle. This should return a pyTorch contraction
-        self._contract = get_contract_fun(self.weight, implementation="factorized", separable=separable, complex=True, operator_type=operator_type)
+        self._contract = partial(_contract_dense_pytorch, separable=separable, complex=True, operator_type=operator_type)
 
         if bias == True:
             self.bias = nn.Parameter(torch.zeros(1, self.out_channels, 1, 1))
@@ -117,26 +114,30 @@ class SpectralConv(nn.Module):
     def forward(self, x):
         dtype = x.dtype
         residual = x
-        x = x.float()
 
-        with amp.autocast(device_type="cuda", enabled=False):
+        with amp.autocast(device_type=x.device.type, enabled=False):
+            x = x.to(torch.float32)
             x = self.forward_transform(x).contiguous()
             if self.scale_residual:
                 residual = self.inverse_transform(x)
-                residual = residual.to(dtype)
+        
+        # convert back
+        if self.scale_residual:
+            residual = residual.to(dtype=dtype)
 
         B, C, H, W = x.shape
         x = x.reshape(B, self.num_groups, C // self.num_groups, H, W)
-        xp = self._contract(x, self.weight, separable=self.separable, operator_type=self.operator_type)
+        xp = self._contract(x, self.weight)
         x = xp.reshape(B, self.out_channels, H, W).contiguous()
 
-        with amp.autocast(device_type="cuda", enabled=False):
+        with amp.autocast(device_type=x.device.type, enabled=False):
             x = self.inverse_transform(x)
+        
+        # convert back
+        x = x.to(dtype=dtype)
 
         if hasattr(self, "bias"):
             x = x + self.bias
-
-        x = x.to(dtype=dtype)
 
         return x, residual
 
@@ -259,23 +260,28 @@ class SpectralAttention(nn.Module):
     def forward(self, x):
         dtype = x.dtype
         residual = x
-        x = x.to(torch.float32)
 
         # FWD transform
-        with amp.autocast(device_type="cuda", enabled=False):
+        with amp.autocast(device_type=x.device.type, enabled=False):
+            x = x.to(torch.float32)
             x = self.forward_transform(x)
             if self.scale_residual:
                 residual = self.inverse_transform(x)
-                residual = residual.to(dtype)
+
+        # convert back
+        x = x.to(dtype=dtype)
+        if self.scale_residual:
+            residual = residual.to(dtype=dtype)
 
         # MLP
         x = self.forward_mlp(x)
 
         # BWD transform
-        with amp.autocast(device_type="cuda", enabled=False):
+        with amp.autocast(device_type=x.device.type, enabled=False):
+            x = x.to(torch.float32)
             x = self.inverse_transform(x)
 
-        # cast back to initial precision
-        x = x.to(dtype)
+        # convert back
+        x = x.to(dtype=dtype)
 
         return x, residual

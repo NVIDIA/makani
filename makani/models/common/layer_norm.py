@@ -18,7 +18,7 @@ import torch.nn as nn
 
 from torch import amp
 
-from typing import Tuple, List, Optional
+from typing import Tuple, Optional
 
 # quadrature stuff
 from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature
@@ -73,19 +73,18 @@ class GeometricInstanceNormS2(nn.Module):
         B, C, H, W = x.shape
 
         xtype = x.dtype
-        with amp.autocast(device_type="cuda", enabled=False):
-            x = x.to(torch.float32)
+        with amp.autocast(device_type=x.device.type, enabled=False):
+            xf = x.to(torch.float32)
 
             # compute var and mean
-            mean = self.quadrature(x)
-            var = self.quadrature(torch.square(x - mean.reshape(B, C, 1, 1)))
+            mean = self.quadrature(xf)
+            var = self.quadrature(torch.square(xf - mean.reshape(B, C, 1, 1)))
 
         # reshape
         var = var.reshape(B, C, 1, 1)
         mean = mean.reshape(B, C, 1, 1)
 
         # convert types
-        x = x.to(xtype)
         mean = mean.to(xtype)
         var = var.to(xtype)
 

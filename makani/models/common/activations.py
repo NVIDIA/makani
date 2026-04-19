@@ -80,7 +80,7 @@ class ComplexActivation(nn.Module):
                 self.bias = nn.Parameter(torch.zeros((1), dtype=torch.float32))
         else:
             bias = torch.zeros((1), dtype=torch.float32)
-            self.register_buffer("bias", bias)
+            self.register_buffer("bias", bias, persistent=False)
 
         # real valued activation
         self.act = activation

@@ -14,11 +14,10 @@
 # limitations under the License.
 
 import os
-import glob
 import abc
 import gc
 
-from typing import Optional, Dict
+from typing import Optional, Dict, Tuple
 from collections import OrderedDict
 
 import numpy as np
@@ -27,7 +26,6 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.optim.lr_scheduler as lr_scheduler
-import torch.distributed as dist
 
 import logging
 import wandb
@@ -43,10 +41,8 @@ from makani.utils.checkpoint_helpers import (
     gather_optimizer_state_dict,
     scatter_optimizer_state_dict,
     prepend_prefix_to_state_dict,
+    get_model_state_dict_prefix,
 )
-
-# for flexible checkpoints
-from physicsnemo.distributed.utils import split_tensor_along_dim
 
 
 class Driver(metaclass=abc.ABCMeta):
@@ -418,9 +414,9 @@ class Driver(metaclass=abc.ABCMeta):
         # if all those test pass, we are good to go
         # this is reworked to avoid loading modules related to the SHT
         state_dict = checkpoint["model_state"]
-        if isinstance(model, nn.parallel.DistributedDataParallel):
-            # prepend module prefix to state dict:
-            prepend_prefix_to_state_dict(state_dict, "module.")
+        prefix = get_model_state_dict_prefix(model)
+        if prefix:
+            prepend_prefix_to_state_dict(state_dict, prefix)
 
         # load state dict
         model.load_state_dict(state_dict, strict=strict)
@@ -459,9 +455,9 @@ class Driver(metaclass=abc.ABCMeta):
         # this is reworked to avoid loading modules related to the SHT
         state_dict = checkpoint["model_state"]
 
-        if isinstance(model, nn.parallel.DistributedDataParallel):
-            # prepend module prefix to state dict:
-            prepend_prefix_to_state_dict(state_dict, "module.")
+        prefix = get_model_state_dict_prefix(model)
+        if prefix:
+            prepend_prefix_to_state_dict(state_dict, prefix)
 
         if comm.get_size("model") > 1:
             state_dict = scatter_model_state_dict(model, state_dict, strict)
@@ -530,14 +526,21 @@ class Driver(metaclass=abc.ABCMeta):
         # attach sharding information to model state:
         state_dict = model.state_dict()
 
-        # drop module prefix in case if DDP is being used
-        if isinstance(model, nn.parallel.DistributedDataParallel):
-            nn.modules.utils.consume_prefix_in_state_dict_if_present(state_dict, "module.")
+        # strip all wrapper prefixes (torch.compile -> "_orig_mod.", DDP -> "module.")
+        # so checkpoints are always stored in canonical form without wrapper-specific keys
+        prefix = get_model_state_dict_prefix(model)
+        if prefix:
+            nn.modules.utils.consume_prefix_in_state_dict_if_present(state_dict, prefix)
 
         # check for model parallelism
-        for param, sk in zip(model.parameters(), state_dict.keys()):
-            if hasattr(param, "sharded_dims_mp"):
-                state_dict[sk].sharded_dims_mp = param.sharded_dims_mp
+        # Build a name-keyed map using the same prefix that was stripped from the
+        # state dict, so lookups are safe regardless of parameter iteration order.
+        # removeprefix is a no-op when prefix is "", so no guard needed.
+        param_map = {name.removeprefix(prefix): param for name, param in model.named_parameters()}
+        for sk, tensor in state_dict.items():
+            param = param_map.get(sk)
+            if param is not None and hasattr(param, "sharded_dims_mp"):
+                tensor.sharded_dims_mp = param.sharded_dims_mp
 
         # add model state dict to store dict
         store_dict = {"model_state": state_dict}
@@ -586,9 +589,19 @@ class Driver(metaclass=abc.ABCMeta):
         else:
             state_dict = model.state_dict()
 
-        # drop module prefix in case if DDP is being used
-        if isinstance(model, nn.parallel.DistributedDataParallel):
-            nn.modules.utils.consume_prefix_in_state_dict_if_present(state_dict, "module.")
+        # strip all wrapper prefixes (torch.compile -> "_orig_mod.", DDP -> "module.")
+        # so checkpoints are always stored in canonical form without wrapper-specific keys
+        prefix = get_model_state_dict_prefix(model)
+        if prefix:
+            nn.modules.utils.consume_prefix_in_state_dict_if_present(state_dict, prefix)
+
+        # attach sharding metadata to state_dict tensors (same as legacy) so torch.save preserves it
+        for name, param in model.named_parameters():
+            if name in state_dict and hasattr(param, "sharded_dims_mp"):
+                state_dict[name].sharded_dims_mp = param.sharded_dims_mp
+        for name, buf in model.named_buffers():
+            if name in state_dict and hasattr(buf, "sharded_dims_mp"):
+                state_dict[name].sharded_dims_mp = buf.sharded_dims_mp
 
         store_dict = {"model_state": state_dict}
 
@@ -688,8 +701,88 @@ class Driver(metaclass=abc.ABCMeta):
         if params.lr_warmup_steps > 0:
             if params.scheduler == "ReduceLROnPlateau":
                 raise NotImplementedError("Error, warmup scheduler not implemented for ReduceLROnPlateau scheduler")
-            warmup_scheduler = lr_scheduler.LinearLR(optimizer, start_factor=params.lr_start, end_factor=1.0, total_iters=params.lr_warmup_steps)
+            warmup_scheduler = lr_scheduler.LinearLR(optimizer, start_factor=params.get("lr_start", 0.0), end_factor=1.0, total_iters=params.get("lr_warmup_steps", 0))
 
-            scheduler = lr_scheduler.SequentialLR(optimizer, [warmup_scheduler, scheduler], milestones=[params.lr_warmup_steps])
+            scheduler = lr_scheduler.SequentialLR(optimizer, [warmup_scheduler, scheduler], milestones=[params.get("lr_warmup_steps", 0)])
 
         return scheduler
+
+    def init_visualizer(self,
+        params: YParams,
+        lat_lon_global: Tuple[np.ndarray, np.ndarray],
+        out_bias: torch.Tensor,
+        out_scale: torch.Tensor,
+        device: torch.device,
+    ):
+        """
+        Initialize the visualizer
+        """
+        from makani.utils import visualize
+
+        # windspeed
+        cnames = params.channel_names
+        u10m_channel_index = cnames.index("u10m") if "u10m" in cnames else None
+        v10m_channel_index = cnames.index("v10m") if "v10m" in cnames else None
+        if u10m_channel_index is not None and v10m_channel_index is not None:
+            plot_list = [
+                {
+                    "name": "windspeed_uv10",
+                    "functor": f"lambda x: np.sqrt(np.square(x[{u10m_channel_index}, ...]) + np.square(x[{v10m_channel_index}, ...]))",
+                    "diverging": False
+                }
+            ]
+        else:
+            plot_list = []
+
+        # z500
+        channel_index = cnames.index("z500") if "z500" in cnames else None
+        if channel_index is not None:
+            plot_list += [
+                {
+                    "name": "geopotential_z500", 
+                    "functor": f"lambda x: x[{channel_index}, ...]", 
+                    "diverging": False
+                }
+            ]
+
+        # q100
+        channel_index = cnames.index("q100") if "q100" in cnames else None
+        if channel_index is not None:
+            plot_list += [
+                {
+                    "name": "specific_humidity_q100", 
+                    "functor": f"lambda x: x[{channel_index}, ...]", 
+                    "diverging": False
+                }
+            ]
+
+        if plot_list:
+            visualizer = visualize.VisualizationWrapper(
+                params.log_to_wandb,
+                path=None,
+                prefix=None,
+                plot_list=plot_list,
+                lat=np.deg2rad(lat_lon_global[0]),
+                lon=np.deg2rad(lat_lon_global[1]) - np.pi,
+                scale=out_scale[0, ...],
+                bias=out_bias[0, ...],
+                num_workers=params.num_visualization_workers,
+            )
+            # allocate pinned tensors for faster copy:
+            if device.type == "cuda":
+                visualizer.stream = torch.Stream(device="cuda")
+                pin_memory = True
+            else:
+                visualizer.stream = None
+                pin_memory = False
+
+            visualizer.prediction_cpu = torch.empty(
+                ((params.N_target_channels // (params.n_future + 1)), params.img_shape_x_resampled, params.img_shape_y_resampled), device="cpu", pin_memory=pin_memory
+                )
+            visualizer.target_cpu = torch.empty(
+                ((params.N_target_channels // (params.n_future + 1)), params.img_shape_x_resampled, params.img_shape_y_resampled), device="cpu", pin_memory=pin_memory
+            )
+        else:
+            visualizer = None
+
+        return visualizer

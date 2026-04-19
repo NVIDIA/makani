@@ -14,18 +14,10 @@
 # limitations under the License.
 
 from functools import partial
-from collections import OrderedDict
-from copy import Error, deepcopy
-from re import S
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.fft
-from torch.nn.modules.container import Sequential
-from torch.utils.checkpoint import checkpoint_sequential
-from typing import Optional
-import math
 
 # helpers
 from makani.models.common import ComplexReLU, PatchEmbed2D, DropPath, MLP

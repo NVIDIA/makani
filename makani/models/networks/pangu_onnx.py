@@ -13,17 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
-import sys
-import math
-import numpy as np
-from collections.abc import Sequence
-from copy import deepcopy
-
 import torch
-import time
-import torch.nn as nn
-from torch.nn import functional as F
 from makani.utils.features import get_channel_groups
 
 from makani.models.onnx_wrapper import OnnxWrapper
@@ -68,8 +58,8 @@ class PanguOnnx(OnnxWrapper):
         if len(atmo_chans) % self.n_atmo_groups:
             raise ValueError(f"Expected number of atmospheric variables to be divisible by number of atmospheric groups but got {len(atmo_chans)} and {self.n_atmo_groups}")
 
-        self.register_buffer("atmo_channels", torch.LongTensor(atmo_chans), persistent=False)
-        self.register_buffer("surf_channels", torch.LongTensor(surf_chans), persistent=False)
+        self.register_buffer("atmo_channels", torch.tensor(atmo_chans, dtype=torch.long), persistent=False)
+        self.register_buffer("surf_channels", torch.tensor(surf_chans, dtype=torch.long), persistent=False)
 
         return
 

@@ -32,7 +32,7 @@ def plot_comparison(
     lon=None,
     pred_title="Prediction",
     truth_title="Ground truth",
-    cmap="twilight_shifted",
+    cmap="RdBu",
     projection="mollweide",
     diverging=False,
     figsize=(6, 7),
@@ -58,18 +58,18 @@ def plot_comparison(
     Lon, Lat = np.meshgrid(lon, lat)
 
     # only normalize with the truth
-    vmax = vmax or np.abs(truth).max()
-    # vmax = vmax or max(np.abs(pred).max(), np.abs(truth).max())
     if diverging:
+        vmax = vmax or np.abs(truth).max()
         vmin = -vmax
     else:
-        vmin = 0.0
+        vmax = truth.max()
+        vmin = truth.min()
 
     fig = plt.figure(figsize=figsize)
 
     ax = fig.add_subplot(2, 1, 1, projection=projection)  # can also be Mollweide
 
-    ax.pcolormesh(Lon, Lat, pred, cmap=cmap)
+    ax.pcolormesh(Lon, Lat, pred, cmap=cmap, vmin=vmin, vmax=vmax)
     ax.set_title(pred_title)
     ax.grid(True)
     ax.set_xticklabels([])
@@ -77,7 +77,7 @@ def plot_comparison(
 
     ax = fig.add_subplot(2, 1, 2, projection=projection)  # can also be Mollweide
 
-    ax.pcolormesh(Lon, Lat, truth, cmap=cmap)
+    ax.pcolormesh(Lon, Lat, truth, cmap=cmap, vmin=vmin, vmax=vmax)
     ax.set_title(truth_title)
     ax.grid(True)
     ax.set_xticklabels([])

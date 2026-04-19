@@ -25,9 +25,8 @@ from makani.utils.losses.base_loss import LossType, GeometricBaseLoss, SpectralB
 from makani.utils import comm
 
 # distributed stuff
-from physicsnemo.distributed.utils import compute_split_shapes, split_tensor_along_dim
-from physicsnemo.distributed.mappings import scatter_to_parallel_region, reduce_from_parallel_region, copy_to_parallel_region
-from makani.mpu.mappings import distributed_transpose
+from torch_harmonics.distributed import split_tensor_along_dim
+from makani.mpu.mappings import scatter_to_parallel_region, reduce_from_parallel_region, distributed_transpose
 
 # torch-harmonics for convolutions
 import torch_harmonics as th
@@ -481,9 +480,9 @@ class SpectralCRPSLoss(SpectralBaseLoss):
 
         # before anything else compute the transform
         # as the CDF definition doesn't generalize well to more than one-dimensional variables, we treat complex and imaginary part as the same
-        forecasts = forecasts.float()
-        observations = observations.float()
-        with amp.autocast(device_type="cuda", enabled=False):
+        with amp.autocast(device_type=forecasts.device.type, enabled=False):
+            forecasts = forecasts.to(torch.float32)
+            observations = observations.to(torch.float32)
             forecasts = self.sht(forecasts) / math.sqrt(4.0 * math.pi)
             observations = self.sht(observations) / math.sqrt(4.0 * math.pi)
 

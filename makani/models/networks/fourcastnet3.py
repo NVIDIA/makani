@@ -23,7 +23,7 @@ import torch.amp as amp
 from torch.utils.checkpoint import checkpoint
 
 # helpers
-from makani.models.common import DropPath, LayerScale, MLP, SpectralConv, LearnablePositionEmbedding, ConstantImputation, MLPImputation
+from makani.models.common import DropPath, LayerScale, MLP, SpectralConv, LearnablePositionEmbedding, ConstantImputation, MLPImputation, EncoderDecoder
 from makani.utils.features import get_water_channels, get_channel_groups
 from makani.utils.grids import compute_spherical_bandlimit
 
@@ -32,6 +32,7 @@ import torch_harmonics as th
 import torch_harmonics.distributed as thd
 
 # get pre-formulated layers
+#from makani.models.common import GeometricInstanceNormS2
 from makani.mpu.layers import DistributedMLP
 
 # more distributed stuff
@@ -44,7 +45,7 @@ from physicsnemo import ModelMetaData
 
 # heuristic for finding theta_cutoff
 def _compute_cutoff_radius(lmax, kernel_shape, basis_type):
-    margin_factor = {"piecewise linear": 1.0, "morlet": 1.0, "harmonic": 1.0, "zernike": 1.0}
+    margin_factor = {"piecewise linear": 1.0, "morlet": 1.0, "harmonic": 1.0, "zernike": 1.0, "fourier-bessel": 1.5}
     return margin_factor[basis_type] * (kernel_shape[0] + 0.25) * math.pi / float(lmax)
 
 # commenting out torch.compile due to long intiial compile times
@@ -60,6 +61,53 @@ class Sin(nn.Module):
     def forward(self, x):
         return torch.sin(x)
 
+@torch.compiler.disable(recursive=True)
+def _get_norm_layer_handle(
+    h,
+    w,
+    embed_dim,
+    normalization_layer="none",
+    sht_grid_type="legendre-gauss",
+):
+    """
+    get the handle for ionitializing normalization layers
+    """
+    # pick norm layer
+    if normalization_layer == "layer_norm":
+        from makani.mpu.layer_norm import DistributedLayerNorm
+        norm_layer_handle = partial(DistributedLayerNorm, normalized_shape=(embed_dim), elementwise_affine=True, eps=1e-6)
+    elif normalization_layer == "instance_norm":
+        if comm.get_size("spatial") > 1:
+            from makani.mpu.layer_norm import DistributedInstanceNorm2d
+            norm_layer_handle = partial(DistributedInstanceNorm2d, num_features=embed_dim, eps=1e-6, affine=True)
+        else:
+            norm_layer_handle = partial(nn.InstanceNorm2d, num_features=embed_dim, eps=1e-6, affine=True, track_running_stats=False)
+    elif normalization_layer == "instance_norm_s2":
+        if comm.get_size("spatial") > 1:
+            from makani.mpu.layer_norm import DistributedGeometricInstanceNormS2
+            norm_layer_handle = DistributedGeometricInstanceNormS2
+        else:
+            from makani.models.common import GeometricInstanceNormS2
+            norm_layer_handle = GeometricInstanceNormS2
+        norm_layer_handle = partial(
+            norm_layer_handle,
+            img_shape=(h, w),
+            crop_shape=(h, w),
+            crop_offset=(0, 0),
+            grid_type=sht_grid_type,
+            pole_mask=0,
+            num_features=embed_dim,
+            eps=1e-6,
+            affine=True,
+        )
+    elif normalization_layer == "none":
+        norm_layer_handle = nn.Identity
+    else:
+        raise NotImplementedError(f"Error, normalization {normalization_layer} not implemented.")
+
+    return norm_layer_handle
+
+
 class DiscreteContinuousEncoder(nn.Module):
     def __init__(
         self,
@@ -73,38 +121,10 @@ class DiscreteContinuousEncoder(nn.Module):
         basis_type="morlet",
         basis_norm_mode="nodal",
         lmax=240,
-        skip=False,
-        resample_sht=False,
         groups=1,
         bias=False,
     ):
         super().__init__()
-
-        if skip:
-            # init distributed torch-harmonics if needed
-            if comm.get_size("spatial") > 1:
-                polar_group = None if (comm.get_size("h") == 1) else comm.get_group("h")
-                azimuth_group = None if (comm.get_size("w") == 1) else comm.get_group("w")
-                thd.init(polar_group, azimuth_group)
-
-            if resample_sht:
-                # set up sht for upsampling
-                sht_handle = thd.DistributedRealSHT if comm.get_size("spatial") > 1 else th.RealSHT
-                isht_handle = thd.DistributedInverseRealSHT if comm.get_size("spatial") > 1 else th.InverseRealSHT
-
-                # set upsampling module
-                self.sht = sht_handle(*inp_shape, grid=grid_in).float()
-                self.isht = isht_handle(*out_shape, lmax=self.sht.lmax, mmax=self.sht.mmax, grid=grid_out).float()
-                self.resample = nn.Sequential(self.sht, self.isht)
-            else:
-                resample_handle = thd.DistributedResampleS2 if comm.get_size("spatial") > 1 else th.ResampleS2
-
-                self.resample = resample_handle(*inp_shape, *out_shape, grid_in=grid_in, grid_out=grid_out, mode="bilinear")
-
-            self.skip_projection = nn.Conv2d(inp_chans, out_chans, 1, 1, groups=groups, bias=False)
-            torch.nn.init.normal_(self.skip_projection.weight, std=math.sqrt(1.0 / inp_chans))
-            self.skip_projection.weight.is_shared_mp = ["spatial"]
-            self.skip_projection.weight.sharded_dims_mp = [None, None, None, None]
 
         # heuristic for finding theta_cutoff
         theta_cutoff = _compute_cutoff_radius(lmax=lmax, kernel_shape=kernel_shape, basis_type=basis_type)
@@ -133,18 +153,9 @@ class DiscreteContinuousEncoder(nn.Module):
                 self.conv.bias.sharded_dims_mp = [None]
 
     def forward(self, x):
-        dtype = x.dtype
 
-        with amp.autocast(device_type="cuda", enabled=False):
-            x = x.float()
-            if hasattr(self, "skip_projection"):
-                res = self.resample(x)
-                res = res.to(dtype=dtype)
-            x = self.conv(x)
-            x = x.to(dtype=dtype)
-
-        if hasattr(self, "skip_projection"):
-            x = x + self.skip_projection(res)
+        # convolution
+        x = self.conv(x)
 
         return x
 
@@ -162,7 +173,6 @@ class DiscreteContinuousDecoder(nn.Module):
         basis_type="morlet",
         basis_norm_mode="nodal",
         lmax=240,
-        skip=False,
         resample_sht=False,
         groups=1,
         bias=False,
@@ -189,12 +199,6 @@ class DiscreteContinuousDecoder(nn.Module):
             resample_handle = thd.DistributedResampleS2 if comm.get_size("spatial") > 1 else th.ResampleS2
 
             self.resample = resample_handle(*inp_shape, *out_shape, grid_in=grid_in, grid_out=grid_out, mode="bilinear")
-
-        if skip:
-            self.skip_projection = nn.Conv2d(inp_chans, out_chans, 1, 1, groups=groups, bias=False)
-            torch.nn.init.normal_(self.skip_projection.weight, std=math.sqrt(1.0 / inp_chans))
-            self.skip_projection.weight.is_shared_mp = ["spatial"]
-            self.skip_projection.weight.sharded_dims_mp = [None, None, None, None]
 
         # heuristic for finding theta_cutoff
         # nto entirely clear if out or in shape should be used here with a non-conv method for upsampling
@@ -223,29 +227,14 @@ class DiscreteContinuousDecoder(nn.Module):
                 self.conv.bias.is_shared_mp = ["spatial"]
                 self.conv.bias.sharded_dims_mp = [None]
 
-    def _conv_forward(self, x):
-        dtype = x.dtype
-
-        with amp.autocast(device_type="cuda", enabled=False):
-            x = x.float()
-            x = self.resample(x)
-            x = self.conv(x)
-            x = x.to(dtype=dtype)
-
-        return x
-
     def forward(self, x):
         dtype = x.dtype
 
         with amp.autocast(device_type="cuda", enabled=False):
-            x = x.float()
-            res = self.resample(x)
-            x = self.conv(res)
-            x = x.to(dtype=dtype)
+            res = self.resample(x.float())
             res = res.to(dtype=dtype)
 
-        if hasattr(self, "skip_projection"):
-            x = x + self.skip_projection(res)
+        x = self.conv(res)
 
         return x
 
@@ -261,7 +250,7 @@ class NeuralOperatorBlock(nn.Module):
         mlp_drop_rate=0.0,
         path_drop_rate=0.0,
         act_layer=nn.GELU,
-        norm_layer=nn.Identity,
+        normalization_layer="none",
         num_groups=1,
         skip="identity",
         layer_scale=True,
@@ -342,8 +331,16 @@ class NeuralOperatorBlock(nn.Module):
             nn.init.normal_(self.bias_std, mean=0.0, std=scale)
             self.bias_std.is_shared_mp = ["spatial"]
 
-        # norm layer
-        self.norm = norm_layer()
+        # get normalization layer handles and instances
+        norm_layer_handle = _get_norm_layer_handle(
+            self.inp_shape[0],
+            self.inp_shape[1],
+            inp_chans,
+            normalization_layer=normalization_layer,
+            sht_grid_type=forward_transform.grid,
+        )
+        self.norm1 = norm_layer_handle()
+        self.norm2 = norm_layer_handle()
 
         # MLP
         if use_mlp == True:
@@ -408,6 +405,9 @@ class NeuralOperatorBlock(nn.Module):
         Updated NO block
         """
 
+        # apply normalization layer 1
+        x = self.norm1(x)
+
         dx = self._conv_forward(x)
 
         if hasattr(self, "bias_std"):
@@ -415,8 +415,8 @@ class NeuralOperatorBlock(nn.Module):
             n.normal_(mean=0.0, std=1.0, generator=self.rng_gpu if n.is_cuda else self.rng_cpu)
             dx = dx + self.bias_std * n
 
-        if hasattr(self, "norm"):
-            dx = self.norm(dx)
+        # apply normalization layer 2
+        dx = self.norm2(dx)
 
         if hasattr(self, "mlp"):
             dx = self.mlp(dx)
@@ -452,7 +452,6 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         kernel_shape=(3, 3),
         filter_basis_type="morlet",
         filter_basis_norm_mode="mean",
-        encoder_skip=False,
         resample_sht=False,
         channel_names=["u500", "v500"],
         aux_channel_names=[],
@@ -554,10 +553,8 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
             basis_type=filter_basis_type,
             basis_norm_mode=filter_basis_norm_mode,
             lmax=self.lmax,
-            skip=encoder_skip,
             groups=math.gcd(self.n_in_chans, self.embed_dim),
             bias=encoder_bias,
-            resample_sht=resample_sht,
         )
 
         # encoder for the auxiliary channels
@@ -573,10 +570,8 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
                 basis_type=filter_basis_type,
                 basis_norm_mode=filter_basis_norm_mode,
                 lmax=self.lmax,
-                skip=encoder_skip,
                 groups=math.gcd(self.n_aux_chans, self.aux_embed_dim),
                 bias=encoder_bias,
-                resample_sht=resample_sht,
             )
 
 
@@ -592,7 +587,6 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
             basis_type=filter_basis_type,
             basis_norm_mode=filter_basis_norm_mode,
             lmax=self.lmax,
-            skip=encoder_skip,
             groups=math.gcd(self.n_out_chans, self.embed_dim),
             bias=encoder_bias,
             resample_sht=resample_sht,
@@ -606,8 +600,6 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         self.pos_drop = nn.Dropout(p=pos_drop_rate) if pos_drop_rate > 0.0 else nn.Identity()
         dpr = [x.item() for x in torch.linspace(0, path_drop_rate, num_layers)]
 
-        # get the handle for the normalization layer
-        norm_layer = self._get_norm_layer_handle(self.h, self.w, self.embed_dim + self.total_aux_embed_dim, normalization_layer=normalization_layer, sht_grid_type=sht_grid_type)
 
         # Internal NO blocks
         self.blocks = nn.ModuleList([])
@@ -629,7 +621,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
                 mlp_drop_rate=mlp_drop_rate,
                 path_drop_rate=dpr[i],
                 act_layer=activation_function,
-                norm_layer=norm_layer,
+                normalization_layer=normalization_layer,
                 skip="identity",
                 layer_scale=layer_scale,
                 use_mlp=use_mlp,
@@ -649,15 +641,13 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         if clamp_water:
             water_chans = get_water_channels(channel_names)
             if len(water_chans) > 0:
-                self.register_buffer("water_channels", torch.LongTensor(water_chans), persistent=False)
+                self.register_buffer("water_channels", torch.tensor(water_chans, dtype=torch.long), persistent=False)
 
         # freeze the encoder/decoder
         if freeze_encoder:
             frozen_params = list(self.encoder.parameters()) + list(self.decoder.parameters())
             if hasattr(self, "aux_encoder"):
                 frozen_params += list(self.aux_encoder.parameters())
-            if self.big_skip:
-                frozen_params += list(self.residual_transform.parameters())
             for param in frozen_params:
                 param.requires_grad = False
 
@@ -678,23 +668,14 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
     ):
         """
         Initialize the spectral transforms based on the maximum number of modes to keep. Handles the computation
-        of local image shapes and domain parallelism, based on the
+        of local image shapes and domain parallelism.
         """
 
         # precompute the cutoff frequency on the sphere
         if lmax is None:
-            lmax =  compute_spherical_bandlimit(self.inp_shape, model_grid_type)
+            lmax = compute_spherical_bandlimit(self.inp_shape, model_grid_type)
             lmax = int(lmax * hard_thresholding_fraction)
         self.lmax = lmax
-
-        # if sht_grid_type == "equiangular":
-        #     self.h = self.lmax + 1
-        #     self.w = 2 * self.lmax
-        # elif sht_grid_type == "legendre-gauss":
-        #     self.h = self.lmax + 1
-        #     self.w = 2 * self.lmax
-        # else:
-        #     raise ValueError(f"Unknown SHT grid type {sht_grid_type}")
 
         sht_handle = th.RealSHT
         isht_handle = th.InverseRealSHT
@@ -711,52 +692,6 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         self.sht = sht_handle(self.h, self.w, lmax=self.lmax, mmax=self.lmax, grid=sht_grid_type).float()
         self.isht = isht_handle(self.h, self.w, lmax=self.lmax, mmax=self.lmax, grid=sht_grid_type).float()
 
-    @torch.compiler.disable(recursive=True)
-    def _get_norm_layer_handle(
-        self,
-        h,
-        w,
-        embed_dim,
-        normalization_layer="none",
-        sht_grid_type="legendre-gauss",
-    ):
-        """
-        get the handle for ionitializing normalization layers
-        """
-        # pick norm layer
-        if normalization_layer == "layer_norm":
-            from makani.mpu.layer_norm import DistributedLayerNorm
-            norm_layer_handle = partial(DistributedLayerNorm, normalized_shape=(embed_dim), elementwise_affine=True, eps=1e-6)
-        elif normalization_layer == "instance_norm":
-            if comm.get_size("spatial") > 1:
-                from makani.mpu.layer_norm import DistributedInstanceNorm2d
-                norm_layer_handle = partial(DistributedInstanceNorm2d, num_features=embed_dim, eps=1e-6, affine=True)
-            else:
-                norm_layer_handle = partial(nn.InstanceNorm2d, num_features=embed_dim, eps=1e-6, affine=True, track_running_stats=False)
-        elif normalization_layer == "instance_norm_s2":
-            if comm.get_size("spatial") > 1:
-                from makani.mpu.layer_norm import DistributedGeometricInstanceNormS2
-                norm_layer_handle = DistributedGeometricInstanceNormS2
-            else:
-                from makani.models.common import GeometricInstanceNormS2
-                norm_layer_handle = GeometricInstanceNormS2
-            norm_layer_handle = partial(
-                norm_layer_handle,
-                img_shape=(h, w),
-                crop_shape=(h, w),
-                crop_offset=(0, 0),
-                grid_type=sht_grid_type,
-                pole_mask=0,
-                num_features=embed_dim,
-                eps=1e-6,
-                affine=True,
-            )
-        elif normalization_layer == "none":
-            norm_layer_handle = nn.Identity
-        else:
-            raise NotImplementedError(f"Error, normalization {normalization_layer} not implemented.")
-
-        return norm_layer_handle
 
     @torch.compiler.disable(recursive=True)
     def _precompute_channel_groups(
@@ -786,7 +721,6 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
             raise ValueError(f"Expected number of atmospheric variables to be divisible by number of atmospheric groups but got {len(atmo_chans)} and {self.n_atmo_groups}")
 
         # if history is included, adapt the channel lists to include the offsets
-        self.n_atmo_groups = self.n_atmo_groups
         n_dyn_chans = len(atmo_chans) + len(surf_chans) + len(dyn_aux_chans)
         atmo_chans_in = atmo_chans.copy()
         surf_chans_in = surf_chans.copy()
@@ -799,18 +733,18 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         # account for the history offset in the static aux channels
         stat_aux_chans = [c + n_history*n_dyn_chans for c in stat_aux_chans]
 
-        self.register_buffer("atmo_channels_in", torch.LongTensor(atmo_chans_in), persistent=False)
-        self.register_buffer("atmo_channels_out", torch.LongTensor(atmo_chans), persistent=False)
-        self.register_buffer("surf_channels_in", torch.LongTensor(surf_chans_in), persistent=False)
-        self.register_buffer("surf_channels_out", torch.LongTensor(surf_chans), persistent=False)
-        self.register_buffer("sst_channels_in", torch.LongTensor(sst_chans_in), persistent=False)
-        self.register_buffer("sst_channels_out", torch.LongTensor(sst_chans), persistent=False)
-        self.register_buffer("dyn_aux_channels", torch.LongTensor(dyn_aux_chans), persistent=False)
-        self.register_buffer("stat_aux_channels", torch.LongTensor(stat_aux_chans), persistent=False)
-        self.register_buffer("land_mask_channels", torch.LongTensor(lsml_chans), persistent=False)
-        self.register_buffer("in_channels", torch.LongTensor(surf_chans_in + atmo_chans_in), persistent=False)
-        self.register_buffer("aux_channels", torch.LongTensor(dyn_aux_chans + stat_aux_chans), persistent=False)
-        self.register_buffer("pred_channels", torch.LongTensor(surf_chans + atmo_chans), persistent=False)
+        self.register_buffer("atmo_channels_in", torch.tensor(atmo_chans_in, dtype=torch.long), persistent=False)
+        self.register_buffer("atmo_channels_out", torch.tensor(atmo_chans, dtype=torch.long), persistent=False)
+        self.register_buffer("surf_channels_in", torch.tensor(surf_chans_in, dtype=torch.long), persistent=False)
+        self.register_buffer("surf_channels_out", torch.tensor(surf_chans, dtype=torch.long), persistent=False)
+        self.register_buffer("sst_channels_in", torch.tensor(sst_chans_in, dtype=torch.long), persistent=False)
+        self.register_buffer("sst_channels_out", torch.tensor(sst_chans, dtype=torch.long), persistent=False)
+        self.register_buffer("dyn_aux_channels", torch.tensor(dyn_aux_chans, dtype=torch.long), persistent=False)
+        self.register_buffer("stat_aux_channels", torch.tensor(stat_aux_chans, dtype=torch.long), persistent=False)
+        self.register_buffer("land_mask_channels", torch.tensor(lsml_chans, dtype=torch.long), persistent=False)
+        self.register_buffer("in_channels", torch.tensor(surf_chans_in + atmo_chans_in, dtype=torch.long), persistent=False)
+        self.register_buffer("aux_channels", torch.tensor(dyn_aux_chans + stat_aux_chans, dtype=torch.long), persistent=False)
+        self.register_buffer("pred_channels", torch.tensor(surf_chans + atmo_chans, dtype=torch.long), persistent=False)
 
         return
 
@@ -907,7 +841,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
                 w = _soft_clamp(x[..., self.water_channels, :, :])
             # the following eventually leads to spectral instability
             # w = nn.functional.softplus(x[..., self.water_channels, :, :], beta=5, threshold=5)
-            x[..., self.water_channels, :, :] = w
+            x[..., self.water_channels, :, :] = w.to(x.dtype)
 
         return x
 
@@ -939,7 +873,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
             x = self.decode(x)
 
         if self.big_skip:
-            x[..., self.pred_channels, :, :] = x + residual
+            x[..., self.pred_channels, :, :] = x + residual.to(x.dtype)
 
         # apply output transform
         x = self.clamp_water_channels(x)

@@ -24,7 +24,7 @@ import torch_harmonics as th
 import torch_harmonics.distributed as thd
 
 from makani.utils import comm
-from physicsnemo.distributed.utils import split_tensor_along_dim, compute_split_shapes
+from torch_harmonics.distributed import split_tensor_along_dim, compute_split_shapes
 
 
 class BaseNoiseS2(nn.Module):
@@ -35,6 +35,7 @@ class BaseNoiseS2(nn.Module):
         num_channels,
         num_time_steps,
         grid_type="equiangular",
+        lmax=None,
         seed=333,
         reflect=False,
         **kwargs,
@@ -57,13 +58,13 @@ class BaseNoiseS2(nn.Module):
                 polar_group = None if (comm.get_size("h") == 1) else comm.get_group("h")
                 azimuth_group = None if (comm.get_size("w") == 1) else comm.get_group("w")
                 thd.init(polar_group, azimuth_group)
-            self.isht = thd.DistributedInverseRealSHT(self.nlat, self.nlon, grid=grid_type)
+            self.isht = thd.DistributedInverseRealSHT(self.nlat, self.nlon, lmax=lmax, mmax=lmax, grid=grid_type)
             self.lmax_local = self.isht.l_shapes[comm.get_rank("h")]
             self.mmax_local = self.isht.m_shapes[comm.get_rank("w")]
             self.nlat_local = self.isht.lat_shapes[comm.get_rank("h")]
             self.nlon_local = self.isht.lon_shapes[comm.get_rank("w")]
         else:
-            self.isht = th.InverseRealSHT(self.nlat, self.nlon, grid=grid_type)
+            self.isht = th.InverseRealSHT(self.nlat, self.nlon, lmax=lmax, mmax=lmax, grid=grid_type)
             self.lmax_local = self.isht.lmax
             self.mmax_local = self.isht.mmax
             self.nlat_local = self.nlat
@@ -231,7 +232,7 @@ class IsotropicGaussianRandomFieldS2(BaseNoiseS2):
         cstate = cstate.reshape(batch_size, self.num_time_steps * self.num_channels, self.lmax_local, self.mmax_local)
 
         # transform
-        with amp.autocast(device_type="cuda", enabled=False):
+        with amp.autocast(device_type=cstate.device.type, enabled=False):
             eta = self.isht(cstate)
 
         # expand history
@@ -390,7 +391,7 @@ class DiffusionNoiseS2(BaseNoiseS2):
 
         # create single occurence
         with torch.no_grad():
-            with torch.amp.autocast(device_type="cuda", enabled=False):
+            with amp.autocast(device_type=self.state.device.type, enabled=False):
                 nsteps = self.num_time_steps if replace_state else 1
                 if batch_size is None:
                     batch_size = self.state.shape[0]
@@ -441,7 +442,7 @@ class DiffusionNoiseS2(BaseNoiseS2):
         cstate = cstate.reshape(batch_size, self.num_time_steps * self.num_channels, self.lmax_local, self.mmax_local)
 
         # transform
-        with amp.autocast(device_type="cuda", enabled=False):
+        with amp.autocast(device_type=cstate.device.type, enabled=False):
             eta = self.isht(cstate)
 
         # expand history

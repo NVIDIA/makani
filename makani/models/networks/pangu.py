@@ -256,13 +256,13 @@ def window_reverse(windows, window_size, Pl=1, Lat=1, Lon=1, ndim=3):
             win_lon,
             -1,
         )
-        x = x.permute(0, 2, 4, 3, 5, 1, 6, 7).contiguous().view(B, Pl, Lat, Lon, -1)
+        x = x.permute(0, 2, 4, 3, 5, 1, 6, 7).reshape(B, Pl, Lat, Lon, -1)
         return x
     elif ndim == 2:
         win_lat, win_lon = window_size
         B = int(windows.shape[0] / (Lon / win_lon))
         x = windows.view(B, Lon // win_lon, Lat // win_lat, win_lat, win_lon, -1)
-        x = x.permute(0, 2, 3, 1, 4, 5).contiguous().view(B, Lat, Lon, -1)
+        x = x.permute(0, 2, 3, 1, 4, 5).reshape(B, Lat, Lon, -1)
         return x
 
 def get_shift_window_mask(input_resolution, window_size, shift_size, ndim=3):
@@ -397,7 +397,7 @@ class EarthAttention3D(nn.Module):
         earth_position_index = get_earth_position_index(
             window_size
         )  # Wpl*Wlat*Wlon, Wpl*Wlat*Wlon
-        self.register_buffer("earth_position_index", earth_position_index)
+        self.register_buffer("earth_position_index", earth_position_index, persistent=False)
 
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
         self.attn_drop_fn = nn.Dropout(self.attn_drop)
@@ -590,7 +590,7 @@ class Transformer3DBlock(nn.Module):
         else:
             attn_mask = None
 
-        self.register_buffer("attn_mask", attn_mask)
+        self.register_buffer("attn_mask", attn_mask, persistent=False)
 
     def forward(self, x: torch.Tensor):
         Pl, Lat, Lon = self.input_resolution
@@ -777,6 +777,7 @@ class Pangu(nn.Module):
         # Add static channels to surface
         self.num_aux = len(self.aux_channel_names)
         N_total_surface = self.num_aux + self.num_surface
+        self.has_surface = (N_total_surface > 0)
 
         # compute static permutations to extract
         self._precompute_channel_groups(self.channel_names, self.aux_channel_names)
@@ -891,9 +892,9 @@ class Pangu(nn.Module):
         if len(atmo_chans) % self.n_atmo_groups:
             raise ValueError(f"Expected number of atmospheric variables to be divisible by number of atmospheric groups but got {len(atmo_chans)} and {self.n_atmo_groups}")
 
-        self.register_buffer("atmo_channels", torch.LongTensor(atmo_chans), persistent=False)
-        self.register_buffer("surf_channels", torch.LongTensor(surf_chans), persistent=False)
-        self.register_buffer("aux_channels", torch.LongTensor(aux_chans), persistent=False)
+        self.register_buffer("atmo_channels", torch.tensor(atmo_chans, dtype=torch.long), persistent=False)
+        self.register_buffer("surf_channels", torch.tensor(surf_chans, dtype=torch.long), persistent=False)
+        self.register_buffer("aux_channels", torch.tensor(aux_chans, dtype=torch.long), persistent=False)
 
         self.n_surf_chans = self.surf_channels.shape[0]
         self.n_aux_chans = self.aux_channels.shape[0]
@@ -963,7 +964,7 @@ class Pangu(nn.Module):
             surface = self.patchembed2d(surface_aux)
             atmospheric = self.patchembed3d(atmospheric)
 
-        if surface.shape[1] == 0:
+        if not self.has_surface:
             x = atmospheric
         else:
             x = torch.concat([surface.unsqueeze(2), atmospheric], dim=2)
@@ -990,14 +991,14 @@ class Pangu(nn.Module):
 
         output = torch.concat([x, skip], dim=-1)
         output = output.transpose(1, 2).reshape(B, -1, Pl, Lat, Lon)
-        if surface.shape[1] == 0:
+        if not self.has_surface:
             output_surface = None
             output_atmospheric = output
         else:
             output_surface = output[:, :, 0, :, :]
             output_atmospheric = output[:, :, 1:, :, :]
 
-        if surface.shape[1] == 0:
+        if not self.has_surface:
             output_surface = None
             if self.checkpointing_level >= 4:
                 output_atmospheric = checkpoint(self.patchrecovery3d, output_atmospheric, use_reentrant=False)

@@ -26,6 +26,8 @@ import torch.distributed as dist
 import torch_harmonics as th
 import torch_harmonics.distributed as thd
 
+from makani.utils import comm
+
 from makani.mpu.mappings import init_gradient_reduction_hooks
 
 # layer norm imports

@@ -79,6 +79,10 @@ data into Makani-compatible yearly `.h5` files.
    ```
    Flags you may want to use:
    - `--force_overwrite` to replace existing yearly files.
+   - `--coord_mode` controls how input lat/lon are aligned to the metadata grid:
+     - `match` (default): use xarray `.sel()` to reorder input coordinates to match the metadata file.
+     - `force-flip-lat`: flip the latitude axis of the input without coordinate matching.
+     - `force`: read data as-is, no reordering — assumes input already matches metadata.
    - Omit `--skip_missing_channels` / `--impute_missing_timestamps` to fail fast on gaps.
 
 The command writes one Makani-format `.h5` file per requested year in `output_dir`

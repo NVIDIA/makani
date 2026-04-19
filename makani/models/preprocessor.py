@@ -13,10 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from functools import partial
 from typing import Union, Tuple
 
-import math
 import numpy as np
 
 import torch
@@ -24,7 +22,7 @@ import torch.nn as nn
 
 from makani.utils import comm
 from makani.utils.grids import GridQuadrature, grid_to_quadrature_rule
-from physicsnemo.distributed.mappings import copy_to_parallel_region
+from makani.mpu.mappings import copy_to_parallel_region
 
 from makani.models.preprocessor_helpers import get_bias_correction, get_static_features
 
@@ -124,6 +122,8 @@ class Preprocessor2D(nn.Module):
             else:
                 raise NotImplementedError(f"Error, input noise mode {self.input_noise_mode} not supported.")
 
+            noise_lmax = noise_params.get("lmax", None)
+
             if noise_params["type"] == "diffusion":
                 from makani.models.noise import DiffusionNoiseS2
 
@@ -140,6 +140,7 @@ class Preprocessor2D(nn.Module):
                     kT=kT,  # use various scales
                     lambd=lambd,  # use suggestion here: tau=6h
                     grid_type=params.model_grid_type,
+                    lmax=noise_lmax,
                     seed=self.noise_base_seed,
                     reflect=reflect,
                     learnable=noise_params.get("learnable", False)
@@ -155,6 +156,7 @@ class Preprocessor2D(nn.Module):
                     sigma=noise_params.get("sigma", 1.0),
                     alpha=noise_params.get("alpha", 0.0),
                     grid_type=params.model_grid_type,
+                    lmax=noise_lmax,
                     seed=self.noise_base_seed,
                     reflect=reflect,
                     learnable=noise_params.get("learnable", False)

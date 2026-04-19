@@ -105,10 +105,6 @@ def convert(file_names_to_convert: List[str], output_file: str, batch_size: Opti
     longitudes = comm.bcast(longitudes, root=0)
     timestamps = comm.bcast(timestamps, root=0)
     entries_per_year = comm.bcast(entries_per_year, root=0)
-
-    # IMPORTANT! ECMWF convention flips the latitudes, so that they start on the south pole
-    # we use co-latitude definition, where 90 degrees is the north pole
-    latitudes = np.flip(latitudes)
                 
     # total hours:
     total_entries = sum(entries_per_year)
@@ -168,26 +164,26 @@ def convert(file_names_to_convert: List[str], output_file: str, batch_size: Opti
         # update local size
         ne_local = ne_end - ne_start
         # protect against negative batch sizes which happen on ranks which have nothing to do
-        batch_size = max(min(batch_size, ne_local), 1)
+        local_batch_size = max(min(batch_size, ne_local), 1)
         
         with h5.File(filename, "r") as f:
             
             # loop over batches
-            for ioff in range(ne_start, ne_end, batch_size):
-            
+            for ioff in range(ne_start, ne_end, local_batch_size):
+
                 # shape
+                nsamples = min(local_batch_size, ne_end - ioff)
                 start = global_off + ioff
-                end = min(start + batch_size, ne_end)
-                nsamples = end - start
+                end = start + nsamples
 
                 if verbose:
-                    print(f"{comm_rank}: file={filename}, ne={ne}, start={start}, end={end}, ne_start={ne_start}, ne_end={ne_end}, ne_local={ne_local}, batch_size={batch_size}")
+                    print(f"{comm_rank}: file={filename}, ne={ne}, start={start}, end={end}, ne_start={ne_start}, ne_end={ne_end}, ne_local={ne_local}, local_batch_size={local_batch_size}, nsamples={nsamples}")
                 
                 # surface channel
                 chunk_data_arrays = {}
                 for sc in surface_channel_names:
                     idc = channel_names.index(sc)
-                    data = f[entry_key][start:end, :, :, idc, ...]
+                    data = f[entry_key][ioff:ioff+nsamples, :, :, idc, ...]
                     # transpose dims 1 und 2
                     data = np.transpose(data, axes=(0, 2, 1, 3, 4))
                     
@@ -200,7 +196,7 @@ def convert(file_names_to_convert: List[str], output_file: str, batch_size: Opti
                     data = np.empty((nsamples, ensemble_size, lead_time, nlevels, nlat, nlon), dtype=dataset_dtype)
                     for idl, level in enumerate(atmospheric_levels):
                         idc = channel_names.index(ac+str(level))
-                        tmpdata = f[entry_key][start:end, :, :, idc, :, :]
+                        tmpdata = f[entry_key][ioff:ioff+nsamples, :, :, idc, :, :]
                         tmpdata = np.transpose(tmpdata, axes=(0, 2, 1, 3, 4))
                         data[..., idl, :, :] = tmpdata[...]
                     
@@ -220,7 +216,7 @@ def convert(file_names_to_convert: List[str], output_file: str, batch_size: Opti
                         "latitude": slice(0, nlat),
                         "longitude": slice(0, nlon),
                     },
-                    mode="a"
+                    mode="r+",
                 )
 
             # we need a barrier here
@@ -232,6 +228,9 @@ def convert(file_names_to_convert: List[str], output_file: str, batch_size: Opti
             # update progressbar
             if comm_rank == 0:
                 pbar.update(global_off)
+
+    # sync one last time
+    comm.Barrier()
 
     # end time
     end_time = time.perf_counter()

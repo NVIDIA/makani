@@ -16,7 +16,6 @@
 import math
 import torch
 import torch.nn as nn
-import torch.special as special
 import torch.amp as amp
 from torch.utils.checkpoint import checkpoint
 
@@ -33,14 +32,12 @@ import torch_harmonics.distributed as thd
 
 # get pre-formulated layers
 from makani.models.common import GeometricInstanceNormS2
-from makani.mpu.layers import DistributedMLP, DistributedEncoderDecoder
+from makani.mpu.layers import DistributedMLP
 
 # more distributed stuff
 from makani.utils import comm
-from physicsnemo.distributed.utils import split_tensor_along_dim
 
 # layer normalization
-from physicsnemo.distributed.mappings import scatter_to_parallel_region, gather_from_parallel_region
 from makani.mpu.layer_norm import DistributedInstanceNorm2d, DistributedLayerNorm
 
 # heuristic for finding theta_cutoff
@@ -112,12 +109,9 @@ class DiscreteContinuousEncoder(nn.Module):
             )
 
     def forward(self, x):
-        dtype = x.dtype
 
-        with amp.autocast(device_type="cuda", enabled=False):
-            x = x.float()
-            x = self.conv(x)
-            x = x.to(dtype=dtype)
+        # perform conv
+        x = self.conv(x)
 
         if hasattr(self, "act"):
             x = self.act(x)
@@ -537,7 +531,7 @@ class SphericalNeuralOperatorNet(nn.Module):
         if clamp_water:
             water_chans = get_water_channels(channel_names)
             if len(water_chans) > 0:
-                self.register_buffer("water_channels", torch.LongTensor(water_chans), persistent=False)
+                self.register_buffer("water_channels", torch.tensor(water_chans, dtype=torch.long), persistent=False)
 
         # finally, freeze part of the model if requested
         if freeze_processor:

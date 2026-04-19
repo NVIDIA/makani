@@ -14,18 +14,15 @@
 # limitations under the License.
 
 from typing import Optional, Tuple, List
-import math
 
 import torch
-import torch.nn as nn
 from torch import amp
 
 from makani.utils.losses.base_loss import SpectralBaseLoss
 
 # distributed stuff
 from makani.utils import comm
-from physicsnemo.distributed.utils import split_tensor_along_dim
-from physicsnemo.distributed.mappings import reduce_from_parallel_region
+from makani.mpu.mappings import reduce_from_parallel_region
 
 
 # Adjusted Mean Squared Error Loss
@@ -56,9 +53,10 @@ class SpectralAMSELoss(SpectralBaseLoss):
     def forward(self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor:
 
         # compute the sht
-        prd = prd.float()
-        tar = tar.float()
-        with amp.autocast(device_type="cuda", enabled=False):
+        ptype = prd.dtype
+        with amp.autocast(device_type=prd.device.type, enabled=False):
+            prd = prd.to(torch.float32)
+            tar = tar.to(torch.float32)
             xcoeffs = self.sht(prd)
             ycoeffs = self.sht(tar)
 
@@ -66,6 +64,11 @@ class SpectralAMSELoss(SpectralBaseLoss):
         xcoeffssq = torch.square(torch.abs(xcoeffs))
         ycoeffssq = torch.square(torch.abs(ycoeffs))
         xycohcoeffssq = torch.real(xcoeffs * ycoeffs.conj())
+
+        # convert back
+        xcoeffssq = xcoeffssq.to(dtype=ptype)
+        ycoeffssq = ycoeffssq.to(dtype=ptype)
+        xycohcoeffssq = xycohcoeffssq.to(dtype=ptype)
 
         if wgt is not None:
             xcoeffssq = xcoeffssq * wgt

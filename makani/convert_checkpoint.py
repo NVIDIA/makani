@@ -16,10 +16,8 @@
 import argparse
 import os
 import glob
-import tempfile
 from collections import OrderedDict
 
-import pynvml
 import torch
 from torch import nn
 
@@ -29,7 +27,6 @@ from makani.models.model_package import LocalPackage
 from makani.models import model_registry
 
 # distributed computing stuff
-from makani.utils import comm
 from makani.utils.driver import Driver
 from makani.utils.YParams import ParamsBase
 
@@ -124,6 +121,7 @@ def consolidate_checkpoints(input_path, output_path, checkpoint_version=0):
     gathered_state_dict = OrderedDict()
     parameter_keys = model_states[checkpoint_paths[0]].keys()
     for pname in parameter_keys:
+
         p = model_states[checkpoint_paths[0]][pname]
         if not hasattr(p, "sharded_dims_mp"):
             gathered_state_dict[pname] = p.clone()
@@ -131,6 +129,7 @@ def consolidate_checkpoints(input_path, output_path, checkpoint_version=0):
             # get the split shapes and the rank in each dimension
             split_shapes = []
             for idd, cdim in enumerate(p.sharded_dims_mp):
+
                 if cdim is None:
                     # if the dimensions is not split we use the entire range
                     split_shapes.append([0, p.shape[idd]])

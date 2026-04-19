@@ -15,8 +15,7 @@
 
 import torch
 import torch.nn as nn
-from torch.nn.modules.container import Sequential
-from torch.utils.checkpoint import checkpoint, checkpoint_sequential
+from torch.utils.checkpoint import checkpoint
 import math
 
 from makani.utils.context import rng_context
@@ -279,7 +278,17 @@ class PatchRecovery3D(nn.Module):
         ]
 
 class EncoderDecoder(nn.Module):
-    def __init__(self, num_layers, input_dim, output_dim, hidden_dim, act_layer, gain=1.0, input_format="nchw"):
+    def __init__(
+        self,
+        num_layers,
+        input_dim,
+        output_dim,
+        hidden_dim,
+        act_layer,
+        gain=1.0,
+        input_format="nchw",
+        groups=1,
+    ):
         super(EncoderDecoder, self).__init__()
 
         encoder_modules = []
@@ -287,7 +296,7 @@ class EncoderDecoder(nn.Module):
         for i in range(num_layers):
             # fully connected layer
             if input_format == "nchw":
-                encoder_modules.append(nn.Conv2d(current_dim, hidden_dim, 1, bias=True))
+                encoder_modules.append(nn.Conv2d(current_dim, hidden_dim, 1, bias=True, groups=groups))
             elif input_format == "traditional":
                 encoder_modules.append(nn.Linear(current_dim, hidden_dim, bias=True))
             else:
@@ -296,8 +305,9 @@ class EncoderDecoder(nn.Module):
             # weight sharing
             encoder_modules[-1].weight.is_shared_mp = ["spatial"]
 
-            # proper initializaiton
-            scale = math.sqrt(2.0 / current_dim)
+            # proper initializaiton (fan-in per group for grouped conv)
+            fan_in = (current_dim // groups) if input_format == "nchw" else current_dim
+            scale = math.sqrt(2.0 / fan_in)
             nn.init.normal_(encoder_modules[-1].weight, mean=0.0, std=scale)
             if encoder_modules[-1].bias is not None:
                 encoder_modules[-1].bias.is_shared_mp = ["spatial"]
@@ -308,7 +318,7 @@ class EncoderDecoder(nn.Module):
 
         # final output layer
         if input_format == "nchw":
-            encoder_modules.append(nn.Conv2d(current_dim, output_dim, 1, bias=False))
+            encoder_modules.append(nn.Conv2d(current_dim, output_dim, 1, bias=False, groups=groups))
         elif input_format == "traditional":
             encoder_modules.append(nn.Linear(current_dim, output_dim, bias=False))
 
@@ -316,7 +326,8 @@ class EncoderDecoder(nn.Module):
         encoder_modules[-1].weight.is_shared_mp = ["spatial"]
 
         # proper initializaiton
-        scale = math.sqrt(gain / current_dim)
+        fan_in = (current_dim // groups) if input_format == "nchw" else current_dim
+        scale = math.sqrt(gain / fan_in)
         nn.init.normal_(encoder_modules[-1].weight, mean=0.0, std=scale)
         if encoder_modules[-1].bias is not None:
             encoder_modules[-1].bias.is_shared_mp = ["spatial"]

@@ -22,16 +22,19 @@ import numpy as np
 import h5py as h5
 import datetime as dt
 import argparse as ap
+import warnings
 import xarray as xr
 
 # MPI
 from mpi4py import MPI
 
-from .wb2_helpers import surface_variables, atmospheric_variables, split_convert_channel_names, DistributedProgressBar
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from data_process.wb2_helpers import split_convert_channel_names, DistributedProgressBar, gcs_storage_options
 
 
 def convert(input_file: str, output_dir: str, metadata_file: str, years: List[int],
             batch_size: Optional[int]=32, entry_key: Optional[str]='fields',
+            coord_mode: Optional[str]='match',
             force_overwrite: Optional[bool]=False, skip_missing_channels: Optional[bool]=False, 
             impute_missing_timestamps: Optional[bool]=False, verbose: Optional[bool]=False):
 
@@ -64,6 +67,11 @@ def convert(input_file: str, output_dir: str, metadata_file: str, years: List[in
         is merely a performance setting. Bigger batches are more efficient but require more memory.
     entry_key: str
         This is the HDF5 dataset name of the data in the files. Defaults to "fields".
+    coord_mode: str
+        How to align input lat/lon to the metadata grid. One of:
+        - "match": use xarray .sel() to reorder input data to match metadata coords (default).
+        - "force-flip-lat": flip the latitude axis of the input data without coordinate matching.
+        - "force": read data as-is, assume ordering already matches metadata.
     force_overwrite: bool
         Setting this flag to True will overwrite existing files.
     skip_missing_channels: bool
@@ -98,8 +106,20 @@ def convert(input_file: str, output_dir: str, metadata_file: str, years: List[in
     # split in surface and atmospheric channels
     atmospheric_channel_names, atmospheric_channel_names_wb2, surface_channel_names, surface_channel_names_wb2, atmospheric_levels = split_convert_channel_names(channel_names)
 
-    # open cloud dataset
-    wb2_data = xr.open_dataset(input_file, engine="zarr")
+    # open cloud dataset and align to metadata grid
+    storage_options = gcs_storage_options() if input_file.startswith(("gs://", "gcs://")) else {}
+    wb2_data = xr.open_dataset(input_file, engine="zarr", storage_options=storage_options)
+    if coord_mode == 'match':
+        wb2_data = wb2_data.sel(latitude=lat, longitude=lon)
+    elif coord_mode == 'force-flip-lat':
+        if comm_rank == 0:
+            warnings.warn("coord_mode='force-flip-lat': flipping latitude axis without coordinate matching")
+        wb2_data = wb2_data.isel(latitude=slice(None, None, -1))
+    elif coord_mode == 'force':
+        if comm_rank == 0:
+            warnings.warn("coord_mode='force': reading data as-is, assuming ordering matches metadata")
+    else:
+        raise ValueError(f"Unknown coord_mode: {coord_mode}. Must be one of: match, force-flip-lat, force")
 
     # check total number of entries:
     num_entries_total = 0
@@ -278,6 +298,7 @@ def main(args):
             metadata_file=args.metadata_file,
             years=args.years,
             batch_size=args.batch_size,
+            coord_mode=args.coord_mode,
             force_overwrite=args.force_overwrite,
             skip_missing_channels=args.skip_missing_channels,
             impute_missing_timestamps=args.impute_missing_timestamps,
@@ -293,6 +314,8 @@ if __name__ == '__main__':
     parser.add_argument("--metadata_file", type=str, help="Local file with metadata.", required=True)
     parser.add_argument("--years", type=int, nargs='+', help="Which years to convert", required=True)
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size for writing chunks")
+    parser.add_argument("--coord_mode", type=str, default="match", choices=["match", "force-flip-lat", "force"],
+                        help="How to align input lat/lon to metadata: match (default), force-flip-lat, force")
     parser.add_argument("--skip_missing_channels", action="store_true", help="Skip missing channels and do not fail")
     parser.add_argument("--impute_missing_timestamps", action="store_true", help="Impute missing timestamps")
     parser.add_argument("--force_overwrite", action="store_true", help="Overwrite existing files")

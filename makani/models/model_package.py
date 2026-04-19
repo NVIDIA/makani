@@ -98,8 +98,8 @@ class ModelWrapper(torch.nn.Module):
         super().__init__()
         self.model = model
         self.params = params
-        nlat = params.img_shape_x
-        nlon = params.img_shape_y
+        nlat = params.img_shape_x_resampled
+        nlon = params.img_shape_y_resampled
 
         # configure lats
         if "lat" in self.params:
@@ -127,10 +127,10 @@ class ModelWrapper(torch.nn.Module):
         out_bias = torch.as_tensor(bias[:, self.params.out_channels]).to(torch.float32)
         out_scale = torch.as_tensor(scale[:, self.params.out_channels]).to(torch.float32)
 
-        self.register_buffer("in_bias", in_bias)
-        self.register_buffer("in_scale", in_scale)
-        self.register_buffer("out_bias", out_bias)
-        self.register_buffer("out_scale", out_scale)
+        self.register_buffer("in_bias", in_bias, persistent=True)
+        self.register_buffer("in_scale", in_scale, persistent=True)
+        self.register_buffer("out_bias", out_bias, persistent=True)
+        self.register_buffer("out_scale", out_scale, persistent=True)
 
     @property
     def in_channels(self):
@@ -219,6 +219,11 @@ def load_model_package(package, pretrained=True, device="cpu", multistep=False):
     """
     path = package.get("config.json")
     params = ParamsBase.from_json(path)
+    # ensure resampled shapes exist (set at runtime from dataset in training; missing when loading from package)
+    if not hasattr(params, "img_shape_x_resampled") or params.img_shape_x_resampled is None:
+        params.img_shape_x_resampled = params.img_shape_x
+    if not hasattr(params, "img_shape_y_resampled") or params.img_shape_y_resampled is None:
+        params.img_shape_y_resampled = params.img_shape_y
     LocalPackage._load_static_data(package, params)
 
     # assume we are not distributed

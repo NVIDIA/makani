@@ -18,11 +18,11 @@ import torch.nn as nn
 
 from torch import amp
 
-from typing import Tuple, List, Optional
+from typing import Tuple, Optional
 
 # for spatial model-parallelism
 from makani.utils import comm
-from physicsnemo.distributed.mappings import gather_from_parallel_region, copy_to_parallel_region
+from makani.mpu.mappings import gather_from_parallel_region, copy_to_parallel_region
 
 # quadrature stuff
 from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature
@@ -77,16 +77,16 @@ def _welford_kernel(vars: torch.Tensor, means: torch.Tensor, counts: torch.Tenso
     return var, mean, count
 
 
-def distributed_welford_variance(var: torch.Tensor, mean: torch.Tensor, count: torch.Tensor, group: str) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def distributed_welford_variance(var: torch.Tensor, mean: torch.Tensor, count: torch.Tensor, comm_id: str) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Computes the statistics locally, then uses the Welford online algorithm to reduce them"""
 
     # concatenate:
     # this has the shape [3, 1, ...]
-    var_mean_count = torch.stack([var, mean, count], dim=0).unsqueeze(1)
+    var_mean_count = torch.stack([var, mean, count], dim=0).unsqueeze(1).contiguous()
 
     # gather
     # this has the shape [3, spatial_size, ...], we split it up directly into individual tensors again
-    vars_means_counts = gather_from_parallel_region(var_mean_count, dim=1, shapes=None, group=group)
+    vars_means_counts = gather_from_parallel_region(var_mean_count, dim=1, shapes=None, comm_id=comm_id)
 
     # split up
     vars = vars_means_counts[0, ...]
@@ -139,17 +139,17 @@ class DistributedInstanceNorm2d(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
 
         xtype = x.dtype
-        with amp.autocast(device_type="cuda", enabled=False):
-            x = x.to(torch.float32)
+        with amp.autocast(device_type=x.device.type, enabled=False):
+            xf = x.to(torch.float32)
 
             # start by computing std and mean
-            var, mean = self._stats_welford(x)
+            var, mean = self._stats_welford(xf)
 
             # this is absolutely necessary to get the correct graph in the backward pass
             mean = copy_to_parallel_region(mean, "spatial")
             var = copy_to_parallel_region(var, "spatial")
 
-        x = x.to(xtype)
+        # convert back
         mean = mean.to(xtype)
         var = var.to(xtype)
 
@@ -219,17 +219,17 @@ class DistributedGeometricInstanceNormS2(DistributedInstanceNorm2d):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
 
         xtype = x.dtype
-        with amp.autocast(device_type="cuda", enabled=False):
-            x = x.to(torch.float32)
+        with amp.autocast(device_type=x.device.type, enabled=False):
+            xf = x.to(torch.float32)
 
             # start by computing std and mean
-            var, mean = self._stats_welford(x)
+            var, mean = self._stats_welford(xf)
 
             # this is absolutely necessary to get the correct graph in the backward pass
             mean = copy_to_parallel_region(mean, "spatial")
             var = copy_to_parallel_region(var, "spatial")
 
-        x = x.to(xtype)
+        # convert back
         mean = mean.to(xtype)
         var = var.to(xtype)
 

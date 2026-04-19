@@ -30,6 +30,7 @@ from makani.models.common import SpectralConv, SpectralAttention
 # get spectral transforms from torch_harmonics
 import torch_harmonics as th
 import torch_harmonics.distributed as thd
+from torch_harmonics.distributed import compute_split_shapes
 
 # wrap fft, to unify interface to spectral transforms
 from makani.models.common import RealFFT2, InverseRealFFT2, GeometricInstanceNormS2
@@ -40,7 +41,7 @@ from makani.mpu.layers import DistributedMLP, DistributedEncoderDecoder
 from makani.utils import comm
 
 # layer normalization
-from physicsnemo.distributed.mappings import scatter_to_parallel_region, gather_from_parallel_region
+from makani.mpu.mappings import scatter_to_parallel_region, gather_from_parallel_region
 from makani.mpu.layer_norm import DistributedInstanceNorm2d, DistributedLayerNorm, DistributedGeometricInstanceNormS2
 
 # for annotation of models
@@ -595,11 +596,11 @@ class SphericalFourierNeuralOperatorNet(nn.Module):
                 xtype = x.dtype
                 # only take the predicted channels as residual
                 residual = x.to(torch.float32)
-                with amp.autocast(device_type="cuda", enabled=False):
+                with amp.autocast(device_type=residual.device.type, enabled=False):
                     residual = self.trans_down(residual)
                     residual = residual.contiguous()
                     residual = self.itrans_up(residual)
-                    residual = residual.to(dtype=xtype)
+                residual = residual.to(dtype=xtype)
             else:
                 # only take the predicted channels
                 residual = x

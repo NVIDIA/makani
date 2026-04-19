@@ -14,7 +14,6 @@
 # limitations under the License.
 
 import os
-import sys
 import gc
 import time
 from typing import Optional
@@ -47,7 +46,7 @@ from makani.mpu.helpers import sync_params, gather_uneven
 
 # for counting model parameters
 from makani.models.helpers import count_parameters
-from physicsnemo.distributed.mappings import reduce_from_parallel_region
+from makani.mpu.mappings import reduce_from_parallel_region
 
 # checkpoint helpers
 from makani.utils.checkpoint_helpers import get_latest_checkpoint_version
@@ -193,7 +192,6 @@ class StochasticTrainer(Driver):
                 find_unused_parameters=self.params["enable_grad_anomaly_detection"],
                 gradient_as_bucket_view=True,
                 static_graph=False,
-                verbose=True,
             )
 
         # lets get one sample from the dataloader:
@@ -215,33 +213,11 @@ class StochasticTrainer(Driver):
         self._compile_model(inp_shape)
 
         # visualization wrapper:
-        # plot_list = [{"name": "windspeed_uv10", "functor": "lambda x: np.sqrt(np.square(x[0, ...]) + np.square(x[1, ...]))", "diverging": False}]
-        plot_list = [{"name": "geopotential_z500", "functor": "lambda x: x[0, ...]", "diverging": False}]
         out_bias, out_scale = self.train_dataloader.get_output_normalization()
-        self.visualizer = visualize.VisualizationWrapper(
-            self.params.log_to_wandb,
-            path=None,
-            prefix=None,
-            plot_list=plot_list,
-            lat=np.deg2rad(self.lat_lon_global[0]),
-            lon=np.deg2rad(self.lat_lon_global[1]) - np.pi,
-            scale=out_scale[0, ...],
-            bias=out_bias[0, ...],
-            num_workers=self.params.num_visualization_workers,
-        )
-        # allocate pinned tensors for faster copy:
-        if self.device.type == "cuda":
-            self.viz_stream = torch.Stream(device="cuda")
-        else:
-            self.viz_stream = None
+        self.visualizer = self.init_visualizer(self.params, self.lat_lon_global, out_bias, out_scale, self.device)
 
-        pin_memory = self.device.type == "cuda"
-        self.viz_prediction_cpu = torch.empty(
-            ((self.params.N_target_channels // (self.params.n_future + 1)), self.params.img_shape_x_resampled, self.params.img_shape_y_resampled), device="cpu", pin_memory=pin_memory
-        )
-        self.viz_target_cpu = torch.empty(
-            ((self.params.N_target_channels // (self.params.n_future + 1)), self.params.img_shape_x_resampled, self.params.img_shape_y_resampled), device="cpu", pin_memory=pin_memory
-        )
+        if self.visualizer is None:
+            self.logger.info("No channels to visualize, skipping visualization.")
 
         # reload checkpoints
         counters = {"iters": 0, "start_epoch": 0}
@@ -592,7 +568,7 @@ class StochasticTrainer(Driver):
         # initialize metrics buffers
         self.metrics.zero_buffers()
 
-        visualize = self.params.log_video and (epoch % self.params.log_video == 0)
+        visualize_data = self.params.log_video and (epoch % self.params.log_video == 0) and (self.visualizer is not None)
 
         # start the timer
         valid_start = time.time()
@@ -646,7 +622,7 @@ class StochasticTrainer(Driver):
                             loss = self.loss_obj(pred, targ)
 
                         # TODO: move all of this into the visualization handler
-                        if (eval_steps <= 1) and visualize:
+                        if (eval_steps <= 1) and visualize_data:
                             # create average prediction for deterministic metrics
                             predm = torch.mean(pred, dim=1)
                             if comm.get_size("ensemble") > 1:
@@ -658,16 +634,16 @@ class StochasticTrainer(Driver):
                             pred_gather = self.metrics._gather_input(pred_gather)
                             targ_gather = self.metrics._gather_input(targ_gather)
 
+                            if self.visualizer.stream is not None:
+                                self.visualizer.stream.wait_stream(torch.cuda.current_stream())
+                            with torch.cuda.stream(self.visualizer.stream):
+                                self.visualizer.prediction_cpu.copy_(pred_gather, non_blocking=True)
+                                self.visualizer.target_cpu.copy_(targ_gather, non_blocking=True)
                             if self.viz_stream is not None:
-                                self.viz_stream.wait_stream(torch.cuda.current_stream())
-                            with torch.cuda.stream(self.viz_stream):
-                                self.viz_prediction_cpu.copy_(pred_gather, non_blocking=True)
-                                self.viz_target_cpu.copy_(targ_gather, non_blocking=True)
-                            if self.viz_stream is not None:
-                                self.viz_stream.synchronize()
+                                self.visualizer.stream.synchronize()
 
-                            pred_cpu = self.viz_prediction_cpu.to(torch.float32).numpy()
-                            targ_cpu = self.viz_target_cpu.to(torch.float32).numpy()
+                            pred_cpu = self.visualizer.prediction_cpu.to(torch.float32).numpy()
+                            targ_cpu = self.visualizer.target_cpu.to(torch.float32).numpy()
 
                             tag = f"step{eval_steps}_time{str(idt).zfill(3)}"
                             self.visualizer.add(tag, pred_cpu, targ_cpu)
@@ -683,7 +659,7 @@ class StochasticTrainer(Driver):
 
         # finalize plotting
         viz_time = time.perf_counter_ns()
-        if visualize:
+        if visualize_data:
             self.visualizer.finalize()
         viz_time = (time.perf_counter_ns() - viz_time) * 10 ** (-9)
 

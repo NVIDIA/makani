@@ -27,7 +27,7 @@ from torch.optim import Optimizer
 from makani.utils import comm
 from makani.mpu.helpers import gather_uneven
 
-from physicsnemo.distributed.utils import split_tensor_along_dim
+from torch_harmonics.distributed import split_tensor_along_dim
 
 
 def get_latest_checkpoint_version(checkpoint_path):
@@ -182,6 +182,28 @@ def scatter_optimizer_state_dict(model: nn.Module, optimizer: Optimizer, optimiz
             optimizer_state_dict["state"][idp]["exp_avg_sq"] = exp_avg_sq
 
     return optimizer_state_dict
+
+
+def get_model_state_dict_prefix(model: nn.Module) -> str:
+    """Return the key prefix that the model's state_dict uses.
+
+    torch.compile wraps a model in OptimizedModule (keys gain ``_orig_mod.``),
+    and DDP wraps it in DistributedDataParallel (keys gain ``module.``).
+    These wrappers may be nested in any combination, so we walk the wrapper
+    chain and accumulate the prefix in order.
+    """
+    prefix = ""
+    m = model
+    while True:
+        if hasattr(m, "_orig_mod"):
+            prefix += "_orig_mod."
+            m = m._orig_mod
+        elif isinstance(m, nn.parallel.DistributedDataParallel):
+            prefix += "module."
+            m = m.module
+        else:
+            break
+    return prefix
 
 
 def prepend_prefix_to_state_dict(

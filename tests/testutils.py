@@ -126,8 +126,7 @@ def init_dataset(
 
     # create lon lat grid
     longitude = np.linspace(0, 360, img_size_w, endpoint=False)
-    latitude = np.linspace(-90, 90, img_size_h, endpoint=True)
-    latitude = latitude[::-1]
+    latitude = np.linspace(90, -90, img_size_h, endpoint=True)
 
     # channels names
     channel_names = [f"chan_{idx}" for idx in range(num_channels)]
@@ -142,7 +141,7 @@ def init_dataset(
     for y in [2017, 2018]:
         data_path = os.path.join(train_path, f"{y}.h5")
         with h5.File(data_path, "w") as hf:
-            hf.create_dataset(H5_PATH, shape=(num_samples_per_year, num_channels, img_size_h, img_size_w))
+            hf.create_dataset(H5_PATH, shape=(num_samples_per_year, num_channels, img_size_h, img_size_w), dtype="f4")
 
             num_dof = num_samples_per_year * num_channels * img_size_h * img_size_w
             data = rng.random((num_dof,), dtype=np.float32)
@@ -189,7 +188,7 @@ def init_dataset(
     for y in [2019]:
         data_path = os.path.join(test_path, f"{y}.h5")
         with h5.File(data_path, "w") as hf:
-            hf.create_dataset(H5_PATH, shape=(num_samples_per_year, num_channels, img_size_h, img_size_w))
+            hf.create_dataset(H5_PATH, shape=(num_samples_per_year, num_channels, img_size_h, img_size_w), dtype="f4")
             hf[H5_PATH][...] = rng.random((num_samples_per_year, num_channels, img_size_h, img_size_w), dtype=np.float32)
 
             # annotations

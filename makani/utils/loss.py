@@ -15,7 +15,6 @@
 
 from typing import Optional, List
 from functools import partial
-import math
 
 import numpy as np
 
@@ -23,10 +22,9 @@ import torch
 from torch import nn
 
 from makani.utils import comm
-from makani.utils.grids import GridQuadrature, BandLimitMask
+
 from makani.utils.dataloaders.data_helpers import get_data_normalization, get_time_diff_stds, get_psd_stats
-from physicsnemo.distributed.utils import compute_split_shapes
-from physicsnemo.distributed.mappings import gather_from_parallel_region, reduce_from_parallel_region
+from makani.mpu.mappings import gather_from_parallel_region, reduce_from_parallel_region
 
 from .losses import LossType, GeometricLpLoss, SpectralLpLoss, SpectralH1Loss, SpectralAMSELoss
 from .losses import CRPSLoss, SpectralCRPSLoss, GradientCRPSLoss, VortDivCRPSLoss, KernelScoreLoss
@@ -174,22 +172,23 @@ class LossHandler(nn.Module):
 
         channel_weights = torch.cat(channel_weights, dim=1)
         ncw = channel_weights.shape[1]
-        self.register_buffer("channel_weights", channel_weights)
+        self.register_buffer("channel_weights", channel_weights, persistent=False)
 
         # set up tensor to track running stats
         # those need to have the same dimensions as the
         # the m2 buffer is filled with a very small non-zero value to avoid division by zero early on
         stats_buffer_shape = (self.n_future + 1) * channel_weights.shape[-1]
-        self.register_buffer("running_mean", torch.zeros(stats_buffer_shape))
-        self.register_buffer("running_var", torch.ones(stats_buffer_shape))
-        self.register_buffer("num_batches_tracked", torch.LongTensor([0]))
+        self.register_buffer("running_mean", torch.zeros(stats_buffer_shape), persistent=True)
+        self.register_buffer("running_var", torch.ones(stats_buffer_shape), persistent=True)
+        self.register_buffer("num_batches_tracked", torch.tensor([0], dtype=torch.long), persistent=True)
 
         # weighting factor for multistep, by default a uniform weight is used
-        multistep_weight = self._compute_multistep_weight(params.get("multistep_loss_weight", "constant"))
+        multistep_params = params.get("multistep", {"weight_type": "constant"})
+        multistep_weight = self._compute_multistep_weight(**multistep_params)
 
         # tile multistep_weights in channel_dim, but channel_dim needs to be fastest dim
         multistep_weight = torch.repeat_interleave(multistep_weight.reshape(1, -1), ncw, dim=1)
-        self.register_buffer("multistep_weight", multistep_weight)
+        self.register_buffer("multistep_weight", multistep_weight, persistent=False)
 
         # generator objects:
         seed = seed
@@ -200,26 +199,38 @@ class LossHandler(nn.Module):
             self.rng_gpu.manual_seed(seed)
 
     @torch.compiler.disable(recursive=False)
-    def _compute_multistep_weight(self, multistep_weight_type: str) -> torch.Tensor:
-        if multistep_weight_type == "constant":
+    def _compute_multistep_weight(self, **kwargs) -> torch.Tensor:
+
+        # select default for weight_type
+        if "weight_type" in kwargs:
+            weight_type = kwargs["weight_type"]
+        else:
+            weight_type = "constant"
+
+        # compute weights:
+        if weight_type == "constant":
             # uniform weighting factor for the case of multistep training
             multistep_weight = torch.ones(self.n_future + 1, dtype=torch.float32) / float(self.n_future + 1)
-        elif multistep_weight_type == "balanced":
+        elif weight_type == "balanced":
             # this tries to balance the loss contributions from each step, accounting for the fact that the n-th gets backpropagated n times
             multistep_weight = 2.0 * torch.arange(1, self.n_future + 2, dtype=torch.float32) / float((self.n_future + 2) * (self.n_future + 1))
-        elif multistep_weight_type == "linear":
+        elif weight_type == "linear":
             # linear weighting factor for the case of multistep training
             multistep_weight = torch.arange(1, self.n_future + 2, dtype=torch.float32) / float(self.n_future + 1)
-        elif multistep_weight_type == "last-n-1":
+        elif weight_type == "last-n-1":
             # weighting factor for the last n steps, with the first step weighted 0
             multistep_weight = torch.ones(self.n_future + 1, dtype=torch.float32) / float(self.n_future)
             multistep_weight[0] = 0.0
-        elif multistep_weight_type == "last":
+        elif weight_type == "last":
             # weighting factor for the last step, with the first n-1 steps weighted 0
             multistep_weight = torch.zeros(self.n_future + 1, dtype=torch.float32)
             multistep_weight[-1] = 1.0
+        elif weight_type == "custom":
+            # custom weighting factor for the case of multistep training
+            multistep_weight = torch.as_tensor(kwargs["weights"], dtype=torch.float32)
+            assert multistep_weight.shape[0] == self.n_future + 1, "Number of multistep weights must match n_future+1"
         else:
-            raise ValueError(f"Unknown multistep loss weight type: {multistep_weight_type}")
+            raise ValueError(f"Unknown multistep loss weight type: {weight_type}")
 
         return multistep_weight
 
