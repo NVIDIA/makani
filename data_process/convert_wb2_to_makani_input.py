@@ -110,6 +110,9 @@ def convert(input_file: str, output_dir: str, metadata_file: str, years: List[in
     # open cloud dataset and align to metadata grid
     storage_options = gcs_storage_options() if input_file.startswith(("gs://", "gcs://")) else {}
     wb2_data = xr.open_dataset(input_file, engine="zarr", storage_options=storage_options)
+    # some WB2 zarrs store atmospheric/surface fields as (..., longitude, latitude);
+    # the rest of this routine assumes (..., latitude, longitude).
+    wb2_data = wb2_data.transpose(..., "latitude", "longitude")
     if coord_mode == 'match':
         wb2_data = wb2_data.sel(latitude=lat, longitude=lon)
     elif coord_mode == 'force-flip-lat':
