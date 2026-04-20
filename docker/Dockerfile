@@ -73,16 +73,16 @@ RUN pip install "git+https://github.com/google-research/weatherbench2.git"
 # some useful scripts from mlperf
 RUN pip install --ignore-installed "git+https://github.com/NVIDIA/mlperf-common.git"
 
+# physicsnemo
+RUN pip install git+https://github.com/NVIDIA/physicsnemo.git@v1.1.1
+
 # torch-harmonics
+RUN pip install setuptools_scm
 ENV FORCE_CUDA_EXTENSION 1
 ENV TORCH_CUDA_ARCH_LIST "8.0 8.6 8.7 9.0 10.0+PTX"
-ENV HARMONICS_VERSION 0.9.1a
 RUN cd /opt && git clone -b bbonev/disco-modal-normalization https://github.com/NVIDIA/torch-harmonics.git && \
     cd torch-harmonics && \
     pip install --no-build-isolation -e .
-
-# physicsnemo
-RUN pip install git+https://github.com/NVIDIA/physicsnemo.git@v1.1.1
 
 # copy source code
 RUN mkdir -p /opt/makani
@@ -94,4 +94,4 @@ COPY makani /opt/makani/makani
 COPY tests /opt/makani/tests
 COPY pyproject.toml /opt/makani/pyproject.toml
 COPY README.md /opt/makani/README.md
-RUN cd /opt/makani && pip install -e .
+RUN cd /opt/makani && pip install --no-deps -e .
