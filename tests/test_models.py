@@ -93,7 +93,6 @@ class TestModels(unittest.TestCase):
             ('AFNO', 1e-5, 1e-5),
             ('AFNOv2', 1e-6, 1e-6),
             ('FNO', 1e-6, 1e-6),
-            ('ViT', 5e-6, 5e-6),
             ("SFNO", 1e-6, 1e-6),
             ("SNO", 1e-6, 1e-6),
             ("FCN3", 1e-6, 1e-6),

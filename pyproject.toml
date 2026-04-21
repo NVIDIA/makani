@@ -56,7 +56,7 @@ dependencies = [
     "torch>=2.4.0",
     "numpy>=1.22.4",
     "h5py>=3.11.0",
-    "nvidia-physicsnemo>=0.5.0a0",
+    "nvidia-physicsnemo>=1.1.1",
     "torch-harmonics>=0.9.0",
     "wandb>=0.13.7",
     "numba",
