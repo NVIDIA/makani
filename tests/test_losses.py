@@ -1381,13 +1381,14 @@ class TestSpectralCRPSLoss(unittest.TestCase):
         self.assertTrue((out >= -1e-6).all())
 
     def test_absolute_true_and_false_differ(self):
-        """absolute=True and absolute=False must give different numerical results."""
-        fn_abs  = self._fn("cdf", absolute=True)
-        fn_real = self._fn("cdf", absolute=False)
+        """absolute=True and absolute=False must give different numerical results.
+        Note: absolute=False only works with the skillspread kernel."""
+        fn_abs  = self._fn("skillspread", absolute=True)
+        fn_real = self._fn("skillspread", absolute=False)
         set_seed(333)
         fc  = torch.randn(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W)
         obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
-        self.assertFalse(compare_tensors("abs vs real CDF", fn_abs(fc, obs), fn_real(fc, obs)))
+        self.assertFalse(compare_tensors("abs vs real skillspread", fn_abs(fc, obs), fn_real(fc, obs)))
 
     # ------ dim validation in forward (lines 398-403) ------
 

@@ -16,49 +16,49 @@
 import torch
 
 
-@torch.compile
+@torch.compile(dynamic=True)
 def _contract_lmwise(ac: torch.Tensor, bc: torch.Tensor) -> torch.Tensor:
     resc = torch.einsum("bgixy,gioxy->bgoxy", ac, bc)
     return resc
 
 
-@torch.compile
+@torch.compile(dynamic=True)
 def _contract_lwise(ac: torch.Tensor, bc: torch.Tensor) -> torch.Tensor:
     resc = torch.einsum("bgixy,giox->bgoxy", ac, bc)
     return resc
 
 
-@torch.compile
+@torch.compile(dynamic=True)
 def _contract_sep_lmwise(ac: torch.Tensor, bc: torch.Tensor) -> torch.Tensor:
     resc = torch.einsum("bgixy,gixy->bgixy", ac, bc)
     return resc
 
 
-@torch.compile
+@torch.compile(dynamic=True)
 def _contract_sep_lwise(ac: torch.Tensor, bc: torch.Tensor) -> torch.Tensor:
     resc = torch.einsum("bgixy,gix->bgixy", ac, bc)
     return resc
 
 
-@torch.compile
+@torch.compile(dynamic=True)
 def _contract_lmwise_real(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     res = torch.einsum("bgixys,gioxy->bgoxys", a, b).contiguous()
     return res
 
 
-@torch.compile
+@torch.compile(dynamic=True)
 def _contract_lwise_real(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     res = torch.einsum("bgixys,giox->bgoxys", a, b).contiguous()
     return res
 
 
-@torch.compile
+@torch.compile(dynamic=True)
 def _contract_sep_lmwise_real(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     res = torch.einsum("bgixys,gixy->bgixys", a, b).contiguous()
     return res
 
 
-@torch.compile
+@torch.compile(dynamic=True)
 def _contract_sep_lwise_real(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     res = torch.einsum("bgixys,gix->bgixys", a, b).contiguous()
     return res
