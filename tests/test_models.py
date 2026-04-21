@@ -110,7 +110,7 @@ class TestModels(unittest.TestCase):
             return
 
         # get loss object
-        self.params.losses = [{"type": "geometric l2", "channel_weights": "constant"}]
+        self.params.losses = [{"type": "l2", "channel_weights": "constant"}]
         loss_obj = LossHandler(self.params).to(self.device)
 
         # get model
