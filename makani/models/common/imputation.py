@@ -44,22 +44,37 @@ class MLPImputation(nn.Module):
             input_format="nchw",
         )
 
-    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None):
-        if mask is None:
-            mask = torch.isnan(x[..., self.inpute_chans, :, :])
-        else:
-            mask = torch.logical_or(mask, torch.isnan(x[..., self.inpute_chans, :, :]))
+    def _scatter_channels(self, x: torch.Tensor, values: torch.Tensor) -> torch.Tensor:
+        """Out-of-place scatter of `values` into `x` at `self.inpute_chans` along the channel dim."""
+        idx = self.inpute_chans.to(x.device)
+        # build an index tensor broadcastable to x's full shape
+        c_dim = x.dim() - 3  # channel axis
+        shape = [1] * x.dim()
+        shape[c_dim] = idx.shape[0]
+        idx_expanded = idx.view(shape).expand_as(values)
+        return x.scatter(c_dim, idx_expanded, values)
 
-        x[..., self.inpute_chans, :, :] = torch.where(mask, 0.0, x[..., self.inpute_chans, :, :])
+    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None):
+        x_sub = x[..., self.inpute_chans, :, :]
+
+        if mask is None:
+            mask = torch.isnan(x_sub)
+        else:
+            mask = torch.logical_or(mask, torch.isnan(x_sub))
+
+        # zero out masked channels for the MLP input (out-of-place)
+        x_zeroed = torch.where(mask, torch.zeros_like(x_sub), x_sub)
+        x_clean = self._scatter_channels(x, x_zeroed)
 
         # flatten extra batch dims for Conv2d compatibility
-        batch_shape = x.shape[:-3]
-        x_flat = x.reshape(-1, *x.shape[-3:])
+        batch_shape = x_clean.shape[:-3]
+        x_flat = x_clean.reshape(-1, *x_clean.shape[-3:])
         mlp_out = self.mlp(x_flat).reshape(*batch_shape, self.out_chans, *x_flat.shape[-2:])
 
-        x[..., self.inpute_chans, :, :] = torch.where(mask, mlp_out, x[..., self.inpute_chans, :, :])
+        # replace only masked positions with MLP predictions (out-of-place)
+        imputed_sub = torch.where(mask, mlp_out, x_zeroed)
 
-        return x
+        return self._scatter_channels(x_clean, imputed_sub)
 
 class ConstantImputation(nn.Module):
     def __init__(
