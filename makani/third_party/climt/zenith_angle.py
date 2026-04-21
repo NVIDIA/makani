@@ -39,15 +39,10 @@ import datetime as dt
 import numpy as np
 from typing import Union, Tuple, TypeVar
 
-# numba stuff for parallelization
-import numba as nb
-from numba import jit, njit
-
 # define helper type
 dtype = np.float32
 
 
-@jit(forceobj=True)
 def _days_from_2000(model_time: np.ndarray) -> np.ndarray:
     """Get the days since year 2000."""
     # compute total days
@@ -58,7 +53,6 @@ def _days_from_2000(model_time: np.ndarray) -> np.ndarray:
     return result
 
 
-@jit(forceobj=True)
 def _greenwich_mean_sidereal_time(model_time: np.ndarray) -> np.ndarray:
     """
     Greenwich mean sidereal time, in radians.
@@ -75,7 +69,6 @@ def _greenwich_mean_sidereal_time(model_time: np.ndarray) -> np.ndarray:
     return theta_radians
 
 
-@jit(forceobj=True)
 def _local_mean_sidereal_time(model_time: np.ndarray, longitude: np.ndarray) -> np.ndarray:
     """
     Local mean sidereal time. requires longitude in radians.
@@ -85,7 +78,6 @@ def _local_mean_sidereal_time(model_time: np.ndarray, longitude: np.ndarray) -> 
     return _greenwich_mean_sidereal_time(model_time) + longitude
 
 
-@jit(forceobj=True)
 def _sun_ecliptic_longitude(model_time: np.ndarray) -> np.ndarray:
     """
     Ecliptic longitude of the sun.
@@ -114,7 +106,6 @@ def _sun_ecliptic_longitude(model_time: np.ndarray) -> np.ndarray:
     return mean_longitude + d_l
 
 
-@jit(forceobj=True)
 def _obliquity_star(julian_centuries: np.ndarray) -> np.ndarray:
     """
     return obliquity of the sun
@@ -137,7 +128,6 @@ def _obliquity_star(julian_centuries: np.ndarray) -> np.ndarray:
     )
 
 
-@jit(forceobj=True)
 def _right_ascension_declination(model_time: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """
     Right ascension and declination of the sun.
@@ -159,7 +149,6 @@ def _right_ascension_declination(model_time: np.ndarray) -> Tuple[np.ndarray, np
     return right_ascension, declination
 
 
-@jit(forceobj=True)
 def _local_hour_angle(model_time: np.ndarray, longitude: np.ndarray, right_ascension: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """
     Hour angle at model_time for the given longitude and right_ascension
@@ -175,7 +164,6 @@ def _local_hour_angle(model_time: np.ndarray, longitude: np.ndarray, right_ascen
     return loc_hour_angle
 
 
-@jit(forceobj=True, cache=True)
 def _star_cos_zenith(model_time: np.ndarray, lon: np.ndarray, lat: np.ndarray) -> np.ndarray:
     """
     Return cosine of star zenith angle
@@ -198,7 +186,6 @@ def _star_cos_zenith(model_time: np.ndarray, lon: np.ndarray, lat: np.ndarray) -
     return cosine_zenith
 
 
-@jit(forceobj=True, cache=True)
 def cos_zenith_angle(
     time: np.ndarray,
     lon: np.ndarray,
