@@ -49,8 +49,8 @@ from properscoring import crps_ensemble, crps_gaussian
 
 _loss_params = [
     ([{"type": "l1"}], False),
-    ([{"type": "relative l1"}], False),
-    ([{"type": "squared l2"}], False),
+    ([{"type": "l1", "parameters": {"relative": True}}], False),
+    ([{"type": "l2", "parameters": {"squared": True}}], False),
     ([{"type": "l2", "channel_weights": "constant"}], True),
     ([{"type": "l2", "channel_weights": "constant"}, {"type": "l2", "channel_weights": "auto"}], True),
     ([{"type": "h1", "channel_weights": "constant"}], True),
