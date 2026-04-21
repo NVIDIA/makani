@@ -189,8 +189,6 @@ class LpEnergyScoreLoss(GeometricBaseLoss):
             espread = espread.sum(dim=-1, keepdim=True)
             eskill = eskill.sum(dim=-1, keepdim=True)
 
-        # just to be sure, mask the diagonal of espread with self.eps
-        #espread = torch.where(torch.eye(num_ensemble, device=espread.device).bool().reshape(num_ensemble, num_ensemble, 1, 1), self.eps, espread)
         # get the masks
         espread_mask = torch.where(espread < self.eps, True, False)
         eskill_mask = torch.where(eskill < self.eps, True, False)
@@ -211,7 +209,6 @@ class LpEnergyScoreLoss(GeometricBaseLoss):
         # mask espread and sum
         espread = torch.where(espread_mask, 0.0, espread)
         eskill = torch.where(eskill_mask, 0.0, eskill)
-        #espread = torch.where(torch.eye(num_ensemble, device=espread.device).bool().reshape(num_ensemble, num_ensemble, 1, 1), 0.0, espread)
         espread = espread.sum(dim=(0,1)) * (float(num_ensemble) - 1.0 + self.alpha) / float(num_ensemble * num_ensemble * (num_ensemble - 1))
 
         # sum over ensemble
@@ -390,8 +387,6 @@ class SobolevEnergyScoreLoss(SpectralBaseLoss):
             espread = reduce_from_parallel_region(espread, "spatial")
             eskill = reduce_from_parallel_region(eskill, "spatial")
 
-        # just to be sure, mask the diagonal of espread with self.eps
-        #espread = torch.where(torch.eye(num_ensemble, device=espread.device).bool().reshape(num_ensemble, num_ensemble, 1, 1), self.eps, espread)
         # get the masks
         espread_mask = torch.where(espread < self.eps, True, False)
         eskill_mask = torch.where(eskill < self.eps, True, False)
@@ -412,7 +407,6 @@ class SobolevEnergyScoreLoss(SpectralBaseLoss):
         # mask espread and sum
         espread = torch.where(espread_mask, 0.0, espread)
         eskill = torch.where(eskill_mask, 0.0, eskill)
-        #espread = torch.where(torch.eye(num_ensemble, device=espread.device).bool().reshape(num_ensemble, num_ensemble, 1, 1), 0.0, espread)
         espread = espread.sum(dim=(0,1)) * (float(num_ensemble) - 1.0 + self.alpha) / float(num_ensemble * num_ensemble * (num_ensemble - 1))
 
         # compute the skill term
