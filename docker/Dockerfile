@@ -80,7 +80,7 @@ RUN pip install git+https://github.com/NVIDIA/physicsnemo.git@v1.1.1
 RUN pip install setuptools_scm
 ENV FORCE_CUDA_EXTENSION 1
 ENV TORCH_CUDA_ARCH_LIST "8.0 8.6 8.7 9.0 10.0+PTX"
-RUN cd /opt && git clone -b bbonev/disco-modal-normalization https://github.com/NVIDIA/torch-harmonics.git && \
+RUN cd /opt && git clone https://github.com/NVIDIA/torch-harmonics.git && \
     cd torch-harmonics && \
     pip install --no-build-isolation -e .
 
