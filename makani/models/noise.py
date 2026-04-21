@@ -15,7 +15,11 @@
 
 import math
 import numpy as np
-from typing import override
+import sys
+if sys.version_info >= (3, 12):
+    from typing import override
+else:
+    from typing_extensions import override
 
 import torch
 import torch.nn as nn

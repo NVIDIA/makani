@@ -515,7 +515,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         # compute the total number of internal groups
         self.n_out_chans = self.n_atmo_groups * self.n_atmo_chans + self.n_surf_chans
         self.n_in_chans = (self.n_atmo_groups * self.n_atmo_chans + self.n_surf_chans) * (self.n_history + 1)
-        self.total_aux_embed_dim = self.aux_embed_dim + self.pos_embed_dim
+        self.total_aux_embed_dim = (self.aux_embed_dim if self.n_aux_chans > 0 else 0) + self.pos_embed_dim
 
         # convert kernel shape to tuple
         kernel_shape = tuple(kernel_shape)
