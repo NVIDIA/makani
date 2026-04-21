@@ -46,7 +46,7 @@ from physicsnemo import ModelMetaData
 # heuristic for finding theta_cutoff
 def _compute_cutoff_radius(lmax, kernel_shape, basis_type):
     margin_factor = {"piecewise linear": 1.0, "morlet": 1.0, "harmonic": 1.0, "zernike": 1.0, "fourier-bessel": 1.5}
-    return margin_factor[basis_type] * (kernel_shape[0] + 0.25) * math.pi / float(lmax)
+    return margin_factor[basis_type] * kernel_shape[0] * math.pi / float(lmax)
 
 # commenting out torch.compile due to long intiial compile times
 # @torch.compile
