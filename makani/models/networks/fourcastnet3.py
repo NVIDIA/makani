@@ -261,14 +261,8 @@ class NeuralOperatorBlock(nn.Module):
         lmax=240,
         checkpointing_level=0,
         bias=False,
-        stochastic_bias=False,
-        seed=333,
     ):
         super().__init__()
-
-        # generator objects:
-        seed = seed + comm.get_rank("model") + comm.get_size("model") * comm.get_rank("ensemble") + comm.get_size("model") * comm.get_size("ensemble") * comm.get_rank("batch")
-        self.set_rng(seed=seed)
 
         # determine some shapes
         self.inp_shape = (forward_transform.nlat, forward_transform.nlon)
@@ -324,13 +318,6 @@ class NeuralOperatorBlock(nn.Module):
         else:
             raise ValueError(f"Unknown convolution type {conv_type}")
 
-        # stochastic bias
-        if stochastic_bias:
-            self.bias_std = nn.Parameter(torch.zeros(inp_chans if use_mlp else out_chans, 1, 1))
-            scale = math.sqrt(gain_factor / self.bias_std.shape[0] / 2)
-            nn.init.normal_(self.bias_std, mean=0.0, std=scale)
-            self.bias_std.is_shared_mp = ["spatial"]
-
         # get normalization layer handles and instances
         norm_layer_handle = _get_norm_layer_handle(
             self.inp_shape[0],
@@ -384,14 +371,6 @@ class NeuralOperatorBlock(nn.Module):
         else:
             raise ValueError(f"Unknown skip connection type {skip}")
 
-    @torch.compiler.disable(recursive=False)
-    def set_rng(self, seed=333):
-        self.rng_cpu = torch.Generator(device=torch.device("cpu"))
-        self.rng_cpu.manual_seed(seed)
-        if torch.cuda.is_available():
-            self.rng_gpu = torch.Generator(device=torch.device(f"cuda:{comm.get_local_rank()}"))
-            self.rng_gpu.manual_seed(seed)
-
     def _conv_forward(self, x):
         if hasattr(self, "global_conv"):
             dx, _ = self.global_conv(x)
@@ -409,11 +388,6 @@ class NeuralOperatorBlock(nn.Module):
         x = self.norm1(x)
 
         dx = self._conv_forward(x)
-
-        if hasattr(self, "bias_std"):
-            n = torch.zeros(*dx.shape[:-2], 1, 1, device=dx.device, dtype=dx.dtype)
-            n.normal_(mean=0.0, std=1.0, generator=self.rng_gpu if n.is_cuda else self.rng_cpu)
-            dx = dx + self.bias_std * n
 
         # apply normalization layer 2
         dx = self.norm2(dx)
@@ -482,8 +456,6 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         freeze_processor=False,
         normalization_means=None,
         normalization_stds=None,
-        stochastic_bias=False,
-        seed=333,
         **kwargs,
     ):
         super().__init__()
@@ -631,8 +603,6 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
                 lmax=self.lmax,
                 checkpointing_level=checkpointing_level,
                 bias=bias,
-                stochastic_bias=stochastic_bias,
-                seed=seed,
             )
 
             self.blocks.append(block)
