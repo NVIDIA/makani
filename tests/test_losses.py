@@ -691,19 +691,19 @@ class TestGaussianMMDLoss(unittest.TestCase):
         )
 
     def test_spread_increases_mmd(self):
-        """A wide ensemble farther from the observation must have a larger MMD²
-        than a tight ensemble concentrated near it."""
+        """A tight ensemble near the observation must have a higher kernel score
+        than a wide ensemble far from it."""
         fn = GaussianMMDLoss(**_GEOM_KWARGS, squared=True)
         obs = torch.zeros(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
         set_seed(333)
         noise = torch.randn(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W)
-        fc_tight = obs.unsqueeze(1) + 0.01 * noise  # k(y_m, obs) ≈ 1 → negative mmd²
-        fc_wide  = obs.unsqueeze(1) + 10.0 * noise  # k(y_m, obs) ≈ 0 → positive mmd²
-        mmd_tight = fn(fc_tight, obs).mean().item()
-        mmd_wide  = fn(fc_wide,  obs).mean().item()
-        self.assertLess(
-            mmd_tight, mmd_wide,
-            f"Tight MMD² ({mmd_tight:.4f}) should be < wide MMD² ({mmd_wide:.4f})",
+        fc_tight = obs.unsqueeze(1) + 0.01 * noise
+        fc_wide  = obs.unsqueeze(1) + 10.0 * noise
+        score_tight = fn(fc_tight, obs).mean().item()
+        score_wide  = fn(fc_wide,  obs).mean().item()
+        self.assertGreater(
+            score_tight, score_wide,
+            f"Tight score ({score_tight:.4f}) should be > wide score ({score_wide:.4f})",
         )
 
     def test_backward(self):

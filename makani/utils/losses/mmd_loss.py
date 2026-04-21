@@ -195,8 +195,11 @@ class GaussianMMDLoss(GeometricBaseLoss):
         espread = torch.where(torch.eye(num_ensemble, device=espread.device).bool().reshape(num_ensemble, num_ensemble, 1, 1), 0.0, espread)
 
         # now we have reduced everything and need to sum appropriately
-        espread = espread.sum(dim=(0,1)) * (float(num_ensemble) - 1.0 + self.alpha) / float(num_ensemble * num_ensemble * (num_ensemble - 1))
         eskill = eskill.sum(dim=0) / float(num_ensemble)
+        if num_ensemble > 1:
+            espread = espread.sum(dim=(0,1)) * (float(num_ensemble) - 1.0 + self.alpha) / float(num_ensemble * num_ensemble * (num_ensemble - 1))
+        else:
+            espread = torch.zeros_like(eskill)
 
         # the resulting tensor should have dimension B, C which is what we return
         return eskill - 0.5 * espread

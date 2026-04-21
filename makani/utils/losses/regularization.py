@@ -187,6 +187,8 @@ class SpectralRegularization(SpectralBaseLoss):
             diff = diff.sum(dim=1) / float(E)
             if self.ensemble_distributed:
                 diff = reduce_from_parallel_region(diff, "ensemble") / float(comm.get_size("ensemble"))
+        else:
+            diff = diff.squeeze(1)
 
         # do the l reduction
         diff = diff.sum(dim=-1)

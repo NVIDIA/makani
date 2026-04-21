@@ -157,11 +157,13 @@ class SpectralLpLoss(SpectralBaseLoss):
         if wgt is not None:
             coeffsp = coeffsp * wgt
 
-        # sum over m: m=0 contributes once, m!=0 contribute twice (due to conjugate symmetry)
+        # Parseval sum: m=0 once, m!=0 twice (conjugate symmetry)
+        # divide by 4π to match the geometric quadrature normalization
+        inv_area = 1.0 / (4.0 * torch.pi)
         if comm.get_rank("w") == 0:
-            normp = coeffsp[..., 0] + 2 * torch.sum(coeffsp[..., 1:], dim=-1)
+            normp = inv_area * (coeffsp[..., 0] + 2 * torch.sum(coeffsp[..., 1:], dim=-1))
         else:
-            normp = 2 * torch.sum(coeffsp, dim=-1)
+            normp = inv_area * (2 * torch.sum(coeffsp, dim=-1))
 
         if self.spatial_distributed and (comm.get_size("w") > 1):
             normp = reduce_from_parallel_region(normp, "w")

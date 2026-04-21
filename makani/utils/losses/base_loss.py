@@ -382,6 +382,8 @@ class SpectralBaseLoss(nn.Module, metaclass=ABCMeta):
         l_weights = torch.ones(self.sht.lmax, dtype=torch.float32)
         m_weights = 2 * torch.ones(self.sht.mmax, dtype=torch.float32)
         m_weights[0] = 1.0
+        # normalize to 1/(4pi) to match the geometric quadrature normalization (Parseval)
+        m_weights = m_weights / (4.0 * torch.pi)
 
         # get meshgrid of weights:
         l_weights, m_weights = torch.meshgrid(l_weights, m_weights, indexing="ij")
