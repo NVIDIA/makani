@@ -146,10 +146,6 @@ RUN pip install moviepy imageio
 # other python stuff
 RUN pip install --upgrade wandb ruamel.yaml tqdm progressbar2
 
-# numba
-RUN pip install numba
-ENV NUMBA_DISABLE_CUDA=1
-
 # scoring tools
 RUN pip install xskillscore properscoring
 

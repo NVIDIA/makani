@@ -59,7 +59,6 @@ dependencies = [
     "nvidia-physicsnemo>=0.5.0a0",
     "torch-harmonics>=0.8.0",
     "wandb>=0.13.7",
-    "numba",
     "tqdm>=4.60.0",
     "more-itertools",
     "Pillow",
