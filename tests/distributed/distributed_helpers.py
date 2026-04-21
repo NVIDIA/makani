@@ -83,7 +83,7 @@ def get_default_parameters():
     return params
 
 
-def init_grid(cls):
+def _init_grid(cls):
     # set up distributed
     cls.grid_size_h = int(os.getenv("GRID_H", 1))
     cls.grid_size_w = int(os.getenv("GRID_W", 1))
@@ -129,7 +129,7 @@ def init_grid(cls):
     return
 
 
-def split_helper(tensor, dim=None, group=None):
+def _split_helper(tensor, dim=None, group=None):
     with torch.no_grad():
         if (dim is not None) and dist.get_world_size(group=group):
             gsize = dist.get_world_size(group=group)
@@ -143,7 +143,7 @@ def split_helper(tensor, dim=None, group=None):
     return tensor_local
 
 
-def gather_helper(tensor, dim=None, group=None):
+def _gather_helper(tensor, dim=None, group=None):
     # get shapes
     if (dim is not None) and (dist.get_world_size(group=group) > 1):
         gsize = dist.get_world_size(group=group)

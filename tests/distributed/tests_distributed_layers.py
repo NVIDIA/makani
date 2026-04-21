@@ -35,35 +35,28 @@ from makani.models.common.layer_norm import GeometricInstanceNormS2
 from makani.mpu.layer_norm import DistributedGeometricInstanceNormS2, DistributedInstanceNorm2d
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-from .distributed_helpers import init_grid, split_helper, gather_helper
-from ..testutils import disable_tf32, compare_tensors
+from .distributed_helpers import _init_grid, _split_helper, _gather_helper
+from ..testutils import disable_tf32, set_seed, compare_tensors
 
 class TestDistributedLayers(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        init_grid(cls)
+        _init_grid(cls)
 
     def setUp(self):
         disable_tf32()
 
 
-    def _init_seed(self, seed):
-        torch.manual_seed(seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed(seed)
-        return
-
-
     def _split_helper(self, tensor, hdim=-2, wdim=-1):
-        tensor_local = split_helper(tensor, dim=hdim, group=self.h_group)
-        tensor_local = split_helper(tensor_local, dim=wdim, group=self.w_group)
+        tensor_local = _split_helper(tensor, dim=hdim, group=self.h_group)
+        tensor_local = _split_helper(tensor_local, dim=wdim, group=self.w_group)
         return tensor_local
 
 
     def _gather_helper(self, tensor, hdim=-2, wdim=-1):
-        tensor_gather = gather_helper(tensor, dim=hdim, group=self.h_group)
-        tensor_gather = gather_helper(tensor_gather, dim=wdim, group=self.w_group)
+        tensor_gather = _gather_helper(tensor, dim=hdim, group=self.h_group)
+        tensor_gather = _gather_helper(tensor_gather, dim=wdim, group=self.w_group)
 
         return tensor_gather
 
@@ -79,11 +72,7 @@ class TestDistributedLayers(unittest.TestCase):
         ],
         skip_on_empty=True,
     )
-    def test_distributed_spectral_conv(self, nlat_in, nlon_in, nlat_out, nlon_out, batch_size, num_chan, tol, verbose=True):
-
-        # disable tf32
-        disable_tf32()
-
+    def test_distributed_spectral_conv(self, nlat_in, nlon_in, nlat_out, nlon_out, batch_size, num_chan, tol, verbose=False):
         B, C, Hi, Wi, Ho, Wo = batch_size, num_chan, nlat_in, nlon_in, nlat_out, nlon_out
 
         from makani.models.common import SpectralConv
@@ -94,7 +83,7 @@ class TestDistributedLayers(unittest.TestCase):
         forward_transform_dist = thd.DistributedRealSHT(nlat=Hi, nlon=Wi).to(self.device)
         inverse_transform_dist = thd.DistributedInverseRealSHT(nlat=Ho, nlon=Wo, lmax=forward_transform_dist.lmax, mmax=forward_transform_dist.mmax).to(self.device)
 
-        self._init_seed(333)
+        set_seed(333)
 
         spect_conv_local = SpectralConv(
             forward_transform_local,
@@ -210,14 +199,10 @@ class TestDistributedLayers(unittest.TestCase):
         ],
         skip_on_empty=True,
     )
-    def test_distributed_instance_norm_2d(self, nlat, nlon, batch_size, num_chan, affine, tol, verbose=True):
-
-        # disable tf32
-        disable_tf32()
-
+    def test_distributed_instance_norm_2d(self, nlat, nlon, batch_size, num_chan, affine, tol, verbose=False):
         B, C, H, W = batch_size, num_chan, nlat, nlon
 
-        self._init_seed(333)
+        set_seed(333)
 
         # create local (serial) instance norm - using PyTorch's standard InstanceNorm2d
         norm_local = nn.InstanceNorm2d(
@@ -342,11 +327,7 @@ class TestDistributedLayers(unittest.TestCase):
         ],
         skip_on_empty=True,
     )
-    def test_distributed_geometric_instance_norm_s2(self, nlat, nlon, batch_size, num_chan, grid_type, affine, tol, verbose=True):
-
-        # disable tf32
-        disable_tf32()
-
+    def test_distributed_geometric_instance_norm_s2(self, nlat, nlon, batch_size, num_chan, grid_type, affine, tol, verbose=False):
         B, C, H, W = batch_size, num_chan, nlat, nlon
 
         # set up layer norm parameters
@@ -356,7 +337,7 @@ class TestDistributedLayers(unittest.TestCase):
         pole_mask = 0
         eps = 1e-5
 
-        self._init_seed(333)
+        set_seed(333)
 
         # create local (serial) layer norm
         norm_local = GeometricInstanceNormS2(

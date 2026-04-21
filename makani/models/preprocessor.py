@@ -31,6 +31,10 @@ class Preprocessor2D(nn.Module):
     def __init__(self, params):
         super().__init__()
 
+        # image shape — must be set first; used by quadrature and noise constructors below
+        self.img_shape = [params.img_shape_x, params.img_shape_y]
+        self.img_shape_resampled = [params.img_shape_x_resampled, params.img_shape_y_resampled]
+
         self.subsampling_factor = params.get("subsampling_factor", 1)
         self.n_history = params.n_history
         self.history_normalization_mode = params.history_normalization_mode
@@ -64,10 +68,6 @@ class Preprocessor2D(nn.Module):
 
         # residual normalization
         self.residual_scale = None
-
-        # image shape
-        self.img_shape = [params.img_shape_x, params.img_shape_y]
-        self.img_shape_resampled = [params.img_shape_x_resampled, params.img_shape_y_resampled]
 
         # unpredicted input channels:
         self.unpredicted_inp_train = None
@@ -256,7 +256,10 @@ class Preprocessor2D(nn.Module):
             if self.input_noise_mode == "concatenate":
                 xc = torch.cat([xc, n], dim=2)
             elif self.input_noise_mode == "perturb":
-                x[:, :, self.perturb_channels] = x[:, :, self.perturb_channels] + n
+                # fully out-of-place: build a zero noise field and add to all channels
+                noise_full = torch.zeros_like(x)
+                noise_full[:, :, self.perturb_channels] = n
+                x = x + noise_full
 
         # concatenate
         xo = torch.cat([x, xc], dim=2)
@@ -300,16 +303,19 @@ class Preprocessor2D(nn.Module):
                 xr = x
 
             # mean
-            # compute weighted mean over dim 1, but sum over dim=3,4
+            # quadrature reduces (H, W) → (B, T, C); weighted sum over T with keepdim → (B, 1, C)
             self.history_mean = torch.sum(self.quadrature(xr * self.history_normalization_weights), dim=1, keepdim=True)
+            # reshape to (B, 1, C, 1, 1) so it broadcasts with xr (B, T, C, H, W)
+            b_, _, c_ = self.history_mean.shape
+            self.history_mean = self.history_mean.reshape(b_, 1, c_, 1, 1)
 
-            # compute std
+            # compute std: (B, T, C, H, W) - (B, 1, C, 1, 1) broadcasts correctly
             self.history_std = torch.sum(self.quadrature(torch.square(xr - self.history_mean) * self.history_normalization_weights), dim=1, keepdim=True)
-            self.history_std = torch.sqrt(self.history_std)
+            self.history_std = torch.sqrt(self.history_std.reshape(b_, 1, c_, 1, 1))
 
-            # squeeze
-            self.history_mean = torch.squeeze(self.history_mean, dim=1)
-            self.history_std = torch.squeeze(self.history_std, dim=1)
+            # squeeze T dim → (B, C, 1, 1); spatial singletons broadcast in history_normalize
+            self.history_mean = self.history_mean.reshape(b_, c_, 1, 1)
+            self.history_std = self.history_std.reshape(b_, c_, 1, 1)
 
             # copy to parallel region
             self.history_mean = copy_to_parallel_region(self.history_mean, "spatial")
@@ -322,12 +328,8 @@ class Preprocessor2D(nn.Module):
             return x
 
         xdim = x.dim()
-        if xdim == 4:
-            b_, c_, h_, w_ = x.shape
-            xr = torch.reshape(x, (b_, (self.n_history + 1), c_ // (self.n_history + 1), h_, w_))
-        else:
+        if xdim == 5:
             xshape = x.shape
-            xr = x
             x = self.flatten_history(x)
 
         # normalize
@@ -377,22 +379,22 @@ class Preprocessor2D(nn.Module):
             if (self.unpredicted_inp_train is not None) and (xz is not None) and (self.unpredicted_inp_train.shape == xz.shape):
                 self.unpredicted_inp_train.copy_(xz)
             else:
-                self.unpredicted_inp_train = xz
+                self.unpredicted_inp_train = xz.clone() if xz is not None else None
 
             if (self.unpredicted_tar_train is not None) and (yz is not None) and (self.unpredicted_tar_train.shape == yz.shape):
                 self.unpredicted_tar_train.copy_(yz)
             else:
-                self.unpredicted_tar_train = yz
+                self.unpredicted_tar_train = yz.clone() if yz is not None else None
         else:
             if (self.unpredicted_inp_eval is not None) and (xz is not None) and (self.unpredicted_inp_eval.shape == xz.shape):
                 self.unpredicted_inp_eval.copy_(xz)
             else:
-                self.unpredicted_inp_eval = xz
+                self.unpredicted_inp_eval = xz.clone() if xz is not None else None
 
             if (self.unpredicted_tar_eval is not None) and (yz is not None) and (self.unpredicted_tar_eval.shape == yz.shape):
                 self.unpredicted_tar_eval.copy_(yz)
             else:
-                self.unpredicted_tar_eval = yz
+                self.unpredicted_tar_eval = yz.clone() if yz is not None else None
 
         return x, y
 

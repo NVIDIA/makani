@@ -23,60 +23,31 @@ from makani.models.common import RealFFT1, InverseRealFFT1, RealFFT2, InverseRea
 from makani.mpu.fft import DistributedRealFFT1, DistributedInverseRealFFT1, DistributedRealFFT2, DistributedInverseRealFFT2, DistributedRealFFT3, DistributedInverseRealFFT3
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-from .distributed_helpers import init_grid, split_helper, gather_helper
-from ..testutils import disable_tf32, compare_tensors
+
+from .distributed_helpers import _init_grid, _split_helper, _gather_helper
+from ..testutils import disable_tf32, set_seed, compare_tensors
+
 
 class TestDistributedRealFFT(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        init_grid(cls)
-
-
-        # init groups
-        comm.init(model_parallel_sizes=[cls.grid_size_h, cls.grid_size_w, 1, 1],
-                  model_parallel_names=["h", "w", "fin", "fout"])
-        cls.world_rank = comm.get_world_rank()
-
-        if torch.cuda.is_available():
-            if cls.world_rank == 0:
-                print("Running test on GPU")
-            local_rank = comm.get_local_rank()
-            cls.device = torch.device(f"cuda:{local_rank}")
-            torch.cuda.set_device(cls.device)
-            torch.cuda.manual_seed(333)
-        else:
-            if cls.world_rank == 0:
-                print("Running test on CPU")
-            cls.device = torch.device('cpu')
-        torch.manual_seed(333)
-
-        # store comm group parameters
-        cls.wrank = comm.get_rank("w")
-        cls.hrank = comm.get_rank("h")
-        cls.w_group = comm.get_group("w")
-        cls.h_group = comm.get_group("h")
-
-        # initializing sht process groups
-        thd.init(cls.h_group, cls.w_group)
-
-        if cls.world_rank == 0:
-            print(f"Running distributed tests on grid H x W = {cls.grid_size_h} x {cls.grid_size_w}")
+        _init_grid(cls)
 
     def setUp(self):
         disable_tf32()
 
 
     def _split_helper(self, tensor):
-        tensor_local = split_helper(tensor, dim=-1, group=self.w_group)
-        tensor_local = split_helper(tensor_local, dim=-2, group=self.h_group)
+        tensor_local = _split_helper(tensor, dim=-1, group=self.w_group)
+        tensor_local = _split_helper(tensor_local, dim=-2, group=self.h_group)
 
         return tensor_local
 
 
     def _gather_helper(self, tensor):
-        tensor_gather = gather_helper(tensor, dim=-2, group=self.h_group)
-        tensor_gather =	gather_helper(tensor_gather, dim=-1, group=self.w_group)
+        tensor_gather = _gather_helper(tensor, dim=-2, group=self.h_group)
+        tensor_gather =	_gather_helper(tensor_gather, dim=-1, group=self.w_group)
 
         return tensor_gather
 
@@ -289,7 +260,7 @@ class TestDistributedRealFFT(unittest.TestCase):
         ],
         skip_on_empty=True,
     )
-    def test_distributed_ifft2_3(self, nlat, nlon, nalt, batch_size, num_chan, tol, verbose=True):
+    def test_distributed_ifft2_3(self, nlat, nlon, nalt, batch_size, num_chan, tol, verbose=False):
         B, C, D, H, W = batch_size, num_chan, nalt, nlat, nlon
 
         if D > 0:

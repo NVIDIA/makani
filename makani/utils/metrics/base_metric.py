@@ -111,7 +111,7 @@ class GeometricBaseMetric(nn.Module, metaclass=ABCMeta):
             if self.batch_reduction == "mean":
                 raise ValueError(f"Batch reduction mode 'mean' is not supported when weights are provided. Use 'sum' instead.")
             elif self.batch_reduction == "sum":
-                counts = torch.sum(self.quadrature(weight), dim=0)
+                counts = torch.sum(self.quadrature(weight.to(dtype=inp.dtype)), dim=0)
             else:
                 raise ValueError(f"Batch reduction mode '{self.batch_reduction}' is not supported")
         else:

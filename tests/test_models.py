@@ -25,7 +25,7 @@ from makani.utils import checkpoint_helpers
 from makani.utils import LossHandler
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from .testutils import disable_tf32, get_default_parameters, compare_tensors
+from .testutils import disable_tf32, set_seed, get_default_parameters, compare_tensors
 
 class TestModels(unittest.TestCase):
 
@@ -54,8 +54,7 @@ class TestModels(unittest.TestCase):
 
         # set device and seed
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        torch.manual_seed(333)
-        torch.cuda.manual_seed(333)
+        set_seed(333)
 
         return
 
@@ -102,7 +101,7 @@ class TestModels(unittest.TestCase):
         ],
         skip_on_empty=True,
     )
-    def test_gradient_accumulation(self, nettype, atol, rtol, verbose=True):
+    def test_gradient_accumulation(self, nettype, atol, rtol, verbose=False):
         """
         Tests initialization of all the models and the forward and backward pass
         """

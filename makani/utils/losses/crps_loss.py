@@ -105,7 +105,7 @@ def _crps_ensemble_kernel(observation: torch.Tensor, forecasts: torch.Tensor, we
         # update forcast
         prev_forecast = forecast
 
-    integral = integral + torch.where(torch.abs(obs_cdf) < 1.0e-7, observation - forecast, 0.0)
+    integral = integral + torch.clamp(observation - forecast, min=0.0)
 
     # set to nan for first forecasts nan
     integral = torch.where(nanmasklist[0], torch.nan, integral)

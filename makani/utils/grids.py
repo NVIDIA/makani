@@ -175,7 +175,7 @@ class GridQuadrature(torch.nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # integrate over last two axes only:
-        quad = torch.sum(x * self.quad_weight, dim=(-2, -1))
+        quad = torch.sum(x * self.quad_weight.to(x.dtype), dim=(-2, -1))
         if self.distributed and (comm.get_size("spatial") > 1):
             quad = reduce_from_parallel_region(quad.contiguous(), "spatial")
 

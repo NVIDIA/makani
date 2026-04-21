@@ -36,15 +36,14 @@ from makani.utils.losses import (
 
 # Add parent directory to path for testutils import
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-
-from .distributed_helpers import init_grid, split_helper, gather_helper
-from ..testutils import disable_tf32, compare_tensors
+from .distributed_helpers import _init_grid, _split_helper, _gather_helper
+from ..testutils import disable_tf32, set_seed, compare_tensors
 
 class TestDistributedLoss(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        init_grid(cls)
+        _init_grid(cls)
 
     def setUp(self):
         disable_tf32()
@@ -52,14 +51,14 @@ class TestDistributedLoss(unittest.TestCase):
     def _split_helper(self, tensor):
         with torch.no_grad():
             # split in W
-            tensor_local = split_helper(tensor, dim=-1, group=self.w_group)
+            tensor_local = _split_helper(tensor, dim=-1, group=self.w_group)
 
             # split in H
-            tensor_local = split_helper(tensor_local, dim=-2, group=self.h_group)
+            tensor_local = _split_helper(tensor_local, dim=-2, group=self.h_group)
 
             # split in E
             if tensor.dim() == 5:
-                tensor_local = split_helper(tensor_local, dim=1, group=self.e_group)
+                tensor_local = _split_helper(tensor_local, dim=1, group=self.e_group)
 
         return tensor_local
 
@@ -76,10 +75,10 @@ class TestDistributedLoss(unittest.TestCase):
         return tensor_gather
 
     def _gather_helper_bwd(self, tensor, ensemble=False):
-        tensor_gather = gather_helper(tensor, dim=-1, group=self.w_group)
-        tensor_gather = gather_helper(tensor_gather, dim=-2, group=self.h_group)
+        tensor_gather = _gather_helper(tensor, dim=-1, group=self.w_group)
+        tensor_gather = _gather_helper(tensor_gather, dim=-2, group=self.h_group)
         if ensemble:
-            tensor_gather = gather_helper(tensor_gather, dim=1, group=self.e_group)
+            tensor_gather = _gather_helper(tensor_gather, dim=1, group=self.e_group)
 
         return tensor_gather
 
@@ -287,12 +286,7 @@ class TestDistributedLoss(unittest.TestCase):
             [129, 256, 1, 10, 4, "skillspread_crps", True, 5e-4],
         ], skip_on_empty=True
     )
-    def test_distributed_spectral_crps(self, nlat, nlon, batch_size, num_chan, ens_size, loss_type, absolute, tol, verbose=True):
-
-        # disable tf32
-        disable_tf32()
-
-        # extract shapes
+    def test_distributed_spectral_crps(self, nlat, nlon, batch_size, num_chan, ens_size, loss_type, absolute, tol, verbose=False):
         B, E, C, H, W = batch_size, ens_size, num_chan, nlat, nlon
 
         # generate gauss random distributed around 1, with sigma=2

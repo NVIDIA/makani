@@ -17,7 +17,8 @@ from packaging import version
 import os
 import json
 import datetime as dt
-from typing import Optional
+import random
+from typing import List, Optional
 
 import numpy as np
 import h5py as h5
@@ -31,6 +32,22 @@ NUM_CHANNELS = 5
 IMG_SIZE_H = 64
 IMG_SIZE_W = 128
 CHANNEL_NAMES = ["u10m", "t2m", "u500", "z500", "t500"]
+
+# Dataset layout used by init_dataset
+NUM_SAMPLES_PER_YEAR = 365
+TRAIN_YEARS = [2017, 2018]
+TEST_YEARS  = [2019]
+DHOURS = (365 * 24) // NUM_SAMPLES_PER_YEAR  # 24
+
+
+def set_seed(seed=333):
+    """Seed torch, torch.cuda, and numpy for reproducible tests."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+    return
 
 
 def disable_tf32():
@@ -96,7 +113,68 @@ def get_default_parameters():
     params.log_to_screen = False
     params.log_to_wandb = False
 
+    # preprocessor fields — required by Preprocessor2D; tests that need different
+    # values override these in their own setUp after calling get_default_parameters()
+    params.img_shape_x = IMG_SIZE_H
+    params.img_shape_y = IMG_SIZE_W
+    params.img_shape_x_resampled = IMG_SIZE_H
+    params.img_shape_y_resampled = IMG_SIZE_W
+    params.history_normalization_mode = "none"
+    params.history_normalization_decay = 0.5
+    params.normalize_residual = False
+
     return params
+
+
+def init_dataset_metadata(
+    path: str,
+    dataset_name: str = "testing",
+    h5_path: str = H5_PATH,
+    dhours: int = DHOURS,
+    channel_names: Optional[List[str]] = None,
+    lat: Optional[List[float]] = None,
+    lon: Optional[List[float]] = None,
+    grid_type: str = "equiangular",
+    attrs: Optional[dict] = None,
+    analysis_epoch_start_dates: Optional[List[str]] = None,
+) -> str:
+    """Write a dataset metadata JSON to <path>/data.json and return the file path.
+
+    This is the canonical way to create a metadata fixture for tests.  It is
+    also called internally by ``init_dataset`` so that both produce identical
+    JSON layouts (including the ``attrs`` key required by
+    ``parse_dataset_metadata``).
+    """
+    if channel_names is None:
+        channel_names = [f"chan_{i}" for i in range(NUM_CHANNELS)]
+    if lat is None:
+        lat = np.linspace(90, -90, IMG_SIZE_H, endpoint=True).tolist()
+    if lon is None:
+        lon = np.linspace(0, 360, IMG_SIZE_W, endpoint=False).tolist()
+    if attrs is None:
+        attrs = {"description": "A synthetic test dataset."}
+
+    metadata = dict(
+        dataset_name=dataset_name,
+        h5_path=h5_path,
+        dims=["time", "channel", "lat", "lon"],
+        dhours=dhours,
+        attrs=attrs,
+        coords=dict(
+            grid_type=grid_type,
+            lat=lat,
+            lon=lon,
+            channel=channel_names,
+        ),
+    )
+    if analysis_epoch_start_dates is not None:
+        metadata["analysis_epoch_start_dates"] = analysis_epoch_start_dates
+
+    os.makedirs(path, exist_ok=True)
+    file_path = os.path.join(path, "data.json")
+    with open(file_path, "w") as f:
+        json.dump(metadata, f)
+    return file_path
 
 
 def init_dataset(
@@ -106,7 +184,8 @@ def init_dataset(
     img_size_h: Optional[int] = IMG_SIZE_H,
     img_size_w: Optional[int] = IMG_SIZE_W,
     nan_fraction: Optional[float] = 0.0,
-    annotate: Optional[bool] = True
+    annotate: Optional[bool] = True,
+    create_concat: Optional[bool] = False,
 ):
 
     test_path = os.path.join(path, "test")
@@ -136,6 +215,10 @@ def init_dataset(
     hours_per_year = 365 * 24
     dhours = hours_per_year // num_samples_per_year
 
+    # storage for the concatenated training file (populated when create_concat=True)
+    concat_data_list = []
+    concat_ts_list   = []
+
     # create training files
     num_train = 0
     for y in [2017, 2018]:
@@ -160,11 +243,12 @@ def init_dataset(
             # store in file
             hf[H5_PATH][...] = data[...]
 
+            # compute timestamps for this year (used for both annotation and concat)
+            year_start = dt.datetime(year=y, month=1, day=1, hour=0, tzinfo=dt.timezone.utc).timestamp()
+            timestamps = year_start + np.arange(0, hours_per_year * 3600, dhours * 3600, dtype=np.float64)
+
             # annotations
             if annotate:
-                # create datasets
-                year_start = dt.datetime(year=y, month=1, day=1, hour=0, tzinfo=dt.timezone.utc).timestamp()
-                timestamps = year_start + np.arange(0, hours_per_year * 3600, dhours * 3600, dtype=np.float64)
                 hf.create_dataset("timestamp", data=timestamps)
                 hf.create_dataset("channel", len(channel_names), dtype=h5.string_dtype(length=chanlen))
                 hf["channel"][...] = channel_names
@@ -180,6 +264,11 @@ def init_dataset(
                 hf[H5_PATH].dims[1].attach_scale(hf["channel"])
                 hf[H5_PATH].dims[2].attach_scale(hf["lat"])
                 hf[H5_PATH].dims[3].attach_scale(hf["lon"])
+
+            # collect for the concatenated file
+            if create_concat:
+                concat_data_list.append(data.copy())
+                concat_ts_list.append(timestamps)
 
         num_train += num_samples_per_year
 
@@ -229,22 +318,41 @@ def init_dataset(
 
     np.save(os.path.join(stats_path, "time_diff_stds.npy"), np.ones((1, num_channels, 1, 1), dtype=np.float64))
 
-    # create metadata file:
-    metadata = dict(dataset_name="testing",
-                    h5_path=H5_PATH,
-                    dims=["time", "channel", "lat", "lon"],
-                    dhours=dhours,
-                    coords=dict(
-                        grid_type="equiangular",
-                        lat=latitude.tolist(),
-                        lon=longitude.tolist(),
-                        channel=channel_names,
-                    )
-    )
-    with open(os.path.join(metadata_path, "data.json"), "w") as f:
-        json.dump(metadata, f)
+    # create concatenated training file (all years in one HDF5)
+    if create_concat:
+        concat_train_path = os.path.join(path, "train_concat.h5")
+        concat_data = np.concatenate(concat_data_list, axis=0)
+        concat_ts   = np.concatenate(concat_ts_list)
+        with h5.File(concat_train_path, "w") as hf:
+            hf.create_dataset(H5_PATH, data=concat_data)
+            hf.create_dataset("timestamp", data=concat_ts)
+            hf.create_dataset("channel", len(channel_names), dtype=h5.string_dtype(length=chanlen))
+            hf["channel"][...] = channel_names
+            hf.create_dataset("lat", data=latitude)
+            hf.create_dataset("lon", data=longitude)
+            hf["timestamp"].make_scale("timestamp")
+            hf["channel"].make_scale("channel")
+            hf["lat"].make_scale("lat")
+            hf["lon"].make_scale("lon")
+            hf[H5_PATH].dims[0].attach_scale(hf["timestamp"])
+            hf[H5_PATH].dims[1].attach_scale(hf["channel"])
+            hf[H5_PATH].dims[2].attach_scale(hf["lat"])
+            hf[H5_PATH].dims[3].attach_scale(hf["lon"])
+    else:
+        concat_train_path = None
 
-    return train_path, num_train, test_path, num_test, stats_path, metadata_path
+    # create metadata file:
+    init_dataset_metadata(
+        path=metadata_path,
+        dataset_name="testing",
+        h5_path=H5_PATH,
+        dhours=dhours,
+        channel_names=channel_names,
+        lat=latitude.tolist(),
+        lon=longitude.tolist(),
+    )
+
+    return train_path, num_train, test_path, num_test, stats_path, metadata_path, concat_train_path
 
 def compare_tensors(msg, tensor1, tensor2, atol=1e-8, rtol=1e-5, verbose=False):
 

@@ -642,6 +642,10 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
             water_chans = get_water_channels(channel_names)
             if len(water_chans) > 0:
                 self.register_buffer("water_channels", torch.tensor(water_chans, dtype=torch.long), persistent=False)
+                # boolean mask for out-of-place torch.where clamping
+                _mask = torch.zeros(self.n_out_chans, dtype=torch.bool)
+                _mask[water_chans] = True
+                self.register_buffer("water_channel_mask", _mask.view(1, -1, 1, 1), persistent=False)
 
         # freeze the encoder/decoder
         if freeze_encoder:
@@ -841,7 +845,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
                 w = _soft_clamp(x[..., self.water_channels, :, :])
             # the following eventually leads to spectral instability
             # w = nn.functional.softplus(x[..., self.water_channels, :, :], beta=5, threshold=5)
-            x[..., self.water_channels, :, :] = w.to(x.dtype)
+            x = torch.where(self.water_channel_mask, w, x)
 
         return x
 

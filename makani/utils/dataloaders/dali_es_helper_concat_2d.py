@@ -437,7 +437,7 @@ class GeneralConcatES(object):
 
     def __del__(self):
         # close files
-        if self.vfile is not None:
+        if getattr(self, "vfile", None) is not None:
             self.vfile.close()
 
     def __call__(self, sample_info):
