@@ -23,8 +23,6 @@ from makani.utils.losses.base_loss import GeometricBaseLoss, SpectralBaseLoss
 
 from makani.utils import comm
 
-from physicsnemo.distributed.mappings import reduce_from_parallel_region
-
 
 class GeometricLpLoss(GeometricBaseLoss):
     """
@@ -64,7 +62,7 @@ class GeometricLpLoss(GeometricBaseLoss):
     def abs(self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None):
         num_examples = prd.shape[0]
 
-        diff = torch.abs(prd - tar) ** self.p
+        diff = torch.abs(prd - tar).pow(self.p)
 
         if wgt is not None:
             diff = diff * wgt
@@ -73,7 +71,7 @@ class GeometricLpLoss(GeometricBaseLoss):
         all_norms = all_norms.reshape(num_examples, -1)
 
         if not self.squared:
-            all_norms = all_norms ** (1.0 / self.p)
+            all_norms = all_norms.pow(1.0 / self.p)
 
         return all_norms
 
@@ -81,7 +79,7 @@ class GeometricLpLoss(GeometricBaseLoss):
         num_examples = prd.shape[0]
 
         # numerator
-        diff = torch.abs(prd - tar) ** self.p
+        diff = torch.abs(prd - tar).pow(self.p)
 
         if wgt is not None:
             diff = diff * wgt
@@ -90,7 +88,7 @@ class GeometricLpLoss(GeometricBaseLoss):
         diff_norms = diff_norms.reshape(num_examples, -1)
 
         # denominator
-        tarr = torch.abs(tar) ** self.p
+        tarr = torch.abs(tar).pow(self.p)
 
         if wgt is not None:
             tarr = tarr * wgt
@@ -102,7 +100,7 @@ class GeometricLpLoss(GeometricBaseLoss):
         all_norms = diff_norms / tar_norms
 
         if not self.squared:
-            all_norms = all_norms ** (1.0 / self.p)
+            all_norms = all_norms.pow(1.0 / self.p)
 
         return all_norms
 
@@ -154,7 +152,7 @@ class SpectralLpLoss(SpectralBaseLoss):
         coeffs = self.sht(prd - tar)
 
         # compute |coeffs|^p (orthonormal convention)
-        coeffsp = torch.abs(coeffs) ** self.p
+        coeffsp = torch.abs(coeffs).pow(self.p)
 
         if wgt is not None:
             coeffsp = coeffsp * wgt
@@ -177,7 +175,7 @@ class SpectralLpLoss(SpectralBaseLoss):
 
         # take p-th root unless squared is True
         if not self.squared:
-            normp = normp ** (1.0 / self.p)
+            normp = normp.pow(1.0 / self.p)
 
         return normp
 
@@ -186,7 +184,7 @@ class SpectralLpLoss(SpectralBaseLoss):
 
         # compute SH coefficients of the difference
         coeffs = self.sht(prd - tar)
-        coeffsp = torch.abs(coeffs) ** self.p
+        coeffsp = torch.abs(coeffs).pow(self.p)
 
         if wgt is not None:
             coeffsp = coeffsp * wgt
@@ -209,7 +207,7 @@ class SpectralLpLoss(SpectralBaseLoss):
 
         # compute target norm
         tar_coeffs = self.sht(tar)
-        tar_coeffsp = torch.abs(tar_coeffs) ** self.p
+        tar_coeffsp = torch.abs(tar_coeffs).pow(self.p)
 
         if wgt is not None:
             tar_coeffsp = tar_coeffsp * wgt
@@ -232,8 +230,8 @@ class SpectralLpLoss(SpectralBaseLoss):
 
         # take p-th root unless squared is True
         if not self.squared:
-            diff_norms = normp ** (1.0 / self.p)
-            tar_norms = tar_normp ** (1.0 / self.p)
+            diff_norms = normp.pow(1.0 / self.p)
+            tar_norms = tar_normp.pow(1.0 / self.p)
         else:
             diff_norms = normp
             tar_norms = tar_normp
