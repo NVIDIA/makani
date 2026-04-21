@@ -32,7 +32,7 @@ from makani.utils.losses import EnsembleCRPSLoss, EnsembleNLLLoss, EnsembleSpect
 # Add parent directory to path for testutils import
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 from .distributed_helpers import split_helper, gather_helper
-from ..testutils import disable_tf32, compare_tensors
+from ..testutils import disable_tf32, set_seed, compare_tensors
 
 class TestDistributedLoss(unittest.TestCase):
 
@@ -60,12 +60,11 @@ class TestDistributedLoss(unittest.TestCase):
             local_rank = comm.get_local_rank()
             cls.device = torch.device(f"cuda:{local_rank}")
             torch.cuda.set_device(cls.device)
-            torch.cuda.manual_seed(333)
         else:
             if cls.world_rank == 0:
                 print("Running test on CPU")
             cls.device = torch.device("cpu")
-        torch.manual_seed(333)
+        set_seed(333)
 
         # store comm group parameters
         cls.wrank = comm.get_rank("w")
@@ -368,7 +367,7 @@ class TestDistributedLoss(unittest.TestCase):
             [129, 256, 1, 10, 4, "skillspread_crps", True, 5e-4],
         ], skip_on_empty=True
     )
-    def test_distributed_spectral_crps(self, nlat, nlon, batch_size, num_chan, ens_size, loss_type, absolute, tol, verbose=True):
+    def test_distributed_spectral_crps(self, nlat, nlon, batch_size, num_chan, ens_size, loss_type, absolute, tol, verbose=False):
         B, E, C, H, W = batch_size, ens_size, num_chan, nlat, nlon
 
         # generate gauss random distributed around 1, with sigma=2

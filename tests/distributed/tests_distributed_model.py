@@ -33,7 +33,7 @@ from makani.mpu.mappings import reduce_from_parallel_region
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 from .distributed_helpers import get_default_parameters, split_helper, gather_helper
-from ..testutils import disable_tf32, compare_tensors
+from ..testutils import disable_tf32, set_seed, compare_tensors
 
 
 class TestDistributedModel(unittest.TestCase):
@@ -51,12 +51,11 @@ class TestDistributedModel(unittest.TestCase):
             local_rank = cls.mpi_comm_rank % torch.cuda.device_count()
             cls.device = torch.device(f"cuda:{local_rank}")
             torch.cuda.set_device(cls.device)
-            torch.cuda.manual_seed(333)
         else:
             if self.mpi_comm_rank == 0:
                 print("Running test on CPU")
             cls.device = torch.device("cpu")
-        torch.manual_seed(333)
+        set_seed(333)
 
         return
 
@@ -122,11 +121,6 @@ class TestDistributedModel(unittest.TestCase):
         return
 
 
-    def _init_seed(self, seed):
-        torch.manual_seed(seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed(seed)
-        return
 
 
     def _split_helper(self, tensor, hdim=None, wdim=None):
@@ -149,7 +143,7 @@ class TestDistributedModel(unittest.TestCase):
         ],
         skip_on_empty=True,
     )
-    def test_distributed_model_checkpoint_restore(self, nettype, verbose=True):
+    def test_distributed_model_checkpoint_restore(self, nettype, verbose=False):
         """
         Tests initialization of all the models and the forward and backward pass
         """
@@ -158,7 +152,7 @@ class TestDistributedModel(unittest.TestCase):
             return
 
         # fix seed
-        self._init_seed(333)
+        set_seed(333)
 
         # create temporary dir
         tmp_path = None
@@ -214,7 +208,7 @@ class TestDistributedModel(unittest.TestCase):
         ],
         skip_on_empty=True,
     )
-    def test_distributed_model_fwd_bwd(self, nettype, tol, verbose=True):
+    def test_distributed_model_fwd_bwd(self, nettype, tol, verbose=False):
         """
         Tests forward backward pass of distributed model vs serial model
         """
@@ -224,7 +218,7 @@ class TestDistributedModel(unittest.TestCase):
             return
 
         # fix seed
-        self._init_seed(333)
+        set_seed(333)
 
         # create temporary dir
         tmp_path = None
@@ -344,7 +338,7 @@ class TestDistributedModel(unittest.TestCase):
         ],
         skip_on_empty=True,
     )
-    def test_distributed_model_gradient_accumulation(self, nettype, atol, rtol, verbose=True):
+    def test_distributed_model_gradient_accumulation(self, nettype, atol, rtol, verbose=False):
         """
         Tests gradient accumulation with distributed models
         """
@@ -354,7 +348,7 @@ class TestDistributedModel(unittest.TestCase):
             return
 
         # fix seed
-        self._init_seed(333)
+        set_seed(333)
 
         # now init comms
         self._init_comms()

@@ -28,7 +28,7 @@ from makani import Trainer, EnsembleTrainer, StochasticTrainer, AutoencoderTrain
 from makani.utils import comm
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from .testutils import disable_tf32, get_default_parameters, init_dataset
+from .testutils import disable_tf32, set_seed, get_default_parameters, init_dataset
 from .testutils import H5_PATH, compare_tensors
 
 
@@ -127,11 +127,12 @@ class TestTrainer(unittest.TestCase):
         data_path = cls.datadir.name
 
         # init datasets and stats
-        cls.train_path, cls.n_train_samples, cls.valid_path, cls.n_eval_samples, cls.stats_path, cls.metadata_path = init_dataset(data_path)
+        cls.train_path, cls.n_train_samples, cls.valid_path, cls.n_eval_samples, cls.stats_path, cls.metadata_path, _ = init_dataset(data_path)
 
     def setUp(self, path: Optional[str] = "/tmp"):
 
         disable_tf32()
+        set_seed(333)
 
         # create temporary directory
         self.tmpdir = tempfile.TemporaryDirectory(dir=path)
@@ -142,7 +143,7 @@ class TestTrainer(unittest.TestCase):
         os.mkdir(os.path.join(exp_path, "training_checkpoints"))
 
         self.params = init_params(
-            exp_path, self.train_path, self.valid_path, self.stats_path, batch_size=2, ensemble_size=3, stochastic_size=5, n_history=0, n_future=0, normalization="zscore", num_data_workers=1
+            exp_path, self.train_path, self.valid_path, self.stats_path, batch_size=2, ensemble_size=3, stochastic_size=5, n_history=0, n_future=0, normalization="zscore", num_data_workers=0
         )
 
         self.params.multifiles = True
@@ -179,7 +180,7 @@ class TestTrainer(unittest.TestCase):
         ]
     
     @parameterized.expand(test_parameters, skip_on_empty=True)
-    def test_trainer(self, trainer_handle, test_train, test_eval, devstring):
+    def test_trainer(self, trainer_handle, test_train, test_eval, devstring, verbose=False):
 
         # create device
         device = torch.device(devstring)
@@ -229,20 +230,20 @@ class TestTrainer(unittest.TestCase):
             out = self.trainer_restored.model(inp)
             out_ref = self.trainer.model(inp)
             with self.subTest(desc="test output vs reference"):
-                self.assertTrue(compare_tensors("test output vs reference", out, out_ref))
+                self.assertTrue(compare_tensors("test output vs reference", out, out_ref, verbose=verbose))
 
         # redo this but in train mode
         if test_train:
             self.trainer._set_train()
             out = self.trainer.model(inp)
             with self.subTest(desc="train output vs reference roundtrip 1"):
-                self.assertTrue(compare_tensors("train output vs reference roundtrip 1", out, out_ref))
+                self.assertTrue(compare_tensors("train output vs reference roundtrip 1", out, out_ref, verbose=verbose))
             out_ref = out
 
             self.trainer_restored._set_train()
             out = self.trainer_restored.model(inp)
             with self.subTest(desc="train output vs reference roundtrip 2"):
-                self.assertTrue(compare_tensors("train output vs reference roundtrip 2", out, out_ref))
+                self.assertTrue(compare_tensors("train output vs reference roundtrip 2", out, out_ref, verbose=verbose))
 
 
 if __name__ == "__main__":

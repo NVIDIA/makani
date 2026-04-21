@@ -41,7 +41,7 @@ from makani.utils.metrics.functions import (
 from makani.utils.dataloaders.data_helpers import get_lat_lon_grid
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from .testutils import disable_tf32, get_default_parameters, compare_arrays
+from .testutils import disable_tf32, set_seed, get_default_parameters, compare_arrays
 
 # check consistency with weatherbench2 if it is installed
 _have_wb2 = importlib.util.find_spec("weatherbench2") is not None
@@ -185,8 +185,7 @@ class TestMetrics(unittest.TestCase):
         disable_tf32()
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        torch.manual_seed(333)
-        torch.cuda.manual_seed(333)
+        set_seed(333)
 
         return
 
@@ -197,10 +196,10 @@ class TestMetrics(unittest.TestCase):
         flat_vector = torch.ones(batch_size, num_channels, nlat, nlon, device=self.device)
         integral = torch.mean(quad(flat_vector)).item()
 
-        self.assertTrue(np.allclose(integral, 1.0, rtol=1e-5, atol=0))
+        self.assertTrue(compare_arrays("weight normalization", np.asarray(integral), np.asarray(1.0), rtol=1e-5, atol=0))
 
     @parameterized.expand(_deterministic_metrics_params, skip_on_empty=True)
-    def test_weighted_rmse(self, grid_type, batch_size, num_channels, nlat, nlon):
+    def test_weighted_rmse(self, grid_type, batch_size, num_channels, nlat, nlon, verbose=False):
 
         # rmse handle
         rmse_func = GeometricRMSE(grid_type, img_shape=(nlat, nlon), normalize=True, channel_reduction="none", batch_reduction="none").to(self.device)
@@ -216,10 +215,10 @@ class TestMetrics(unittest.TestCase):
         B = xr.DataArray(B.cpu(), dims=["batch", "channels", "lat", "lon"])
         rmse_xskillscore = xs.rmse(A, B, weights=lwf, dim=["lat", "lon"]).to_numpy().mean(axis=0)
 
-        self.assertTrue(compare_arrays("rmse", rmse, rmse_xskillscore, rtol=1e-5, atol=0))
+        self.assertTrue(compare_arrays("rmse", rmse, rmse_xskillscore, rtol=1e-5, atol=0, verbose=verbose))
 
     @parameterized.expand(_deterministic_metrics_params, skip_on_empty=True)
-    def test_l1(self, grid_type, batch_size, num_channels, nlat, nlon):
+    def test_l1(self, grid_type, batch_size, num_channels, nlat, nlon, verbose=False):
 
         # l1 handle
         l1_func = GeometricL1(grid_type, img_shape=(nlat, nlon), normalize=True, channel_reduction="mean", batch_reduction="mean").to(self.device)
@@ -235,10 +234,10 @@ class TestMetrics(unittest.TestCase):
         B = xr.DataArray(B.cpu(), dims=["batch", "channels", "lat", "lon"])
         l1_xskillscore = xs.mae(A, B, weights=lwf).to_numpy()
 
-        self.assertTrue(compare_arrays("l1", l1_xskillscore, l1, rtol=1e-5, atol=0))
+        self.assertTrue(compare_arrays("l1", l1_xskillscore, l1, rtol=1e-5, atol=0, verbose=verbose))
 
     @parameterized.expand(_deterministic_metrics_params, skip_on_empty=True)
-    def test_weighted_acc_macro(self, grid_type, batch_size, num_channels, nlat, nlon):
+    def test_weighted_acc_macro(self, grid_type, batch_size, num_channels, nlat, nlon, verbose=False):
 
         # ACC handle
         acc_func = GeometricACC(grid_type, img_shape=(nlat, nlon), normalize=True, channel_reduction="none", batch_reduction="mean", method="macro").to(self.device)
@@ -262,10 +261,10 @@ class TestMetrics(unittest.TestCase):
         # compute score using xskillscore
         acc_xskillscore = xs.pearson_r(A, B, weights=lwf, dim=["lat", "lon"]).to_numpy().mean(axis=0)
 
-        self.assertTrue(compare_arrays("acc macro", acc, acc_xskillscore, rtol=5e-5, atol=0))
+        self.assertTrue(compare_arrays("acc macro", acc, acc_xskillscore, rtol=5e-5, atol=0, verbose=verbose))
 
     @parameterized.expand(_deterministic_metrics_params, skip_on_empty=True)
-    def test_weighted_acc_micro(self, grid_type, batch_size, num_channels, nlat, nlon):
+    def test_weighted_acc_micro(self, grid_type, batch_size, num_channels, nlat, nlon, verbose=False):
 
         # ACC handle
         acc_func = GeometricACC(grid_type, img_shape=(nlat, nlon), normalize=True, channel_reduction="none", batch_reduction="mean", method="micro").to(self.device)
@@ -292,10 +291,10 @@ class TestMetrics(unittest.TestCase):
         # compute score using xskillscore   
         acc_xskillscore = xs.pearson_r(A, B, weights=lwf, dim=["batch", "lat", "lon"]).to_numpy()
 
-        self.assertTrue(compare_arrays("acc micro", acc, acc_xskillscore, rtol=5e-5, atol=0))
+        self.assertTrue(compare_arrays("acc micro", acc, acc_xskillscore, rtol=5e-5, atol=0, verbose=verbose))
 
     @parameterized.expand(_probabilistic_metrics_params, skip_on_empty=True)
-    def test_weighted_crps(self, grid_type, batch_size, ensemble_size, num_channels, nlat, nlon):
+    def test_weighted_crps(self, grid_type, batch_size, ensemble_size, num_channels, nlat, nlon, verbose=False):
 
         # CRPS handle
         crps_func = GeometricCRPS(
@@ -315,11 +314,11 @@ class TestMetrics(unittest.TestCase):
         # compute score using xskillscore
         crps_xskillscore = xs.crps_ensemble(obs, fct, member_dim="ensemble", weights=lwf, dim=["lat", "lon"]).to_numpy()
 
-        self.assertTrue(compare_arrays("crps", crps, crps_xskillscore, rtol=5e-5, atol=0))
+        self.assertTrue(compare_arrays("crps", crps, crps_xskillscore, rtol=5e-5, atol=0, verbose=verbose))
 
     # we need to relax the bounds here because on CPU, for some reason, the deviations are big
     @parameterized.expand(_probabilistic_metrics_params, skip_on_empty=True)
-    def test_rank_histogram(self, grid_type, batch_size, ensemble_size, num_channels, nlat, nlon, atol=1e-3, rtol=1e-4, verbose=True):
+    def test_rank_histogram(self, grid_type, batch_size, ensemble_size, num_channels, nlat, nlon, atol=1e-3, rtol=1e-4, verbose=False):
         # Rank histogram Handle
         rankhist_handle = GeometricRankHistogram(grid_type=grid_type,
                                                  img_shape=(nlat, nlon),
@@ -375,8 +374,7 @@ class TestMetricsAggregation(unittest.TestCase):
 
     def setUp(self):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        torch.manual_seed(333)
-        torch.cuda.manual_seed(333)
+        set_seed(333)
 
         return
 
@@ -463,7 +461,7 @@ class TestMetricsAggregation(unittest.TestCase):
         self.assertTrue(compare_arrays("deterministic aggregation weighted", res_full.cpu().numpy(), res_split.cpu().numpy(), rtol=1e-6, atol=1e-6, verbose=verbose))
 
     @parameterized.expand(_deterministic_metric_weighted_aggregation_params, skip_on_empty=True)
-    def test_deterministic_aggregation_nan(self, metric_handle, grid_type, batch_size, num_channels, nlat, nlon, cred, bred, verbose=True):
+    def test_deterministic_aggregation_nan(self, metric_handle, grid_type, batch_size, num_channels, nlat, nlon, cred, bred, verbose=False):
         """With NaNs in different positions in output and target, a combined mask (1 where both valid, 0 else) as weight should yield a metric output with no NaNs."""
         # inflate batch size
         num_rollout_steps = 10
@@ -686,8 +684,7 @@ class TestMetricsHandler(unittest.TestCase):
     
     def setUp(self):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        torch.manual_seed(333)
-        torch.cuda.manual_seed(333)
+        set_seed(333)
 
         self.params = get_default_parameters()
         self.params["dhours"] = 1
@@ -886,7 +883,7 @@ class TestMetricsHandler(unittest.TestCase):
 
 
     @parameterized.expand(_metric_handler_params, skip_on_empty=True)
-    def test_aggregation_weighted(self, grid_type, batch_size, ensemble_size, num_rollout_steps, bred, verbose=True):
+    def test_aggregation_weighted(self, grid_type, batch_size, ensemble_size, num_rollout_steps, bred, verbose=False):
         """Test that weighted metric updates aggregate correctly when splitting batches."""
         # create dummy climatology
         num_steps = 4
@@ -1148,12 +1145,11 @@ class ComparetMetricsWB2(unittest.TestCase):
     def setUp(self):
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        torch.manual_seed(333)
-        torch.cuda.manual_seed(333)
+        set_seed(333)
 
     # same as above but compare to wb2
     @parameterized.expand(_wb2_metrics_params, skip_on_empty=True)
-    def test_weighted_crps(self, grid_type, batch_size, ensemble_size, num_channels, nlat, nlon, verbose=True):
+    def test_weighted_crps(self, grid_type, batch_size, ensemble_size, num_channels, nlat, nlon, verbose=False):
 
         # some imports
         from weatherbench2.metrics import CRPS
@@ -1186,7 +1182,7 @@ class ComparetMetricsWB2(unittest.TestCase):
 
     # same as above but compare to wb2
     @parameterized.expand(_wb2_metrics_params, skip_on_empty=True)
-    def test_weighted_ssr(self, grid_type, batch_size, ensemble_size, num_channels, nlat, nlon, verbose=True):
+    def test_weighted_ssr(self, grid_type, batch_size, ensemble_size, num_channels, nlat, nlon, verbose=False):
 
         # some imports
         from weatherbench2.metrics import EnergyScoreSkill, EnergyScoreSpread

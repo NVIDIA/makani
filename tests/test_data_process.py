@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -42,12 +42,12 @@ class TestAnnotateDataset(unittest.TestCase):
         # Create unannotated dataset
         path = os.path.join(tmp_path, "data")
         os.makedirs(path, exist_ok=True)
-        cls.train_path, cls.num_train, cls.test_path, cls.num_test, _, cls.metadata_path = init_dataset(path, nan_fraction=0.0, annotate=False)
+        cls.train_path, cls.num_train, cls.test_path, cls.num_test, _, cls.metadata_path, _ = init_dataset(path, nan_fraction=0.0, annotate=False)
 
         # Create reference dataset with annotations
         ref_path = os.path.join(tmp_path, "ref_data")
         os.makedirs(ref_path, exist_ok=True)
-        cls.ref_train_path, cls.ref_num_train, cls.ref_test_path, cls.ref_num_test, _, _ = init_dataset(ref_path, annotate=True)
+        cls.ref_train_path, cls.ref_num_train, cls.ref_test_path, cls.ref_num_test, _, _, _ = init_dataset(ref_path, annotate=True)
 
     @classmethod
     def tearDownClass(cls):
@@ -83,7 +83,7 @@ class TestAnnotateDataset(unittest.TestCase):
             with h5.File(file_path, "r") as f, h5.File(ref_file_path, "r") as ref_f:
                 # Check data content
                 with self.subTest(desc="data"):
-                    self.assertTrue(np.allclose(f[H5_PATH][...], ref_f[H5_PATH][...]))
+                    self.assertTrue(compare_arrays("data", f[H5_PATH][...], ref_f[H5_PATH][...], verbose=verbose))
 
                 # Check annotations
                 with self.subTest(desc="timestamp"):
@@ -125,7 +125,7 @@ class TestConcatenateDataset(unittest.TestCase):
         # Create dataset
         path = os.path.join(tmp_path, "data")
         os.makedirs(path, exist_ok=True)
-        cls.train_path, cls.num_train, cls.test_path, cls.num_test, _, cls.metadata_path = init_dataset(path, annotate=True)
+        cls.train_path, cls.num_train, cls.test_path, cls.num_test, _, cls.metadata_path, _ = init_dataset(path, annotate=True)
 
     @classmethod
     def tearDownClass(cls):
@@ -173,15 +173,17 @@ class TestConcatenateDataset(unittest.TestCase):
                     num_samples = f_orig[H5_PATH].shape[0] // dhoursrel
                     
                     # Compare data
-                    self.assertTrue(np.allclose(
+                    self.assertTrue(compare_arrays(
+                        "concat data",
                         f_conc[H5_PATH][current_pos:current_pos + num_samples, ...],
-                        f_orig[H5_PATH][::dhoursrel, ...]
+                        f_orig[H5_PATH][::dhoursrel, ...],
                     ))
-                    
+
                     # Compare timestamps
-                    self.assertTrue(np.allclose(
+                    self.assertTrue(compare_arrays(
+                        "concat timestamp",
                         f_conc["timestamp"][current_pos:current_pos + num_samples, ...],
-                        f_orig["timestamp"][::dhoursrel, ...]
+                        f_orig["timestamp"][::dhoursrel, ...],
                     ))
                     
                     # Update position
@@ -193,9 +195,9 @@ class TestConcatenateDataset(unittest.TestCase):
 
             # Verify metadata
             with self.subTest(desc="lat"):
-                self.assertTrue(np.allclose(f_conc["lat"][...], metadata["coords"]["lat"]))
+                self.assertTrue(compare_arrays("lat", f_conc["lat"][...], np.asarray(metadata["coords"]["lat"])))
             with self.subTest(desc="lon"):
-                self.assertTrue(np.allclose(f_conc["lon"][...], metadata["coords"]["lon"]))
+                self.assertTrue(compare_arrays("lon", f_conc["lon"][...], np.asarray(metadata["coords"]["lon"])))
             with self.subTest(desc="channel"):
                 self.assertEqual([c.decode() for c in f_conc["channel"][...].tolist()], metadata["coords"]["channel"])
 
@@ -220,12 +222,12 @@ class TestGetStats(unittest.TestCase):
         # Create dataset
         path = os.path.join(tmp_path, "data")
         os.makedirs(path, exist_ok=True)
-        cls.train_path, cls.num_train, cls.test_path, cls.num_test, _, cls.metadata_path = init_dataset(path, annotate=True)
+        cls.train_path, cls.num_train, cls.test_path, cls.num_test, _, cls.metadata_path, _ = init_dataset(path, annotate=True)
 
         # Create dataset with annotations and NaNs:
         nan_path = os.path.join(tmp_path, "nan_data")
         os.makedirs(nan_path, exist_ok=True)
-        cls.nan_train_path, cls.nan_num_train, cls.nan_test_path, cls.nan_num_test, _, _ = init_dataset(nan_path, nan_fraction=0.1, annotate=True)
+        cls.nan_train_path, cls.nan_num_train, cls.nan_test_path, cls.nan_num_test, _, _, _ = init_dataset(nan_path, nan_fraction=0.1, annotate=True)
 
     @classmethod
     def tearDownClass(cls):
@@ -240,7 +242,7 @@ class TestGetStats(unittest.TestCase):
         ], skip_on_empty=False
     )
     @unittest.skipUnless(importlib.util.find_spec("mpi4py") is not None, "mpi4py needs to be installed for this test")
-    def test_get_stats(self, batch_size, allow_nan, verbose=True):
+    def test_get_stats(self, batch_size, allow_nan, verbose=False):
         # import necessary modules
         from data_process.get_stats import welford_combine, get_file_stats, mask_data
 

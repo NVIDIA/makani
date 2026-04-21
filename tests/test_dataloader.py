@@ -32,7 +32,7 @@ import h5py as h5
 from makani.utils.dataloader import get_dataloader
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from .testutils import disable_tf32, get_default_parameters, init_dataset
+from .testutils import disable_tf32, get_default_parameters, init_dataset, compare_tensors, compare_arrays
 from .testutils import H5_PATH, NUM_CHANNELS, IMG_SIZE_H, IMG_SIZE_W
 
 _multifiles_params = [True]
@@ -109,7 +109,7 @@ class TestDataLoader(unittest.TestCase):
         tmp_path = cls.tmpdir.name
 
         # init datasets and stats
-        cls.train_path, cls.num_train, cls.valid_path, cls.num_valid, cls.stats_path, cls.metadata_path = init_dataset(tmp_path)
+        cls.train_path, cls.num_train, cls.valid_path, cls.num_valid, cls.stats_path, cls.metadata_path, _ = init_dataset(tmp_path)
 
     @classmethod
     def tearDownClass(cls):
@@ -180,11 +180,75 @@ class TestDataLoader(unittest.TestCase):
             inp = np.squeeze(inp.cpu().numpy())
             tar = np.squeeze(tar.cpu().numpy())
 
-            self.assertTrue(np.allclose(inp, test_inp))
-            self.assertTrue(np.allclose(tar, test_tar))
+            self.assertTrue(compare_arrays("test_content inp", inp, test_inp))
+            self.assertTrue(compare_arrays("test_content tar", tar, test_tar))
 
             if idt > self.num_steps:
                 break
+
+    @parameterized.expand(_multifiles_params, skip_on_empty=False)
+    def test_content_normalization_zscore(self, multifiles):
+        """With non-trivial means/stds, zscore output equals (raw - mean) / std."""
+        self.params.multifiles = multifiles
+
+        # non-trivial stats: per-channel means/stds distinct from (0, 1)
+        rng = np.random.default_rng(seed=1234)
+        means = rng.normal(loc=0.5, scale=1.0, size=(1, NUM_CHANNELS, 1, 1)).astype(np.float64)
+        stds  = rng.uniform(low=0.5, high=2.0, size=(1, NUM_CHANNELS, 1, 1)).astype(np.float64)
+
+        with tempfile.TemporaryDirectory() as tmp_stats:
+            np.save(os.path.join(tmp_stats, "global_means.npy"), means)
+            np.save(os.path.join(tmp_stats, "global_stds.npy"),  stds)
+            # ancillary stats files: copy defaults from the shared stats dir
+            for fname in ("mins.npy", "maxs.npy", "time_means.npy",
+                          "time_diff_means.npy", "time_diff_stds.npy"):
+                src = os.path.join(self.stats_path, fname)
+                np.save(os.path.join(tmp_stats, fname), np.load(src))
+
+            params = copy.deepcopy(self.params)
+            params.global_means_path    = os.path.join(tmp_stats, "global_means.npy")
+            params.global_stds_path     = os.path.join(tmp_stats, "global_stds.npy")
+            params.min_path             = os.path.join(tmp_stats, "mins.npy")
+            params.max_path             = os.path.join(tmp_stats, "maxs.npy")
+            params.time_means_path      = os.path.join(tmp_stats, "time_means.npy")
+            params.time_diff_means_path = os.path.join(tmp_stats, "time_diff_means.npy")
+            params.time_diff_stds_path  = os.path.join(tmp_stats, "time_diff_stds.npy")
+
+            valid_loader, valid_dataset, _ = get_dataloader(params, params.valid_data_path, mode="eval", device=self.device)
+
+            # the same (B, C, 1, 1) stats broadcast over (B, C, H, W) raw samples
+            means_b = means.astype(np.float32)
+            stds_b  = stds.astype(np.float32)
+
+            for idt, token in enumerate(valid_loader):
+                inp, tar = token
+
+                off = params.batch_size * idt
+                inp_raw = np.stack(
+                    [get_sample(params.valid_data_path, off + b) for b in range(params.batch_size)],
+                    axis=0,
+                ).astype(np.float32)
+                tar_raw = np.stack(
+                    [get_sample(params.valid_data_path, off + b + 1) for b in range(params.batch_size)],
+                    axis=0,
+                ).astype(np.float32)
+
+                # analytical zscore: broadcast (1, C, 1, 1) stats against (B, C, H, W) samples
+                expected_inp = (inp_raw - means_b) / stds_b
+                expected_tar = (tar_raw - means_b) / stds_b
+
+                inp_np = np.squeeze(inp.cpu().numpy())
+                tar_np = np.squeeze(tar.cpu().numpy())
+
+                self.assertTrue(compare_arrays("zscore normalized inp",
+                                               inp_np, np.squeeze(expected_inp),
+                                               atol=1e-5, rtol=1e-4))
+                self.assertTrue(compare_arrays("zscore normalized tar",
+                                               tar_np, np.squeeze(expected_tar),
+                                               atol=1e-5, rtol=1e-4))
+
+                if idt > self.num_steps:
+                    break
 
     @parameterized.expand(_multifiles_params, skip_on_empty=False)
     def test_channel_ordering(self, multifiles):
@@ -205,13 +269,13 @@ class TestDataLoader(unittest.TestCase):
             inp, tar = token
             inp_flip, tar_flip = token_flip
 
-            self.assertFalse(torch.allclose(inp, inp_flip))
+            self.assertFalse(compare_tensors("inp vs flipped inp", inp, inp_flip))
             inp_flip_flip = torch.flip(inp_flip, dims=(2,))
-            self.assertTrue(torch.allclose(inp, inp_flip_flip))
+            self.assertTrue(compare_tensors("inp vs double-flipped inp", inp, inp_flip_flip))
 
-            self.assertFalse(torch.allclose(tar, tar_flip))
+            self.assertFalse(compare_tensors("tar vs flipped tar", tar, tar_flip))
             tar_flip_flip = torch.flip(tar_flip, dims=(2,))
-            self.assertTrue(torch.allclose(tar, tar_flip_flip))
+            self.assertTrue(compare_tensors("tar vs double-flipped tar", tar, tar_flip_flip))
 
     @parameterized.expand(_multifiles_params, skip_on_empty=False)
     def test_history(self, multifiles):
@@ -374,8 +438,8 @@ class TestDataLoader(unittest.TestCase):
             inp = np.squeeze(inp.cpu().numpy())
             tar = np.squeeze(tar.cpu().numpy())
 
-            self.assertTrue(np.allclose(inp, test_inp))
-            self.assertTrue(np.allclose(tar, test_tar))
+            self.assertTrue(compare_arrays("test_distributed inp", inp, test_inp))
+            self.assertTrue(compare_arrays("test_distributed tar", tar, test_tar))
 
             if idt > self.num_steps:
                 break
@@ -427,8 +491,8 @@ class TestDataLoader(unittest.TestCase):
             inp = np.squeeze(inp.cpu().numpy())
             tar = np.squeeze(tar.cpu().numpy())
 
-            self.assertTrue(np.allclose(inp, test_inp))
-            self.assertTrue(np.allclose(tar, test_tar))
+            self.assertTrue(compare_arrays("test_distributed_subsampling inp", inp, test_inp))
+            self.assertTrue(compare_arrays("test_distributed_subsampling tar", tar, test_tar))
 
             if idt > self.num_steps:
                 break

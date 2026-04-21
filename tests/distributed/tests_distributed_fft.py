@@ -28,7 +28,7 @@ from makani.mpu.fft import DistributedRealFFT1, DistributedInverseRealFFT1, Dist
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 from .distributed_helpers import split_helper, gather_helper
-from ..testutils import disable_tf32, compare_tensors
+from ..testutils import disable_tf32, set_seed, compare_tensors
 
 class TestDistributedRealFFT(unittest.TestCase):
 
@@ -51,12 +51,11 @@ class TestDistributedRealFFT(unittest.TestCase):
             local_rank = comm.get_local_rank()
             cls.device = torch.device(f"cuda:{local_rank}")
             torch.cuda.set_device(cls.device)
-            torch.cuda.manual_seed(333)
         else:
             if cls.world_rank == 0:
                 print("Running test on CPU")
             cls.device = torch.device('cpu')
-        torch.manual_seed(333)
+        set_seed(333)
 
         # store comm group parameters
         cls.wrank = comm.get_rank("w")
@@ -296,7 +295,7 @@ class TestDistributedRealFFT(unittest.TestCase):
         ],
         skip_on_empty=True,
     )
-    def test_distributed_ifft2_3(self, nlat, nlon, nalt, batch_size, num_chan, tol, verbose=True):
+    def test_distributed_ifft2_3(self, nlat, nlon, nalt, batch_size, num_chan, tol, verbose=False):
         B, C, D, H, W = batch_size, num_chan, nalt, nlat, nlon
 
         if D > 0:

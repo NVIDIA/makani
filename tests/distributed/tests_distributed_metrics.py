@@ -34,7 +34,7 @@ from makani.utils import MetricsHandler
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 from .distributed_helpers import split_helper, get_default_parameters
-from ..testutils import disable_tf32, compare_arrays
+from ..testutils import disable_tf32, set_seed, compare_arrays
 
 # because of physicsnemo/NCCL tear down issues, we can only run one test at a time
 _metric_handler_params = [
@@ -57,12 +57,11 @@ class TestDistributedMetricHandler(unittest.TestCase):
             local_rank = cls.mpi_comm_rank % torch.cuda.device_count()
             cls.device = torch.device(f"cuda:{local_rank}")
             torch.cuda.set_device(cls.device)
-            torch.cuda.manual_seed(333)
         else:
             if self.mpi_comm_rank == 0:
                 print("Running test on CPU")
             cls.device = torch.device("cpu")
-        torch.manual_seed(333)
+        set_seed(333)
 
         # create temporary directory
         cls.tmpdir = tempfile.TemporaryDirectory(dir=path)
@@ -260,7 +259,7 @@ class TestDistributedMetricHandler(unittest.TestCase):
             val_dist = metrics_dist[key]
             if verbose:
                 print(f"log metric {key}: local={val_local}, dist={val_dist}")
-            self.assertTrue(np.allclose(val_local, val_dist))
+            self.assertTrue(compare_arrays(f"log metric {key}", np.asarray(val_local), np.asarray(val_dist), verbose=verbose))
 
         # compare rollouts
         rollouts_local = logs_local["metrics"]["rollouts"]

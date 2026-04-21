@@ -15,6 +15,7 @@
 
 import math
 import numpy as np
+from typing import override
 
 import torch
 import torch.nn as nn
@@ -211,9 +212,11 @@ class IsotropicGaussianRandomFieldS2(BaseNoiseS2):
         else:
             self.register_buffer("sigma_l", sigma_l, persistent=False)
 
+    @override
     def is_stateful(self):
         return False
 
+    @override
     def forward(self, update_internal_state=False):
 
         # combine channels and time:
@@ -375,10 +378,12 @@ class DiffusionNoiseS2(BaseNoiseS2):
             discount = torch.stack(discount, dim=0)
             self.register_buffer("discount", discount, persistent=False)
 
+    @override
     def is_stateful(self):
         return True
 
     # this routine generates a noise sample for a single time step and updates the state accordingly, by appending the last time step
+    @override
     def update(self, replace_state=False, batch_size=None):
 
         # create single occurence
@@ -424,6 +429,7 @@ class DiffusionNoiseS2(BaseNoiseS2):
 
         return
 
+    @override
     def forward(self, update_internal_state=False):
 
         # combine channels and time:
@@ -447,17 +453,38 @@ class DiffusionNoiseS2(BaseNoiseS2):
         return eta
 
 
-class DummyNoiseS2(nn.Module):
+class DummyNoiseS2(BaseNoiseS2):
     def __init__(
         self,
         img_shape,
         batch_size,
         num_channels,
         num_time_steps=1,
+        mode="constant_zero",
+        seed=333,
         **kwargs,
     ):
         r"""
-        Dummy noise module for debugging purposes. This noise is stateless.
+        Dummy noise module for testing and debugging. This noise is stateless.
+
+        The module always emits a tensor with the correct output shape (B, T, C, H, W)
+        but carries no stochastic signal beyond what the chosen mode specifies.
+
+        Supported modes
+        ---------------
+        constant_zero (default)
+            Always emits an all-zero tensor. Useful for verifying shape consistency
+            of the noise pipeline without introducing any stochastic signal. In particular,
+            when the preprocessor is configured in 'perturb' mode the noise is *added* to
+            the model input channels. Returning zeros guarantees that the input is not
+            modified, so integration tests can check shapes and control-flow correctness
+            without having to account for random perturbations.
+
+        constant_random
+            Draws a spatially-uniform Gaussian tensor once per update() call and holds it
+            fixed until the next update(). Useful for verifying that the model handles a
+            non-zero, reproducible noise pattern correctly without the overhead of the
+            spherical-harmonic transform used by the real noise classes.
 
         Parameters
         ============
@@ -469,37 +496,73 @@ class DummyNoiseS2(nn.Module):
             Number of channels for the noise
         num_time_steps: int
             Number of time steps
+        mode : str, default 'constant_zero'
+            Output mode. One of 'constant_zero' or 'constant_random'.
+        seed : int, default 333
+            Random seed used in 'constant_random' mode; ignored otherwise.
         """
 
-        super().__init__()
+        if mode not in ("constant_zero", "constant_random"):
+            raise ValueError(f"DummyNoiseS2: unknown mode '{mode}'. "
+                             f"Expected 'constant_zero' or 'constant_random'.")
 
-        # Number of latitudinal modes.
-        self.nlat, self.nlon = img_shape
-        self.num_channels = num_channels
-        self.num_time_steps = num_time_steps
+        self.mode = mode
 
-        if comm.get_size("spatial") > 1:
-            lat_shapes = compute_split_shapes(self.nlat, comm.get_size("h"))
-            lon_shapes = compute_split_shapes(self.nlon, comm.get_size("w"))
-            self.nlat_local = lat_shapes[comm.get_rank("h")]
-            self.nlon_local = lon_shapes[comm.get_rank("w")]
-        else:
-            self.nlat_local = self.nlat
-            self.nlon_local = self.nlon
+        # BaseNoiseS2.__init__ sets up nlat/nlon, comm splits, rng_cpu/rng_gpu, and
+        # registers a spectral state buffer. We replace the state buffer below with
+        # a spatial one of the correct shape.
+        super().__init__(
+            img_shape=img_shape,
+            batch_size=batch_size,
+            num_channels=num_channels,
+            num_time_steps=num_time_steps,
+            seed=seed,
+        )
 
-        # store the noise state: initialize to None
-        self.register_buffer("state", torch.zeros((batch_size, self.num_time_steps, self.num_channels, self.nlat_local, self.nlon_local), dtype=torch.float32), persistent=False)
+        # Replace the spectral state buffer (lmax, mmax, 2) with a spatial one (H, W).
+        self.register_buffer(
+            "state",
+            torch.zeros(
+                (batch_size, self.num_time_steps, self.num_channels, self.nlat_local, self.nlon_local),
+                dtype=torch.float32,
+            ),
+            persistent=False,
+        )
 
+    @override
     def is_stateful(self):
         return False
 
+    @override
+    def reset(self, batch_size=None):
+        if self.state is not None:
+            if batch_size is not None:
+                self.state = torch.zeros(
+                    batch_size, self.num_time_steps, self.num_channels,
+                    self.nlat_local, self.nlon_local,
+                    dtype=self.state.dtype, device=self.state.device,
+                )
+            with torch.no_grad():
+                self.state.fill_(0.0)
+
+    @override
     def update(self, replace_state=False, batch_size=None):
 
-        # create single occurence
         with torch.no_grad():
             if batch_size is None:
                 batch_size = self.state.shape[0]
-            newstate = torch.zeros((batch_size, self.num_time_steps, self.num_channels, self.nlat_local, self.nlon_local), dtype=self.state.dtype, device=self.state.device)
+            newstate = torch.empty(
+                (batch_size, self.num_time_steps, self.num_channels, self.nlat_local, self.nlon_local),
+                dtype=self.state.dtype, device=self.state.device,
+            )
+
+            if self.mode == "constant_zero":
+                newstate.zero_()
+            else:  # constant_random
+                if self.state.is_cuda:
+                    newstate.normal_(mean=0.0, std=1.0, generator=self.rng_gpu)
+                else:
+                    newstate.normal_(mean=0.0, std=1.0, generator=self.rng_cpu)
 
             if newstate.shape == self.state.shape:
                 self.state.copy_(newstate)
@@ -508,9 +571,9 @@ class DummyNoiseS2(nn.Module):
 
         return
 
+    @override
     def forward(self, update_internal_state=False):
 
-        # combine channels and time:
         state = self.state
 
         # update the internal state if requested
