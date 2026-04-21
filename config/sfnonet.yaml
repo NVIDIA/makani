@@ -41,9 +41,11 @@ base_config: &BASE_CONFIG
 
     # training parameters
     losses:
-    -   type: "squared geometric l2"
+    -   type: "l2"
         channel_weights: "auto"
         temp_diff_normalization: !!bool True
+        parameters:
+            squared: !!bool True
 
     lr: 1E-3
     n_eval_samples: 8760

@@ -18,7 +18,7 @@ full_field: &BASE_CONFIG
     time_diff_stds_path: "/stats/time_diff_stds.npy"
 
     # training parameters
-    loss: "squared geometric l2"
+    loss: "l2"
     channel_weights: "constant"
     lr: 5E-4
     n_eval_samples: 8760

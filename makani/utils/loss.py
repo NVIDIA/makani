@@ -24,12 +24,34 @@ from makani.utils import comm
 from makani.utils.dataloaders.data_helpers import get_data_normalization, get_time_diff_stds, get_psd_stats
 from makani.mpu.mappings import gather_from_parallel_region, reduce_from_parallel_region
 
-from .losses import LossType, GeometricLpLoss, SpectralLpLoss, SpectralH1Loss, SpectralAMSELoss
-from .losses import CRPSLoss, SpectralCRPSLoss, GradientCRPSLoss, VortDivCRPSLoss, KernelScoreLoss
-from .losses import LpEnergyScoreLoss, SobolevEnergyScoreLoss, SpectralL2EnergyScoreLoss, SpectralCoherenceLoss, CorrectedSpectralL2EnergyScoreLoss
+from .losses import LossType, GeometricLpLoss, SpectralLpLoss, SpectralH1Loss
+from .losses import CRPSLoss, SpectralCRPSLoss, GradientCRPSLoss, VortDivCRPSLoss
+from .losses import LpEnergyScoreLoss, SobolevEnergyScoreLoss, SpectralL2EnergyScoreLoss
 from .losses import GaussianMMDLoss
 from .losses import EnsembleNLLLoss
-from .losses import DriftRegularization, HydrostaticBalanceLoss, SpectralRegularization, CoherenceRegularization
+from .losses import DriftRegularization, HydrostaticBalanceLoss, SpectralRegularization
+
+_LOSS_REGISTRY = {
+    "l1": partial(GeometricLpLoss, p=1),
+    "l2": partial(GeometricLpLoss, p=2),
+    "spectral l1": partial(SpectralLpLoss, p=1),
+    "spectral l2": partial(SpectralLpLoss, p=2),
+    "h1": SpectralH1Loss,
+    "hydrostatic": HydrostaticBalanceLoss,
+    "ensemble_crps": CRPSLoss,
+    "ensemble_spectral_crps": SpectralCRPSLoss,
+    "ensemble_vort_div_crps": VortDivCRPSLoss,
+    "ensemble_gradient_crps": GradientCRPSLoss,
+    "ensemble_nll": EnsembleNLLLoss,
+    "gaussian_mmd": GaussianMMDLoss,
+    "lp_energy_score": LpEnergyScoreLoss,
+    "l2_energy_score": partial(LpEnergyScoreLoss, p=2.0),
+    "sobolev_energy_score": SobolevEnergyScoreLoss,
+    "spectral_l2_energy_score": SpectralL2EnergyScoreLoss,
+    "drift_regularization": DriftRegularization,
+    "spectral_regularization": SpectralRegularization,
+}
+
 
 
 class LossHandler(nn.Module):
@@ -234,72 +256,9 @@ class LossHandler(nn.Module):
 
     @torch.compiler.disable(recursive=False)
     def _parse_loss_type(self, loss_type: str):
-        """
-        auxiliary routine for parsing the loss function
-        """
-
-        loss_type = set(loss_type.split())
-
-        # decide which loss to use
-        if "spectral" in loss_type and "l2" in loss_type:
-            loss_handle = partial(SpectralLpLoss, p=2)
-        elif "spectral" in loss_type and "l1" in loss_type:
-            loss_handle = partial(SpectralLpLoss, p=1)
-        elif "l2" in loss_type:
-            loss_handle = partial(GeometricLpLoss, p=2)
-        elif "l1" in loss_type:
-            loss_handle = partial(GeometricLpLoss, p=1)
-        elif "h1" in loss_type:
-            loss_handle = partial(SpectralH1Loss)
-        elif "amse" in loss_type:
-            loss_handle = SpectralAMSELoss
-        elif "hydrostatic" in loss_type:
-            use_moist_air_formula = "use_moist_air_formula" in loss_type
-            # check if we have p_min,p_max specified
-            p_min = 50
-            p_max = 900
-            for x in loss_type:
-                if x.startswith("p_min="):
-                    p_min = int(x.replace("p_min=", ""))
-                elif x.startswith("p_max="):
-                    p_max = int(x.replace("p_max=", ""))
-            loss_handle = partial(HydrostaticBalanceLoss, p_min=p_min, p_max=p_max, use_moist_air_formula=use_moist_air_formula)
-        elif "ensemble_crps" in loss_type:
-            loss_handle = partial(CRPSLoss)
-        elif "ensemble_spectral_crps" in loss_type:
-            loss_handle = partial(SpectralCRPSLoss)
-        elif "ensemble_vort_div_crps" in loss_type:
-            loss_handle = partial(VortDivCRPSLoss)
-        elif "ensemble_gradient_crps" in loss_type:
-            loss_handle = partial(GradientCRPSLoss)
-        elif "ensemble_kernel_score" in loss_type:
-            loss_handle = partial(KernelScoreLoss)
-        elif "ensemble_nll" in loss_type:
-            loss_handle = EnsembleNLLLoss
-        elif "gaussian_mmd" in loss_type:
-            loss_handle = GaussianMMDLoss
-        elif "lp_energy_score" in loss_type:
-            loss_handle = partial(LpEnergyScoreLoss)
-        elif "l2_energy_score" in loss_type:
-            loss_handle = partial(LpEnergyScoreLoss, p=2.0)
-        elif "sobolev_energy_score" in loss_type:
-            loss_handle = partial(SobolevEnergyScoreLoss)
-        elif "spectral_l2_energy_score" in loss_type:
-            loss_handle = partial(SpectralL2EnergyScoreLoss)
-        elif "spectral_coherence_loss" in loss_type:
-            loss_handle = partial(SpectralCoherenceLoss)
-        elif "corrected_spectral_l2_energy_score" in loss_type:
-            loss_handle = partial(CorrectedSpectralL2EnergyScoreLoss)
-        elif "drift_regularization" in loss_type:
-            loss_handle = DriftRegularization
-        elif "spectral_regularization" in loss_type:
-            loss_handle = SpectralRegularization
-        elif "coherence_regularization" in loss_type:
-            loss_handle = partial(CoherenceRegularization)
-        else:
+        if loss_type not in _LOSS_REGISTRY:
             raise NotImplementedError(f"Unknown loss function: {loss_type}")
-
-        return loss_handle
+        return _LOSS_REGISTRY[loss_type]
 
     @torch.compiler.disable(recursive=False)
     def _gather_batch(self, x: torch.Tensor) -> torch.Tensor:

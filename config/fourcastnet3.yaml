@@ -206,9 +206,11 @@ deterministic_base: &DETERMINISTIC_BASE
 
     # loss function
     losses:
-    -   type: "absolute squared geometric l2"
+    -   type: "l2"
         channel_weights: "auto"
         temp_diff_normalization: !!bool True
+        parameters:
+            squared: !!bool True
 
 
 ###########################################################################################################################
