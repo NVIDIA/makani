@@ -28,7 +28,8 @@ base_config: &BASE_CONFIG
     hard_thresholding_fraction: 1.0 # turning it off for now
     verbose: !!bool False
 
-    loss: "l2"
+    losses:
+    -   type: "l2"
     lr: 1E-3
 
     # n_train_samples_per_year: 1460

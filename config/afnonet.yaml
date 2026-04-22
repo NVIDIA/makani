@@ -17,7 +17,8 @@ full_field: &BASE_CONFIG
     time_diff_means_path: "/stats/time_diff_means.npy"
     time_diff_stds_path: "/stats/time_diff_stds.npy"
 
-    loss: "l2"
+    losses:
+    -   type: "l2"
     lr: 1E-3
     scheduler: "CosineAnnealingLR" # "ReduceLROnPlateau"
     scheduler_T_max: 150
