@@ -1506,6 +1506,17 @@ class TestSpectralCRPSLoss(unittest.TestCase):
         self.assertFalse(torch.isnan(fc.grad).any(), "NaN in fc.grad")
         self.assertFalse(torch.isinf(fc.grad).any(), "Inf in fc.grad")
 
+    @parameterized.expand([("cdf",), ("skillspread",)])
+    def test_backward_finite_on_perfect_prediction(self, crps_type):
+        """Perfect ensemble (all members == obs) must produce finite gradients."""
+        fn  = self._fn(crps_type)
+        obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
+        fc  = obs.unsqueeze(1).expand(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W).clone().requires_grad_(True)
+        fn(fc, obs).sum().backward()
+        self.assertIsNotNone(fc.grad)
+        self.assertFalse(torch.isnan(fc.grad).any(), f"NaN in {crps_type} gradient at perfect forecast")
+        self.assertFalse(torch.isinf(fc.grad).any(), f"Inf in {crps_type} gradient at perfect forecast")
+
 
 # ===========================================================================
 class TestSobolevEnergyScoreLoss(unittest.TestCase):
@@ -1614,6 +1625,49 @@ class TestSobolevEnergyScoreLoss(unittest.TestCase):
                 self.assertFalse(torch.isnan(forecasts.grad).any(), f"Gradients contain NaN values")
                 self.assertFalse(torch.isinf(forecasts.grad).any(), f"Gradients contain inf values")
 
+    @parameterized.expand([(0.5,), (1.0,), (2.0,)])
+    def test_backward_finite_on_perfect_prediction(self, beta):
+        """Perfect ensemble (all members == obs) must produce finite gradients across beta values.
+        For beta<1 the |diff|^beta derivative at diff=0 is singular; the eps-mask must neutralize
+        that path in the backward pass."""
+        sobolev_loss = SobolevEnergyScoreLoss(
+            img_shape=(self.params.img_shape_x, self.params.img_shape_y),
+            crop_shape=(self.params.img_shape_x, self.params.img_shape_y),
+            crop_offset=(0, 0),
+            channel_names=self.params.channel_names,
+            grid_type=self.params.model_grid_type,
+            lmax=None,
+            spatial_distributed=False,
+            ensemble_distributed=False,
+            channel_reduction=True,
+            alpha=1.0,
+            beta=beta,
+            offset=1.0,
+            fraction=1.0,
+        ).to(self.device)
+
+        ensemble_size = 4
+        observations = torch.randn(
+            self.params.batch_size,
+            self.params.N_in_channels,
+            self.params.img_shape_x,
+            self.params.img_shape_y,
+            device=self.device,
+            dtype=torch.float32,
+        )
+        forecasts = observations.unsqueeze(1).expand(
+            self.params.batch_size,
+            ensemble_size,
+            self.params.N_in_channels,
+            self.params.img_shape_x,
+            self.params.img_shape_y,
+        ).clone().requires_grad_(True)
+
+        sobolev_loss(forecasts, observations).sum().backward()
+        self.assertIsNotNone(forecasts.grad, f"Gradients are None (beta={beta})")
+        self.assertFalse(torch.isnan(forecasts.grad).any(), f"NaN in sobolev_es gradient at perfect forecast (beta={beta})")
+        self.assertFalse(torch.isinf(forecasts.grad).any(), f"Inf in sobolev_es gradient at perfect forecast (beta={beta})")
+
 
 # ===========================================================================
 class TestLpEnergyScoreLoss(unittest.TestCase):
@@ -1666,6 +1720,19 @@ class TestLpEnergyScoreLoss(unittest.TestCase):
         self.assertTrue(
             compare_tensors("lp_es zero", out, torch.zeros_like(out), atol=1e-4, verbose=verbose),
         )
+
+    @parameterized.expand([(1.0,), (2.0,), (4.0,)])
+    def test_backward_finite_on_perfect_prediction(self, p):
+        """Perfect ensemble (all members == obs) must produce finite gradients across p values.
+        The |diff|^p term's derivative is ~p·x^(p-1), which at x=0 with p<1 would be singular;
+        the eps-mask must neutralize that path."""
+        fn = self._fn(p=p)
+        obs = _rand()
+        fc = obs.unsqueeze(1).expand(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W).clone().requires_grad_(True)
+        fn(fc, obs).sum().backward()
+        self.assertIsNotNone(fc.grad)
+        self.assertFalse(torch.isnan(fc.grad).any(), f"NaN in lp_es gradient at perfect forecast (p={p})")
+        self.assertFalse(torch.isinf(fc.grad).any(), f"Inf in lp_es gradient at perfect forecast (p={p})")
 
     @parameterized.expand([(1.0,), (2.0,), (4.0,)])
     def test_p_parameter_changes_output(self, p):
@@ -1741,6 +1808,16 @@ class TestSpectralL2EnergyScoreLoss(unittest.TestCase):
         self.assertTrue(
             compare_tensors("spec_l2_es zero", out, torch.zeros_like(out), atol=1e-4, verbose=verbose),
         )
+
+    def test_backward_finite_on_perfect_prediction(self):
+        """Perfect ensemble (all members == obs) must produce finite gradients."""
+        fn = self._fn()
+        obs = _rand()
+        fc = obs.unsqueeze(1).expand(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W).clone().requires_grad_(True)
+        fn(fc, obs).sum().backward()
+        self.assertIsNotNone(fc.grad)
+        self.assertFalse(torch.isnan(fc.grad).any(), "NaN in spec_l2_es gradient at perfect forecast")
+        self.assertFalse(torch.isinf(fc.grad).any(), "Inf in spec_l2_es gradient at perfect forecast")
 
     def test_batch_independence(self, verbose=False):
         fn = self._fn()
@@ -1892,6 +1969,17 @@ class TestGradientCRPSLoss(unittest.TestCase):
             compare_tensors(f"grad_crps {crps_type} zero", out, torch.zeros_like(out), atol=1e-4, verbose=verbose),
         )
 
+    @parameterized.expand([("skillspread",), ("cdf",)])
+    def test_backward_finite_on_perfect_prediction(self, crps_type):
+        """Perfect ensemble (all members == obs) must produce finite gradients."""
+        fn = self._fn(crps_type)
+        obs = _rand()
+        fc = obs.unsqueeze(1).expand(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W).clone().requires_grad_(True)
+        fn(fc, obs).sum().backward()
+        self.assertIsNotNone(fc.grad)
+        self.assertFalse(torch.isnan(fc.grad).any(), f"NaN in {crps_type} gradient at perfect forecast")
+        self.assertFalse(torch.isinf(fc.grad).any(), f"Inf in {crps_type} gradient at perfect forecast")
+
     def test_wrong_forecast_dims_raises(self):
         fn = self._fn()
         fc = _rand()
@@ -1961,6 +2049,17 @@ class TestVortDivCRPSLoss(unittest.TestCase):
         self.assertTrue(
             compare_tensors(f"vortdiv {crps_type} zero", out, torch.zeros_like(out), atol=1e-4, verbose=verbose),
         )
+
+    @parameterized.expand([("skillspread",), ("cdf",)])
+    def test_backward_finite_on_perfect_prediction(self, crps_type):
+        """Perfect ensemble (all members == obs) must produce finite gradients."""
+        fn = self._fn(crps_type)
+        obs = _rand(channels=_NUM_WIND_CH)
+        fc = obs.unsqueeze(1).expand(_BATCH, self._E, _NUM_WIND_CH, _IMG_H, _IMG_W).clone().requires_grad_(True)
+        fn(fc, obs).sum().backward()
+        self.assertIsNotNone(fc.grad)
+        self.assertFalse(torch.isnan(fc.grad).any(), f"NaN in vortdiv {crps_type} gradient at perfect forecast")
+        self.assertFalse(torch.isinf(fc.grad).any(), f"Inf in vortdiv {crps_type} gradient at perfect forecast")
 
     def test_wrong_forecast_dims_raises(self):
         fn = self._fn()

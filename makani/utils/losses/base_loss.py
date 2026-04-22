@@ -227,7 +227,7 @@ def _compute_channel_weighting_helper(channel_names: List[str], channel_weight_t
         for c, chn in enumerate(channel_names):
             channel_weights[c] = weight_dict.get(chn, 1.0)
     else:
-        raise NotImplementedError("Unknown channel weighting type {channel_weight_type}")
+        raise NotImplementedError(f"Unknown channel weighting type {channel_weight_type}")
 
     # normalize
     channel_weights = channel_weights / torch.sum(channel_weights)
