@@ -66,9 +66,6 @@ class Preprocessor2D(nn.Module):
         self.history_diff_var = None
         self.history_eps = 1e-6
 
-        # residual normalization
-        self.residual_scale = None
-
         # unpredicted input channels:
         self.unpredicted_inp_train = None
         self.unpredicted_tar_train = None

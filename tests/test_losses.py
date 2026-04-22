@@ -34,6 +34,7 @@ from makani.utils.losses import (
     GeometricLpLoss,
     SpectralLpLoss,
     SpectralH1Loss,
+    SpectralAMSELoss,
     DriftRegularization,
     SpectralRegularization,
     EnsembleNLLLoss,
@@ -526,6 +527,41 @@ class TestSpectralRelativeLoss(unittest.TestCase):
         self.assertLess(loss_small, loss_large,
                         f"H1 rel: small-error loss {loss_small:.4f} should be < large-error {loss_large:.4f}")
 
+
+
+# ===========================================================================
+class TestSpectralAMSELoss(unittest.TestCase):
+
+    def setUp(self):
+        disable_tf32()
+        set_seed(333)
+
+    def _fn(self):
+        return SpectralAMSELoss(**_SPEC_KWARGS)
+
+    def test_amplitude_difference_penalized(self):
+        """prd = 2*tar has identical phase but double amplitude -> amplitude term > 0, loss > 0."""
+        fn = self._fn()
+        tar = _rand()
+        loss_perfect = fn(tar, tar).sum().item()
+        loss_2x      = fn(2.0 * tar, tar).sum().item()
+        self.assertGreater(loss_2x, loss_perfect + 1e-4)
+
+    def test_phase_difference_penalized(self):
+        """cos(phi) and sin(phi) share the same power spectrum but have orthogonal phase:
+        their spectral inner product is purely imaginary -> coherence = 0 -> loss > 0."""
+        fn = self._fn()
+
+        lon = torch.linspace(0, 2.0 * math.pi, _IMG_W)
+        LON = lon.unsqueeze(0).expand(_IMG_H, -1)
+        field_cos = torch.cos(LON).expand(_BATCH, _NUM_CH, -1, -1).clone()
+        field_sin = torch.sin(LON).expand(_BATCH, _NUM_CH, -1, -1).clone()
+
+        loss = fn(field_cos, field_sin)
+        self.assertTrue(
+            (loss > 1e-4).all(),
+            f"Orthogonal-phase fields must have positive AMSE; min={loss.min().item():.2e}",
+        )
 
 
 # ===========================================================================
