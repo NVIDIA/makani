@@ -50,7 +50,6 @@ class GaussianMMDLoss(GeometricBaseLoss):
         sigma: Optional[float] = 1.0,
         alpha: Optional[float] = 1.0,
         beta: Optional[float] = 2.0,
-        eps: Optional[float] = 1.0e-5,
         channel_reduction: Optional[bool] = False,
         **kwargs,
     ):
@@ -69,7 +68,6 @@ class GaussianMMDLoss(GeometricBaseLoss):
         self.ensemble_distributed = comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1) and ensemble_distributed
         self.alpha = alpha
         self.beta = beta
-        self.eps = eps
         self.channel_reduction = channel_reduction
         self.sigma = sigma
 

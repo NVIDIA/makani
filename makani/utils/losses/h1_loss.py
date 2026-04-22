@@ -43,6 +43,7 @@ class SpectralH1Loss(SpectralBaseLoss):
         relative: Optional[bool] = False,
         squared: Optional[bool] = False,
         spatial_distributed: Optional[bool] = False,
+        eps: Optional[float] = 1.0e-6,
         **kwargs,
     ):
         super().__init__(
@@ -56,6 +57,7 @@ class SpectralH1Loss(SpectralBaseLoss):
 
         self.relative = relative
         self.squared = squared
+        self.eps = eps
 
         # store weights
         h1_weights = torch.arange(self.sht.lmax).float()
@@ -147,8 +149,8 @@ class SpectralH1Loss(SpectralBaseLoss):
             diff_norms = h1_norm2
             tar_norms = tar_h1_norm2
 
-        # setup return value
-        retval = diff_norms / tar_norms
+        # setup return value (eps-guard: avoids NaN on constant targets where l(l+1) weighting zeros the H¹ norm)
+        retval = diff_norms / (tar_norms + self.eps)
 
         return retval
 

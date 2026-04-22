@@ -49,7 +49,7 @@ class LpEnergyScoreLoss(GeometricBaseLoss):
         alpha: Optional[float] = 1.0,
         beta: Optional[float] = 1.0,
         p: Optional[float] = 2.0,
-        eps: Optional[float] = 1.0e-5,
+        eps: Optional[float] = 1.0e-6,
         spread_temper_steps: Optional[int] = 0,
         **kwargs,
     ):
@@ -431,7 +431,7 @@ class SpectralL2EnergyScoreLoss(SpectralBaseLoss):
         channel_reduction: Optional[bool] = True,
         alpha: Optional[float] = 1.0,
         beta: Optional[float] = 1.0,
-        eps: Optional[float] = 1.0e-3,
+        eps: Optional[float] = 1.0e-6,
         **kwargs,
     ):
 
@@ -783,7 +783,7 @@ class CorrectedSpectralL2EnergyScoreLoss(SpectralBaseLoss):
         channel_reduction: Optional[bool] = True,
         alpha: Optional[float] = 1.0,
         beta: Optional[float] = 1.0,
-        eps: Optional[float] = 1.0e-3,
+        eps: Optional[float] = 1.0e-6,
         **kwargs,
     ):
         super().__init__(

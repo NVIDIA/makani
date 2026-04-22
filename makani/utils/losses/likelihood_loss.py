@@ -55,7 +55,7 @@ class EnsembleNLLLoss(GeometricBaseLoss):
         pole_mask: int,
         spatial_distributed: Optional[bool] = False,
         ensemble_distributed: Optional[bool] = False,
-        eps: Optional[float] = 1.0e-5,
+        eps: Optional[float] = 1.0e-6,
         **kwargs,
     ):
 

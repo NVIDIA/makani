@@ -42,6 +42,7 @@ class GeometricLpLoss(GeometricBaseLoss):
         jacobian: Optional[str] = "s2",
         grid_type: Optional[str] = "equiangular",
         spatial_distributed: Optional[bool] = False,
+        eps: Optional[float] = 1.0e-6,
         **kwargs,
     ):
         super().__init__(
@@ -57,6 +58,7 @@ class GeometricLpLoss(GeometricBaseLoss):
         self.p = p
         self.relative = relative
         self.squared = squared
+        self.eps = eps
 
     def abs(self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None):
         num_examples = prd.shape[0]
@@ -95,8 +97,8 @@ class GeometricLpLoss(GeometricBaseLoss):
         tar_norms = self.quadrature(tarr)
         tar_norms = tar_norms.reshape(num_examples, -1)
 
-        # divide the ratios
-        all_norms = diff_norms / tar_norms
+        # divide the ratios (eps-guard: avoids NaN on zero-power targets)
+        all_norms = diff_norms / (tar_norms + self.eps)
 
         if not self.squared:
             all_norms = all_norms.pow(1.0 / self.p)
@@ -128,6 +130,7 @@ class SpectralLpLoss(SpectralBaseLoss):
         relative: Optional[bool] = False,
         squared: Optional[bool] = False,
         spatial_distributed: Optional[bool] = False,
+        eps: Optional[float] = 1.0e-6,
         **kwargs,
     ):
         super().__init__(
@@ -142,6 +145,7 @@ class SpectralLpLoss(SpectralBaseLoss):
         self.p = p
         self.relative = relative
         self.squared = squared
+        self.eps = eps
 
     def abs(self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None):
         B, C, H, W = prd.shape
@@ -236,8 +240,8 @@ class SpectralLpLoss(SpectralBaseLoss):
             diff_norms = normp
             tar_norms = tar_normp
 
-        # compute relative error
-        retval = diff_norms / tar_norms
+        # compute relative error (eps-guard: avoids NaN on zero-power targets)
+        retval = diff_norms / (tar_norms + self.eps)
 
         return retval
 

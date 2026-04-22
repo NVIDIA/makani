@@ -264,7 +264,7 @@ class CRPSLoss(GeometricBaseLoss):
         ensemble_distributed: Optional[bool] = False,
         ensemble_weights: Optional[torch.Tensor] = None,
         alpha: Optional[float] = 1.0,
-        eps: Optional[float] = 1.0e-5,
+        eps: Optional[float] = 1.0e-6,
         **kwargs,
     ):
 
@@ -430,7 +430,7 @@ class SpectralCRPSLoss(SpectralBaseLoss):
         ensemble_weights: Optional[torch.Tensor] = None,
         absolute: Optional[bool] = True,
         alpha: Optional[float] = 1.0,
-        eps: Optional[float] = 1.0e-5,
+        eps: Optional[float] = 1.0e-6,
         **kwargs,
     ):
 
@@ -603,7 +603,7 @@ class GradientCRPSLoss(GradientBaseLoss):
         ensemble_weights: Optional[torch.Tensor] = None,
         absolute: Optional[bool] = True,
         alpha: Optional[float] = 1.0,
-        eps: Optional[float] = 1.0e-5,
+        eps: Optional[float] = 1.0e-6,
         **kwargs,
     ):
 
@@ -795,7 +795,7 @@ class VortDivCRPSLoss(VortDivBaseLoss):
         ensemble_distributed: Optional[bool] = False,
         ensemble_weights: Optional[torch.Tensor] = None,
         alpha: Optional[float] = 1.0,
-        eps: Optional[float] = 1.0e-5,
+        eps: Optional[float] = 1.0e-6,
         **kwargs,
     ):
 
@@ -959,7 +959,7 @@ class KernelScoreLoss(GeometricBaseLoss):
         ensemble_distributed: Optional[bool] = False,
         ensemble_weights: Optional[torch.Tensor] = None,
         alpha: Optional[float] = 1.0,
-        eps: Optional[float] = 1.0e-5,
+        eps: Optional[float] = 1.0e-6,
         kernel_basis_type: str = "harmonic",
         kernel_basis_norm_mode: str = "nodal",
         kernel_shape: Tuple[int, int] = (3, 3),

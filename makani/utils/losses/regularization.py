@@ -98,6 +98,8 @@ class SpectralRegularization(SpectralBaseLoss):
         lmax: Optional[int] = None,
         spatial_distributed: Optional[bool] = False,
         ensemble_distributed: Optional[bool] = False,
+        # eps is applied inside sqrt(psd_a * psd_b + eps); the output-scale floor is sqrt(eps) ≈ 1e-5,
+        # matching the 1e-5/1e-6 guards used by sibling losses
         eps: Optional[float] = 1.0e-10,
         logarithmic: Optional[bool] = False,
         **kwargs,
