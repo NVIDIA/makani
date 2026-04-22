@@ -15,7 +15,11 @@
 
 import math
 import numpy as np
-from typing import override
+import sys
+if sys.version_info >= (3, 12):
+    from typing import override
+else:
+    from typing_extensions import override
 
 import torch
 import torch.nn as nn
@@ -36,6 +40,7 @@ class BaseNoiseS2(nn.Module):
         num_channels,
         num_time_steps,
         grid_type="equiangular",
+        lmax=None,
         seed=333,
         reflect=False,
         **kwargs,
@@ -58,13 +63,13 @@ class BaseNoiseS2(nn.Module):
                 polar_group = None if (comm.get_size("h") == 1) else comm.get_group("h")
                 azimuth_group = None if (comm.get_size("w") == 1) else comm.get_group("w")
                 thd.init(polar_group, azimuth_group)
-            self.isht = thd.DistributedInverseRealSHT(self.nlat, self.nlon, grid=grid_type)
+            self.isht = thd.DistributedInverseRealSHT(self.nlat, self.nlon, lmax=lmax, mmax=lmax, grid=grid_type)
             self.lmax_local = self.isht.l_shapes[comm.get_rank("h")]
             self.mmax_local = self.isht.m_shapes[comm.get_rank("w")]
             self.nlat_local = self.isht.lat_shapes[comm.get_rank("h")]
             self.nlon_local = self.isht.lon_shapes[comm.get_rank("w")]
         else:
-            self.isht = th.InverseRealSHT(self.nlat, self.nlon, grid=grid_type)
+            self.isht = th.InverseRealSHT(self.nlat, self.nlon, lmax=lmax, mmax=lmax, grid=grid_type)
             self.lmax_local = self.isht.lmax
             self.mmax_local = self.isht.mmax
             self.nlat_local = self.nlat
@@ -101,7 +106,7 @@ class BaseNoiseS2(nn.Module):
 
     # this routine generates a noise sample for a single time step and updates the state accordingly, by appending the last time step
     def update(self, replace_state=False, batch_size=None):
-        # Update should always create a new state, so 
+        # Update should always create a new state, so
         # we don't need to check for replace_state
         # create single occurence
         with torch.no_grad():
@@ -160,7 +165,7 @@ class IsotropicGaussianRandomFieldS2(BaseNoiseS2):
         grid_type="equiangular",
         seed=333,
         reflect=False,
-        learnable =False,
+        learnable=False,
         **kwargs,
     ):
         r"""
@@ -194,21 +199,28 @@ class IsotropicGaussianRandomFieldS2(BaseNoiseS2):
             alpha = float(alpha)
 
         # Compute ls, angular power spectrum and sigma_l:
-        ls = torch.arange(self.lmax)
+        ls = torch.arange(self.lmax).reshape(-1 ,1)
+        ms = torch.arange(self.mmax)
         power_spectrum = torch.pow(2 * ls + 1, -alpha)
         norm_factor = torch.sum((2 * ls + 1) * power_spectrum / 4.0 / math.pi)
         sigma_l = sigma * torch.sqrt(power_spectrum / norm_factor)
+        sigma_l = torch.where(ms <= ls, sigma_l, 0.0)
 
         # the new shape is B, T, C, L, M
-        sigma_l = sigma_l.reshape((1, 1, 1, self.lmax, 1)).to(dtype=torch.float32)
+        sigma_l = sigma_l.reshape((1, 1, 1, self.lmax, self.mmax)).to(dtype=torch.float32)
 
         # split tensor
         if comm.get_size("h") > 1:
             sigma_l = split_tensor_along_dim(sigma_l, dim=-2, num_chunks=comm.get_size("h"))[comm.get_rank("h")]
 
+        # split tensor
+        if comm.get_size("w") > 1:
+            sigma_l = split_tensor_along_dim(sigma_l, dim=-1, num_chunks=comm.get_size("w"))[comm.get_rank("w")]
+
         # register buffer
         if learnable:
             self.register_parameter("sigma_l", nn.Parameter(sigma_l))
+            self.sigma_l.sharded_dims_mp = [None, None, None, "h", "w"]
         else:
             self.register_buffer("sigma_l", sigma_l, persistent=False)
 

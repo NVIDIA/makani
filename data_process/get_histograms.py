@@ -299,7 +299,7 @@ def get_histograms(input_dir: str, output_dir: str, stats_dir: str, metadata_fil
     # quadrature:
     quadrature_weights = GridQuadrature(quadrature_rule, (height, width),
                                         crop_shape=None, crop_offset=(0, 0),
-                                        normalize=True, pole_mask=None).quad_weight.cpu().numpy()
+                                        normalize=True).quad_weight.cpu().numpy()
 
     if comm_rank == 0:
         print(f"Found {len(filelist)} files with a total of {num_samples_total} samples. Each sample has the shape {num_channels}x{height}x{width} (CxHxW).")

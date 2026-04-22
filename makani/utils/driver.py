@@ -184,7 +184,7 @@ class Driver(metaclass=abc.ABCMeta):
             params.N_dynamic_channels += 1
 
         params.n_noise_chan = 0
-        if hasattr(params, "input_noise"):
+        if params.get("input_noise", None) is not None:
             if params.input_noise["mode"] == "concatenate":
                 if "n_channels" in params.input_noise:
                     params.n_noise_chan = params.input_noise["n_channels"]
@@ -595,6 +595,14 @@ class Driver(metaclass=abc.ABCMeta):
         if prefix:
             nn.modules.utils.consume_prefix_in_state_dict_if_present(state_dict, prefix)
 
+        # attach sharding metadata to state_dict tensors (same as legacy) so torch.save preserves it
+        for name, param in model.named_parameters():
+            if name in state_dict and hasattr(param, "sharded_dims_mp"):
+                state_dict[name].sharded_dims_mp = param.sharded_dims_mp
+        for name, buf in model.named_buffers():
+            if name in state_dict and hasattr(buf, "sharded_dims_mp"):
+                state_dict[name].sharded_dims_mp = buf.sharded_dims_mp
+
         store_dict = {"model_state": state_dict}
 
         if loss is not None:
@@ -646,15 +654,15 @@ class Driver(metaclass=abc.ABCMeta):
         if params.optimizer_type == "Adam":
             if self.log_to_screen:
                 self.logger.info("using Adam optimizer")
-            optimizer = optim.Adam(all_parameters, betas=betas, lr=params.get("lr", 1e-3), weight_decay=params.get("weight_decay", 0), foreach=True)
+            optimizer = optim.Adam(all_parameters, lr=params.get("lr", 1e-3), betas=betas, eps=params.get("optimizer_eps", 1e-8), weight_decay=params.get("weight_decay", 0), foreach=True)
         elif params.optimizer_type == "AdamW":
             if self.log_to_screen:
                 self.logger.info("using AdamW optimizer")
-            optimizer = optim.AdamW(all_parameters, betas=betas, lr=params.get("lr", 1e-3), weight_decay=params.get("weight_decay", 0), foreach=True)
+            optimizer = optim.AdamW(all_parameters, lr=params.get("lr", 1e-3), betas=betas, eps=params.get("optimizer_eps", 1e-8), weight_decay=params.get("weight_decay", 0), foreach=True)
         elif params.optimizer_type == "SGD":
             if self.log_to_screen:
                 self.logger.info("using SGD optimizer")
-            optimizer = optim.SGD(all_parameters, lr=params.get("lr", 1e-3), weight_decay=params.get("weight_decay", 0), momentum=params.get("momentum", 0), foreach=True)
+            optimizer = optim.SGD(all_parameters, lr=params.get("lr", 1e-3), weight_decay=params.get("weight_decay", 0), momentum=params.get("momentum", 0), nesterov=params.get("nesterov", False), foreach=True)
         elif params.optimizer_type == "SIRFShampoo":
             if self.log_to_screen:
                 self.logger.info("using SIRFShampoo optimizer")
@@ -684,6 +692,8 @@ class Driver(metaclass=abc.ABCMeta):
             scheduler = lr_scheduler.CosineAnnealingLR(optimizer, T_max=params.scheduler_T_max, eta_min=params.scheduler_min_lr)
         elif params.scheduler == "OneCycleLR":
             scheduler = lr_scheduler.OneCycleLR(optimizer, max_lr=params.lr, total_steps=params.scheduler_T_max, steps_per_epoch=1)
+        elif params.scheduler == "CosineAnnealingWarmRestarts":
+            scheduler = lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=params.get("scheduler_T_0", 10), T_mult=params.get("scheduler_T_mult", 1), eta_min=params.get("scheduler_min_lr", 0.0))
         else:
             scheduler = None
 
@@ -691,9 +701,9 @@ class Driver(metaclass=abc.ABCMeta):
         if params.lr_warmup_steps > 0:
             if params.scheduler == "ReduceLROnPlateau":
                 raise NotImplementedError("Error, warmup scheduler not implemented for ReduceLROnPlateau scheduler")
-            warmup_scheduler = lr_scheduler.LinearLR(optimizer, start_factor=params.lr_start, end_factor=1.0, total_iters=params.lr_warmup_steps)
+            warmup_scheduler = lr_scheduler.LinearLR(optimizer, start_factor=params.get("lr_start", 0.0), end_factor=1.0, total_iters=params.get("lr_warmup_steps", 0))
 
-            scheduler = lr_scheduler.SequentialLR(optimizer, [warmup_scheduler, scheduler], milestones=[params.lr_warmup_steps])
+            scheduler = lr_scheduler.SequentialLR(optimizer, [warmup_scheduler, scheduler], milestones=[params.get("lr_warmup_steps", 0)])
 
         return scheduler
 

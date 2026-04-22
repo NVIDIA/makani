@@ -66,15 +66,6 @@ class Preprocessor2D(nn.Module):
         self.history_diff_var = None
         self.history_eps = 1e-6
 
-        # residual normalization
-        self.learn_residual = params.target == "residual"
-        if self.learn_residual and (params.normalize_residual):
-            with torch.no_grad():
-                residual_scale = torch.as_tensor(np.load(params.time_diff_stds_path)).to(torch.float32)
-                self.register_buffer("residual_scale", residual_scale, persistent=False)
-        else:
-            self.residual_scale = None
-
         # unpredicted input channels:
         self.unpredicted_inp_train = None
         self.unpredicted_tar_train = None
@@ -99,7 +90,7 @@ class Preprocessor2D(nn.Module):
             # register static buffer
             self.register_buffer("static_features", static_features, persistent=False)
 
-        if hasattr(params, "input_noise"):
+        if params.get("input_noise", None) is not None:
             noise_params = params.input_noise
             centered_noise = noise_params.get("centered", False)
 
@@ -128,6 +119,8 @@ class Preprocessor2D(nn.Module):
             else:
                 raise NotImplementedError(f"Error, input noise mode {self.input_noise_mode} not supported.")
 
+            noise_lmax = noise_params.get("lmax", None)
+
             if noise_params["type"] == "diffusion":
                 from makani.models.noise import DiffusionNoiseS2
 
@@ -144,6 +137,7 @@ class Preprocessor2D(nn.Module):
                     kT=kT,  # use various scales
                     lambd=lambd,  # use suggestion here: tau=6h
                     grid_type=params.model_grid_type,
+                    lmax=noise_lmax,
                     seed=self.noise_base_seed,
                     reflect=reflect,
                     learnable=noise_params.get("learnable", False)
@@ -159,6 +153,7 @@ class Preprocessor2D(nn.Module):
                     sigma=noise_params.get("sigma", 1.0),
                     alpha=noise_params.get("alpha", 0.0),
                     grid_type=params.model_grid_type,
+                    lmax=noise_lmax,
                     seed=self.noise_base_seed,
                     reflect=reflect,
                     learnable=noise_params.get("learnable", False)
@@ -187,20 +182,6 @@ class Preprocessor2D(nn.Module):
         if x.dim() == 4:
             b_, ct_, h_, w_ = x.shape
             x = torch.reshape(x, (b_, nhist, ct_ // nhist, h_, w_))
-        return x
-
-    def add_residual(self, x, dx):
-        if self.learn_residual:
-            if self.residual_scale is not None:
-                dx = dx * self.residual_scale
-
-            # add residual: deal with history
-            # fully out-of-place: cat the unchanged prefix with the updated last step
-            x5 = self.expand_history(x, nhist=self.n_history + 1)
-            x = self.flatten_history(torch.cat([x5[:, :-1], (x5[:, -1:] + dx.unsqueeze(1))], dim=1))
-        else:
-            x = dx
-
         return x
 
     def add_static_features(self, x):

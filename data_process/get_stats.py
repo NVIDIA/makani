@@ -365,9 +365,10 @@ def get_stats(input_path: str, output_path: str, metadata_file: str,
     height, width = (data_shape[2], data_shape[3])
 
     # quadrature:
+    # we normalize the quadrature rule to 4pi
     quadrature = GridQuadrature(quadrature_rule, (height, width),
                                 crop_shape=None, crop_offset=(0, 0),
-                                normalize=False, pole_mask=None).to(device)
+                                normalize=False).to(device)
 
     if comm_rank == 0:
         print(f"Found {len(filelist)} files with a total of {num_samples_total} samples. Each sample has the shape {num_channels}x{height}x{width} (CxHxW).")

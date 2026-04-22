@@ -92,7 +92,7 @@ def init_params(
     params.num_layers = 2
 
     # losss
-    params.loss = "geometric l2"
+    params.loss = "l2"
     params.lr = 5e-4
     params.weight_decay = 0.0
 

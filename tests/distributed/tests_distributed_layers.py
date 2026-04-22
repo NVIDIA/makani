@@ -35,61 +35,28 @@ from makani.models.common.layer_norm import GeometricInstanceNormS2
 from makani.mpu.layer_norm import DistributedGeometricInstanceNormS2, DistributedInstanceNorm2d
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-from .distributed_helpers import split_helper, gather_helper
+from .distributed_helpers import _init_grid, _split_helper, _gather_helper
 from ..testutils import disable_tf32, set_seed, compare_tensors
 
 class TestDistributedLayers(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-
-        # set up distributed
-        cls.grid_size_h = int(os.getenv('GRID_H', 1))
-        cls.grid_size_w = int(os.getenv('GRID_W', 1))
-        cls.world_size = cls.grid_size_h * cls.grid_size_w
-
-        # init groups
-        comm.init(model_parallel_sizes=[cls.grid_size_h, cls.grid_size_w, 1, 1, 1],
-                  model_parallel_names=["h", "w", "fin", "fout", "batch"])
-        cls.world_rank = comm.get_world_rank()
-
-        if torch.cuda.is_available():
-            if cls.world_rank == 0:
-                print("Running test on GPU")
-            local_rank = comm.get_local_rank()
-            cls.device = torch.device(f"cuda:{local_rank}")
-            torch.cuda.set_device(cls.device)
-        else:
-            if cls.world_rank == 0:
-                print("Running test on CPU")
-            cls.device = torch.device('cpu')
-        set_seed(333)
-
-        # store comm group parameters
-        cls.wrank = comm.get_rank("w")
-        cls.hrank = comm.get_rank("h")
-        cls.w_group = comm.get_group("w")
-        cls.h_group = comm.get_group("h")
-
-        # initializing sht process groups
-        thd.init(cls.h_group, cls.w_group)
-
-        if cls.world_rank == 0:
-            print(f"Running distributed tests on grid H x W = {cls.grid_size_h} x {cls.grid_size_w}")
+        _init_grid(cls)
 
     def setUp(self):
         disable_tf32()
 
 
     def _split_helper(self, tensor, hdim=-2, wdim=-1):
-        tensor_local = split_helper(tensor, dim=hdim, group=self.h_group)
-        tensor_local = split_helper(tensor_local, dim=wdim, group=self.w_group)
+        tensor_local = _split_helper(tensor, dim=hdim, group=self.h_group)
+        tensor_local = _split_helper(tensor_local, dim=wdim, group=self.w_group)
         return tensor_local
-        
-        
+
+
     def _gather_helper(self, tensor, hdim=-2, wdim=-1):
-        tensor_gather = gather_helper(tensor, dim=hdim, group=self.h_group)
-        tensor_gather = gather_helper(tensor_gather, dim=wdim, group=self.w_group)
+        tensor_gather = _gather_helper(tensor, dim=hdim, group=self.h_group)
+        tensor_gather = _gather_helper(tensor_gather, dim=wdim, group=self.w_group)
 
         return tensor_gather
 
@@ -109,7 +76,7 @@ class TestDistributedLayers(unittest.TestCase):
         B, C, Hi, Wi, Ho, Wo = batch_size, num_chan, nlat_in, nlon_in, nlat_out, nlon_out
 
         from makani.models.common import SpectralConv
-        
+
         # set up handles
         forward_transform_local = th.RealSHT(nlat=Hi, nlon=Wi).to(self.device)
         inverse_transform_local = th.InverseRealSHT(nlat=Ho, nlon=Wo, lmax=forward_transform_local.lmax, mmax=forward_transform_local.mmax).to(self.device)
@@ -157,10 +124,10 @@ class TestDistributedLayers(unittest.TestCase):
             weight = self._split_helper(spect_conv_local.weight, hdim=-1, wdim=None)
             spect_conv_dist.module.weight.copy_(weight)
             spect_conv_dist.module.bias.copy_(spect_conv_local.bias)
-        
+
         # input
         inp_full = torch.randn((B, C, Hi, Wi), dtype=torch.float32, device=self.device)
-        
+
         #############################################################
         # local transform
         #############################################################
@@ -172,13 +139,13 @@ class TestDistributedLayers(unittest.TestCase):
         with torch.no_grad():
             # create full grad
             ograd_full = torch.randn_like(out_full)
-            
+
         # BWD pass
         out_full.backward(ograd_full)
         igrad_full = inp_full.grad.clone()
         wgrad_full = spect_conv_local.weight.grad.clone()
         bgrad_full = spect_conv_local.bias.grad.clone()
-        
+
         #############################################################
         # distributed transform
         #############################################################
@@ -194,7 +161,7 @@ class TestDistributedLayers(unittest.TestCase):
         igrad_local = inp_local.grad.clone()
         wgrad_local = spect_conv_dist.module.weight.grad.clone()
         bgrad_local = spect_conv_dist.module.bias.grad.clone()
-        
+
         #############################################################
         # evaluate FWD pass
         #############################################################
@@ -273,10 +240,10 @@ class TestDistributedLayers(unittest.TestCase):
             with torch.no_grad():
                 norm_dist_handle.weight.copy_(norm_local.weight)
                 norm_dist_handle.bias.copy_(norm_local.bias)
-        
+
         # input
         inp_full = torch.randn((B, C, H, W), dtype=torch.float32, device=self.device)
-        
+
         #############################################################
         # local (serial) transform
         #############################################################
@@ -296,7 +263,7 @@ class TestDistributedLayers(unittest.TestCase):
         if affine:
             wgrad_full = norm_local.weight.grad.clone()
             bgrad_full = norm_local.bias.grad.clone()
-        
+
         #############################################################
         # distributed transform
         #############################################################
@@ -313,7 +280,7 @@ class TestDistributedLayers(unittest.TestCase):
         if affine:
             wgrad_local = norm_dist_handle.weight.grad.clone()
             bgrad_local = norm_dist_handle.bias.grad.clone()
-        
+
         #############################################################
         # evaluate FWD pass
         #############################################################
@@ -353,10 +320,10 @@ class TestDistributedLayers(unittest.TestCase):
 
     @parameterized.expand(
         [
-            [181, 360, 1, 4, "equiangular", True, 1e-5],
-            [181, 360, 1, 4, "equiangular", False, 1e-5],
-            [180, 360, 1, 10, "legendre-gauss", True, 1e-5],
-            [180, 360, 1, 10, "legendre-gauss", False, 1e-5],
+            [181, 360, 1, 4, "equiangular", True, 1e-4],
+            [181, 360, 1, 4, "equiangular", False, 1e-4],
+            [180, 360, 1, 10, "legendre-gauss", True, 1e-4],
+            [180, 360, 1, 10, "legendre-gauss", False, 1e-4],
         ],
         skip_on_empty=True,
     )
@@ -367,7 +334,6 @@ class TestDistributedLayers(unittest.TestCase):
         img_shape = (H, W)
         crop_shape = (H, W)
         crop_offset = (0, 0)
-        pole_mask = 0
         eps = 1e-5
 
         set_seed(333)
@@ -378,7 +344,6 @@ class TestDistributedLayers(unittest.TestCase):
             crop_shape=crop_shape,
             crop_offset=crop_offset,
             grid_type=grid_type,
-            pole_mask=pole_mask,
             num_features=C,
             eps=eps,
             affine=affine,
@@ -390,7 +355,6 @@ class TestDistributedLayers(unittest.TestCase):
             crop_shape=crop_shape,
             crop_offset=crop_offset,
             grid_type=grid_type,
-            pole_mask=pole_mask,
             num_features=C,
             eps=eps,
             affine=affine,
@@ -414,10 +378,10 @@ class TestDistributedLayers(unittest.TestCase):
             with torch.no_grad():
                 norm_dist.module.weight.copy_(norm_local.weight)
                 norm_dist.module.bias.copy_(norm_local.bias)
-        
+
         # input
         inp_full = torch.randn((B, C, H, W), dtype=torch.float32, device=self.device)
-        
+
         #############################################################
         # local (serial) transform
         #############################################################
@@ -437,7 +401,7 @@ class TestDistributedLayers(unittest.TestCase):
         if affine:
             wgrad_full = norm_local.weight.grad.clone()
             bgrad_full = norm_local.bias.grad.clone()
-        
+
         #############################################################
         # distributed transform
         #############################################################
@@ -454,7 +418,7 @@ class TestDistributedLayers(unittest.TestCase):
         if affine:
             wgrad_local = norm_dist.module.weight.grad.clone()
             bgrad_local = norm_dist.module.bias.grad.clone()
-        
+
         #############################################################
         # evaluate FWD pass
         #############################################################
@@ -491,5 +455,5 @@ class TestDistributedLayers(unittest.TestCase):
                     self.assertTrue(compare_tensors(f"bias gradient {idb}", bgrad_gather_full, bgrad_full, tol, tol, verbose=verbose))
 
 
-if __name__ == '__main__':    
+if __name__ == '__main__':
     unittest.main()

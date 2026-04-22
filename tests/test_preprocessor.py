@@ -48,18 +48,6 @@ class TestPreprocessor2DBasic(unittest.TestCase):
         pp = Preprocessor2D(get_default_parameters())
         self.assertIsInstance(pp, Preprocessor2D)
 
-    def test_construction_residual_target(self):
-        """target='residual' with normalize_residual=False constructs correctly."""
-        params = get_default_parameters()
-        params.target = "residual"
-        params.normalize_residual = False
-        pp = Preprocessor2D(params)
-        self.assertTrue(pp.learn_residual)
-
-    def test_construction_default_target_not_residual(self):
-        """target='default' sets learn_residual=False."""
-        self.assertFalse(self.pp.learn_residual)
-
     # -----------------------------------------------------------------------
     # flatten_history / expand_history
     # -----------------------------------------------------------------------
@@ -98,34 +86,6 @@ class TestPreprocessor2DBasic(unittest.TestCase):
         x = self._rand(self.B, T * self.C, self.H, self.W)
         out = self.pp.flatten_history(self.pp.expand_history(x, nhist=T))
         self.assertTrue(compare_tensors("flatten/expand roundtrip", out, x, verbose=verbose))
-
-    # -----------------------------------------------------------------------
-    # add_residual
-    # -----------------------------------------------------------------------
-
-    def test_add_residual_default_mode_returns_dx(self, verbose=False):
-        """In non-residual mode, add_residual(x, dx) returns dx unchanged."""
-        x  = self._rand(self.B, self.C, self.H, self.W)
-        dx = self._rand(self.B, self.C, self.H, self.W)
-        out = self.pp.add_residual(x, dx)
-        self.assertTrue(compare_tensors("add_residual default", out, dx, verbose=verbose))
-
-    def test_add_residual_residual_mode_adds_to_last_step(self, verbose=False):
-        """In residual mode, add_residual adds dx to the last time-step of x."""
-        params = get_default_parameters()
-        params.target = "residual"
-        params.n_history = 1
-        pp = Preprocessor2D(params)
-        T = 2  # n_history + 1
-        x  = self._rand(self.B, T * self.C, self.H, self.W)
-        dx = self._rand(self.B, self.C, self.H, self.W)
-
-        out = pp.add_residual(x, dx)
-
-        out_5d = pp.expand_history(out, nhist=T)
-        x_5d   = pp.expand_history(x, nhist=T)
-        self.assertTrue(compare_tensors("add_residual last step", out_5d[:, -1], x_5d[:, -1] + dx, verbose=verbose))
-        self.assertTrue(compare_tensors("add_residual early step unchanged", out_5d[:, 0], x_5d[:, 0], verbose=verbose))
 
     # -----------------------------------------------------------------------
     # Static features
@@ -401,61 +361,6 @@ class TestPreprocessor2DBasic(unittest.TestCase):
         """update_internal_state() with noise does not raise."""
         pp = self._make_pp_with_noise()
         pp.update_internal_state()
-
-    # -----------------------------------------------------------------------
-    # add_residual with n_history > 1
-    # -----------------------------------------------------------------------
-
-    def test_add_residual_n_history_2_last_step_updated(self, verbose=False):
-        """With n_history=2, add_residual updates only the last time-step."""
-        params = get_default_parameters()
-        params.target = "residual"
-        params.n_history = 2
-        pp = Preprocessor2D(params)
-        T = 3  # n_history + 1
-        x  = self._rand(self.B, T * self.C, self.H, self.W)
-        dx = self._rand(self.B, self.C, self.H, self.W)
-
-        out    = pp.add_residual(x, dx)
-        out_5d = pp.expand_history(out, nhist=T)
-        x_5d   = pp.expand_history(x,   nhist=T)
-        self.assertTrue(compare_tensors("last step updated", out_5d[:, -1], x_5d[:, -1] + dx, verbose=verbose))
-
-    def test_add_residual_n_history_2_early_steps_unchanged(self, verbose=False):
-        """With n_history=2, the two earlier time-steps are not touched."""
-        params = get_default_parameters()
-        params.target = "residual"
-        params.n_history = 2
-        pp = Preprocessor2D(params)
-        T  = 3
-        x  = self._rand(self.B, T * self.C, self.H, self.W)
-        dx = self._rand(self.B, self.C, self.H, self.W)
-
-        out    = pp.add_residual(x, dx)
-        out_5d = pp.expand_history(out, nhist=T)
-        x_5d   = pp.expand_history(x,   nhist=T)
-        self.assertTrue(compare_tensors("step 0 unchanged", out_5d[:, 0], x_5d[:, 0], verbose=verbose))
-        self.assertTrue(compare_tensors("step 1 unchanged", out_5d[:, 1], x_5d[:, 1], verbose=verbose))
-
-    # -----------------------------------------------------------------------
-    # add_residual with residual_scale
-    # -----------------------------------------------------------------------
-
-    def test_add_residual_scales_dx_by_residual_scale(self, verbose=False):
-        """add_residual multiplies dx by residual_scale before adding to x."""
-        params = get_default_parameters()
-        params.target = "residual"
-        params.normalize_residual = False
-        pp = Preprocessor2D(params)
-        # inject a known per-channel scale (shape broadcasts with (B, C, H, W))
-        scale = torch.full((self.C, 1, 1), fill_value=2.0)
-        pp.residual_scale = scale
-        x  = self._rand(self.B, self.C, self.H, self.W)
-        dx = self._rand(self.B, self.C, self.H, self.W)
-
-        out      = pp.add_residual(x, dx)
-        expected = x + dx * scale
-        self.assertTrue(compare_tensors("residual scale applied", out, expected, verbose=verbose))
 
     # -----------------------------------------------------------------------
     # cache_unpredicted_features — copy_() vs rebind
@@ -1077,35 +982,6 @@ class TestPreprocessor2DBasic(unittest.TestCase):
     # Gradient flow through train-path ops
     # -----------------------------------------------------------------------
 
-    def test_add_residual_grad_flows_default_mode(self):
-        """Default (non-residual) mode: gradient of sum(out) w.r.t. dx is 1 everywhere."""
-        x  = self._rand(self.B, self.C, self.H, self.W)
-        dx = self._rand(self.B, self.C, self.H, self.W).requires_grad_(True)
-        out = self.pp.add_residual(x, dx)
-        out.sum().backward()
-        self.assertIsNotNone(dx.grad)
-        self.assertTrue(torch.all(dx.grad == 1.0).item())
-
-    def test_add_residual_grad_flows_residual_mode(self):
-        """Residual mode: gradient flows into both the history x and the increment dx."""
-        params = get_default_parameters()
-        params.target = "residual"
-        params.n_history = 1
-        params.normalize_residual = False
-        pp = Preprocessor2D(params)
-        T = 2
-        x  = self._rand(self.B, T * self.C, self.H, self.W).requires_grad_(True)
-        dx = self._rand(self.B, self.C, self.H, self.W).requires_grad_(True)
-        out = pp.add_residual(x, dx)
-        out.sum().backward()
-        self.assertIsNotNone(x.grad)
-        self.assertIsNotNone(dx.grad)
-        self.assertTrue(torch.isfinite(x.grad).all().item())
-        self.assertTrue(torch.isfinite(dx.grad).all().item())
-        # sum(out) = sum(x) + sum(dx) → d/dx = 1 everywhere, d/ddx = 1 everywhere
-        self.assertTrue(torch.all(x.grad == 1.0).item())
-        self.assertTrue(torch.all(dx.grad == 1.0).item())
-
     def test_append_channels_grad_flows_concatenate_noise(self):
         """_append_channels with concatenate noise preserves autograd w.r.t. x."""
         params = get_default_parameters()
@@ -1171,23 +1047,6 @@ class TestPreprocessor2DBasic(unittest.TestCase):
     # -----------------------------------------------------------------------
     # CPU ↔ GPU numerical consistency
     # -----------------------------------------------------------------------
-
-    @unittest.skipUnless(torch.cuda.is_available(), "CUDA not available")
-    def test_add_residual_cpu_gpu_match(self, verbose=False):
-        """add_residual produces matching numerics on CPU and GPU (residual mode)."""
-        params = get_default_parameters()
-        params.target = "residual"
-        params.n_history = 1
-        params.normalize_residual = False
-        pp_cpu = Preprocessor2D(params)
-        pp_gpu = Preprocessor2D(params).to("cuda")
-        T = 2
-        x  = self._rand(self.B, T * self.C, self.H, self.W)
-        dx = self._rand(self.B, self.C, self.H, self.W)
-        out_cpu = pp_cpu.add_residual(x, dx)
-        out_gpu = pp_gpu.add_residual(x.to("cuda"), dx.to("cuda")).cpu()
-        self.assertTrue(compare_tensors("add_residual cpu vs gpu", out_cpu, out_gpu,
-                                        atol=1e-6, rtol=1e-5, verbose=verbose))
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA not available")
     def test_append_unpredicted_features_cpu_gpu_match(self, verbose=False):

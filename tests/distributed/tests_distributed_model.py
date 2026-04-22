@@ -32,7 +32,7 @@ from makani.mpu.mappings import init_gradient_reduction_hooks
 from makani.mpu.mappings import reduce_from_parallel_region
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-from .distributed_helpers import get_default_parameters, split_helper, gather_helper
+from .distributed_helpers import get_default_parameters, _split_helper, _gather_helper
 from ..testutils import disable_tf32, set_seed, compare_tensors
 
 
@@ -124,15 +124,15 @@ class TestDistributedModel(unittest.TestCase):
 
 
     def _split_helper(self, tensor, hdim=None, wdim=None):
-        tensor_local = split_helper(tensor, dim=hdim, group=self.h_group)
-        tensor_local = split_helper(tensor_local, dim=wdim, group=self.w_group)
+        tensor_local = _split_helper(tensor, dim=hdim, group=self.h_group)
+        tensor_local = _split_helper(tensor_local, dim=wdim, group=self.w_group)
 
         return tensor_local
 
 
     def _gather_helper(self, tensor, hdim=-2, wdim=-1):
-        tensor_gather = gather_helper(tensor, dim=hdim, group=self.h_group)
-        tensor_gather = gather_helper(tensor_gather, dim=wdim, group=self.w_group)
+        tensor_gather = _gather_helper(tensor, dim=hdim, group=self.h_group)
+        tensor_gather = _gather_helper(tensor_gather, dim=wdim, group=self.w_group)
 
         return tensor_gather
 
@@ -369,7 +369,7 @@ class TestDistributedModel(unittest.TestCase):
         )
 
         # get loss object
-        self.params.losses = [{"type": "geometric l2", "channel_weights": "constant"}]
+        self.params.losses = [{"type": "l2", "channel_weights": "constant"}]
         loss_obj = LossHandler(self.params).to(self.device)
 
         # input shape

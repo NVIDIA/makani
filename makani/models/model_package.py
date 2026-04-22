@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 
 class LocalPackage:
     """
-    Implements the earth2mip/modulus Package interface.
+    Implements the modulus Package interface.
     """
 
     # These define the model package in terms of where makani expects the files to be located
@@ -48,7 +48,7 @@ class LocalPackage:
     MEANS_FILE = "global_means.npy"
     STDS_FILE = "global_stds.npy"
     OROGRAPHY_FILE = "orography.nc"
-    LANDMASK_FILE = "land_mask.nc"
+    LANDMASK_FILE = "land_sea_mask.nc"
     SOILTYPE_FILE = "soil_type.nc"
 
     def __init__(self, root):
@@ -98,8 +98,8 @@ class ModelWrapper(torch.nn.Module):
         super().__init__()
         self.model = model
         self.params = params
-        nlat = params.img_shape_x
-        nlon = params.img_shape_y
+        nlat = params.img_shape_x_resampled
+        nlon = params.img_shape_y_resampled
 
         # configure lats
         if "lat" in self.params:
@@ -147,11 +147,11 @@ class ModelWrapper(torch.nn.Module):
     def update_state(self, replace_state=True):
         self.model.preprocessor.update_internal_state(replace_state=replace_state)
         return
-    
+
     def set_rng(self, reset=True, seed=333):
         self.model.preprocessor.set_rng(reset=reset, seed=seed)
         return
-        
+
     def forward(self, x, time, normalized_data=True, replace_state=None):
         if not normalized_data:
             x = (x - self.in_bias) / self.in_scale
@@ -219,6 +219,11 @@ def load_model_package(package, pretrained=True, device="cpu", multistep=False):
     """
     path = package.get("config.json")
     params = ParamsBase.from_json(path)
+    # ensure resampled shapes exist (set at runtime from dataset in training; missing when loading from package)
+    if not hasattr(params, "img_shape_x_resampled") or params.img_shape_x_resampled is None:
+        params.img_shape_x_resampled = params.img_shape_x
+    if not hasattr(params, "img_shape_y_resampled") or params.img_shape_y_resampled is None:
+        params.img_shape_y_resampled = params.img_shape_y
     LocalPackage._load_static_data(package, params)
 
     # assume we are not distributed

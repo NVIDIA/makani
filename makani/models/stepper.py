@@ -49,9 +49,6 @@ class SingleStepWrapper(nn.Module):
         # undo normalization
         y = self.preprocessor.history_denormalize(yn, target=True)
 
-        # add residual (for residual learning, no-op for direct learning
-        y = self.preprocessor.add_residual(inp, y)
-
         return y
 
 
@@ -60,7 +57,6 @@ class MultiStepWrapper(nn.Module):
         super().__init__()
         self.preprocessor = Preprocessor2D(params)
         self.model = model_handle()
-        self.residual_mode = True if (params.target == "target") else False
         multistep_parameters = params.get("multistep", {"push_forward": False})
         self.push_forward_mode = multistep_parameters["push_forward"]
 
@@ -102,9 +98,6 @@ class MultiStepWrapper(nn.Module):
             # important to do that here, otherwise normalization stats
             # will have been updated later:
             pred = self.preprocessor.history_denormalize(predn, target=True)
-
-            # add residual (for residual learning, no-op for direct learning
-            pred = self.preprocessor.add_residual(inpt, pred)
 
             # append output
             result.append(pred)
@@ -149,15 +142,12 @@ class MultiStepWrapper(nn.Module):
         # because otherwise normalization stats are already outdated
         y = self.preprocessor.history_denormalize(yn, target=True)
 
-        # add residual (for residual learning, no-op for direct learning
-        y = self.preprocessor.add_residual(inp, y)
-
         return y
 
     def forward(self, inp, update_state=True, replace_state=True):
         # decide which routine to call
         if self.training:
-            y = self._forward_train(inp, update_state=True, replace_state=replace_state)
+            y = self._forward_train(inp, update_state=update_state, replace_state=replace_state)
         else:
             y = self._forward_eval(inp, update_state=update_state, replace_state=replace_state)
 

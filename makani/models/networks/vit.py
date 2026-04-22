@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
+
 import torch.nn.functional as F
 import torch
 import torch.nn as nn
@@ -123,12 +125,10 @@ class Block(nn.Module):
             self.mlp = MLP(in_features=dim, hidden_features=mlp_hidden_dim, out_features=dim, act_layer=act_layer, drop_rate=mlp_drop_rate, input_format="traditional")
 
     def forward(self, x):
-        # flatten transpose:
         y = self.attn(self.norm1(x))
         x = x + self.drop_path(y)
         x = self.norm2(x)
         x = x + self.drop_path(self.mlp(x))
-
         return x
 
 

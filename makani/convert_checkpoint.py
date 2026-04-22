@@ -97,7 +97,7 @@ def consolidate_checkpoints(input_path, output_path, checkpoint_version=0):
     print(checkpoint_paths)
 
     # load the static data necessary for instantiating the preprocessor (required due to the way the registry works)
-    LocalPackage._load_static_data(input_path, params)
+    LocalPackage._load_static_data(LocalPackage(input_path), params)
 
     # get the model
     multistep = params.n_future > 0
@@ -121,6 +121,7 @@ def consolidate_checkpoints(input_path, output_path, checkpoint_version=0):
     gathered_state_dict = OrderedDict()
     parameter_keys = model_states[checkpoint_paths[0]].keys()
     for pname in parameter_keys:
+
         p = model_states[checkpoint_paths[0]][pname]
         if not hasattr(p, "sharded_dims_mp"):
             gathered_state_dict[pname] = p.clone()
@@ -128,6 +129,7 @@ def consolidate_checkpoints(input_path, output_path, checkpoint_version=0):
             # get the split shapes and the rank in each dimension
             split_shapes = []
             for idd, cdim in enumerate(p.sharded_dims_mp):
+
                 if cdim is None:
                     # if the dimensions is not split we use the entire range
                     split_shapes.append([0, p.shape[idd]])

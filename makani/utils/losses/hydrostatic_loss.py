@@ -36,13 +36,12 @@ class HydrostaticBalanceLoss(GeometricBaseLoss):
         scale: torch.Tensor,
         p_min: Optional[int] = 0,
         p_max: Optional[int] = 1000,
-        pole_mask: Optional[int] = 0,
         use_moist_air_formula: Optional[bool] = False,
         spatial_distributed: Optional[bool] = False,
         **kwargs,
     ):
 
-        super().__init__(img_shape, crop_shape, crop_offset, channel_names, grid_type, pole_mask, spatial_distributed)
+        super().__init__(img_shape, crop_shape, crop_offset, channel_names, grid_type, spatial_distributed)
 
         # store some variables
         self.use_moist_air_formula = use_moist_air_formula
@@ -133,7 +132,7 @@ class HydrostaticBalanceLoss(GeometricBaseLoss):
 
         return channel_weights
 
-    def forward(self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor:
 
         # undo normalization
         prdun = prd * self.scale + self.bias

@@ -165,7 +165,26 @@ def get_model(params: ParamsBase, use_stochastic_interpolation: bool = False, mu
         if hasattr(model_handle, "load") and callable(model_handle.load):
             model_handle = model_handle.load()
 
-        model_handle = partial(model_handle, inp_shape=inp_shape, out_shape=out_shape, inp_chans=inp_chans, out_chans=out_chans, **params.to_dict())
+        model_kwargs = params.to_dict()
+
+        # pass normalization statistics to the model
+        normalization_mode = params.get("normalization", "none")
+        if normalization_mode in ["zscore", "minmax"] or isinstance(normalization_mode, dict):
+            if not hasattr(params, "out_channels"):
+                raise ValueError(
+                    f"normalization='{normalization_mode}' requires params.out_channels "
+                    "to slice the normalization stats to the model's output channels"
+                )
+            bias, scale = get_data_normalization(params)
+            if bias is not None:
+                bias = bias.flatten()[params.out_channels]
+            if scale is not None:
+                scale = scale.flatten()[params.out_channels]
+            if bias is not None and scale is not None:
+                model_kwargs["normalization_means"] = bias
+                model_kwargs["normalization_stds"] = scale
+
+        model_handle = partial(model_handle, inp_shape=inp_shape, out_shape=out_shape, inp_chans=inp_chans, out_chans=out_chans, **model_kwargs)
     else:
         raise KeyError(f"No model is registered under the name {params.nettype}")
 

@@ -52,10 +52,9 @@ class EnsembleNLLLoss(GeometricBaseLoss):
         crop_offset: Tuple[int, int],
         channel_names: List[str],
         grid_type: str,
-        pole_mask: int,
         spatial_distributed: Optional[bool] = False,
         ensemble_distributed: Optional[bool] = False,
-        eps: Optional[float] = 1.0e-5,
+        eps: Optional[float] = 1.0e-6,
         **kwargs,
     ):
 
@@ -65,7 +64,6 @@ class EnsembleNLLLoss(GeometricBaseLoss):
             crop_offset=crop_offset,
             channel_names=channel_names,
             grid_type=grid_type,
-            pole_mask=pole_mask,
             spatial_distributed=spatial_distributed,
         )
 
@@ -84,7 +82,7 @@ class EnsembleNLLLoss(GeometricBaseLoss):
     def type(self):
         return LossType.Probabilistic
 
-    def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, spatial_weights: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, spatial_weights: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor:
 
         # we assume the following shapes:
         # forecasts: batch, ensemble, channels, lat, lon

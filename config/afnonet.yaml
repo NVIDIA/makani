@@ -17,7 +17,8 @@ full_field: &BASE_CONFIG
     time_diff_means_path: "/stats/time_diff_means.npy"
     time_diff_stds_path: "/stats/time_diff_stds.npy"
 
-    loss: "l2"
+    losses:
+    -   type: "l2"
     lr: 1E-3
     scheduler: "CosineAnnealingLR" # "ReduceLROnPlateau"
     scheduler_T_max: 150
@@ -56,9 +57,6 @@ full_field: &BASE_CONFIG
     skip_fno: "identity" # "linear", "identity" or None
     nested_skip_fno: !!bool True # whether to nest the inner skip connection or have it be sequential, inside the AFNO block
     verbose: False
-
-    #options default, residual
-    target: "default"
 
     channel_names: ["u10m", "v10m", "t2m", "sp", "msl", "t850", "u1000", "v1000", "z1000", "u850", "v850", "z850", "u500", "v500", "z500", "t500", "z50", "r500", "r850", "tcwv", "u100m", "v100m", "u250", "v250", "z250", "t250", "u100", "v100", "z100", "t100", "u900", "v900", "z900", "t900"]
     normalization: "zscore" #options zscore or minmax

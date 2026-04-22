@@ -53,10 +53,10 @@ def normalize_weights(model, eps=1e-5):
     return
 
 
-def _compute_total_grad_norm(model, norm_type=2.0):
+def _compute_total_grad_norm(model, norm_type=2.0, verbose=False):
     # iterate over parameters
     gnorms = []
-    for param in model.parameters():
+    for name, param in model.named_parameters():
 
         if param.grad is None:
             continue
@@ -79,6 +79,11 @@ def _compute_total_grad_norm(model, norm_type=2.0):
 
         gnorms.append(gnorm)
 
+    if verbose:
+        for gnorm in gnorms:
+            if torch.any(torch.isnan(gnorm)):
+                print(f"Gradient norm is NaN for parameter {name}")
+
     # compute total norm
     if gnorms:
         total_gnorm = torch.sum(torch.stack(gnorms))
@@ -92,11 +97,11 @@ def _compute_total_grad_norm(model, norm_type=2.0):
     return total_gnorm
 
 
-def clip_grads(model, max_grad_norm, norm_type=2.0):
+def clip_grads(model, max_grad_norm, norm_type=2.0, verbose=False):
 
     # iterate over parameters
     with torch.no_grad():
-        total_gnorm = _compute_total_grad_norm(model, norm_type)
+        total_gnorm = _compute_total_grad_norm(model, norm_type=norm_type, verbose=verbose)
 
         clip_factor = max_grad_norm / (total_gnorm + 1e-6)  # add small epsilon to avoid division by zero
         clip_factor = torch.clamp(clip_factor, max=1.0)

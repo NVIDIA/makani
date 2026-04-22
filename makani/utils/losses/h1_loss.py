@@ -43,6 +43,7 @@ class SpectralH1Loss(SpectralBaseLoss):
         relative: Optional[bool] = False,
         squared: Optional[bool] = False,
         spatial_distributed: Optional[bool] = False,
+        eps: Optional[float] = 1.0e-6,
         **kwargs,
     ):
         super().__init__(
@@ -56,7 +57,7 @@ class SpectralH1Loss(SpectralBaseLoss):
 
         self.relative = relative
         self.squared = squared
-        self.spatial_distributed = comm.is_distributed("spatial") and spatial_distributed
+        self.eps = eps
 
         # store weights
         h1_weights = torch.arange(self.sht.lmax).float()
@@ -77,11 +78,13 @@ class SpectralH1Loss(SpectralBaseLoss):
         if wgt is not None:
             coeffssq = coeffssq * wgt
 
-        # sum m != 0 coeffs:
+        # Parseval sum: m=0 once, m!=0 twice (conjugate symmetry)
+        # divide by 4π to match the geometric quadrature normalization
+        inv_area = 1.0 / (4.0 * torch.pi)
         if comm.get_rank("w") == 0:
-            norm2 = coeffssq[..., 0] + 2 * torch.sum(coeffssq[..., 1:], dim=-1)
+            norm2 = inv_area * (coeffssq[..., 0] + 2 * torch.sum(coeffssq[..., 1:], dim=-1))
         else:
-            norm2 = 2 * torch.sum(coeffssq, dim=-1)
+            norm2 = inv_area * (2 * torch.sum(coeffssq, dim=-1))
         if self.spatial_distributed and (comm.get_size("w") > 1):
             norm2 = reduce_from_parallel_region(norm2, "w")
 
@@ -132,7 +135,7 @@ class SpectralH1Loss(SpectralBaseLoss):
             tar_norm2 = 2 * torch.sum(tar_coeffssq, dim=-1)
         if self.spatial_distributed and (comm.get_size("w") > 1):
             tar_norm2 = reduce_from_parallel_region(tar_norm2, "w")
-        
+
         # compute target norms
         tar_norm2 = tar_norm2.reshape(B, C, -1)
         tar_h1_norm2 = torch.sum(tar_norm2 * self.h1_weights, dim=-1)
@@ -146,12 +149,12 @@ class SpectralH1Loss(SpectralBaseLoss):
             diff_norms = h1_norm2
             tar_norms = tar_h1_norm2
 
-        # setup return value
-        retval = diff_norms / tar_norms
+        # setup return value (eps-guard: avoids NaN on constant targets where l(l+1) weighting zeros the H¹ norm)
+        retval = diff_norms / (tar_norms + self.eps)
 
         return retval
 
-    def forward(self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor:
 
         if self.relative:
             loss = self.rel(prd, tar, wgt)
