@@ -196,11 +196,17 @@ def distributed_transpose(x, dims, shapes, comm_id):
 class gradient_print_wrapper(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, x, msg=""):
-        ctx.msg = msg
+    @torch.compiler.disable
+    def forward(x, msg=""):
         return x
 
     @staticmethod
+    def setup_context(ctx, inputs, output):
+        _, msg = inputs
+        ctx.msg = msg
+
+    @staticmethod
+    @torch.compiler.disable
     def backward(ctx, go):
         msg = ctx.msg
         print(f"Gradient stats for {msg}: min: {go.min()}, max: {go.max()}, mean: {go.mean()}")
