@@ -57,7 +57,6 @@ class GeometricLpLoss(GeometricBaseLoss):
         self.p = p
         self.relative = relative
         self.squared = squared
-        self.spatial_distributed = spatial_distributed
 
     def abs(self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None):
         num_examples = prd.shape[0]
@@ -143,7 +142,6 @@ class SpectralLpLoss(SpectralBaseLoss):
         self.p = p
         self.relative = relative
         self.squared = squared
-        self.spatial_distributed = comm.is_distributed("spatial") and spatial_distributed
 
     def abs(self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None):
         B, C, H, W = prd.shape

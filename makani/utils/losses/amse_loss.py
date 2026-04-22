@@ -65,17 +65,17 @@ class SpectralAMSELoss(SpectralBaseLoss):
         # compute the SHT:
         xcoeffssq = torch.square(torch.abs(xcoeffs))
         ycoeffssq = torch.square(torch.abs(ycoeffs))
-        xycohcoeffssq = torch.real(xcoeffs * ycoeffs.conj())
+        xycoh_prod = torch.real(xcoeffs * ycoeffs.conj())
 
         # convert back
         xcoeffssq = xcoeffssq.to(dtype=ptype)
         ycoeffssq = ycoeffssq.to(dtype=ptype)
-        xycohcoeffssq = xycohcoeffssq.to(dtype=ptype)
+        xycoh_prod = xycoh_prod.to(dtype=ptype)
 
         if wgt is not None:
             xcoeffssq = xcoeffssq * wgt
             ycoeffssq = ycoeffssq * wgt
-            xycohcoeffssq = xycohcoeffssq * wgt
+            xycoh_prod = xycoh_prod * wgt
 
         # Parseval sum: m=0 once, m!=0 twice (conjugate symmetry)
         # divide by 4π to match the geometric quadrature normalization
@@ -83,23 +83,23 @@ class SpectralAMSELoss(SpectralBaseLoss):
         if comm.get_rank("w") == 0:
             xnorm2 = inv_area * (xcoeffssq[..., 0] + 2 * torch.sum(xcoeffssq[..., 1:], dim=-1))
             ynorm2 = inv_area * (ycoeffssq[..., 0] + 2 * torch.sum(ycoeffssq[..., 1:], dim=-1))
-            xycoh = inv_area * (xycohcoeffssq[..., 0] + 2 * torch.sum(xycohcoeffssq[..., 1:], dim=-1))
+            xycoh_sum = inv_area * (xycoh_prod[..., 0] + 2 * torch.sum(xycoh_prod[..., 1:], dim=-1))
         else:
             xnorm2 = inv_area * (2 * torch.sum(xcoeffssq, dim=-1))
             ynorm2 = inv_area * (2 * torch.sum(ycoeffssq, dim=-1))
-            xycoh = inv_area * (2 * torch.sum(xycohcoeffssq, dim=-1))
+            xycoh_sum = inv_area * (2 * torch.sum(xycoh_prod, dim=-1))
 
         # distributed reduction
         if self.spatial_distributed and (comm.get_size("w") > 1):
             xnorm2 = reduce_from_parallel_region(xnorm2, "w")
             ynorm2 = reduce_from_parallel_region(ynorm2, "w")
-            xycoh = reduce_from_parallel_region(xycoh, "w")
+            xycoh_sum = reduce_from_parallel_region(xycoh_sum, "w")
 
         # compute sqrt
         xnorm = torch.sqrt(xnorm2)
         ynorm = torch.sqrt(ynorm2)
         # eps-guard: avoids NaN at degrees where either field has zero power
-        xycoh = xycoh / torch.sqrt(xnorm2 * ynorm2 + self.eps)
+        xycoh = xycoh_sum / torch.sqrt(xnorm2 * ynorm2 + self.eps)
 
         # compute equation (6) from the paper
         loss = torch.square(xnorm - ynorm) + 2 * torch.maximum(xnorm2, ynorm2) * (1 - xycoh)

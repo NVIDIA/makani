@@ -168,10 +168,11 @@ def get_model(params: ParamsBase, use_stochastic_interpolation: bool = False, mu
         model_kwargs = params.to_dict()
 
         # pass normalization statistics to the model
-        if params.get("normalization", "none") in ["zscore", "minmax"]:
+        normalization_mode = params.get("normalization", "none")
+        if normalization_mode in ["zscore", "minmax"] or isinstance(normalization_mode, dict):
             if not hasattr(params, "out_channels"):
                 raise ValueError(
-                    f"normalization='{params.normalization}' requires params.out_channels "
+                    f"normalization='{normalization_mode}' requires params.out_channels "
                     "to slice the normalization stats to the model's output channels"
                 )
             bias, scale = get_data_normalization(params)

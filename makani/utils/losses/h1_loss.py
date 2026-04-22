@@ -56,7 +56,6 @@ class SpectralH1Loss(SpectralBaseLoss):
 
         self.relative = relative
         self.squared = squared
-        self.spatial_distributed = comm.is_distributed("spatial") and spatial_distributed
 
         # store weights
         h1_weights = torch.arange(self.sht.lmax).float()
