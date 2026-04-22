@@ -36,6 +36,19 @@ from .data_helpers import get_lat_lon_grid
 
 
 class DummyLoader(object):
+    """Synthetic dataloader for model-perf benchmarking.
+
+    Unlike conventional dataloaders, ``DummyLoader`` pre-allocates its output
+    tensors on the device passed via the ``device`` kwarg and returns the same
+    tensors on every iteration. This is intentional — for benchmarking model
+    throughput, it avoids the per-batch CPU→device transfer cost that would
+    otherwise dominate the timing. Pass ``device=torch.device("cpu")`` for
+    testing or for a more conventional dataloader-like behavior.
+
+    For multi-GPU runs the caller is responsible for passing the rank-specific
+    device (e.g. ``cuda:<local_rank>``); the loader does not infer it.
+    """
+
     def __init__(self,
                  location: str,
                  batch_size: int,
@@ -96,12 +109,7 @@ class DummyLoader(object):
 
         self._get_files_stats()
 
-        # set lat_lon
-        if self.lat_lon is None:
-            latitude, longitude = get_lat_lon_grid(self.img_shape)
-            self.lat_lon = (latitude.tolist(), longitude.tolist())
-
-        # get local lat lon
+        # get local lat lon (overrides the read_anchor-based slice from _get_files_stats)
         self.lat_lon_local = (self.lat_lon[0][self.crop_anchor[0] : self.crop_anchor[0] + self.crop_shape[0]], self.lat_lon[1][self.crop_anchor[1] : self.crop_anchor[1] + self.crop_shape[1]])
 
         # zenith angle yes or no?
@@ -109,12 +117,12 @@ class DummyLoader(object):
         if self.add_zenith:
             self.zen_dummy = torch.zeros((self.batch_size, self.n_history + 1, 1, self.return_shape[0], self.return_shape[1]), dtype=torch.float32, device=self.device)
 
-        # grid types
+        # grid types (lat_lon_local may be a list if auto-created; coerce to tensor)
         self.grid_converter = GridConverter(
             data_grid_type,
             model_grid_type,
-            torch.deg2rad(self.lat_lon_local[0]).to(torch.float32),
-            torch.deg2rad(self.lat_lon_local[1]).to(torch.float32),
+            torch.deg2rad(torch.as_tensor(self.lat_lon_local[0])).to(torch.float32),
+            torch.deg2rad(torch.as_tensor(self.lat_lon_local[1])).to(torch.float32),
         )
 
     def _get_files_stats(self):
@@ -205,6 +213,12 @@ class DummyLoader(object):
         self.img_shape_x_resampled = self.img_shape_resampled[0]
         self.img_shape_y_resampled = self.img_shape_resampled[1]
 
+        # auto-create lat/lon if the caller didn't supply them
+        # (matches the pattern used by GeneralES and GeneralConcatES)
+        if self.lat_lon is None:
+            latitude, longitude = get_lat_lon_grid(self.img_shape)
+            self.lat_lon = (latitude.tolist(), longitude.tolist())
+
         # lat lon coords
         self.lat_lon_local = (self.lat_lon[0][self.read_anchor[0] : self.read_anchor[0] + self.read_shape[0]], self.lat_lon[1][self.read_anchor[1] : self.read_anchor[1] + self.read_shape[1]])
 
@@ -220,8 +234,7 @@ class DummyLoader(object):
         logging.info(f"Including {self.dhours*self.dt*self.n_history} hours of past history in training at a frequency of {self.dhours*self.dt} hours")
         logging.info("WARNING: using dummy data")
 
-        # create tensors for dummy data
-        self.device = torch.device(f"cuda:{comm.get_local_rank()}")
+        # create tensors for dummy data on the device passed at construction time
         self.inp = torch.zeros((self.batch_size, self.n_history + 1, self.n_in_channels, self.return_shape[0], self.return_shape[1]), dtype=torch.float32, device=self.device)
         self.tar = torch.zeros(
             (self.batch_size, self.n_future + 1, self.n_out_channels_local, self.return_shape[0], self.return_shape[1]), dtype=torch.float32, device=self.device

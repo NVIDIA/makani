@@ -583,5 +583,85 @@ class TestDataLoader(unittest.TestCase):
             self.assertNotEqual(fps_ep0, fps_ep1)
 
 
+class TestDummyLoader(unittest.TestCase):
+    """Smoke tests for the synthetic DummyLoader. CPU-friendly — no DALI, no HDF5 fixture."""
+
+    def setUp(self):
+        disable_tf32()
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.batch_size = 2
+        self.img_shape = (32, 64)
+        self.in_channels = list(range(5))
+        self.out_channels = list(range(5))
+
+    def _make_loader(self, **overrides):
+        from makani.utils.dataloaders.data_loader_dummy import DummyLoader
+        kwargs = dict(
+            location="/nonexistent",
+            device=self.device,
+            batch_size=self.batch_size,
+            dt=1,
+            dhours=6,
+            in_channels=self.in_channels,
+            out_channels=self.out_channels,
+            img_shape=self.img_shape,
+            n_samples_per_epoch=4,
+        )
+        kwargs.update(overrides)
+        return DummyLoader(**kwargs)
+
+    def test_basic_iteration_shapes_and_dtype(self):
+        loader = self._make_loader()
+        self.assertEqual(len(loader), 4)
+        batches = list(loader)
+        self.assertEqual(len(batches), 4)
+        for inp, tar in batches:
+            self.assertEqual(tuple(inp.shape), (self.batch_size, 1, len(self.in_channels), *self.img_shape))
+            self.assertEqual(tuple(tar.shape), (self.batch_size, 1, len(self.out_channels), *self.img_shape))
+            self.assertEqual(inp.dtype, torch.float32)
+            self.assertEqual(tar.dtype, torch.float32)
+
+    def test_history_and_future_dimensions(self):
+        loader = self._make_loader(n_history=2, n_future=3)
+        inp, tar = next(iter(loader))
+        self.assertEqual(inp.shape[1], 3)   # n_history + 1
+        self.assertEqual(tar.shape[1], 4)   # n_future  + 1
+
+    def test_add_zenith_appends_zenith_tensors(self):
+        loader = self._make_loader(add_zenith=True)
+        batch = next(iter(loader))
+        self.assertEqual(len(batch), 4)     # inp, tar, inp_zen, tar_zen
+        _, _, inp_zen, _ = batch
+        self.assertEqual(tuple(inp_zen.shape), (self.batch_size, 1, 1, *self.img_shape))
+
+    def test_return_timestamp_appends_time_tensors(self):
+        loader = self._make_loader(return_timestamp=True)
+        batch = next(iter(loader))
+        self.assertEqual(len(batch), 4)     # inp, tar, inp_time, tar_time
+        _, _, inp_time, _ = batch
+        self.assertEqual(tuple(inp_time.shape), (self.batch_size, 1))
+        self.assertEqual(inp_time.dtype, torch.float64)
+
+    def test_return_target_false_yields_input_only(self):
+        loader = self._make_loader(return_target=False)
+        batch = next(iter(loader))
+        self.assertEqual(len(batch), 1)     # inp only
+
+    def test_subsampling_factor_reduces_spatial_shape(self):
+        loader = self._make_loader(subsampling_factor=2)
+        inp, _ = next(iter(loader))
+        self.assertEqual(tuple(inp.shape[-2:]), (self.img_shape[0] // 2, self.img_shape[1] // 2))
+
+    def test_normalization_helpers_return_neutral_stats(self):
+        loader = self._make_loader()
+        in_bias, in_scale = loader.get_input_normalization()
+        out_bias, out_scale = loader.get_output_normalization()
+        self.assertEqual(in_bias.shape, (1, len(self.in_channels), 1, 1))
+        self.assertTrue((in_bias == 0).all())
+        self.assertTrue((in_scale == 1).all())
+        self.assertTrue((out_bias == 0).all())
+        self.assertTrue((out_scale == 1).all())
+
+
 if __name__ == "__main__":
     unittest.main()
