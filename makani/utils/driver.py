@@ -603,14 +603,6 @@ class Driver(metaclass=abc.ABCMeta):
             if name in state_dict and hasattr(buf, "sharded_dims_mp"):
                 state_dict[name].sharded_dims_mp = buf.sharded_dims_mp
 
-        # attach sharding metadata to state_dict tensors (same as legacy) so torch.save preserves it
-        for name, param in model.named_parameters():
-            if name in state_dict and hasattr(param, "sharded_dims_mp"):
-                state_dict[name].sharded_dims_mp = param.sharded_dims_mp
-        for name, buf in model.named_buffers():
-            if name in state_dict and hasattr(buf, "sharded_dims_mp"):
-                state_dict[name].sharded_dims_mp = buf.sharded_dims_mp
-
         store_dict = {"model_state": state_dict}
 
         if loss is not None:
@@ -670,7 +662,7 @@ class Driver(metaclass=abc.ABCMeta):
         elif params.optimizer_type == "SGD":
             if self.log_to_screen:
                 self.logger.info("using SGD optimizer")
-            optimizer = optim.SGD(all_parameters, lr=params.get("lr", 1e-3), weight_decay=params.get("weight_decay", 0), momentum=params.get("momentum", 0), nesterov=params.get("nesterov", True), foreach=True)
+            optimizer = optim.SGD(all_parameters, lr=params.get("lr", 1e-3), weight_decay=params.get("weight_decay", 0), momentum=params.get("momentum", 0), nesterov=params.get("nesterov", False), foreach=True)
         elif params.optimizer_type == "SIRFShampoo":
             if self.log_to_screen:
                 self.logger.info("using SIRFShampoo optimizer")
