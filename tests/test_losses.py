@@ -397,6 +397,37 @@ class TestSpectralH1Loss(unittest.TestCase):
             compare_tensors("squared", fn_unsq(prd, tar) ** 2, fn_sq(prd, tar), atol=1e-5, rtol=1e-4, verbose=verbose),
         )
 
+    def test_parseval_consistency_with_geometric_l2(self, verbose=False):
+        """On a single zonal harmonic Y_l^0 (L²-normalized), Parseval gives
+        ||Y_l^0||²_{H¹} = l(l+1) · ||Y_l^0||²_{L²}.  With the 1/(4π) Parseval factor
+        applied to both losses, SpectralH1Loss(squared=True) must equal
+        l(l+1) · GeometricLpLoss(p=2, squared=True)."""
+        import torch_harmonics as th
+        from makani.utils.grids import compute_spherical_bandlimit
+
+        l_test = 4
+        lmax = compute_spherical_bandlimit((_IMG_H, _IMG_W), "equiangular")
+
+        # build single-mode field by inverse SHT of a unit coefficient at (l, m=0)
+        isht = th.InverseRealSHT(_IMG_H, _IMG_W, lmax=lmax, mmax=lmax, grid="equiangular").float()
+        coeffs = torch.zeros(lmax, lmax, dtype=torch.complex64)
+        coeffs[l_test, 0] = 1.0 + 0.0j
+        single_mode = isht(coeffs).expand(_BATCH, _NUM_CH, -1, -1).contiguous()
+        zeros = torch.zeros_like(single_mode)
+
+        fn_h1 = SpectralH1Loss(**_SPEC_KWARGS, squared=True)
+        fn_l2 = GeometricLpLoss(**_GEOM_KWARGS, p=2.0, squared=True)
+
+        h1_val = fn_h1(single_mode, zeros)
+        l2_val = fn_l2(single_mode, zeros)
+
+        expected = float(l_test * (l_test + 1)) * l2_val
+        self.assertTrue(
+            compare_tensors("parseval H1", h1_val, expected, atol=1e-3, rtol=0.05, verbose=verbose),
+            f"Expected H1 = l(l+1)·L²: h1={h1_val.mean().item():.4f}, "
+            f"l(l+1)*l2={expected.mean().item():.4f}",
+        )
+
     def test_constant_difference_has_zero_h1_seminorm(self, verbose=False):
         """A spatially constant field lives entirely in the l=0 SHT mode.
         h1_weights[0] = 0*(0+1) = 0, so the H1 seminorm must be exactly zero."""

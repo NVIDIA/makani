@@ -75,15 +75,17 @@ class SpectralAMSELoss(SpectralBaseLoss):
             ycoeffssq = ycoeffssq * wgt
             xycohcoeffssq = xycohcoeffssq * wgt
 
-        # reduce over m
+        # Parseval sum: m=0 once, m!=0 twice (conjugate symmetry)
+        # divide by 4π to match the geometric quadrature normalization
+        inv_area = 1.0 / (4.0 * torch.pi)
         if comm.get_rank("w") == 0:
-            xnorm2 = xcoeffssq[..., 0] + 2 * torch.sum(xcoeffssq[..., 1:], dim=-1)
-            ynorm2 = ycoeffssq[..., 0] + 2 * torch.sum(ycoeffssq[..., 1:], dim=-1)
-            xycoh = xycohcoeffssq[..., 0] + 2 * torch.sum(xycohcoeffssq[..., 1:], dim=-1)
+            xnorm2 = inv_area * (xcoeffssq[..., 0] + 2 * torch.sum(xcoeffssq[..., 1:], dim=-1))
+            ynorm2 = inv_area * (ycoeffssq[..., 0] + 2 * torch.sum(ycoeffssq[..., 1:], dim=-1))
+            xycoh = inv_area * (xycohcoeffssq[..., 0] + 2 * torch.sum(xycohcoeffssq[..., 1:], dim=-1))
         else:
-            xnorm2 = 2 * torch.sum(xcoeffssq, dim=-1)
-            ynorm2 = 2 * torch.sum(ycoeffssq, dim=-1)
-            xycoh = 2 * torch.sum(xycohcoeffssq, dim=-1)
+            xnorm2 = inv_area * (2 * torch.sum(xcoeffssq, dim=-1))
+            ynorm2 = inv_area * (2 * torch.sum(ycoeffssq, dim=-1))
+            xycoh = inv_area * (2 * torch.sum(xycohcoeffssq, dim=-1))
 
         # distributed reduction
         if self.spatial_distributed and (comm.get_size("w") > 1):

@@ -77,11 +77,13 @@ class SpectralH1Loss(SpectralBaseLoss):
         if wgt is not None:
             coeffssq = coeffssq * wgt
 
-        # sum m != 0 coeffs:
+        # Parseval sum: m=0 once, m!=0 twice (conjugate symmetry)
+        # divide by 4π to match the geometric quadrature normalization
+        inv_area = 1.0 / (4.0 * torch.pi)
         if comm.get_rank("w") == 0:
-            norm2 = coeffssq[..., 0] + 2 * torch.sum(coeffssq[..., 1:], dim=-1)
+            norm2 = inv_area * (coeffssq[..., 0] + 2 * torch.sum(coeffssq[..., 1:], dim=-1))
         else:
-            norm2 = 2 * torch.sum(coeffssq, dim=-1)
+            norm2 = inv_area * (2 * torch.sum(coeffssq, dim=-1))
         if self.spatial_distributed and (comm.get_size("w") > 1):
             norm2 = reduce_from_parallel_region(norm2, "w")
 
