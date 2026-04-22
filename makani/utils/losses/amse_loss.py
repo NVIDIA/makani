@@ -39,6 +39,7 @@ class SpectralAMSELoss(SpectralBaseLoss):
         channel_names: List[str],
         grid_type: str,
         spatial_distributed: Optional[bool] = False,
+        eps: Optional[float] = 1.0e-6,
         **kwargs,
     ):
         super().__init__(
@@ -49,6 +50,7 @@ class SpectralAMSELoss(SpectralBaseLoss):
             grid_type=grid_type,
             spatial_distributed=spatial_distributed,
         )
+        self.eps = eps
 
     def forward(self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor:
 
@@ -96,7 +98,8 @@ class SpectralAMSELoss(SpectralBaseLoss):
         # compute sqrt
         xnorm = torch.sqrt(xnorm2)
         ynorm = torch.sqrt(ynorm2)
-        xycoh = xycoh / (xnorm * ynorm)
+        # eps-guard: avoids NaN at degrees where either field has zero power
+        xycoh = xycoh / torch.sqrt(xnorm2 * ynorm2 + self.eps)
 
         # compute equation (6) from the paper
         loss = torch.square(xnorm - ynorm) + 2 * torch.maximum(xnorm2, ynorm2) * (1 - xycoh)
