@@ -470,7 +470,7 @@ class EnsembleTrainer(Trainer):
         else:
             pred = pred_flat.unsqueeze(1)
 
-        loss = self.loss_obj(pred, tar)
+        loss = self.loss_obj(pred, tar, inp=inp)
 
         return pred, loss
 
