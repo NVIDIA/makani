@@ -52,7 +52,6 @@ class EnsembleNLLLoss(GeometricBaseLoss):
         crop_offset: Tuple[int, int],
         channel_names: List[str],
         grid_type: str,
-        pole_mask: int,
         spatial_distributed: Optional[bool] = False,
         ensemble_distributed: Optional[bool] = False,
         eps: Optional[float] = 1.0e-6,
@@ -65,7 +64,6 @@ class EnsembleNLLLoss(GeometricBaseLoss):
             crop_offset=crop_offset,
             channel_names=channel_names,
             grid_type=grid_type,
-            pole_mask=pole_mask,
             spatial_distributed=spatial_distributed,
         )
 

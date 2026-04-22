@@ -334,7 +334,6 @@ class TestDistributedLayers(unittest.TestCase):
         img_shape = (H, W)
         crop_shape = (H, W)
         crop_offset = (0, 0)
-        pole_mask = 0
         eps = 1e-5
 
         set_seed(333)
@@ -345,7 +344,6 @@ class TestDistributedLayers(unittest.TestCase):
             crop_shape=crop_shape,
             crop_offset=crop_offset,
             grid_type=grid_type,
-            pole_mask=pole_mask,
             num_features=C,
             eps=eps,
             affine=affine,
@@ -357,7 +355,6 @@ class TestDistributedLayers(unittest.TestCase):
             crop_shape=crop_shape,
             crop_offset=crop_offset,
             grid_type=grid_type,
-            pole_mask=pole_mask,
             num_features=C,
             eps=eps,
             affine=affine,

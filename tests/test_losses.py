@@ -99,7 +99,6 @@ _GEOM_KWARGS = dict(
     crop_offset=(0, 0),
     channel_names=_CHANNEL_NAMES,
     grid_type="equiangular",
-    pole_mask=0,
 )
 
 _WIND_GEOM_KWARGS = dict(
@@ -108,7 +107,6 @@ _WIND_GEOM_KWARGS = dict(
     crop_offset=(0, 0),
     channel_names=_WIND_CHANNEL_NAMES,
     grid_type="equiangular",
-    pole_mask=0,
 )
 
 _SPEC_KWARGS = dict(

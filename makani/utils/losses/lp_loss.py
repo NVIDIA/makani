@@ -38,7 +38,6 @@ class GeometricLpLoss(GeometricBaseLoss):
         p: Optional[float] = 2.0,
         relative: Optional[bool] = False,
         squared: Optional[bool] = False,
-        pole_mask: Optional[int] = 0,
         jacobian: Optional[str] = "s2",
         grid_type: Optional[str] = "equiangular",
         spatial_distributed: Optional[bool] = False,
@@ -51,7 +50,6 @@ class GeometricLpLoss(GeometricBaseLoss):
             crop_offset=crop_offset,
             channel_names=channel_names,
             grid_type=grid_type,
-            pole_mask=pole_mask,
             spatial_distributed=spatial_distributed,
         )
 

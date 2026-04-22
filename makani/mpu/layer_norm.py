@@ -173,7 +173,6 @@ class DistributedGeometricInstanceNormS2(DistributedInstanceNorm2d):
         crop_shape: Tuple[int, int],
         crop_offset: Tuple[int, int],
         grid_type: str,
-        pole_mask: int,
         num_features: int,
         eps: Optional[float] = 1e-05,
         affine: Optional[bool] = False,
@@ -185,12 +184,11 @@ class DistributedGeometricInstanceNormS2(DistributedInstanceNorm2d):
 
         # we only need the weights
         quad_weight = GridQuadrature(
-            quadrature_rule, 
-            img_shape=img_shape, 
-            crop_shape=crop_shape, 
-            crop_offset=crop_offset, 
+            quadrature_rule,
+            img_shape=img_shape,
+            crop_shape=crop_shape,
+            crop_offset=crop_offset,
             normalize=True,
-            pole_mask=pole_mask, 
             distributed=True
         ).quad_weight
 

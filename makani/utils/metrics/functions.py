@@ -442,7 +442,6 @@ class GeometricCRPS(torch.nn.Module):
             crop_offset=crop_offset,
             channel_names=[],
             grid_type=grid_type,
-            pole_mask=0,
             crps_type=crps_type,
             spatial_distributed=spatial_distributed,
             ensemble_distributed=ensemble_distributed,

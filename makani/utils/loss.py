@@ -119,9 +119,6 @@ class LossHandler(nn.Module):
             # check if this is a tendency loss (from explicit field, not string parsing)
             requires_input = loss.get("tendency", False)
 
-            # get pole mask if it was specified
-            pole_mask = loss.get("pole_mask", 0)
-
             # get extra loss arguments if specified
             loss_params = loss.get("parameters", {})
 
@@ -132,7 +129,6 @@ class LossHandler(nn.Module):
                 crop_shape=self.crop_shape,
                 crop_offset=self.crop_offset,
                 channel_names=params.channel_names,
-                pole_mask=pole_mask,
                 bias=bias,
                 scale=scale,
                 grid_type=params.model_grid_type,

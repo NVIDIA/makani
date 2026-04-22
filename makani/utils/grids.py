@@ -90,7 +90,7 @@ class GridConverter(torch.nn.Module):
 
 
 class GridQuadrature(torch.nn.Module):
-    def __init__(self, quadrature_rule, img_shape, crop_shape=None, crop_offset=(0, 0), normalize=False, pole_mask=None, distributed=False):
+    def __init__(self, quadrature_rule, img_shape, crop_shape=None, crop_offset=(0, 0), normalize=False, distributed=False):
         super().__init__()
 
         self.distributed = comm.is_distributed("spatial") and distributed
@@ -134,11 +134,6 @@ class GridQuadrature(torch.nn.Module):
         # apply normalization
         if normalize:
             quad_weight = quad_weight / (4.0 * torch.pi)
-
-        # apply pole mask
-        if (pole_mask is not None) and (pole_mask > 0):
-            quad_weight[:pole_mask, :] = 0.0
-            quad_weight[img_shape[0] - pole_mask :, :] = 0.0
 
         # if distributed, make sure to split correctly across ranks:
         # in case of model parallelism, we need to make sure that we use the correct shapes per rank

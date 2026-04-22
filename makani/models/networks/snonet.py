@@ -613,7 +613,6 @@ class SphericalNeuralOperatorNet(nn.Module):
                 crop_shape=(h, w),
                 crop_offset=(0, 0),
                 grid_type=sht_grid_type,
-                pole_mask=0,
                 num_features=embed_dim,
                 eps=1e-6,
                 affine=True,

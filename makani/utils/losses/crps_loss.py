@@ -258,7 +258,6 @@ class CRPSLoss(GeometricBaseLoss):
         crop_offset: Tuple[int, int],
         channel_names: List[str],
         grid_type: str,
-        pole_mask: int,
         crps_type: str = "skillspread",
         spatial_distributed: Optional[bool] = False,
         ensemble_distributed: Optional[bool] = False,
@@ -274,7 +273,6 @@ class CRPSLoss(GeometricBaseLoss):
             crop_offset=crop_offset,
             channel_names=channel_names,
             grid_type=grid_type,
-            pole_mask=pole_mask,
             spatial_distributed=spatial_distributed,
         )
 
@@ -595,7 +593,6 @@ class GradientCRPSLoss(GradientBaseLoss):
         crop_offset: Tuple[int, int],
         channel_names: List[str],
         grid_type: str,
-        pole_mask: int,
         lmax: Optional[int] = None,
         crps_type: str = "skillspread",
         spatial_distributed: Optional[bool] = False,
@@ -613,7 +610,6 @@ class GradientCRPSLoss(GradientBaseLoss):
             crop_offset=crop_offset,
             channel_names=channel_names,
             grid_type=grid_type,
-            pole_mask=pole_mask,
             lmax=lmax,
             spatial_distributed=spatial_distributed,
         )
@@ -789,7 +785,6 @@ class VortDivCRPSLoss(VortDivBaseLoss):
         crop_offset: Tuple[int, int],
         channel_names: List[str],
         grid_type: str,
-        pole_mask: int,
         crps_type: str = "skillspread",
         spatial_distributed: Optional[bool] = False,
         ensemble_distributed: Optional[bool] = False,
@@ -805,7 +800,6 @@ class VortDivCRPSLoss(VortDivBaseLoss):
             crop_offset=crop_offset,
             channel_names=channel_names,
             grid_type=grid_type,
-            pole_mask=pole_mask,
             spatial_distributed=spatial_distributed,
         )
 
@@ -953,7 +947,6 @@ class KernelScoreLoss(GeometricBaseLoss):
         crop_offset: Tuple[int, int],
         channel_names: List[str],
         grid_type: str,
-        pole_mask: int,
         crps_type: str = "skillspread",
         spatial_distributed: Optional[bool] = False,
         ensemble_distributed: Optional[bool] = False,
@@ -972,7 +965,6 @@ class KernelScoreLoss(GeometricBaseLoss):
             crop_offset=crop_offset,
             channel_names=channel_names,
             grid_type=grid_type,
-            pole_mask=pole_mask,
             spatial_distributed=spatial_distributed,
         )
 

@@ -65,7 +65,6 @@ class TestConstraints(unittest.TestCase):
                                                 scale=self.scale,
                                                 p_min=50,
                                                 p_max=900,
-                                                pole_mask=0,
                                                 use_moist_air_formula=use_moist_air_formula).to(self.device)
                 loss_tens = hbloss(self.data, None)
                 
@@ -87,7 +86,6 @@ class TestConstraints(unittest.TestCase):
                                                 scale=self.scale,
                                                 p_min=50,
                                                 p_max=900,
-                                                pole_mask=0,
                                                 use_moist_air_formula=use_moist_air_formula).to(self.device)
 
                 # constraints wrapper
@@ -141,7 +139,6 @@ class TestConstraints(unittest.TestCase):
                                                 scale=self.scale,
                                                 p_min=50,
                                                 p_max=900,
-                                                pole_mask=0,
                                                 use_moist_air_formula=use_moist_air_formula).to(self.device)
 
                 # constraints wrapper

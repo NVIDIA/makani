@@ -39,7 +39,6 @@ class GeometricInstanceNormS2(nn.Module):
         crop_shape: Tuple[int, int],
         crop_offset: Tuple[int, int],
         grid_type: str,
-        pole_mask: int,
         num_features: int,
         eps: Optional[float] = 1e-05,
         affine: Optional[bool] = False,
@@ -58,12 +57,11 @@ class GeometricInstanceNormS2(nn.Module):
 
         # we only need the weights
         self.quadrature = GridQuadrature(
-            quadrature_rule, 
-            img_shape=img_shape, 
-            crop_shape=crop_shape, 
-            crop_offset=crop_offset, 
-            normalize=True, 
-            pole_mask=pole_mask, 
+            quadrature_rule,
+            img_shape=img_shape,
+            crop_shape=crop_shape,
+            crop_offset=crop_offset,
+            normalize=True,
             distributed=False
         )
 

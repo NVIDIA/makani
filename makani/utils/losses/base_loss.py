@@ -299,7 +299,6 @@ class GeometricBaseLoss(nn.Module, metaclass=ABCMeta):
         crop_offset: Tuple[int, int],
         channel_names: List[str],
         grid_type: str,
-        pole_mask: int,
         spatial_distributed: Optional[bool] = False,
     ):
         super().__init__()
@@ -308,7 +307,6 @@ class GeometricBaseLoss(nn.Module, metaclass=ABCMeta):
         self.crop_shape = crop_shape
         self.crop_offset = crop_offset
         self.channel_names = channel_names
-        self.pole_mask = pole_mask
         self.spatial_distributed = comm.is_distributed("spatial") and spatial_distributed
 
         # get the quadrature rule for the corresponding grid
@@ -319,7 +317,6 @@ class GeometricBaseLoss(nn.Module, metaclass=ABCMeta):
             crop_shape=self.crop_shape,
             crop_offset=self.crop_offset,
             normalize=True,
-            pole_mask=self.pole_mask,
             distributed=self.spatial_distributed,
         )
 
@@ -430,7 +427,6 @@ class VortDivBaseLoss(nn.Module, metaclass=ABCMeta):
         crop_offset: Tuple[int, int],
         channel_names: List[str],
         grid_type: str,
-        pole_mask: int,
         lmax: Optional[int] = None,
         spatial_distributed: Optional[bool] = False,
     ):
@@ -440,7 +436,6 @@ class VortDivBaseLoss(nn.Module, metaclass=ABCMeta):
         self.crop_shape = crop_shape
         self.crop_offset = crop_offset
         self.channel_names = channel_names
-        self.pole_mask = pole_mask
         self.spatial_distributed = comm.is_distributed("spatial") and spatial_distributed
 
         # get the wind channels
@@ -466,7 +461,6 @@ class VortDivBaseLoss(nn.Module, metaclass=ABCMeta):
             crop_shape=self.crop_shape,
             crop_offset=self.crop_offset,
             normalize=True,
-            pole_mask=self.pole_mask,
             distributed=self.spatial_distributed,
         )
 
@@ -507,7 +501,6 @@ class GradientBaseLoss(nn.Module, metaclass=ABCMeta):
         crop_offset: Tuple[int, int],
         channel_names: List[str],
         grid_type: str,
-        pole_mask: int,
         lmax: Optional[int] = None,
         spatial_distributed: Optional[bool] = False,
     ):
@@ -517,7 +510,6 @@ class GradientBaseLoss(nn.Module, metaclass=ABCMeta):
         self.crop_shape = crop_shape
         self.crop_offset = crop_offset
         self.channel_names = channel_names
-        self.pole_mask = pole_mask
         self.spatial_distributed = comm.is_distributed("spatial") and spatial_distributed
 
         if self.spatial_distributed and (comm.get_size("spatial") > 1):
@@ -539,7 +531,6 @@ class GradientBaseLoss(nn.Module, metaclass=ABCMeta):
             crop_shape=self.crop_shape,
             crop_offset=self.crop_offset,
             normalize=True,
-            pole_mask=self.pole_mask,
             distributed=self.spatial_distributed,
         )
 
