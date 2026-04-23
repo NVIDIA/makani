@@ -814,7 +814,9 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
                 w = _soft_clamp(x[..., self.water_channels, :, :])
             # the following eventually leads to spectral instability
             # w = nn.functional.softplus(x[..., self.water_channels, :, :], beta=5, threshold=5)
-            x = torch.where(self.water_channel_mask, w, x)
+            w_full = torch.zeros_like(x)
+            w_full.index_copy_(-3, self.water_channels, w)
+            x = torch.where(self.water_channel_mask, w_full, x)
 
         return x
 
