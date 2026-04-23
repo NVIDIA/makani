@@ -669,7 +669,12 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         if clamp_water:
             water_chans = get_water_channels(channel_names)
             if len(water_chans) > 0:
-                self.register_buffer("water_channels", torch.LongTensor(water_chans), persistent=False)
+                self.register_buffer("water_channels", torch.tensor(water_chans, dtype=torch.long), persistent=False)
+                # boolean mask for out-of-place torch.where clamping
+                _mask = torch.zeros(self.n_out_chans, dtype=torch.bool)
+                _mask[water_chans] = True
+                self.register_buffer("water_channel_mask", _mask.view(1, -1, 1, 1), persistent=False)
+        
 
         # freeze the encoder/decoder
         if freeze_encoder:
@@ -828,12 +833,24 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         return x
 
     def clamp_water_channels(self, x):
-        """clamp water channes with a smooth, positive activation function"""
+        """
+        clamp water channes with a smooth, positive activation function
+        """
+
         if hasattr(self, "water_channels"):
-            w = _soft_clamp(x[..., self.water_channels, :, :])
+            # potentially qwrong due to water_channels neeeding to be differentiated for input and output
+            if hasattr(self, "normalization_means") and hasattr(self, "normalization_stds"):
+                means = self.normalization_means[self.water_channels].view(1, -1, 1, 1)
+                stds = self.normalization_stds[self.water_channels].view(1, -1, 1, 1)
+                offset = (means / stds).to(x.dtype)
+                w = _soft_clamp(x[..., self.water_channels, :, :], offset=offset) - offset
+            else:
+                w = _soft_clamp(x[..., self.water_channels, :, :])
             # the following eventually leads to spectral instability
             # w = nn.functional.softplus(x[..., self.water_channels, :, :], beta=5, threshold=5)
-            x[..., self.water_channels, :, :] = w
+            w_full = torch.zeros_like(x)
+            w_full.index_copy_(-3, self.water_channels, w)
+            x = torch.where(self.water_channel_mask, w_full, x)
 
         return x
 
