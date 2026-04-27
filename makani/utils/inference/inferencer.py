@@ -573,10 +573,7 @@ class Inferencer(Driver):
                         self.preprocessor.update_internal_state(replace_state=True, batch_size=inp.shape[0])
 
                         if rollout_buffer is not None:
-                            if E > 1:
-                                inpt_viz = inp.reshape(B, E, *inp.shape[1:])
-                            else:
-                                inpt_viz = inp.unsqueeze(1)
+                            inpt_viz = inp.reshape(B, E, *inp.shape[1:])
                             rollout_buffer.update(inpt_viz, tinp[:, 0], idt=idte)
 
                     else:
@@ -603,10 +600,7 @@ class Inferencer(Driver):
                             inp = self.preprocessor.append_history(inp, pred_flat, 0, update_state=True)
 
                             # reshape back to (B, E, ...) for downstream metrics / loss / buffers
-                            if E > 1:
-                                pred = pred_flat.reshape(B, E, *pred_flat.shape[1:])
-                            else:
-                                pred = pred_flat.unsqueeze(1)
+                            pred = pred_flat.reshape(B, E, *pred_flat.shape[1:])
 
                             # set weight to None here, since I am not sure what to do for spectral components
                             # in spectral CRPS

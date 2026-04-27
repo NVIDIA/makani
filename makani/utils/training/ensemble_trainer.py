@@ -465,10 +465,7 @@ class EnsembleTrainer(Trainer):
 
         pred_flat = self.model_train(inp_flat, update_state=False)
 
-        if E > 1:
-            pred = pred_flat.reshape(B, E, *pred_flat.shape[1:])
-        else:
-            pred = pred_flat.unsqueeze(1)
+        pred = pred_flat.reshape(B, E, *pred_flat.shape[1:])
 
         loss = self.loss_obj(pred, tar, inp=inp)
 
@@ -694,10 +691,7 @@ class EnsembleTrainer(Trainer):
                             inp = self.preprocessor.append_history(inp, pred_flat, idt, update_state=True)
 
                             # reshape back to (B, E, ...) for the loss
-                            if E > 1:
-                                pred = pred_flat.reshape(B, E, *pred_flat.shape[1:])
-                            else:
-                                pred = pred_flat.unsqueeze(1)
+                            pred = pred_flat.reshape(B, E, *pred_flat.shape[1:])
 
                             loss = self.loss_obj(pred, targ)
 
