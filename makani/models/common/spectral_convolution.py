@@ -120,7 +120,7 @@ class SpectralConv(nn.Module):
             x = self.forward_transform(x).contiguous()
             if self.scale_residual:
                 residual = self.inverse_transform(x)
-        
+
         # convert back
         if self.scale_residual:
             residual = residual.to(dtype=dtype)
@@ -132,7 +132,7 @@ class SpectralConv(nn.Module):
 
         with amp.autocast(device_type=x.device.type, enabled=False):
             x = self.inverse_transform(x)
-        
+
         # convert back
         x = x.to(dtype=dtype)
 
