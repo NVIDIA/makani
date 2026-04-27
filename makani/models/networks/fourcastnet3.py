@@ -48,8 +48,7 @@ def _compute_cutoff_radius(lmax, kernel_shape, basis_type):
     margin_factor = {"piecewise linear": 1.0, "morlet": 1.0, "harmonic": 1.0, "zernike": 1.0, "fourier-bessel": 1.5}
     return margin_factor[basis_type] * kernel_shape[0] * math.pi / float(lmax)
 
-# commenting out torch.compile due to long intiial compile times
-# @torch.compile
+@torch.compile
 def _soft_clamp(x: torch.Tensor, offset: float = 0.0):
     x = x + offset
     y = torch.where(x > 0.0, x**2, 0.0)
@@ -611,10 +610,6 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
             water_chans = get_water_channels(channel_names)
             if len(water_chans) > 0:
                 self.register_buffer("water_channels", torch.tensor(water_chans, dtype=torch.long), persistent=False)
-                # boolean mask for out-of-place torch.where clamping
-                _mask = torch.zeros(self.n_out_chans, dtype=torch.bool)
-                _mask[water_chans] = True
-                self.register_buffer("water_channel_mask", _mask.view(1, -1, 1, 1), persistent=False)
 
         # freeze the encoder/decoder
         if freeze_encoder:
@@ -733,7 +728,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
                 mask = x[..., self.land_mask_channels, :, :]
             else:
                 mask = None
-            x = self.sst_imputation(x, mask=mask).clone()
+            x = self.sst_imputation(x, mask=mask)
 
         return x
 
@@ -742,7 +737,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         forward pass for the encoder
         """
 
-        x = x[..., self.in_channels, :, :].contiguous()
+        x = x[..., self.in_channels, :, :]
         x = self.encoder(x)
 
         return x
@@ -755,7 +750,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         aux_tensors = []
 
         if hasattr(self, "aux_encoder"):
-            x_aux = x[..., self.aux_channels, :, :].contiguous()
+            x_aux = x[..., self.aux_channels, :, :]
             x_aux = self.aux_encoder(x_aux)
             aux_tensors.append(x_aux)
 
@@ -814,9 +809,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
                 w = _soft_clamp(x[..., self.water_channels, :, :])
             # the following eventually leads to spectral instability
             # w = nn.functional.softplus(x[..., self.water_channels, :, :], beta=5, threshold=5)
-            w_full = torch.zeros_like(x)
-            w_full.index_copy_(-3, self.water_channels, w.to(x.dtype))
-            x = torch.where(self.water_channel_mask, w_full, x)
+            x = x.index_copy(-3, self.water_channels, w.to(x.dtype))
 
         return x
 
@@ -827,7 +820,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
 
         # save big skip
         if self.big_skip:
-            residual = x[..., self.pred_channels, :, :].contiguous()
+            residual = x[..., self.pred_channels, :, :]
 
         # extract embeddings for the auxiliary embeddings
         x_aux = self.encode_auxiliary_channels(x)
@@ -848,7 +841,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
             x = self.decode(x)
 
         if self.big_skip:
-            x[..., self.pred_channels, :, :] = x + residual.to(x.dtype)
+            x = x + residual.to(x.dtype)
 
         # apply output transform
         x = self.clamp_water_channels(x)
