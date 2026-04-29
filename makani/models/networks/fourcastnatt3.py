@@ -22,7 +22,7 @@ from torch.utils.checkpoint import checkpoint
 from functools import partial
 
 # helpers
-from makani.models.common import DropPath, LayerScale, MLP, EncoderDecoder, SpectralConv
+from makani.models.common import DropPath, LayerScale, MLP, SpectralConv
 from makani.utils.features import get_water_channels, get_channel_groups
 
 # get spectral transforms and spherical convolutions from torch_harmonics
@@ -47,8 +47,127 @@ def _compute_cutoff_radius(nlat, kernel_shape, basis_type):
 
     return (kernel_shape[0] + 1) * theta_cutoff_factor[basis_type] * math.pi / float(nlat - 1)
 
-# commenting out torch.compile due to long intiial compile times
-# @torch.compile
+def _init_low_l_spectral(spec_param, isht, std=0.01, l_cutoff_frac=0.25):
+    """
+    Init a complex spectral parameter with small Gaussian noise on low-l modes only.
+
+    Breaks the iSHT(0)=0 symmetry that makes the Perceiver cross-attention degenerate
+    to a uniform mean-pool over each query's KV neighborhood at init. Restricting to
+    low-l keeps the initial query smooth (large-scale spatial variation, no high-freq
+    noise).
+
+    Strategy: build the full global init on every rank (identical because the global
+    RNG state matches), then slice out the local (l, m) portion. This makes the init
+    independent of the spatial parallelism layout — a single-GPU run and a multi-GPU
+    run with the same seed produce equivalent global random fields.
+    """
+    with torch.no_grad():
+        global_l = isht.lmax
+        global_m = isht.mmax
+        device = spec_param.device
+        inp_chans = spec_param.shape[1]
+
+        # global mask: valid SH modes (m <= l) inside the low-l band
+        l_idx = torch.arange(global_l, device=device)
+        m_idx = torch.arange(global_m, device=device)
+        l_cutoff = max(1, int(global_l * l_cutoff_frac))
+        mask = ((m_idx.view(1, -1) <= l_idx.view(-1, 1)) &
+                (l_idx.view(-1, 1) < l_cutoff))
+        mask_f = mask.view(1, 1, global_l, global_m).float()
+
+        # global Gaussian field — identical on every rank (same RNG state)
+        global_real = torch.randn(1, inp_chans, global_l, global_m, device=device) * std * mask_f
+        global_imag = torch.randn(1, inp_chans, global_l, global_m, device=device) * std * mask_f
+
+        # m=0 must be real for a real iSHT (conjugate symmetry)
+        global_imag[..., :, 0] = 0
+
+        # slice the local portion held by this rank
+        if isinstance(isht, thd.DistributedInverseRealSHT):
+            l_start = sum(isht.l_shapes[:comm.get_rank("h")])
+            l_end = l_start + isht.l_shapes[comm.get_rank("h")]
+            m_start = sum(isht.m_shapes[:comm.get_rank("w")])
+            m_end = m_start + isht.m_shapes[comm.get_rank("w")]
+        else:
+            l_start, l_end = 0, global_l
+            m_start, m_end = 0, global_m
+
+        local_real = global_real[..., l_start:l_end, m_start:m_end]
+        local_imag = global_imag[..., l_start:l_end, m_start:m_end]
+
+        spec_param.copy_(torch.complex(local_real, local_imag))
+
+
+class FiLM(nn.Module):
+    """
+    AdaLN-Zero style spatial FiLM modulation: ``x * (1 + gamma) + beta`` where
+    ``(gamma, beta)`` are produced from a conditioning tensor by a 1x1 conv.
+
+    The projection is zero-initialized so the modulation is identity at start —
+    the surrounding network trains exactly as it would without conditioning until
+    FiLM learns to use it. This is the trick from DiT that lets AdaLN train from
+    scratch without instability.
+    """
+    def __init__(self, cond_dim, feat_dim, bias=False):
+        super().__init__()
+        self.proj = nn.Conv2d(cond_dim, 2 * feat_dim, 1, bias=bias)
+        nn.init.zeros_(self.proj.weight)
+        self.proj.weight.is_shared_mp = ["spatial"]
+        self.proj.weight.sharded_dims_mp = [None, None, None, None]
+        if bias:
+            nn.init.zeros_(self.proj.bias)
+            self.proj.bias.is_shared_mp = ["spatial"]
+            self.proj.bias.sharded_dims_mp = [None]
+
+    def forward(self, x, cond):
+        gamma, beta = self.proj(cond).chunk(2, dim=1)
+        return x * (1.0 + gamma) + beta
+
+
+class PreLNMLP(nn.Module):
+    """
+    Standard transformer Pre-LN MLP residual: ``x = x + LayerScale(MLP(norm(x)))``.
+
+    Used to add a stabilizing residual MLP after the encoder/decoder cross-attention,
+    so the latent enters/leaves the deep processor stack with a consistent magnitude
+    and the model has additional non-linear capacity at the boundary.
+    """
+    def __init__(
+        self,
+        chans,
+        h,
+        w,
+        mlp_ratio=2.0,
+        normalization_layer="layer_norm",
+        sht_grid_type="legendre-gauss",
+        act_layer=nn.GELU,
+        layer_scale=True,
+        gain=0.5,
+    ):
+        super().__init__()
+        norm_handle = _get_norm_layer_handle(h, w, chans, normalization_layer, sht_grid_type)
+        self.norm = norm_handle()
+
+        MLPH = DistributedMLP if (comm.get_size("matmul") > 1) else MLP
+        self.mlp = MLPH(
+            in_features=chans,
+            out_features=chans,
+            hidden_features=int(chans * mlp_ratio),
+            act_layer=act_layer,
+            gain=gain,
+        )
+
+        if layer_scale:
+            self.layer_scale = LayerScale(chans)
+            self.layer_scale.weight.is_shared_mp = ["spatial"]
+            self.layer_scale.weight.sharded_dims_mp = [None, None, None, None]
+
+    def forward(self, x):
+        scale = self.layer_scale if hasattr(self, "layer_scale") else nn.Identity()
+        return x + scale(self.mlp(self.norm(x)))
+
+
+@torch.compile
 def _soft_clamp(x: torch.Tensor, offset: float = 0.0):
     dtype = x.dtype
     x = x + offset
@@ -120,12 +239,23 @@ class DiscreteContinuousEncoder(nn.Module):
         use_mlp=False,
         mlp_ratio=2.0,
         activation_function=nn.GELU,
+        normalization_layer="layer_norm",
+        layer_scale=True,
         bias=False,
+        perceiver_encoder=False,
     ):
         super().__init__()
 
-        # heuristic for finding theta_cutoff
-        theta_cutoff = _compute_cutoff_radius(nlat=inp_shape[0], kernel_shape=kernel_shape, basis_type=basis_type)
+        # sanity checks
+        if perceiver_encoder and inverse_transform is None:
+            raise ValueError("Perceiver encoder requires inverse transform to be provided")
+
+        # heuristic for finding theta_cutoff. Sized by the LATENT (out_shape) grid so that
+        # the receptive field scales with the bottleneck cell width — one latent cell wide
+        # in each direction. Using inp_shape (high-res key grid) would shrink the radius
+        # as input resolution grows, which is the wrong direction for a cross-attention
+        # bridging into the latent.
+        theta_cutoff = _compute_cutoff_radius(nlat=out_shape[0], kernel_shape=kernel_shape, basis_type=basis_type)
 
         # set up local convolution
         attn_handle = thd.DistributedNeighborhoodAttentionS2 if comm.get_size("spatial") > 1 else th.NeighborhoodAttentionS2
@@ -166,7 +296,7 @@ class DiscreteContinuousEncoder(nn.Module):
         # band-limited and independent of grid type or resolution.
         # InverseRealSHT has no learnable parameters (precomputed buffers only), so storing
         # the reference here does not double-count parameters from the outer model.
-        if inverse_transform is not None:
+        if perceiver_encoder:
             self.isht = inverse_transform
 
             # local spectral mode counts — mirrors the SpectralConv pattern
@@ -177,10 +307,12 @@ class DiscreteContinuousEncoder(nn.Module):
                 modes_lat_local = self.isht.lmax
                 modes_lon_local = self.isht.mmax
 
-            # zero-init: isht(0)=0 → uniform attention → average-pool starting point
+            # small low-l Gaussian init: breaks the iSHT(0)=0 symmetry so the cross-attention
+            # softmax is position-aware from step 0 instead of starting as a uniform mean-pool.
             self.latent_query_spec = nn.Parameter(
                 torch.zeros(1, inp_chans, modes_lat_local, modes_lon_local, dtype=torch.complex64)
             )
+            _init_low_l_spectral(self.latent_query_spec, self.isht)
             # sharding annotation matches SpectralConv diagonal weights:
             # lat modes sharded in "h", lon modes sharded in "w"
             self.latent_query_spec.is_shared_mp = ["matmul"]
@@ -190,16 +322,18 @@ class DiscreteContinuousEncoder(nn.Module):
             resample_handle = thd.DistributedResampleS2 if comm.get_size("spatial") > 1 else th.ResampleS2
             self.downsample = resample_handle(*inp_shape, *out_shape, grid_in=grid_in, grid_out=grid_out, mode="bilinear")
 
+        # Pre-LN MLP residual after the cross-attention. Adds non-linear capacity
+        # and stabilizes the latent magnitude before it enters the deep processor.
         if use_mlp:
-            self.act = activation_function()
-
-            self.mlp = EncoderDecoder(
-                num_layers=1,
-                input_dim=out_chans,
-                output_dim=out_chans,
-                hidden_dim=int(mlp_ratio * out_chans),
+            self.post_mlp = PreLNMLP(
+                chans=out_chans,
+                h=out_shape[0],
+                w=out_shape[1],
+                mlp_ratio=mlp_ratio,
+                normalization_layer=normalization_layer,
+                sht_grid_type=grid_out,
                 act_layer=activation_function,
-                input_format="nchw",
+                layer_scale=layer_scale,
             )
 
     def forward(self, x):
@@ -216,11 +350,8 @@ class DiscreteContinuousEncoder(nn.Module):
         # cross-attention: learned spectral queries attend to full-resolution input
         xd = self.attn(query=query, key=x, value=x)
 
-        if hasattr(self, "act"):
-            xd = self.act(xd)
-
-        if hasattr(self, "mlp"):
-            xd = self.mlp(xd)
+        if hasattr(self, "post_mlp"):
+            xd = self.post_mlp(xd)
 
         return xd
 
@@ -240,10 +371,17 @@ class DiscreteContinuousDecoder(nn.Module):
         use_mlp=False,
         mlp_ratio=2.0,
         activation_function=nn.GELU,
+        normalization_layer="layer_norm",
+        layer_scale=True,
         bias=False,
         upsample_sht=False,
+        perceiver_decoder=False,
     ):
         super().__init__()
+
+        # sanity checks
+        if perceiver_decoder and inverse_transform is None:
+            raise ValueError("Perceiver decoder requires inverse transform to be provided")
 
         # init distributed torch-harmonics if needed
         if comm.get_size("spatial") > 1:
@@ -253,7 +391,7 @@ class DiscreteContinuousDecoder(nn.Module):
 
         attn_handle = thd.DistributedNeighborhoodAttentionS2 if comm.get_size("spatial") > 1 else th.NeighborhoodAttentionS2
 
-        if inverse_transform is not None:
+        if perceiver_decoder:
             # Perceiver-style: learnable spectral query projected to the output grid,
             # cross-attending to the low-res latent as keys/values. Symmetric to the encoder.
             self.isht_out = inverse_transform
@@ -269,10 +407,11 @@ class DiscreteContinuousDecoder(nn.Module):
             # learnable query in spherical harmonic space: grid-agnostic Perceiver-style latent.
             # iSHT maps spectral coefficients to the decoder output grid, so the query is
             # band-limited and independent of the specific output grid type or resolution.
-            # zero-init: isht(0)=0 → uniform attention → average-pool starting point
+            # Small low-l Gaussian init breaks the iSHT(0)=0 symmetry; see _init_low_l_spectral.
             self.latent_query_spec = nn.Parameter(
                 torch.zeros(1, inp_chans, modes_lat_local, modes_lon_local, dtype=torch.complex64)
             )
+            _init_low_l_spectral(self.latent_query_spec, self.isht_out)
             # sharding annotation: lat modes sharded in "h", lon modes sharded in "w"
             self.latent_query_spec.is_shared_mp = ["matmul"]
             self.latent_query_spec.sharded_dims_mp = [None, None, "h", "w"]
@@ -292,12 +431,20 @@ class DiscreteContinuousDecoder(nn.Module):
                 theta_cutoff=theta_cutoff,
             )
         else:
-            # classic path: optional pre-mlp on the latent, explicit spatial upsample, self-attention
+            # classic path: optional pre-mlp residual on the latent, explicit upsample, self-attention.
+            # The pre-mlp is a Pre-LN MLP residual on the low-res latent, giving the decoder some
+            # non-linear capacity before upsampling.
             if use_mlp:
-                self.mlp = EncoderDecoder(
-                    num_layers=1, input_dim=inp_chans, output_dim=inp_chans, hidden_dim=int(mlp_ratio * inp_chans), act_layer=activation_function, input_format="nchw", gain=2.0
+                self.pre_mlp = PreLNMLP(
+                    chans=inp_chans,
+                    h=inp_shape[0],
+                    w=inp_shape[1],
+                    mlp_ratio=mlp_ratio,
+                    normalization_layer=normalization_layer,
+                    sht_grid_type=grid_in,
+                    act_layer=activation_function,
+                    layer_scale=layer_scale,
                 )
-                self.act = activation_function()
 
             if upsample_sht:
                 sht_handle = thd.DistributedRealSHT if comm.get_size("spatial") > 1 else th.RealSHT
@@ -344,6 +491,21 @@ class DiscreteContinuousDecoder(nn.Module):
                 self.attn.proj_bias.is_shared_mp = ["spatial"]
                 self.attn.proj_bias.sharded_dims_mp = [None]
 
+        # Post-attention Pre-LN MLP residual on the decoder output (high-res, out_chans space).
+        # Mirrors the encoder's post_mlp; gives the decoder non-linear capacity at the boundary
+        # back to the prediction grid.
+        if use_mlp:
+            self.post_mlp = PreLNMLP(
+                chans=out_chans,
+                h=out_shape[0],
+                w=out_shape[1],
+                mlp_ratio=mlp_ratio,
+                normalization_layer=normalization_layer,
+                sht_grid_type=grid_out,
+                act_layer=activation_function,
+                layer_scale=layer_scale,
+            )
+
     def forward(self, x):
         if hasattr(self, "latent_query_spec"):
             # Perceiver-style: project spectral query to output grid, cross-attend to latent
@@ -353,17 +515,19 @@ class DiscreteContinuousDecoder(nn.Module):
             query = query.to(dtype=x.dtype)
             x = self.attn(query=query, key=x, value=x)
         else:
-            # classic path: optional pre-mlp, upsample, self-attention
+            # classic path: optional pre-mlp residual on the latent, upsample, self-attention
+            if hasattr(self, "pre_mlp"):
+                x = self.pre_mlp(x)
             dtype = x.dtype
-            if hasattr(self, "act"):
-                x = self.act(x)
-            if hasattr(self, "mlp"):
-                x = self.mlp(x)
             with amp.autocast(device_type=x.device.type, enabled=False):
                 x = x.to(torch.float32)
                 x = self.upsample(x)
             x = x.to(dtype=dtype)
             x = self.attn(x)
+
+        if hasattr(self, "post_mlp"):
+            x = self.post_mlp(x)
+
         return x
 
 
@@ -383,11 +547,11 @@ class NeuralOperatorBlock(nn.Module):
         num_groups=1,
         skip="identity",
         layer_scale=True,
-        use_mlp=False,
         kernel_shape=(3, 3),
         basis_type="morlet",
         checkpointing_level=0,
         bias=False,
+        aux_embed_dim=0,
     ):
         super().__init__()
 
@@ -397,7 +561,7 @@ class NeuralOperatorBlock(nn.Module):
         self.out_chans = out_chans
 
         # gain factor for the convolution
-        gain_factor = 1.0
+        gain_factor = 0.5
 
         # disco convolution layer
         if attn_type == "local":
@@ -436,6 +600,11 @@ class NeuralOperatorBlock(nn.Module):
                 if self.attn.proj_bias is not None:
                     self.attn.proj_bias.is_shared_mp = ["spatial"]
                     self.attn.proj_bias.sharded_dims_mp = [None]
+
+            # match the gain convention used by SpectralConv/MLP: scale the output
+            # projection so the residual branch's output variance is multiplied by gain_factor
+            with torch.no_grad():
+                self.attn.proj_weights *= math.sqrt(gain_factor)
 
         elif attn_type == "global":
             # global spectral convolution — same as FCN3's global blocks
@@ -476,15 +645,6 @@ class NeuralOperatorBlock(nn.Module):
             gain=gain_factor,
         )
 
-        # skip projection only needed when dimensions change (e.g. first block with aux channels)
-        if inp_chans != out_chans:
-            self.skip_projection = nn.Conv2d(inp_chans, out_chans, 1, bias=bias)
-            self.skip_projection.weight.is_shared_mp = ["spatial"]
-            self.skip_projection.weight.sharded_dims_mp = [None, None, None, None]
-            if bias:
-                self.skip_projection.bias.is_shared_mp = ["spatial"]
-                self.skip_projection.bias.sharded_dims_mp = [None]
-
         # layer scale for stable init: residual branches start near-zero
         if layer_scale:
             self.layer_scale1 = LayerScale(inp_chans)
@@ -497,7 +657,14 @@ class NeuralOperatorBlock(nn.Module):
         # dropout
         self.drop_path = DropPath(path_drop_rate) if path_drop_rate > 0.0 else nn.Identity()
 
-    def forward(self, x):
+        # AdaLN-Zero style FiLM modulation from x_aux. One head per Pre-LN site.
+        # Zero-init means the block is identity in aux at start; the model trains
+        # as if there is no conditioning until the FiLM heads learn to use it.
+        if aux_embed_dim > 0:
+            self.film_attn = FiLM(aux_embed_dim, inp_chans, bias=bias)
+            self.film_mlp = FiLM(aux_embed_dim, inp_chans, bias=bias)
+
+    def forward(self, x, x_aux=None):
         """
         Updated NO block
         """
@@ -506,17 +673,19 @@ class NeuralOperatorBlock(nn.Module):
 
         # mixing sub-layer: Pre-LN residual, local attention or global spectral conv
         x_norm = self.norm1(x)
+        if x_aux is not None and hasattr(self, "film_attn"):
+            x_norm = self.film_attn(x_norm, x_aux)
         if hasattr(self, "global_conv"):
             mix_out, _ = self.global_conv(x_norm)
         else:
             mix_out = self.attn(x_norm)
         x = x + self.drop_path(attn_scale(mix_out))
 
-        # mlp sub-layer: use skip_projection only when dimensions change
-        if hasattr(self, "skip_projection"):
-            x = self.skip_projection(x) + self.drop_path(mlp_scale(self.mlp(self.norm2(x))))
-        else:
-            x = x + self.drop_path(mlp_scale(self.mlp(self.norm2(x))))
+        # mlp sub-layer
+        x_norm2 = self.norm2(x)
+        if x_aux is not None and hasattr(self, "film_mlp"):
+            x_norm2 = self.film_mlp(x_norm2, x_aux)
+        x = x + self.drop_path(mlp_scale(self.mlp(x_norm2)))
 
         return x
 
@@ -551,7 +720,6 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         surf_embed_dim=8,
         aux_embed_dim=8,
         num_layers=4,
-        use_mlp=True,
         mlp_ratio=2.0,
         activation_function="gelu",
         layer_scale=True,
@@ -568,11 +736,18 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         checkpointing_level=0,
         freeze_encoder=False,
         freeze_processor=False,
-        perceiver_decoder=True,
+        perceiver_decoder=False,
         num_groups=1,
         **kwargs,
     ):
         super().__init__()
+
+        # Perceiver-style decoder is not yet supported under spatial model parallelism
+        # because DistributedNeighborhoodAttentionS2 cannot do low-res KV → high-res Q.
+        if perceiver_decoder and comm.get_size("spatial") > 1:
+            raise NotImplementedError(
+                "perceiver_decoder=True is not supported with spatial model parallelism yet"
+            )
 
         self.inp_shape = inp_shape
         self.out_shape = out_shape
@@ -638,8 +813,12 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
             basis_type=filter_basis_type,
             inverse_transform=self.isht,
             activation_function=activation_function,
+            normalization_layer=normalization_layer,
+            layer_scale=layer_scale,
+            mlp_ratio=mlp_ratio,
             bias=bias,
             use_mlp=encoder_mlp,
+            perceiver_encoder=True,
         )
 
         # encoder for the surface channels
@@ -655,8 +834,12 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
                 basis_type=filter_basis_type,
                 inverse_transform=self.isht,
                 activation_function=activation_function,
+                normalization_layer=normalization_layer,
+                layer_scale=layer_scale,
+                mlp_ratio=mlp_ratio,
                 bias=bias,
                 use_mlp=encoder_mlp,
+                perceiver_encoder=True,
             )
 
         # decoder for the atmospheric variables
@@ -671,9 +854,13 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
             basis_type=filter_basis_type,
             inverse_transform=decoder_inv_transform,
             activation_function=activation_function,
+            normalization_layer=normalization_layer,
+            layer_scale=layer_scale,
+            mlp_ratio=mlp_ratio,
             bias=bias,
             use_mlp=encoder_mlp,
             upsample_sht=upsample_sht,
+            perceiver_decoder=perceiver_decoder,
         )
 
         # decoder for the surface variables
@@ -689,9 +876,13 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
                 basis_type=filter_basis_type,
                 inverse_transform=decoder_inv_transform,
                 activation_function=activation_function,
+                normalization_layer=normalization_layer,
+                layer_scale=layer_scale,
+                mlp_ratio=mlp_ratio,
                 bias=bias,
                 use_mlp=encoder_mlp,
                 upsample_sht=upsample_sht,
+                perceiver_decoder=perceiver_decoder,
             )
 
         # encoder for the auxiliary channels
@@ -707,8 +898,12 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
                 basis_type=filter_basis_type,
                 inverse_transform=self.isht,
                 activation_function=activation_function,
+                normalization_layer=normalization_layer,
+                layer_scale=layer_scale,
+                mlp_ratio=mlp_ratio,
                 bias=bias,
                 use_mlp=encoder_mlp,
+                perceiver_encoder=True,
             )
 
         # dropout
@@ -719,9 +914,6 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         # Internal NO blocks
         self.blocks = nn.ModuleList([])
         for i in range(num_layers):
-            first_layer = i == 0
-            last_layer = i == num_layers - 1
-
             if i % sfno_block_frequency == 0:
                 attn_type = "global"
             else:
@@ -730,7 +922,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
             block = NeuralOperatorBlock(
                 self.sht,
                 self.isht,
-                self.total_embed_dim + (self.n_aux_chans > 0) * self.aux_embed_dim,
+                self.total_embed_dim,
                 self.total_embed_dim,
                 attn_type=attn_type,
                 mlp_ratio=mlp_ratio,
@@ -741,11 +933,11 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
                 num_groups=num_groups,
                 skip="identity",
                 layer_scale=layer_scale,
-                use_mlp=use_mlp,
                 kernel_shape=kernel_shape,
                 basis_type=filter_basis_type,
                 bias=bias,
                 checkpointing_level=checkpointing_level,
+                aux_embed_dim=self.aux_embed_dim if self.n_aux_chans > 0 else 0,
             )
 
             self.blocks.append(block)
@@ -860,12 +1052,12 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         batchdims = x.shape[:-3]
 
         # for atmospheric channels the same encoder is applied to each atmospheric level
-        x_atmo = x[..., self.atmo_channels, :, :].contiguous().reshape(-1, self.n_atmo_chans, *x.shape[-2:])
+        x_atmo = x[..., self.atmo_channels, :, :].reshape(-1, self.n_atmo_chans, *x.shape[-2:])
         x_out = self.atmo_encoder(x_atmo)
         x_out = x_out.reshape(*batchdims, self.n_atmo_groups * self.atmo_embed_dim, *x_out.shape[-2:])
 
         if hasattr(self, "surf_encoder"):
-            x_surf = x[..., self.surf_channels, :, :].contiguous()
+            x_surf = x[..., self.surf_channels, :, :]
             x_surf = self.surf_encoder(x_surf)
             x_out = torch.cat((x_out, x_surf), dim=-3)
 
@@ -911,17 +1103,13 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         # maybe clean the padding just in case
         x = self.pos_drop(x)
 
-        # do the feature extraction
+        # do the feature extraction. Each block conditions on x_aux via FiLM
+        # (AdaLN-Zero); aux is no longer concatenated as channels.
         for blk in self.blocks:
-
-            # append the auxiliary channels to the input of each block
-            if x_aux is not None:
-                x = torch.cat([x, x_aux], dim=-3)
-
             if self.checkpointing_level >= 3:
-                x = checkpoint(blk, x, use_reentrant=False)
+                x = checkpoint(blk, x, x_aux, use_reentrant=False)
             else:
-                x = blk(x)
+                x = blk(x, x_aux)
 
         return x
 
