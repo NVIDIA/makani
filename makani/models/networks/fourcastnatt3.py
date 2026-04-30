@@ -1137,12 +1137,12 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         return x
 
     def clamp_water_channels(self, x):
-        """clamp water channes with a smooth, positive activation function"""
+        """clamp water channels with a smooth, positive activation function"""
         if hasattr(self, "water_channels"):
             w = _soft_clamp(x[..., self.water_channels, :, :])
             # the following eventually leads to spectral instability
             # w = nn.functional.softplus(x[..., self.water_channels, :, :], beta=5, threshold=5)
-            x[..., self.water_channels, :, :] = w
+            x = x.index_copy(-3, self.water_channels, w.to(x.dtype))
 
         return x
 
