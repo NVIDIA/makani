@@ -465,6 +465,7 @@ class EnsembleTrainer(Trainer):
 
         pred_flat = self.model_train(inp_flat, update_state=False)
 
+        # unflatten
         pred = pred_flat.reshape(B, E, *pred_flat.shape[1:])
 
         loss = self.loss_obj(pred, tar, inp=inp)
@@ -693,7 +694,7 @@ class EnsembleTrainer(Trainer):
                             # reshape back to (B, E, ...) for the loss
                             pred = pred_flat.reshape(B, E, *pred_flat.shape[1:])
 
-                            loss = self.loss_obj(pred, targ)
+                            loss = self.loss_obj(pred, targ, None)
 
                             # log the loss
                             progress_bar.set_postfix({"loss": loss.item()})

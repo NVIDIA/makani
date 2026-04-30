@@ -619,10 +619,7 @@ class StochasticTrainer(Driver):
                             inp = self.preprocessor.append_history(inp, pred_flat, idt, update_state=True)
 
                             # reshape back to (B, E, ...) for the loss and downstream buffers
-                            if E > 1:
-                                pred = pred_flat.reshape(B, E, *pred_flat.shape[1:])
-                            else:
-                                pred = pred_flat.unsqueeze(1)
+                            pred = pred_flat.reshape(B, E, *pred_flat.shape[1:])
 
                             loss = self.loss_obj(pred, targ)
 
