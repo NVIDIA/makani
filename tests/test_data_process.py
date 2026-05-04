@@ -493,19 +493,23 @@ class TestConcatenateDatasetChannelsAndTime(unittest.TestCase):
 
         # Build the expected concatenated array and timestamp vector for comparison.
         # 'a' channels precede 'b' channels along the channel axis.
-        # Within each year, samples are subsampled by dhoursrel.
+        # Within each year, samples are subsampled by dhoursrel. Use a bounded
+        # stride slice (``[:n_red*dhoursrel:dhoursrel]``) rather than bare
+        # ``[::dhoursrel]`` so the count matches the VDS layout slot
+        # (floor(n/dhoursrel)) regardless of whether n divides evenly.
+        n_per_year_red = self.num_samples_per_year // dhoursrel
+        slc = slice(None, n_per_year_red * dhoursrel, dhoursrel)
         expected_full = []
         expected_ts = []
         for year in self.years:
             year_combined = np.concatenate(
-                [self.data_a[year][::dhoursrel], self.data_b[year][::dhoursrel]], axis=1
+                [self.data_a[year][slc], self.data_b[year][slc]], axis=1
             )
             expected_full.append(year_combined)
-            expected_ts.append(self.timestamps[year][::dhoursrel])
+            expected_ts.append(self.timestamps[year][slc])
         expected_full = np.concatenate(expected_full, axis=0)
         expected_ts = np.concatenate(expected_ts, axis=0)
 
-        n_per_year_red = self.num_samples_per_year // dhoursrel
         boundary_t = n_per_year_red       # first index of year-2018 in concatenated time axis
         boundary_c = self.num_chans_a     # first index of 'b' channels in channel axis
 
@@ -1030,9 +1034,13 @@ class TestConcatenateDatasetChannelsAndTime(unittest.TestCase):
                 expected_ts.append(ts)
             expected_ts = np.concatenate(expected_ts, axis=0)
 
+            # Use floor-count slicing to match the layout slot exactly. Bare
+            # ``[::dhoursrel]`` yields ceil(n/dhoursrel) which over-counts the
+            # year by one when n is not a multiple of dhoursrel.
+            slc = slice(None, n_red * dhoursrel, dhoursrel)
             expected_data = np.concatenate(
                 [
-                    np.concatenate([data_a[y][::dhoursrel], data_b[y][::dhoursrel]], axis=1)
+                    np.concatenate([data_a[y][slc], data_b[y][slc]], axis=1)
                     for y in self.years
                 ],
                 axis=0,
