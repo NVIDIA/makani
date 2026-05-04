@@ -555,14 +555,13 @@ class TestRolloutBuffer(unittest.TestCase):
       * auto-flush on buffer-overflow at idt=0
       * output_memory_buffer_size defaults and clamping
 
-    The auto-flush test requires CUDA because ``_flush_to_disk`` calls
-    ``torch.cuda.synchronize`` unconditionally; it's skipped on CPU-only hosts.
+    Runs on CPU end-to-end: ``_flush_buffer_to_disk``'s
+    ``torch.cuda.synchronize`` is now device-guarded, so the auto-flush test
+    no longer requires CUDA.
     """
 
     @classmethod
     def setUpClass(cls):
-        # CPU is fine for everything except _flush_to_disk; per-test guards
-        # skip that single case if CUDA isn't available.
         cls.device = torch.device("cpu")
 
     @staticmethod
@@ -626,12 +625,12 @@ class TestRolloutBuffer(unittest.TestCase):
 
         # Expected output shape (2 samples, 2 ensemble, 2 channels, 4 lat, 6 lon)
         with self.subTest(desc="channel a values"):
-            self.assertTrue(torch.all(buf.rollout_data_cpu[0:2, 0, :, 0, :, :] == 1.0))
+            self.assertTrue(torch.all(buf.rollout_data[0:2, 0, :, 0, :, :] == 1.0))
         with self.subTest(desc="channel c values"):
-            self.assertTrue(torch.all(buf.rollout_data_cpu[0:2, 0, :, 1, :, :] == 3.0))
+            self.assertTrue(torch.all(buf.rollout_data[0:2, 0, :, 1, :, :] == 3.0))
         with self.subTest(desc="other slots untouched"):
             # step 1 should still be zero (we only updated idt=0)
-            self.assertTrue(torch.all(buf.rollout_data_cpu[:, 1, :, :, :, :] == 0.0))
+            self.assertTrue(torch.all(buf.rollout_data[:, 1, :, :, :, :] == 0.0))
 
     def test_buffer_offset_advances_only_on_rollout_completion(self, verbose=False):
         # buffer_offset increments only when idt+1 == num_rollout_steps+1
@@ -677,7 +676,7 @@ class TestRolloutBuffer(unittest.TestCase):
 
         for idt in range(num_rollout_steps + 1):
             with self.subTest(desc=f"slot {idt}"):
-                slot = buf.rollout_data_cpu[0, idt]
+                slot = buf.rollout_data[0, idt]
                 self.assertTrue(torch.all(slot == float(idt)))
 
     def test_scale_and_bias_applied(self, verbose=False):
@@ -699,9 +698,9 @@ class TestRolloutBuffer(unittest.TestCase):
         buf.update(pred, torch.tensor([0.0]), idt=0)
 
         with self.subTest(desc="ch a = 2*1 + 1"):
-            self.assertTrue(torch.all(buf.rollout_data_cpu[0, 0, :, 0, :, :] == 3.0))
+            self.assertTrue(torch.all(buf.rollout_data[0, 0, :, 0, :, :] == 3.0))
         with self.subTest(desc="ch b = 3*1 - 1"):
-            self.assertTrue(torch.all(buf.rollout_data_cpu[0, 0, :, 1, :, :] == 2.0))
+            self.assertTrue(torch.all(buf.rollout_data[0, 0, :, 1, :, :] == 2.0))
 
     def test_default_scale_and_bias_are_identity(self, verbose=False):
         # When scale and bias are None, DataBuffer fills them with ones/zeros so
@@ -711,7 +710,7 @@ class TestRolloutBuffer(unittest.TestCase):
         pred = torch.full((1, 1, 1, 2, 2), 7.5)
         buf.update(pred, torch.tensor([0.0]), idt=0)
 
-        self.assertTrue(torch.all(buf.rollout_data_cpu[0, 0] == 7.5))
+        self.assertTrue(torch.all(buf.rollout_data[0, 0] == 7.5))
 
     def test_timestamps_recorded_only_at_idt_zero(self, verbose=False):
         # Timestamps for a given IC should be captured at idt=0 and NOT
@@ -724,13 +723,13 @@ class TestRolloutBuffer(unittest.TestCase):
 
         buf.update(pred, torch.tensor([100.0]), idt=0)
         with self.subTest(desc="recorded at idt=0"):
-            self.assertEqual(buf.timestamp_data_cpu[0].item(), 100.0)
+            self.assertEqual(buf.timestamp_data[0].item(), 100.0)
 
         # Pass a different tstamp at later steps — it should be ignored.
         buf.update(pred, torch.tensor([999.0]), idt=1)
         buf.update(pred, torch.tensor([777.0]), idt=2)
         with self.subTest(desc="not overwritten by idt>0"):
-            self.assertEqual(buf.timestamp_data_cpu[0].item(), 100.0)
+            self.assertEqual(buf.timestamp_data[0].item(), 100.0)
 
     def test_zero_buffers_resets_all_state(self, verbose=False):
         # zero_buffers() is fully self-contained: zeros data tensors AND
@@ -744,23 +743,23 @@ class TestRolloutBuffer(unittest.TestCase):
 
         with self.subTest(desc="pre-zero state"):
             self.assertEqual(buf.buffer_offset, 1)
-            self.assertNotEqual(buf.rollout_data_cpu.abs().sum().item(), 0.0)
-            self.assertNotEqual(buf.timestamp_data_cpu.abs().sum().item(), 0.0)
+            self.assertNotEqual(buf.rollout_data.abs().sum().item(), 0.0)
+            self.assertNotEqual(buf.timestamp_data.abs().sum().item(), 0.0)
 
         buf.zero_buffers()
 
         with self.subTest(desc="data zeroed"):
-            self.assertEqual(buf.rollout_data_cpu.abs().sum().item(), 0.0)
-            self.assertEqual(buf.timestamp_data_cpu.abs().sum().item(), 0.0)
+            self.assertEqual(buf.rollout_data.abs().sum().item(), 0.0)
+            self.assertEqual(buf.timestamp_data.abs().sum().item(), 0.0)
         with self.subTest(desc="offset reset"):
             self.assertEqual(buf.buffer_offset, 0)
 
     def test_auto_flush_on_buffer_overflow(self, verbose=False):
         # Buffer holds 2 ICs (output_memory_buffer_size=2), batch_size=2,
         # rollout_steps=0 (one timestep per IC). The first batch fills the
-        # buffer; the second batch's idt=0 must trigger _flush_to_disk before
+        # buffer; the second batch's idt=0 must trigger _flush_buffer_to_disk before
         # writing, leaving the buffer holding only the second batch's data.
-        # _flush_to_disk's cuda.synchronize is now device-guarded, so this
+        # _flush_buffer_to_disk's cuda.synchronize is now device-guarded, so this
         # test runs on either CPU or CUDA.
         buf = self._make_buffer(
             num_samples=4,
@@ -783,7 +782,7 @@ class TestRolloutBuffer(unittest.TestCase):
 
         with self.subTest(desc="buffer holds second batch only"):
             self.assertEqual(buf.buffer_offset, 2)
-            self.assertTrue(torch.all(buf.rollout_data_cpu[0:2, 0] == 9.0))
+            self.assertTrue(torch.all(buf.rollout_data[0:2, 0] == 9.0))
 
     def test_output_memory_buffer_size_defaults_to_num_samples(self, verbose=False):
         # output_memory_buffer_size=None means "buffer the entire run in memory".
@@ -1166,6 +1165,302 @@ class TestRolloutBufferIO(unittest.TestCase):
         # File on disk is unaffected and still readable.
         with h5.File(out_path, "r") as f:
             self.assertEqual(f["fields"].shape, (4, 2, 1, 2, 2, 4))
+
+
+class TestRolloutBufferStreaming(unittest.TestCase):
+    """
+    Tests for ``RolloutBuffer``'s streaming mode and ``buffer_device``
+    parameter.
+
+    Streaming mode skips the in-memory buffer entirely and writes directly to
+    HDF5 on every ``update()``. ``buffer_device`` controls where the
+    in-memory buffer (when present) lives — defaulting to CPU but allowing a
+    GPU-resident buffer to avoid GPU→CPU traffic on every update.
+
+    These tests reuse the public-API-only style of ``TestRolloutBufferIO``:
+    construction → ``update()`` → ``finalize()`` → readback. We assert on
+    file content (the contract) rather than internal state where possible.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.device = torch.device("cpu")
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.tmpdir = self._tmpdir.name
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def _make_buffer(
+        self,
+        *,
+        output_file,
+        num_samples=4,
+        batch_size=2,
+        num_rollout_steps=1,
+        rollout_dt=6,
+        ensemble_size=1,
+        img_shape=(2, 4),
+        channel_names=("a", "b"),
+        output_channels=None,
+        scale=None,
+        bias=None,
+        output_memory_buffer_size=None,
+        streaming_mode=False,
+        buffer_device=torch.device("cpu"),
+    ):
+        if output_channels is None:
+            output_channels = list(channel_names)
+        H, W = img_shape
+        lat_lon = (
+            [float(90 - 180.0 * i / max(H - 1, 1)) for i in range(H)],
+            [float(360.0 * j / W) for j in range(W)],
+        )
+        return RolloutBuffer(
+            num_samples=num_samples,
+            batch_size=batch_size,
+            num_rollout_steps=num_rollout_steps,
+            rollout_dt=rollout_dt,
+            ensemble_size=ensemble_size,
+            img_shape=(H, W),
+            local_shape=(H, W),
+            local_offset=(0, 0),
+            channel_names=list(channel_names),
+            lat_lon=lat_lon,
+            device=self.device,
+            scale=scale,
+            bias=bias,
+            output_channels=list(output_channels),
+            output_file=output_file,
+            output_memory_buffer_size=output_memory_buffer_size,
+            streaming_mode=streaming_mode,
+            buffer_device=buffer_device,
+        )
+
+    def _drive_full_rollout(self, buf, *, ic_data_per_batch, tstamps_per_batch):
+        R_plus_1 = ic_data_per_batch[0].shape[1]
+        for batch, tstamps in zip(ic_data_per_batch, tstamps_per_batch):
+            for idt in range(R_plus_1):
+                buf.update(batch[:, idt], tstamps, idt=idt)
+
+    def test_streaming_without_output_file_raises(self, verbose=False):
+        # Streaming mode has no in-memory fallback — every update writes
+        # directly to disk, so output_file is mandatory.
+        with self.assertRaises(ValueError):
+            self._make_buffer(output_file=None, streaming_mode=True)
+
+    def test_streaming_skips_in_memory_buffer_allocation(self, verbose=False):
+        # Streaming mode must NOT allocate the (potentially huge) rollout
+        # tensors. ``rollout_data`` and ``timestamp_data`` are None.
+        out_path = os.path.join(self.tmpdir, "no_buf.h5")
+        buf = self._make_buffer(output_file=out_path, streaming_mode=True)
+        with self.subTest(desc="rollout_data is None"):
+            self.assertIsNone(buf.rollout_data)
+        with self.subTest(desc="timestamp_data is None"):
+            self.assertIsNone(buf.timestamp_data)
+        # Drive a no-op rollout so finalize() doesn't trip on an empty file.
+        zero = torch.zeros(2, 2, 1, 2, 2, 4)
+        self._drive_full_rollout(buf, ic_data_per_batch=[zero], tstamps_per_batch=[torch.tensor([0.0, 1.0])])
+        buf.finalize()
+
+    def test_streaming_round_trip_matches_buffered(self, verbose=False):
+        # The same input, fed through streaming-mode and buffered-mode buffers,
+        # must produce byte-identical output files. This is the strongest
+        # correctness check: it pins down that streaming hits the same disk
+        # coordinates as the bulk-flush path.
+        num_samples = 6
+        R = 1
+        H, W = 2, 3
+        img_shape = (H, W)
+
+        # build identical inputs
+        batches = []
+        for b in range(3):
+            arr = torch.zeros(2, R + 1, 1, 1, H, W)
+            for i in range(2):
+                ic = b * 2 + i
+                for idt in range(R + 1):
+                    arr[i, idt, ...] = float(ic * 10 + idt)
+            batches.append(arr)
+        tstamps = [torch.tensor([float(b * 2), float(b * 2 + 1)]) for b in range(3)]
+
+        out_streaming = os.path.join(self.tmpdir, "streaming.h5")
+        out_buffered = os.path.join(self.tmpdir, "buffered.h5")
+
+        for path, streaming in [(out_streaming, True), (out_buffered, False)]:
+            buf = self._make_buffer(
+                output_file=path,
+                num_samples=num_samples, batch_size=2,
+                num_rollout_steps=R, ensemble_size=1,
+                img_shape=img_shape, channel_names=("a",),
+                streaming_mode=streaming,
+            )
+            self._drive_full_rollout(buf, ic_data_per_batch=batches, tstamps_per_batch=tstamps)
+            buf.finalize()
+
+        with h5.File(out_streaming, "r") as f_s, h5.File(out_buffered, "r") as f_b:
+            with self.subTest(desc="fields match buffered mode"):
+                self.assertTrue(np.array_equal(f_s["fields"][...], f_b["fields"][...]))
+            with self.subTest(desc="timestamps match buffered mode"):
+                self.assertTrue(np.array_equal(f_s["timestamp"][...], f_b["timestamp"][...]))
+
+    def test_streaming_zero_buffers_is_noop(self, verbose=False):
+        # Without buffers, zero_buffers() must not raise (and must not touch
+        # the file_offset bookkeeping that streaming depends on).
+        out_path = os.path.join(self.tmpdir, "zero_noop.h5")
+        buf = self._make_buffer(output_file=out_path, streaming_mode=True)
+
+        # advance file_offset via a full IC rollout
+        zero = torch.zeros(2, 2, 1, 2, 2, 4)
+        self._drive_full_rollout(buf, ic_data_per_batch=[zero], tstamps_per_batch=[torch.tensor([0.0, 1.0])])
+        offset_before = buf.file_offset
+
+        buf.zero_buffers()
+        with self.subTest(desc="no exception"):
+            pass
+        with self.subTest(desc="file_offset preserved"):
+            self.assertEqual(buf.file_offset, offset_before)
+        buf.finalize()
+
+    def test_streaming_finalize_idempotent(self, verbose=False):
+        # finalize() in streaming mode must close the file once and be safe
+        # to call again. Mirrors test_finalize_idempotent for the buffered path.
+        out_path = os.path.join(self.tmpdir, "stream_idempotent.h5")
+        buf = self._make_buffer(output_file=out_path, streaming_mode=True)
+
+        zero = torch.zeros(2, 2, 1, 2, 2, 4)
+        self._drive_full_rollout(buf, ic_data_per_batch=[zero], tstamps_per_batch=[torch.tensor([0.0, 1.0])])
+
+        buf.finalize()
+        with self.subTest(desc="file_handle nulled after first finalize"):
+            self.assertIsNone(buf.file_handle)
+
+        try:
+            buf.finalize()
+        except Exception as e:
+            self.fail(f"second finalize() raised: {e!r}")
+
+    def test_buffer_device_string_resolves_to_torch_device(self, verbose=False):
+        # Passing a string device name should resolve to a torch.device on
+        # ``buffer_device``, matching how ``device`` is handled.
+        buf = self._make_buffer(output_file=None, buffer_device="cpu")
+        self.assertIsInstance(buf.buffer_device, torch.device)
+        self.assertEqual(buf.buffer_device.type, "cpu")
+
+    def test_buffer_device_default_is_cpu(self, verbose=False):
+        # Constructed without ``buffer_device`` the buffer must land on CPU,
+        # preserving pre-port behavior for callers that don't opt in to
+        # GPU-resident buffers. Construct ``RolloutBuffer`` directly (bypassing
+        # the helper) so this test pins the actual signature default.
+        H, W = 2, 4
+        lat_lon = (
+            [float(90 - 180.0 * i / max(H - 1, 1)) for i in range(H)],
+            [float(360.0 * j / W) for j in range(W)],
+        )
+        buf = RolloutBuffer(
+            num_samples=4,
+            batch_size=2,
+            num_rollout_steps=1,
+            rollout_dt=6,
+            ensemble_size=1,
+            img_shape=(H, W),
+            local_shape=(H, W),
+            local_offset=(0, 0),
+            channel_names=["a", "b"],
+            lat_lon=lat_lon,
+            device=self.device,
+            output_channels=["a", "b"],
+            output_file=None,
+        )
+        self.assertEqual(buf.buffer_device.type, "cpu")
+        self.assertEqual(buf.rollout_data.device.type, "cpu")
+        self.assertEqual(buf.timestamp_data.device.type, "cpu")
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA required for GPU-resident buffer test")
+    def test_buffer_device_cuda_keeps_buffer_on_gpu(self, verbose=False):
+        # When buffer_device is CUDA, the buffer tensors must live on GPU and
+        # pin_memory must be False (pinning only applies to host memory).
+        cuda_dev = torch.device("cuda:0")
+        buf = self._make_buffer(output_file=None, buffer_device=cuda_dev)
+        with self.subTest(desc="rollout_data on cuda"):
+            self.assertEqual(buf.rollout_data.device.type, "cuda")
+        with self.subTest(desc="timestamp_data on cuda"):
+            self.assertEqual(buf.timestamp_data.device.type, "cuda")
+        with self.subTest(desc="not pinned"):
+            self.assertFalse(buf.rollout_data.is_pinned())
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA required for GPU-resident buffer round-trip test")
+    def test_buffer_device_cuda_round_trip_matches_cpu(self, verbose=False):
+        # End-to-end: CUDA-resident buffer must produce the same file as a
+        # CPU buffer for identical inputs. This catches mistakes in the
+        # GPU→CPU bridge inside _flush_buffer_to_disk.
+        cuda_dev = torch.device("cuda:0")
+        num_samples = 4
+        R = 1
+        H, W = 2, 3
+
+        # build identical inputs (place on CUDA so update() copy_ has work to do)
+        batches_cpu = []
+        for b in range(2):
+            arr = torch.zeros(2, R + 1, 1, 1, H, W)
+            for i in range(2):
+                ic = b * 2 + i
+                for idt in range(R + 1):
+                    arr[i, idt, ...] = float(ic * 10 + idt)
+            batches_cpu.append(arr)
+        batches_cuda = [b.to(cuda_dev) for b in batches_cpu]
+        tstamps_cpu = [torch.tensor([float(b * 2), float(b * 2 + 1)]) for b in range(2)]
+        tstamps_cuda = [t.to(cuda_dev) for t in tstamps_cpu]
+
+        # CPU buffer reference (default buffer_device)
+        out_cpu = os.path.join(self.tmpdir, "buf_cpu.h5")
+        buf_cpu = self._make_buffer(
+            output_file=out_cpu,
+            num_samples=num_samples, batch_size=2,
+            num_rollout_steps=R, ensemble_size=1,
+            img_shape=(H, W), channel_names=("a",),
+        )
+        self._drive_full_rollout(buf_cpu, ic_data_per_batch=batches_cpu, tstamps_per_batch=tstamps_cpu)
+        buf_cpu.finalize()
+
+        # CUDA buffer
+        out_cuda = os.path.join(self.tmpdir, "buf_cuda.h5")
+        # we want device=cuda too so .copy_(non_blocking=True) into a cuda buffer works
+        H_, W_ = H, W
+        lat_lon = (
+            [float(90 - 180.0 * i / max(H_ - 1, 1)) for i in range(H_)],
+            [float(360.0 * j / W_) for j in range(W_)],
+        )
+        buf_cuda = RolloutBuffer(
+            num_samples=num_samples,
+            batch_size=2,
+            num_rollout_steps=R,
+            rollout_dt=6,
+            ensemble_size=1,
+            img_shape=(H, W),
+            local_shape=(H, W),
+            local_offset=(0, 0),
+            channel_names=["a"],
+            lat_lon=lat_lon,
+            device=cuda_dev,
+            scale=None,
+            bias=None,
+            output_channels=["a"],
+            output_file=out_cuda,
+            output_memory_buffer_size=None,
+            streaming_mode=False,
+            buffer_device=cuda_dev,
+        )
+        self._drive_full_rollout(buf_cuda, ic_data_per_batch=batches_cuda, tstamps_per_batch=tstamps_cuda)
+        buf_cuda.finalize()
+
+        with h5.File(out_cpu, "r") as f_c, h5.File(out_cuda, "r") as f_g:
+            with self.subTest(desc="fields match"):
+                self.assertTrue(np.array_equal(f_c["fields"][...], f_g["fields"][...]))
+            with self.subTest(desc="timestamps match"):
+                self.assertTrue(np.array_equal(f_c["timestamp"][...], f_g["timestamp"][...]))
 
 
 if __name__ == "__main__":
