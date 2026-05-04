@@ -150,8 +150,19 @@ class RolloutBuffer(DataBuffer):
         List of channels to be recorded
     output_file: str, optional
         Outputfile to write to
-    output_memory_buffer_size: int
+    output_memory_buffer_size: int, optional
         Number of samples to cache in memory before writing to disk
+    streaming_mode: bool, optional
+        When ``True``, every ``update()`` call writes directly to disk and no
+        in-memory rollout buffer is allocated. Requires ``output_file`` to be
+        set. Default is ``False``.
+    buffer_device: str or torch.device, optional
+        Device on which the in-memory rollout buffer is allocated. Defaults
+        to ``torch.device("cpu")``, which uses pinned memory when ``device``
+        is CUDA. Pass a CUDA device to keep the buffer GPU-resident and
+        avoid GPU→CPU transfers on every ``update()``; the buffer is copied
+        to host once at flush time. Ignored when ``streaming_mode`` is
+        ``True``.
     """
 
     def __init__(
@@ -172,8 +183,23 @@ class RolloutBuffer(DataBuffer):
         output_channels: List[str] = [],
         output_file: Optional[str] = None,
         output_memory_buffer_size: Optional[int] = None,
+        streaming_mode: bool = False,
+        buffer_device: Union[str, torch.device] = torch.device("cpu"),
     ):
         super().__init__(num_rollout_steps, rollout_dt, channel_names, device, scale, bias, output_channels, output_file)
+
+        # streaming mode has no in-memory fallback — every update writes to disk.
+        if streaming_mode and output_file is None:
+            raise ValueError(
+                "streaming_mode=True requires output_file to be set; "
+                "there is no in-memory buffer in streaming mode."
+            )
+        self.streaming_mode = streaming_mode
+
+        # resolve buffer device (mirrors DataBuffer's str→torch.device coercion).
+        # CUDA buffers avoid GPU→CPU transfers per update() call but pay one
+        # bulk copy at flush time.
+        self.buffer_device = torch.device(buffer_device) if isinstance(buffer_device, str) else buffer_device
 
         # store additional members
         self.img_shape = img_shape
@@ -200,11 +226,18 @@ class RolloutBuffer(DataBuffer):
             self.num_samples_offsets = [0, self.num_samples]
         self.num_samples_total = self.num_samples_offsets[-1]
 
-        # rollout buffer on CPU has dimensions initial_conditions x num_rollout_steps x ensemble_size x num_channels x nlat x nlon
-        pin_memory = self.device.type == "cuda"
-        local_buffer_size = (self.num_buffered_samples, self.num_rollout_steps + 1, self.ensemble_size, self.num_channels, *self.local_shape)
-        self.rollout_data_cpu = torch.zeros(local_buffer_size, dtype=torch.float32, device="cpu", pin_memory=pin_memory)
-        self.timestamp_data_cpu = torch.zeros((self.num_buffered_samples), dtype=torch.float64, device="cpu", pin_memory=pin_memory)
+        # rollout buffer dimensions: initial_conditions x num_rollout_steps x ensemble_size x num_channels x nlat x nlon
+        if self.streaming_mode:
+            # No in-memory buffer; each update() flushes to disk directly.
+            self.rollout_data = None
+            self.timestamp_data = None
+        else:
+            # pin_memory only applies to CPU buffers, and is only useful when the
+            # compute device is CUDA (it accelerates async H2D/D2H transfers).
+            pin_memory = (self.buffer_device.type == "cpu") and (self.device.type == "cuda")
+            local_buffer_size = (self.num_buffered_samples, self.num_rollout_steps + 1, self.ensemble_size, self.num_channels, *self.local_shape)
+            self.rollout_data = torch.zeros(local_buffer_size, dtype=torch.float32, device=self.buffer_device, pin_memory=pin_memory)
+            self.timestamp_data = torch.zeros((self.num_buffered_samples), dtype=torch.float64, device=self.buffer_device, pin_memory=pin_memory)
 
         # open output_file
         self.file_handle = None
@@ -277,8 +310,12 @@ class RolloutBuffer(DataBuffer):
 
     # close the output file
     def __del__(self):
-        if self.file_handle is not None:
-            self.file_handle.close()
+        # ``__del__`` may run after a partial-init failure (e.g. constructor
+        # validation raised before ``self.file_handle`` was assigned). Use
+        # getattr so a missing attribute doesn't shadow the original error.
+        file_handle = getattr(self, "file_handle", None)
+        if file_handle is not None:
+            file_handle.close()
             self.file_handle = None
         return
 
@@ -291,23 +328,29 @@ class RolloutBuffer(DataBuffer):
 
         This mirrors ``MeanStdBuffer.zero_buffers`` (which also resets its
         offset analog ``num_samples_tracked``) for consistency.
+
+        In streaming mode there are no in-memory buffers, so this is a no-op.
         """
 
+        if self.streaming_mode:
+            return
+
         with torch.no_grad():
-            self.timestamp_data_cpu.fill_(0.0)
-            self.rollout_data_cpu.fill_(0.0)
+            self.timestamp_data.fill_(0.0)
+            self.rollout_data.fill_(0.0)
         self.buffer_offset = 0
 
         return
 
-    def _flush_to_disk(self):
+    def _flush_buffer_to_disk(self):
+        """Write the accumulated in-memory buffer to disk (non-streaming mode)."""
 
         # wait for everything to complete (CUDA only — synchronize is a CUDA-specific
         # primitive and would raise on CPU-only builds).
         if self.device.type == "cuda":
             torch.cuda.synchronize(device=self.device)
 
-        if self.file_handle is not None:
+        if (self.file_handle is not None) and (self.buffer_offset > 0):
             # batch ranges in file
             batch_start_file = self.file_offset
             # the buffer offset represents the current filling level of the local buffer
@@ -325,11 +368,26 @@ class RolloutBuffer(DataBuffer):
             lat_range = slice(self.local_offset[0], self.local_offset[0] + self.local_shape[0])
             lon_range = slice(self.local_offset[1], self.local_offset[1] + self.local_shape[1])
 
+            # bring buffer to host if it lives on a non-CPU device
+            rollout_src = self.rollout_data if self.buffer_device.type == "cpu" else self.rollout_data.cpu()
+            timestamp_src = self.timestamp_data if self.buffer_device.type == "cpu" else self.timestamp_data.cpu()
+
+            # write_direct requires C-contiguous source arrays
+            rollout_arr = np.ascontiguousarray(rollout_src.numpy())
+            timestamp_arr = np.ascontiguousarray(timestamp_src.numpy())
+
             # concurrent writing
             if (comm.get_rank("model") == 0) and (comm.get_rank("ensemble") == 0):
-                tarr = self.timestamp_data_cpu.numpy()
-                self.timestamp_buffer_disk[batch_range] = tarr[batch_range_buffer, ...]
-            self.rollout_buffer_disk[batch_range, :, ens_range, :, lat_range, lon_range] = self.rollout_data_cpu.numpy()[batch_range_buffer, ...]
+                self.timestamp_buffer_disk.write_direct(
+                    timestamp_arr,
+                    source_sel=batch_range_buffer,
+                    dest_sel=batch_range,
+                )
+            self.rollout_buffer_disk.write_direct(
+                rollout_arr,
+                source_sel=np.s_[batch_range_buffer, ...],
+                dest_sel=np.s_[batch_range, :, ens_range, :, lat_range, lon_range],
+            )
 
             # advance the file pointer BEFORE zero_buffers — zero_buffers now
             # resets buffer_offset, so we must capture it here while still valid.
@@ -340,6 +398,43 @@ class RolloutBuffer(DataBuffer):
 
         return
 
+    def _write_to_disk(self, tstamps, predp, idt):
+        """Write a single (batch, leadtime) slice straight to disk (streaming mode)."""
+
+        if self.file_handle is None:
+            return
+
+        current_batch_size = predp.shape[0]
+
+        # batch range in file (uses current file_offset, advanced after the last leadtime)
+        batch_range = slice(self.file_offset, self.file_offset + current_batch_size)
+
+        # ensemble range
+        ens_start = self.ensemble_size * comm.get_rank("ensemble")
+        ens_range = slice(ens_start, ens_start + self.ensemble_size)
+
+        # spatial range
+        lat_range = slice(self.local_offset[0], self.local_offset[0] + self.local_shape[0])
+        lon_range = slice(self.local_offset[1], self.local_offset[1] + self.local_shape[1])
+
+        # bring data to host for h5py write; ensure C-contiguity for write_direct
+        predp_arr = np.ascontiguousarray(predp.detach().cpu().numpy())
+
+        self.rollout_buffer_disk.write_direct(
+            predp_arr,
+            dest_sel=np.s_[batch_range, idt, ens_range, :, lat_range, lon_range],
+        )
+
+        # write timestamps once per IC (on the first leadtime), single-writer
+        if (idt == 0) and (comm.get_rank("model") == 0) and (comm.get_rank("ensemble") == 0):
+            tarr = np.ascontiguousarray(tstamps.detach().cpu().numpy())
+            self.timestamp_buffer_disk.write_direct(
+                tarr,
+                dest_sel=batch_range,
+            )
+
+        return
+
     def update(self, pred, tstamps, idt):
         """update local buffers"""
 
@@ -347,22 +442,29 @@ class RolloutBuffer(DataBuffer):
         current_batch_size = pred.shape[0]
 
         # check if we can buffer the next element or if we need to flush now
-        if (idt == 0) and (self.buffer_offset + current_batch_size > self.num_buffered_samples):
-            self._flush_to_disk()
+        # (only meaningful in non-streaming mode — streaming has no buffer to fill)
+        if (not self.streaming_mode) and (idt == 0) and (self.buffer_offset + current_batch_size > self.num_buffered_samples):
+            self._flush_buffer_to_disk()
 
         with torch.no_grad():
             predp = self.scale * pred[..., self.channel_mask, :, :] + self.bias
 
-            batch_start = self.buffer_offset
-            batch_end = batch_start + current_batch_size
+            if self.streaming_mode:
+                self._write_to_disk(tstamps, predp, idt)
+                # advance file pointer when this IC's last leadtime is done
+                if (idt + 1) == (self.num_rollout_steps + 1):
+                    self.file_offset += current_batch_size
+            else:
+                batch_start = self.buffer_offset
+                batch_end = batch_start + current_batch_size
 
-            if idt == 0:
-                self.timestamp_data_cpu[batch_start:batch_end].copy_(tstamps, non_blocking=True)
-            self.rollout_data_cpu[batch_start:batch_end, idt].copy_(predp, non_blocking=True)
+                if idt == 0:
+                    self.timestamp_data[batch_start:batch_end].copy_(tstamps, non_blocking=True)
+                self.rollout_data[batch_start:batch_end, idt].copy_(predp, non_blocking=True)
 
-            # increase buffer pointer if the next one is a new IC
-            if (idt + 1) == (self.num_rollout_steps + 1):
-                self.buffer_offset += current_batch_size
+                # increase buffer pointer if the next one is a new IC
+                if (idt + 1) == (self.num_rollout_steps + 1):
+                    self.buffer_offset += current_batch_size
 
         return
 
@@ -370,12 +472,14 @@ class RolloutBuffer(DataBuffer):
 
         _barrier(self.device)
 
-        # Flush only when there's an output file. ``_flush_to_disk`` doubles as
-        # a destructive reset: in the no-file path it just zeros the buffer.
-        # Calling it here without a file would silently destroy the in-memory
-        # data the caller may want to read.
-        if self.file_handle is not None:
-            self._flush_to_disk()
+        # Flush remaining buffered data when there's both a file to write to and
+        # an in-memory buffer to flush. ``_flush_buffer_to_disk`` doubles as a
+        # destructive reset; in the no-file path it just zeros the buffer.
+        # Calling it here without a file would silently destroy in-memory data
+        # the caller may want to read. In streaming mode there's nothing to
+        # flush — every ``update()`` already wrote directly to disk.
+        if (not self.streaming_mode) and (self.file_handle is not None):
+            self._flush_buffer_to_disk()
 
         _barrier(self.device)
 
