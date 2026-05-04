@@ -95,15 +95,19 @@ def concatenate(input_dirs: List[str], output_file: str, metadata: dict, channel
     timestamps = []
     for idx, fname in enumerate(file_names_to_concatenate):
         ifname = os.path.join(input_dir, fname)
+        ne_red = entries_per_year_red[idx]
         try:
             with h5.File(ifname, 'r') as f:
                 ts = f[entry_key].dims[0]["timestamp"][...]
-                ts = ts[::dhoursrel]
+                # Take exactly ne_red elements to match the layout slot. Using
+                # bare ``::dhoursrel`` here would yield ceil(ne/dhoursrel), which
+                # is one more than ne_red whenever ne is not a multiple of
+                # dhoursrel (e.g. 366-day leap year with dhoursrel=5).
+                ts = ts[: ne_red * dhoursrel : dhoursrel]
             timestamps.append(ts.astype(np.float64))
         except:
             print(f"File {fname} is not annotated, deriving timestamps")
             year = years[idx]
-            ne_red = entries_per_year_red[idx]
             jan_01_epoch = dt.datetime(year, 1, 1, 0, 0, 0, tzinfo=dt.timezone.utc)
             ts = [jan_01_epoch + dt.timedelta(hours=h * dhours * dhoursrel) for h in range(ne_red)]
             timestamps.append(np.asarray([x.timestamp() for x in ts]).astype(np.float64))
@@ -163,7 +167,13 @@ def concatenate(input_dirs: List[str], output_file: str, metadata: dict, channel
                 cend = channel_offsets[idc+1]
 
                 if dhoursrel > 1:
-                    layout[tstart:tend, cstart:cend, ...] = vsource[::dhoursrel, ...]
+                    # Slice an exact multiple of dhoursrel from the source so the
+                    # element count matches the layout slot (ne_red = ne // dhoursrel).
+                    # Using bare ``::dhoursrel`` would yield ceil(ne/dhoursrel) elements,
+                    # one more than ne_red whenever ne is not a multiple of dhoursrel
+                    # (e.g. a 366-day leap year with dhoursrel=5). h5py rejects such a
+                    # virtual/source size mismatch with "Invalid mapping selections".
+                    layout[tstart:tend, cstart:cend, ...] = vsource[: ne_red * dhoursrel : dhoursrel, ...]
                 else:
                     layout[tstart:tend, cstart:cend, ...] = vsource
 
