@@ -23,11 +23,11 @@ import torch
 import h5py as h5
 from typing import Optional
 
-from makani.utils.inference.rollout_buffer import TemporalAverageBuffer
+from makani.utils.inference.rollout_buffer import MeanStdBuffer, TemporalAverageBuffer
 from makani.utils.dataloaders.data_helpers import get_lat_lon_grid
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from .testutils import disable_tf32, set_seed, init_dataset, get_default_parameters, compare_arrays, H5_PATH, IMG_SIZE_H, IMG_SIZE_W
+from .testutils import disable_tf32, set_seed, init_dataset, get_default_parameters, compare_arrays, compare_tensors, H5_PATH, IMG_SIZE_H, IMG_SIZE_W
 
 
 def init_dataset_params(
@@ -262,5 +262,274 @@ class TestRolloutBuffers(unittest.TestCase):
             self.assertTrue(compare_arrays("std", buffer_std, manual_std, atol=0.0, rtol=1e-5, verbose=verbose))
 
 
+class TestMeanStdBuffer(unittest.TestCase):
+    """
+    Tests the Welford online accumulator that all averaging buffers inherit from.
+    Bugs in this math produce silent skill-metric regressions, so we check it
+    against torch's offline mean/m2 on the concatenated batch.
+
+    ``MeanStdBuffer`` is abstract (inherits the ``DataBuffer`` ABC), so we use
+    a thin concrete subclass that exposes the protected math methods through
+    ``update``.
+    """
+
+    @staticmethod
+    def _make_buffer(num_rollout_steps, num_channels, variable_shape, scale=None, bias=None):
+        class _Concrete(MeanStdBuffer):
+            def update(self, data, idt):
+                mean, m2, count = self._compute_stats(data, dim=0)
+                self._welford_combine(mean, m2, count, idt)
+
+            def finalize(self):
+                pass
+
+        channel_names = [f"ch_{i}" for i in range(num_channels)]
+        return _Concrete(
+            num_rollout_steps=num_rollout_steps,
+            rollout_dt=1,
+            variable_shape=variable_shape,
+            channel_names=channel_names,
+            device="cpu",
+            scale=scale,
+            bias=bias,
+            output_channels=channel_names,   # output all channels
+            output_file=None,
+        )
+
+    def test_compute_stats_matches_torch(self, verbose=False):
+        buf = self._make_buffer(num_rollout_steps=1, num_channels=2, variable_shape=(4, 4))
+        data = torch.randn(10, 2, 4, 4)
+        mean, m2, count = buf._compute_stats(data, dim=0)
+        expected_mean = data.mean(dim=0)
+        expected_m2 = (data - expected_mean).pow(2).sum(dim=0)
+
+        with self.subTest(desc="mean"):
+            self.assertTrue(compare_tensors("compute_stats mean", mean, expected_mean, atol=1e-6, verbose=verbose))
+        with self.subTest(desc="m2"):
+            self.assertTrue(compare_tensors("compute_stats m2", m2, expected_m2, atol=1e-4, verbose=verbose))
+        with self.subTest(desc="count"):
+            self.assertEqual(count.item(), 10)
+
+    def test_single_batch_welford(self, verbose=False):
+        # Welford from one batch should reproduce the batch's mean and m2 directly.
+        buf = self._make_buffer(num_rollout_steps=1, num_channels=3, variable_shape=(4, 4))
+        torch.manual_seed(0)
+        data = torch.randn(8, 3, 4, 4)
+        buf.update(data, idt=0)
+
+        expected_mean = data.mean(dim=0)
+        expected_m2 = (data - expected_mean).pow(2).sum(dim=0)
+
+        with self.subTest(desc="mean"):
+            self.assertTrue(compare_tensors("running_mean", buf.running_mean[0], expected_mean, atol=1e-5, verbose=verbose))
+        with self.subTest(desc="m2"):
+            self.assertTrue(compare_tensors("running_var", buf.running_var[0], expected_m2, atol=1e-4, verbose=verbose))
+        with self.subTest(desc="count"):
+            self.assertEqual(buf.num_samples_tracked[0].item(), 8)
+
+    def test_two_batch_welford_matches_concatenated(self, verbose=False):
+        # Online Welford on two unequal batches must match offline mean/m2 on
+        # their concatenation. This is the core invariant.
+        buf = self._make_buffer(num_rollout_steps=1, num_channels=2, variable_shape=(3, 5))
+        torch.manual_seed(7)
+        data1 = torch.randn(5, 2, 3, 5)
+        data2 = torch.randn(7, 2, 3, 5)
+        buf.update(data1, idt=0)
+        buf.update(data2, idt=0)
+
+        joined = torch.cat([data1, data2], dim=0)
+        expected_mean = joined.mean(dim=0)
+        expected_m2 = (joined - expected_mean).pow(2).sum(dim=0)
+
+        with self.subTest(desc="mean"):
+            self.assertTrue(compare_tensors("two-batch mean", buf.running_mean[0], expected_mean, atol=1e-5, verbose=verbose))
+        with self.subTest(desc="m2"):
+            self.assertTrue(compare_tensors("two-batch m2", buf.running_var[0], expected_m2, atol=1e-3, verbose=verbose))
+        with self.subTest(desc="count"):
+            self.assertEqual(buf.num_samples_tracked[0].item(), 12)
+
+    def test_three_batch_welford(self, verbose=False):
+        # More batches to confirm the recurrence holds beyond the easy 2-batch case.
+        buf = self._make_buffer(num_rollout_steps=1, num_channels=1, variable_shape=(3, 3))
+        torch.manual_seed(42)
+        batches = [torch.randn(b, 1, 3, 3) for b in [3, 5, 7]]
+        for b in batches:
+            buf.update(b, idt=0)
+
+        joined = torch.cat(batches, dim=0)
+        expected_mean = joined.mean(dim=0)
+        expected_m2 = (joined - expected_mean).pow(2).sum(dim=0)
+
+        with self.subTest(desc="mean"):
+            self.assertTrue(compare_tensors("three-batch mean", buf.running_mean[0], expected_mean, atol=1e-5, verbose=verbose))
+        with self.subTest(desc="m2"):
+            self.assertTrue(compare_tensors("three-batch m2", buf.running_var[0], expected_m2, atol=1e-3, verbose=verbose))
+        with self.subTest(desc="count"):
+            self.assertEqual(buf.num_samples_tracked[0].item(), 15)
+
+    def test_rollout_steps_track_independently(self, verbose=False):
+        # Each rollout step has its own running stats — updating one must
+        # leave the others zero.
+        buf = self._make_buffer(num_rollout_steps=3, num_channels=2, variable_shape=(4, 4))
+        buf.update(torch.randn(4, 2, 4, 4), idt=1)
+
+        with self.subTest(desc="counts"):
+            self.assertEqual(buf.num_samples_tracked[0].item(), 0)
+            self.assertEqual(buf.num_samples_tracked[1].item(), 4)
+            self.assertEqual(buf.num_samples_tracked[2].item(), 0)
+        with self.subTest(desc="mean step 0 untouched"):
+            self.assertTrue(compare_tensors("step 0 mean", buf.running_mean[0], torch.zeros_like(buf.running_mean[0]), verbose=verbose))
+        with self.subTest(desc="mean step 2 untouched"):
+            self.assertTrue(compare_tensors("step 2 mean", buf.running_mean[2], torch.zeros_like(buf.running_mean[2]), verbose=verbose))
+
+    def test_zero_buffers_resets_all_state(self, verbose=False):
+        buf = self._make_buffer(num_rollout_steps=2, num_channels=2, variable_shape=(4, 4))
+        buf.update(torch.randn(5, 2, 4, 4), idt=0)
+        buf.update(torch.randn(5, 2, 4, 4), idt=1)
+        self.assertGreater(buf.num_samples_tracked.sum().item(), 0)
+
+        buf.zero_buffers()
+
+        with self.subTest(desc="counts"):
+            self.assertEqual(buf.num_samples_tracked.sum().item(), 0)
+        with self.subTest(desc="running_mean reset"):
+            self.assertTrue(compare_tensors("running_mean", buf.running_mean, torch.zeros_like(buf.running_mean), verbose=verbose))
+        with self.subTest(desc="running_var reset"):
+            self.assertTrue(compare_tensors("running_var", buf.running_var, torch.zeros_like(buf.running_var), verbose=verbose))
+
+
+class TestTemporalAverageBufferUnit(unittest.TestCase):
+    """
+    In-memory unit tests for TemporalAverageBuffer that don't touch disk and
+    don't depend on the dataset fixture. Complements ``TestRolloutBuffers``,
+    which is the integration-style test that loads real HDF5 data and writes
+    to an output file.
+    """
+
+    @staticmethod
+    def _make_buffer(num_rollout_steps, channel_names, output_channels, img_shape, scale=None, bias=None):
+        H, W = img_shape
+        return TemporalAverageBuffer(
+            num_rollout_steps=num_rollout_steps,
+            rollout_dt=1,
+            img_shape=(H, W),
+            local_shape=(H, W),
+            local_offset=(0, 0),
+            channel_names=channel_names,
+            lat_lon=(list(range(H)), list(range(W))),
+            device="cpu",
+            scale=scale,
+            bias=bias,
+            output_channels=output_channels,
+            output_file=None,
+        )
+
+    def test_update_subset_of_channels(self, verbose=False):
+        # output_channels selects a subset; only those channels are accumulated.
+        # 'a' (index 0) and 'c' (index 2) but not 'b' (index 1).
+        channel_names = ["a", "b", "c"]
+        output_channels = ["a", "c"]
+        buf = self._make_buffer(
+            num_rollout_steps=2,
+            channel_names=channel_names,
+            output_channels=output_channels,
+            img_shape=(4, 8),
+        )
+
+        torch.manual_seed(1)
+        data1 = torch.randn(3, 3, 4, 8)
+        data2 = torch.randn(2, 3, 4, 8)
+        buf.update(data1, idt=0)
+        buf.update(data2, idt=0)
+
+        joined = torch.cat([data1, data2], dim=0)
+        sub = joined[:, [0, 2], :, :]
+        expected_mean = sub.mean(dim=0)
+        expected_m2 = (sub - expected_mean).pow(2).sum(dim=0)
+
+        with self.subTest(desc="mean"):
+            self.assertTrue(compare_tensors("subset mean", buf.running_mean[0], expected_mean, atol=1e-5, verbose=verbose))
+        with self.subTest(desc="m2"):
+            self.assertTrue(compare_tensors("subset m2", buf.running_var[0], expected_m2, atol=1e-3, verbose=verbose))
+        with self.subTest(desc="count"):
+            self.assertEqual(buf.num_samples_tracked[0].item(), 5)
+
+    def test_scale_and_bias_applied_before_averaging(self, verbose=False):
+        # scale and bias are applied per-channel before the Welford update.
+        # With constant data == 1, the per-channel mean must be scale*1 + bias.
+        channel_names = ["a", "b"]
+        output_channels = ["a", "b"]
+        scale = torch.tensor([2.0, 0.5])
+        bias = torch.tensor([1.0, -1.0])
+        buf = self._make_buffer(
+            num_rollout_steps=1,
+            channel_names=channel_names,
+            output_channels=output_channels,
+            img_shape=(2, 2),
+            scale=scale,
+            bias=bias,
+        )
+
+        data = torch.ones(4, 2, 2, 2)
+        buf.update(data, idt=0)
+
+        # mean per channel = scale*1 + bias = [3.0, -0.5], spatially constant.
+        with self.subTest(desc="ch_a mean = scale*1 + bias"):
+            self.assertTrue(compare_tensors("ch_a", buf.running_mean[0, 0], 3.0 * torch.ones(2, 2), atol=1e-6, verbose=verbose))
+        with self.subTest(desc="ch_b mean = scale*1 + bias"):
+            self.assertTrue(compare_tensors("ch_b", buf.running_mean[0, 1], -0.5 * torch.ones(2, 2), atol=1e-6, verbose=verbose))
+        with self.subTest(desc="m2 zero for constant input"):
+            # constant input → zero variance → m2 = 0
+            self.assertTrue(compare_tensors("zero m2", buf.running_var[0], torch.zeros_like(buf.running_var[0]), verbose=verbose))
+
+    def test_rollout_steps_independent(self, verbose=False):
+        # Updates to different rollout steps must not contaminate each other.
+        channel_names = ["a"]
+        buf = self._make_buffer(
+            num_rollout_steps=3,
+            channel_names=channel_names,
+            output_channels=channel_names,
+            img_shape=(2, 2),
+        )
+
+        # Step 0: known constant 1.0
+        buf.update(torch.ones(4, 1, 2, 2), idt=0)
+        # Step 2: known constant 5.0
+        buf.update(5.0 * torch.ones(4, 1, 2, 2), idt=2)
+
+        with self.subTest(desc="step 0"):
+            self.assertTrue(compare_tensors("step 0", buf.running_mean[0], torch.ones_like(buf.running_mean[0]), verbose=verbose))
+        with self.subTest(desc="step 1 untouched"):
+            self.assertTrue(compare_tensors("step 1", buf.running_mean[1], torch.zeros_like(buf.running_mean[1]), verbose=verbose))
+        with self.subTest(desc="step 2"):
+            self.assertTrue(compare_tensors("step 2", buf.running_mean[2], 5.0 * torch.ones_like(buf.running_mean[2]), verbose=verbose))
+        with self.subTest(desc="step 1 count"):
+            self.assertEqual(buf.num_samples_tracked[1].item(), 0)
+
+    def test_finalize_no_output_file_runs_without_error(self, verbose=False):
+        # finalize() with no output_file should compute std and return cleanly.
+        # std = sqrt(running_var / (n - 1)) — sample-corrected.
+        channel_names = ["a"]
+        buf = self._make_buffer(
+            num_rollout_steps=1,
+            channel_names=channel_names,
+            output_channels=channel_names,
+            img_shape=(2, 2),
+        )
+
+        # Two-sample batch with values [-1, +1] → mean=0, m2 = 2 (two unit deltas).
+        data = torch.tensor([[[-1.0, -1.0], [-1.0, -1.0]],
+                             [[ 1.0,  1.0], [ 1.0,  1.0]]]).reshape(2, 1, 2, 2)
+        buf.update(data, idt=0)
+
+        with self.subTest(desc="post-update mean"):
+            self.assertTrue(compare_tensors("mean", buf.running_mean[0], torch.zeros(2, 2), atol=1e-6, verbose=verbose))
+        with self.subTest(desc="post-update m2"):
+            self.assertTrue(compare_tensors("m2", buf.running_var[0], 2.0 * torch.ones(2, 2), atol=1e-6, verbose=verbose))
+
+        # finalize is in-place math + (no-op write) — should not raise
+        buf.finalize()
+
+
 if __name__ == "__main__":
-    unittest.main() 
+    unittest.main()

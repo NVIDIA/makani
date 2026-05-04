@@ -39,7 +39,7 @@ from makani.utils import comm
 from makani.utils.dataloaders.data_helpers import get_date_from_string
 
 # inference specific stuff
-from makani.utils.inference.helpers import split_list, SortedIndexSampler, translate_date_sampler_to_timedelta_sampler
+from makani.utils.inference.helpers import split_list, SortedIndexSampler, translate_date_sampler_to_timedelta_sampler, compute_inference_range
 from makani.utils.inference.rollout_buffer import RolloutBuffer, TemporalAverageBuffer, SpectrumAverageBuffer, ZonalSpectrumAverageBuffer
 
 # checkpoint helpers
@@ -742,39 +742,16 @@ class Inferencer(Driver):
         except ValueError:
             pass
 
-        # check if a date range is specified:
+        # parse string dates (if supplied) into datetimes; helper expects datetimes
         if start_date is not None:
             start_date = get_date_from_string(start_date)
-
         if end_date is not None:
             end_date = get_date_from_string(end_date)
 
-        # now check if the dates are within dataset range:
-        if start_date is not None:
-            start_index = self.valid_dataset.get_index_at_time(start_date)
-            if start_index is None:
-                raise IndexError(f"Error, start date {start_date} is outside the dataset range of {self.valid_dataset.start_date} to {self.valid_dataset.end_date}")
-        else:
-            start_index = 0
-
-        if end_date is not None:
-            end_index = self.valid_dataset.get_index_at_time(end_date)
-            if end_index is None:
-                raise IndexError(f"Error, end date {end_date} is outside the dataset range of {self.valid_dataset.start_date} to {self.valid_dataset.end_date}")
-        else:
-            end_index = len(self.valid_dataset) - 1
-
-        # perform sanity checks
-        if end_index <= start_index:
-            raise ValueError(f"Error, start date {start_date} has to be strictly smaller than end date {end_date}")
-
-        # get the step size
-        if date_step < self.valid_dataset.dhours:
-            raise ValueError(f"date_step {date_step} is smaller than the dataset dhours {self.valid_dataset.dhours}")
-        step = date_step // self.valid_dataset.dhours
-
-        start_date = self.valid_dataset.get_time_at_index(start_index)
-        end_date = self.valid_dataset.get_time_at_index(end_index)
+        # resolve range, validate, and snap dates to dataset cadence
+        start_index, end_index, step, start_date, end_date = compute_inference_range(
+            self.valid_dataset, start_date, end_date, date_step
+        )
         if self.log_to_screen:
             self.logger.info(f"Using date range: {start_date} to {end_date} with a step of {date_step} hours.")
             if output_channels:
