@@ -213,6 +213,8 @@ if __name__ == "__main__":
                 ],
                 schedule=torch.profiler.schedule(wait=args.capture_range_start - 1, warmup=1, active=args.capture_range_stop - args.capture_range_start, repeat=1),
                 on_trace_ready=trace_handler,
+                record_shapes=True,
+                profile_memory=True,
             ) as profiler:
                 inferencer.score_model(
                     metrics_file=metrics_file,

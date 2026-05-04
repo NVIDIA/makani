@@ -22,6 +22,8 @@ def trace_handler(prof, print_stats=True, export_trace_prefix=None):
     print(prof.key_averages().table(sort_by="self_cuda_time_total", row_limit=-1))
     if export_trace_prefix is not None:
         prof.export_chrome_trace(export_trace_prefix + "_" + str(prof.step_num) + ".json")
+        device = f"cuda:{torch.cuda.current_device()}" if torch.cuda.is_available() else "cpu"
+        prof.export_memory_timeline(export_trace_prefix + "_mem_" + str(prof.step_num) + ".html", device=device)
 
     return
 
