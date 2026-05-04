@@ -32,7 +32,7 @@ from makani.mpu.mappings import init_gradient_reduction_hooks
 from makani.mpu.mappings import reduce_from_parallel_region
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-from .distributed_helpers import get_default_parameters, _split_helper, _gather_helper
+from .distributed_helpers import get_default_parameters, set_image_shape, _split_helper, _gather_helper
 from ..testutils import disable_tf32, set_seed, compare_tensors
 
 
@@ -75,21 +75,9 @@ class TestDistributedModel(unittest.TestCase):
 
         self.params.history_normalization_mode = "none"
 
-        # generating the image logic that is typically used by the dataloader
-        self.params.img_shape_x = 36
-        self.params.img_shape_y = 72
-        self.params.img_local_shape_x = self.params.img_crop_shape_x = self.params.img_shape_x
-        self.params.img_local_shape_y = self.params.img_crop_shape_y = self.params.img_shape_y
-        self.params.img_local_offset_x = 0
-        self.params.img_local_offset_y = 0
-        self.params.img_crop_offset_x = 0
-        self.params.img_crop_offset_y = 0
-        # Resampled shapes were added during the resampling refactor; production
-        # populates these via the dataloader (driver.py:167). This test bypasses
-        # the dataloader, so set them explicitly to match the raw shapes (no
-        # resampling). Required by model_registry.get_model().
-        self.params.img_shape_x_resampled = self.params.img_shape_x
-        self.params.img_shape_y_resampled = self.params.img_shape_y
+        # set image shape, local/crop shapes, offsets, and resampled shapes
+        # consistently — see set_image_shape for the rationale.
+        set_image_shape(self.params, h=36, w=72)
 
         # also set the batch size for testing
         self.params.batch_size = 4

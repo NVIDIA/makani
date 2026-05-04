@@ -83,6 +83,30 @@ def get_default_parameters():
     return params
 
 
+def set_image_shape(params, h, w, *, h_resampled=None, w_resampled=None):
+    """
+    Set all image-shape-related fields on ``params`` consistently.
+
+    Sets ``img_shape_x/y``, the ``img_local_shape_*`` and ``img_crop_shape_*``
+    pair (which mirror the full shape until distributed sharding rewrites
+    them), all related offsets to zero, and the resampled shapes (defaulting
+    to the unsampled values, i.e. no resampling).
+
+    Centralising this prevents tests from forgetting fields that downstream
+    code requires — most recently the ``img_shape_*_resampled`` pair added
+    during the resampling refactor (consumed by ``model_registry.get_model``,
+    ``MetricsHandler``, ``LossHandler``).
+    """
+    params.img_shape_x = h
+    params.img_shape_y = w
+    params.img_local_shape_x = params.img_crop_shape_x = h
+    params.img_local_shape_y = params.img_crop_shape_y = w
+    params.img_local_offset_x = params.img_crop_offset_x = 0
+    params.img_local_offset_y = params.img_crop_offset_y = 0
+    params.img_shape_x_resampled = h if h_resampled is None else h_resampled
+    params.img_shape_y_resampled = w if w_resampled is None else w_resampled
+
+
 def _init_grid(cls):
     # set up distributed
     cls.grid_size_h = int(os.getenv("GRID_H", 1))
