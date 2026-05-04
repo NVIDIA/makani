@@ -212,6 +212,145 @@ class TestConcatenateDataset(unittest.TestCase):
             with self.subTest(desc="longitude label"):
                 self.assertEqual(f_conc[H5_PATH].dims[3].label, "Longitude in degrees")
 
+    def test_concatenate_leap_year_indivisible_dhoursrel(self):
+        """
+        Regression: when a year's sample count is not a multiple of dhoursrel
+        (the realistic case for a leap year at daily cadence: 366 % 5 = 1),
+        concatenate() must produce a virtual layout of size floor(ne/dhoursrel)
+        per year — and the source slice fed to the layout must contain exactly
+        that many elements.
+
+        Pre-fix, the source slice was ``vsource[::dhoursrel]`` whose length is
+        ceil(ne/dhoursrel) — one more than the layout slot for any year whose
+        sample count is not divisible by dhoursrel. h5py rejected this with
+        ``ValueError: Invalid mapping selections``.
+
+        Post-fix, the source slice is ``vsource[:ne_red*dhoursrel:dhoursrel]``,
+        which is exactly ``ne_red`` elements regardless of divisibility.
+        """
+        from data_process.concatenate_dataset import concatenate
+
+        # Year 2017: 365 samples (non-leap, 365 % 5 == 0)  → no bug exposure.
+        # Year 2020: 366 samples (leap year, 366 % 5 == 1) → triggers the bug.
+        years_local = [2017, 2020]
+        sample_counts = {2017: 365, 2020: 366}
+        dhoursrel = 5
+        dhours_local = 24
+        img_h = 16
+        img_w = 32
+        num_chans = 3
+        channel_names = [f"chan_{i}" for i in range(num_chans)]
+        latitudes = np.linspace(90, -90, img_h, endpoint=True).astype(np.float32)
+        longitudes = np.linspace(0, 360, img_w, endpoint=False).astype(np.float32)
+
+        rng = np.random.default_rng(seed=2020)
+
+        with tempfile.TemporaryDirectory() as work_dir, \
+             tempfile.TemporaryDirectory() as out_dir:
+
+            # Write source files manually so we control the per-year sample count.
+            # init_dataset's default is 365 across all files — we need 366 for one.
+            data_per_year = {}
+            ts_per_year = {}
+            chanlen = max(len(c) for c in channel_names)
+            for year in years_local:
+                n = sample_counts[year]
+                data = rng.random((n, num_chans, img_h, img_w), dtype=np.float32)
+                data_per_year[year] = data
+
+                jan_01 = dt.datetime(year, 1, 1, 0, 0, 0, tzinfo=dt.timezone.utc)
+                ts = np.array(
+                    [(jan_01 + dt.timedelta(hours=h * dhours_local)).timestamp() for h in range(n)],
+                    dtype=np.float64,
+                )
+                ts_per_year[year] = ts
+
+                fpath = os.path.join(work_dir, f"{year}.h5")
+                with h5.File(fpath, "w") as f:
+                    f.create_dataset(H5_PATH, data=data)
+                    f.create_dataset("timestamp", data=ts)
+                    f.create_dataset("lat", data=latitudes)
+                    f.create_dataset("lon", data=longitudes)
+                    f.create_dataset("channel", num_chans, dtype=h5.string_dtype(length=chanlen))
+                    f["channel"][...] = channel_names
+                    f["timestamp"].make_scale("timestamp")
+                    f["channel"].make_scale("channel")
+                    f["lat"].make_scale("lat")
+                    f["lon"].make_scale("lon")
+                    f[H5_PATH].dims[0].attach_scale(f["timestamp"])
+                    f[H5_PATH].dims[1].attach_scale(f["channel"])
+                    f[H5_PATH].dims[2].attach_scale(f["lat"])
+                    f[H5_PATH].dims[3].attach_scale(f["lon"])
+
+            metadata = dict(
+                dataset_name="testing_leap",
+                h5_path=H5_PATH,
+                dims=["time", "channel", "lat", "lon"],
+                dhours=dhours_local,
+                coords=dict(
+                    grid_type="equiangular",
+                    lat=latitudes.tolist(),
+                    lon=longitudes.tolist(),
+                    channel=channel_names,
+                ),
+            )
+
+            output_file = os.path.join(out_dir, "concatenated_leap.h5v")
+            concatenate(
+                input_dirs=[work_dir],
+                output_file=output_file,
+                metadata=metadata,
+                channel_names=[channel_names],
+                file_names_to_concatenate=[f"{y}.h5" for y in years_local],
+                years=years_local,
+                dhoursrel=dhoursrel,
+            )
+
+            # Build expected output: each year is sliced to floor(n/dhoursrel)
+            # contiguous strided samples, taking exactly that many (NOT the ceil).
+            ne_red_per_year = {y: sample_counts[y] // dhoursrel for y in years_local}
+            total_red = sum(ne_red_per_year.values())  # 73 + 73 = 146
+
+            expected_data = []
+            expected_ts = []
+            for year in years_local:
+                ne_red = ne_red_per_year[year]
+                slc = slice(None, ne_red * dhoursrel, dhoursrel)
+                expected_data.append(data_per_year[year][slc])
+                expected_ts.append(ts_per_year[year][slc])
+            expected_data = np.concatenate(expected_data, axis=0)
+            expected_ts = np.concatenate(expected_ts, axis=0)
+
+            with h5.File(output_file, "r") as f_conc:
+                with self.subTest(desc="layout shape uses floor(ne/dhoursrel) per year"):
+                    self.assertEqual(
+                        f_conc[H5_PATH].shape,
+                        (total_red, num_chans, img_h, img_w),
+                    )
+                    # Sanity: 365//5 + 366//5 = 73 + 73 = 146
+                    self.assertEqual(total_red, 146)
+
+                with self.subTest(desc="data round-trips correctly"):
+                    self.assertTrue(
+                        compare_arrays("leap data", f_conc[H5_PATH][...], expected_data)
+                    )
+
+                with self.subTest(desc="timestamps match expected stride"):
+                    self.assertTrue(
+                        compare_arrays("leap ts", f_conc["timestamp"][...], expected_ts)
+                    )
+
+                # Pin the leap-year boundary specifically: the last sample stored
+                # for year 2020 must come from source index (ne_red-1)*dhoursrel = 360.
+                # The buggy ceil-based slice would have written index 365 instead.
+                with self.subTest(desc="leap-year last sample is the correct stride index"):
+                    ne_red_2020 = ne_red_per_year[2020]
+                    t_last = ne_red_per_year[2017] + ne_red_2020 - 1
+                    expected_last = data_per_year[2020][(ne_red_2020 - 1) * dhoursrel, :, :, :]
+                    self.assertTrue(
+                        compare_arrays("leap last sample", f_conc[H5_PATH][t_last], expected_last)
+                    )
+
 
 class TestConcatenateDatasetChannelsAndTime(unittest.TestCase):
     """
