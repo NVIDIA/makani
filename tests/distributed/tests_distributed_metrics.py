@@ -72,7 +72,10 @@ class TestDistributedMetricHandler(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.tmpdir.cleanup()
-        cls.mpi_comm.finalize()
+        # Free the duplicated communicator. mpi_comm is an mpi4py Intracomm
+        # (returned by MPI.COMM_WORLD.Dup()), whose disposal API is Free(),
+        # not the previously-used (and non-existent) finalize().
+        cls.mpi_comm.Free()
 
 
     def _init_comms(self):
@@ -143,6 +146,12 @@ class TestDistributedMetricHandler(unittest.TestCase):
         self.params.img_local_offset_y = 0
         self.params.img_crop_offset_x = 0
         self.params.img_crop_offset_y = 0
+        # Resampled shapes were added to MetricsHandler/LossHandler during the
+        # resampling refactor. In production they're populated by the dataloader
+        # (driver.py:167); since this test bypasses the dataloader, set them
+        # explicitly. No actual resampling here, so they equal the raw shapes.
+        self.params.img_shape_x_resampled = self.params.img_shape_x
+        self.params.img_shape_y_resampled = self.params.img_shape_y
 
         return
 

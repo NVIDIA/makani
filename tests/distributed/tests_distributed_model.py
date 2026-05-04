@@ -52,13 +52,20 @@ class TestDistributedModel(unittest.TestCase):
             cls.device = torch.device(f"cuda:{local_rank}")
             torch.cuda.set_device(cls.device)
         else:
-            if self.mpi_comm_rank == 0:
+            if cls.mpi_comm_rank == 0:
                 print("Running test on CPU")
             cls.device = torch.device("cpu")
         set_seed(333)
 
         return
 
+    @classmethod
+    def tearDownClass(cls):
+        # Free the duplicated communicator. mpi_comm is an mpi4py Intracomm
+        # (returned by MPI.COMM_WORLD.Dup()), whose disposal API is Free()
+        # — release the duplicated comm explicitly rather than relying on
+        # interpreter shutdown to clean it up.
+        cls.mpi_comm.Free()
 
     def setUp(self):
 
@@ -77,6 +84,12 @@ class TestDistributedModel(unittest.TestCase):
         self.params.img_local_offset_y = 0
         self.params.img_crop_offset_x = 0
         self.params.img_crop_offset_y = 0
+        # Resampled shapes were added during the resampling refactor; production
+        # populates these via the dataloader (driver.py:167). This test bypasses
+        # the dataloader, so set them explicitly to match the raw shapes (no
+        # resampling). Required by model_registry.get_model().
+        self.params.img_shape_x_resampled = self.params.img_shape_x
+        self.params.img_shape_y_resampled = self.params.img_shape_y
 
         # also set the batch size for testing
         self.params.batch_size = 4
@@ -119,8 +132,6 @@ class TestDistributedModel(unittest.TestCase):
     def _destroy_comms(self):
         comm.cleanup()
         return
-
-
 
 
     def _split_helper(self, tensor, hdim=None, wdim=None):
@@ -204,7 +215,7 @@ class TestDistributedModel(unittest.TestCase):
     @parameterized.expand(
         [
             #("SNO", 1e-4),
-            #("FCN3", 1e-4),
+            ("FCN3", 1e-4),
         ],
         skip_on_empty=True,
     )
