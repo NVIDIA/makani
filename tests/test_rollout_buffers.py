@@ -23,7 +23,7 @@ import torch
 import h5py as h5
 from typing import Optional
 
-from makani.utils.inference.rollout_buffer import MeanStdBuffer, TemporalAverageBuffer
+from makani.utils.inference.rollout_buffer import MeanStdBuffer, RolloutBuffer, TemporalAverageBuffer
 from makani.utils.dataloaders.data_helpers import get_lat_lon_grid
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
@@ -72,9 +72,17 @@ def init_dataset_params(
     return params
 
 
-class TestRolloutBuffers(unittest.TestCase):
+class TestTemporalAverageBufferIntegration(unittest.TestCase):
     """
-    Test class for TemporalAverageBuffer using dataset initialization from test_dataloader.py
+    End-to-end test for ``TemporalAverageBuffer``: feeds real HDF5 data through
+    the buffer (update + finalize), writes the output, reads it back, and
+    compares against numpy-computed mean/std. Complements
+    ``TestTemporalAverageBufferUnit`` (in-memory, no I/O) below.
+
+    Named ``Integration`` rather than ``...Buffers`` (plural) — the prior name
+    misleadingly suggested coverage of all rollout-buffer classes when in fact
+    only ``TemporalAverageBuffer`` is exercised here. The actual ``RolloutBuffer``
+    data-dump class has its own ``TestRolloutBuffer`` (singular) elsewhere.
     """
 
     @classmethod
@@ -529,6 +537,635 @@ class TestTemporalAverageBufferUnit(unittest.TestCase):
 
         # finalize is in-place math + (no-op write) — should not raise
         buf.finalize()
+
+
+class TestRolloutBuffer(unittest.TestCase):
+    """
+    In-memory unit tests for ``RolloutBuffer`` — the data-dump buffer used to
+    record forecast tensors during inference rollouts. None of these tests
+    write to disk (``output_file=None``), so they exercise the pure logic of
+    update/flush/zero in isolation:
+
+      * update() routing into (sample, step, ensemble, channel, lat, lon)
+      * buffer_offset advance only on rollout completion
+      * scale*x + bias projection
+      * channel_mask channel selection
+      * timestamp-only-at-idt=0
+      * zero_buffers() data reset
+      * auto-flush on buffer-overflow at idt=0
+      * output_memory_buffer_size defaults and clamping
+
+    The auto-flush test requires CUDA because ``_flush_to_disk`` calls
+    ``torch.cuda.synchronize`` unconditionally; it's skipped on CPU-only hosts.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        # CPU is fine for everything except _flush_to_disk; per-test guards
+        # skip that single case if CUDA isn't available.
+        cls.device = torch.device("cpu")
+
+    @staticmethod
+    def _make_buffer(
+        *,
+        num_samples=4,
+        batch_size=2,
+        num_rollout_steps=1,
+        ensemble_size=1,
+        img_shape=(2, 2),
+        channel_names=("a",),
+        output_channels=("a",),
+        scale=None,
+        bias=None,
+        output_memory_buffer_size=None,
+        device=None,
+    ):
+        if device is None:
+            device = torch.device("cpu")
+        H, W = img_shape
+        return RolloutBuffer(
+            num_samples=num_samples,
+            batch_size=batch_size,
+            num_rollout_steps=num_rollout_steps,
+            rollout_dt=1,
+            ensemble_size=ensemble_size,
+            img_shape=(H, W),
+            local_shape=(H, W),
+            local_offset=(0, 0),
+            channel_names=list(channel_names),
+            lat_lon=(list(range(H)), list(range(W))),
+            device=device,
+            scale=scale,
+            bias=bias,
+            output_channels=list(output_channels),
+            output_file=None,
+            output_memory_buffer_size=output_memory_buffer_size,
+        )
+
+    def test_update_writes_to_correct_slot(self, verbose=False):
+        # Channel mask should select 'a' (idx 0) and 'c' (idx 2), drop 'b' (idx 1).
+        # Verify the slot at (sample=0:2, step=0, ensemble=:, channel=:, lat=:, lon=:)
+        # holds the projected per-channel constants.
+        buf = self._make_buffer(
+            num_samples=4,
+            batch_size=2,
+            num_rollout_steps=1,
+            ensemble_size=2,
+            img_shape=(4, 6),
+            channel_names=("a", "b", "c"),
+            output_channels=("a", "c"),
+        )
+
+        pred = torch.zeros(2, 2, 3, 4, 6)
+        pred[..., 0, :, :] = 1.0   # 'a'
+        pred[..., 1, :, :] = 2.0   # 'b' (NOT in output_channels, must be dropped)
+        pred[..., 2, :, :] = 3.0   # 'c'
+        tstamps = torch.tensor([100.0, 200.0])
+
+        buf.update(pred, tstamps, idt=0)
+
+        # Expected output shape (2 samples, 2 ensemble, 2 channels, 4 lat, 6 lon)
+        with self.subTest(desc="channel a values"):
+            self.assertTrue(torch.all(buf.rollout_data_cpu[0:2, 0, :, 0, :, :] == 1.0))
+        with self.subTest(desc="channel c values"):
+            self.assertTrue(torch.all(buf.rollout_data_cpu[0:2, 0, :, 1, :, :] == 3.0))
+        with self.subTest(desc="other slots untouched"):
+            # step 1 should still be zero (we only updated idt=0)
+            self.assertTrue(torch.all(buf.rollout_data_cpu[:, 1, :, :, :, :] == 0.0))
+
+    def test_buffer_offset_advances_only_on_rollout_completion(self, verbose=False):
+        # buffer_offset increments only when idt+1 == num_rollout_steps+1
+        # (i.e., the final step of an IC's rollout). This is the trickiest
+        # invariant — getting it wrong silently corrupts the recorded slots.
+        num_rollout_steps = 3
+        batch_size = 2
+        buf = self._make_buffer(
+            num_samples=4,
+            batch_size=batch_size,
+            num_rollout_steps=num_rollout_steps,
+        )
+
+        pred = torch.zeros(batch_size, 1, 1, 2, 2)
+        tstamps = torch.tensor([0.0, 1.0])
+
+        with self.subTest(desc="initial offset"):
+            self.assertEqual(buf.buffer_offset, 0)
+
+        # Steps 0..R-1: buffer_offset must NOT advance.
+        for idt in range(num_rollout_steps):
+            buf.update(pred, tstamps, idt=idt)
+            with self.subTest(desc=f"idt={idt} (intermediate)"):
+                self.assertEqual(buf.buffer_offset, 0)
+
+        # Final step (idt == num_rollout_steps): buffer_offset advances by batch_size.
+        buf.update(pred, tstamps, idt=num_rollout_steps)
+        with self.subTest(desc="post-final-step offset"):
+            self.assertEqual(buf.buffer_offset, batch_size)
+
+    def test_multi_step_rollout_fills_slots_in_order(self, verbose=False):
+        # Each step writes a known constant; verify slot[idt] == idt afterwards.
+        num_rollout_steps = 3
+        buf = self._make_buffer(
+            num_samples=1,
+            batch_size=1,
+            num_rollout_steps=num_rollout_steps,
+        )
+
+        for idt in range(num_rollout_steps + 1):
+            pred = torch.full((1, 1, 1, 2, 2), float(idt))
+            buf.update(pred, torch.tensor([42.0]), idt=idt)
+
+        for idt in range(num_rollout_steps + 1):
+            with self.subTest(desc=f"slot {idt}"):
+                slot = buf.rollout_data_cpu[0, idt]
+                self.assertTrue(torch.all(slot == float(idt)))
+
+    def test_scale_and_bias_applied(self, verbose=False):
+        # With constant input ones, output per channel should equal scale*1 + bias.
+        scale = torch.tensor([2.0, 3.0])
+        bias = torch.tensor([1.0, -1.0])
+        buf = self._make_buffer(
+            num_samples=1,
+            batch_size=1,
+            num_rollout_steps=0,
+            ensemble_size=1,
+            channel_names=("a", "b"),
+            output_channels=("a", "b"),
+            scale=scale,
+            bias=bias,
+        )
+
+        pred = torch.ones(1, 1, 2, 2, 2)
+        buf.update(pred, torch.tensor([0.0]), idt=0)
+
+        with self.subTest(desc="ch a = 2*1 + 1"):
+            self.assertTrue(torch.all(buf.rollout_data_cpu[0, 0, :, 0, :, :] == 3.0))
+        with self.subTest(desc="ch b = 3*1 - 1"):
+            self.assertTrue(torch.all(buf.rollout_data_cpu[0, 0, :, 1, :, :] == 2.0))
+
+    def test_default_scale_and_bias_are_identity(self, verbose=False):
+        # When scale and bias are None, DataBuffer fills them with ones/zeros so
+        # the projection is the identity. Verify input passes through unchanged.
+        buf = self._make_buffer(num_samples=1, batch_size=1, num_rollout_steps=0)
+
+        pred = torch.full((1, 1, 1, 2, 2), 7.5)
+        buf.update(pred, torch.tensor([0.0]), idt=0)
+
+        self.assertTrue(torch.all(buf.rollout_data_cpu[0, 0] == 7.5))
+
+    def test_timestamps_recorded_only_at_idt_zero(self, verbose=False):
+        # Timestamps for a given IC should be captured at idt=0 and NOT
+        # overwritten by subsequent rollout steps that pass different values.
+        buf = self._make_buffer(
+            num_samples=1, batch_size=1, num_rollout_steps=2,
+        )
+
+        pred = torch.zeros(1, 1, 1, 2, 2)
+
+        buf.update(pred, torch.tensor([100.0]), idt=0)
+        with self.subTest(desc="recorded at idt=0"):
+            self.assertEqual(buf.timestamp_data_cpu[0].item(), 100.0)
+
+        # Pass a different tstamp at later steps — it should be ignored.
+        buf.update(pred, torch.tensor([999.0]), idt=1)
+        buf.update(pred, torch.tensor([777.0]), idt=2)
+        with self.subTest(desc="not overwritten by idt>0"):
+            self.assertEqual(buf.timestamp_data_cpu[0].item(), 100.0)
+
+    def test_zero_buffers_resets_all_state(self, verbose=False):
+        # zero_buffers() is fully self-contained: zeros data tensors AND
+        # resets buffer_offset, so it's safe to call mid-rollout (puts the
+        # buffer back into a fresh post-construction state). Mirrors
+        # MeanStdBuffer.zero_buffers's contract for the offset analog.
+        buf = self._make_buffer(num_samples=2, batch_size=1, num_rollout_steps=0)
+
+        pred = torch.full((1, 1, 1, 2, 2), 5.0)
+        buf.update(pred, torch.tensor([100.0]), idt=0)   # finishes rollout (R=0)
+
+        with self.subTest(desc="pre-zero state"):
+            self.assertEqual(buf.buffer_offset, 1)
+            self.assertNotEqual(buf.rollout_data_cpu.abs().sum().item(), 0.0)
+            self.assertNotEqual(buf.timestamp_data_cpu.abs().sum().item(), 0.0)
+
+        buf.zero_buffers()
+
+        with self.subTest(desc="data zeroed"):
+            self.assertEqual(buf.rollout_data_cpu.abs().sum().item(), 0.0)
+            self.assertEqual(buf.timestamp_data_cpu.abs().sum().item(), 0.0)
+        with self.subTest(desc="offset reset"):
+            self.assertEqual(buf.buffer_offset, 0)
+
+    def test_auto_flush_on_buffer_overflow(self, verbose=False):
+        # Buffer holds 2 ICs (output_memory_buffer_size=2), batch_size=2,
+        # rollout_steps=0 (one timestep per IC). The first batch fills the
+        # buffer; the second batch's idt=0 must trigger _flush_to_disk before
+        # writing, leaving the buffer holding only the second batch's data.
+        # _flush_to_disk's cuda.synchronize is now device-guarded, so this
+        # test runs on either CPU or CUDA.
+        buf = self._make_buffer(
+            num_samples=4,
+            batch_size=2,
+            num_rollout_steps=0,
+            output_memory_buffer_size=2,
+            device=self.device,
+        )
+
+        pred1 = torch.full((2, 1, 1, 2, 2), 1.0, device=self.device)
+        buf.update(pred1, torch.tensor([1.0, 2.0]), idt=0)
+        with self.subTest(desc="buffer full after first batch"):
+            self.assertEqual(buf.buffer_offset, 2)
+
+        # Second batch at idt=0: pre-flush condition (offset+B > capacity) holds.
+        # The implementation auto-flushes, then writes the new batch into a
+        # freshly-zeroed buffer.
+        pred2 = torch.full((2, 1, 1, 2, 2), 9.0, device=self.device)
+        buf.update(pred2, torch.tensor([3.0, 4.0]), idt=0)
+
+        with self.subTest(desc="buffer holds second batch only"):
+            self.assertEqual(buf.buffer_offset, 2)
+            self.assertTrue(torch.all(buf.rollout_data_cpu[0:2, 0] == 9.0))
+
+    def test_output_memory_buffer_size_defaults_to_num_samples(self, verbose=False):
+        # output_memory_buffer_size=None means "buffer the entire run in memory".
+        buf = self._make_buffer(
+            num_samples=10,
+            batch_size=2,
+            output_memory_buffer_size=None,
+        )
+        self.assertEqual(buf.num_buffered_samples, 10)
+
+    def test_output_memory_buffer_size_clamping(self, verbose=False):
+        # The buffer size is clamped to [batch_size, num_samples] inclusive.
+        # Below the floor: clamped up to batch_size (otherwise update() with a
+        # full batch would never fit).
+        with self.subTest(desc="clamps below batch_size"):
+            buf = self._make_buffer(
+                num_samples=10, batch_size=4,
+                output_memory_buffer_size=2,    # below floor
+            )
+            self.assertEqual(buf.num_buffered_samples, 4)
+
+        # Above the ceiling: clamped down to num_samples (no point in
+        # over-allocating).
+        with self.subTest(desc="clamps above num_samples"):
+            buf = self._make_buffer(
+                num_samples=10, batch_size=2,
+                output_memory_buffer_size=100,  # above ceiling
+            )
+            self.assertEqual(buf.num_buffered_samples, 10)
+
+
+class TestRolloutBufferIO(unittest.TestCase):
+    """
+    End-to-end round-trip tests for ``RolloutBuffer``'s HDF5 output path.
+
+    These tests drive only the public API: construct with ``output_file``,
+    call ``update()`` per (batch, idt), then ``finalize()``. They verify
+    correctness by **reading the resulting HDF5 file** rather than by
+    inspecting the buffer's in-memory state. This keeps the tests valid
+    under a future streaming write-path (e.g. GDS-backed) that may bypass
+    the in-memory buffer entirely.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.device = torch.device("cpu")
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.tmpdir = self._tmpdir.name
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def _make_buffer(
+        self,
+        *,
+        output_file,
+        num_samples=4,
+        batch_size=2,
+        num_rollout_steps=1,
+        rollout_dt=6,
+        ensemble_size=1,
+        img_shape=(2, 4),
+        channel_names=("a", "b"),
+        output_channels=None,
+        scale=None,
+        bias=None,
+        output_memory_buffer_size=None,
+        lat_lon=None,
+    ):
+        if output_channels is None:
+            output_channels = list(channel_names)
+        if lat_lon is None:
+            H, W = img_shape
+            # synthetic lat/lon so we can verify file content
+            lat_lon = (
+                [float(90 - 180.0 * i / max(H - 1, 1)) for i in range(H)],
+                [float(360.0 * j / W) for j in range(W)],
+            )
+        H, W = img_shape
+        return RolloutBuffer(
+            num_samples=num_samples,
+            batch_size=batch_size,
+            num_rollout_steps=num_rollout_steps,
+            rollout_dt=rollout_dt,
+            ensemble_size=ensemble_size,
+            img_shape=(H, W),
+            local_shape=(H, W),
+            local_offset=(0, 0),
+            channel_names=list(channel_names),
+            lat_lon=lat_lon,
+            device=self.device,
+            scale=scale,
+            bias=bias,
+            output_channels=list(output_channels),
+            output_file=output_file,
+            output_memory_buffer_size=output_memory_buffer_size,
+        )
+
+    def _drive_full_rollout(self, buf, *, ic_data_per_batch, tstamps_per_batch):
+        """Feed multiple batches through update() with the canonical step ordering.
+
+        ``ic_data_per_batch[b]`` shape: (batch_size, num_rollout_steps+1,
+        ensemble_size, num_channels, H, W). For each batch and each timestep,
+        we extract the corresponding step slice and call update().
+        """
+        R_plus_1 = ic_data_per_batch[0].shape[1]
+        for batch_idx, (batch, tstamps) in enumerate(zip(ic_data_per_batch, tstamps_per_batch)):
+            for idt in range(R_plus_1):
+                buf.update(batch[:, idt], tstamps, idt=idt)
+
+    def test_dataset_shape_and_dtype(self, verbose=False):
+        # Verify the output HDF5 ``fields`` dataset has the expected
+        # (num_samples, R+1, ensemble_size, num_channels, H, W) shape and
+        # float32 dtype. This is the contract every consumer relies on.
+        out_path = os.path.join(self.tmpdir, "structure.h5")
+        num_samples = 4
+        num_rollout_steps = 2
+        ensemble_size = 3
+        img_shape = (4, 6)
+        output_channels = ["a", "c"]
+
+        buf = self._make_buffer(
+            output_file=out_path,
+            num_samples=num_samples,
+            batch_size=2,
+            num_rollout_steps=num_rollout_steps,
+            ensemble_size=ensemble_size,
+            img_shape=img_shape,
+            channel_names=("a", "b", "c"),
+            output_channels=output_channels,
+        )
+
+        # Feed enough zero data to fill all ICs through full rollouts.
+        zero_batches = [
+            torch.zeros(2, num_rollout_steps + 1, ensemble_size, 3, *img_shape)
+            for _ in range(2)   # 2 batches × 2 ICs each = 4 ICs total
+        ]
+        tstamps = [torch.tensor([1.0, 2.0]), torch.tensor([3.0, 4.0])]
+        self._drive_full_rollout(buf, ic_data_per_batch=zero_batches, tstamps_per_batch=tstamps)
+        buf.finalize()
+
+        with h5.File(out_path, "r") as f:
+            with self.subTest(desc="dataset shape"):
+                self.assertEqual(
+                    f["fields"].shape,
+                    (num_samples, num_rollout_steps + 1, ensemble_size, len(output_channels), *img_shape),
+                )
+            with self.subTest(desc="dataset dtype"):
+                self.assertEqual(f["fields"].dtype, np.float32)
+            with self.subTest(desc="dim labels"):
+                self.assertEqual(f["fields"].dims[0].label, "Timestamp in UTC time zone")
+                self.assertEqual(f["fields"].dims[1].label, "Lead time relative to timestamp")
+                self.assertEqual(f["fields"].dims[2].label, "Ensemble index")
+                self.assertEqual(f["fields"].dims[3].label, "Channel name")
+                self.assertEqual(f["fields"].dims[4].label, "Latitude in degrees")
+                self.assertEqual(f["fields"].dims[5].label, "Longitude in degrees")
+
+    def test_round_trip_single_flush(self, verbose=False):
+        # Whole run fits in a single in-memory buffer (no auto-flush).
+        # Per-IC data is a unique constant so we can verify routing into
+        # (sample, step, ensemble, channel, lat, lon) slots after readback.
+        out_path = os.path.join(self.tmpdir, "single_flush.h5")
+        num_samples = 4
+        R = 2
+        E = 1
+        H, W = 2, 4
+
+        buf = self._make_buffer(
+            output_file=out_path,
+            num_samples=num_samples, batch_size=2,
+            num_rollout_steps=R, ensemble_size=E,
+            img_shape=(H, W), channel_names=("a",),
+        )
+
+        # batch 0: ICs 0, 1; batch 1: ICs 2, 3
+        # data[ic, idt, e, c, h, w] = ic * 10 + idt
+        batches = []
+        for b in range(2):
+            arr = torch.zeros(2, R + 1, E, 1, H, W)
+            for i in range(2):
+                ic = b * 2 + i
+                for idt in range(R + 1):
+                    arr[i, idt, ...] = float(ic * 10 + idt)
+            batches.append(arr)
+        tstamps = [torch.tensor([100.0, 200.0]), torch.tensor([300.0, 400.0])]
+
+        self._drive_full_rollout(buf, ic_data_per_batch=batches, tstamps_per_batch=tstamps)
+        buf.finalize()
+
+        with h5.File(out_path, "r") as f:
+            data = f["fields"][...]
+            ts = f["timestamp"][...]
+
+        for ic in range(num_samples):
+            for idt in range(R + 1):
+                with self.subTest(desc=f"ic={ic} idt={idt}"):
+                    self.assertTrue(
+                        np.all(data[ic, idt] == float(ic * 10 + idt)),
+                        msg=f"slot (ic={ic}, idt={idt}) has wrong content",
+                    )
+        with self.subTest(desc="timestamps"):
+            self.assertTrue(np.array_equal(ts, np.array([100.0, 200.0, 300.0, 400.0], dtype=np.float64)))
+
+    def test_round_trip_with_auto_flush(self, verbose=False):
+        # ``output_memory_buffer_size`` < ``num_samples`` forces at least one
+        # mid-run flush. Verify the full file still contains every IC at the
+        # right (sample, step, ...) coordinates — i.e. the auto-flush bookkeeping
+        # for ``file_offset`` is correct.
+        out_path = os.path.join(self.tmpdir, "auto_flush.h5")
+        num_samples = 6
+        R = 1
+        H, W = 2, 3
+
+        buf = self._make_buffer(
+            output_file=out_path,
+            num_samples=num_samples, batch_size=2,
+            num_rollout_steps=R, ensemble_size=1,
+            img_shape=(H, W), channel_names=("a",),
+            output_memory_buffer_size=2,   # forces auto-flush every batch
+        )
+
+        # 3 batches × 2 ICs each = 6 ICs. Same encoding as single-flush case.
+        batches = []
+        for b in range(3):
+            arr = torch.zeros(2, R + 1, 1, 1, H, W)
+            for i in range(2):
+                ic = b * 2 + i
+                for idt in range(R + 1):
+                    arr[i, idt, ...] = float(ic * 10 + idt)
+            batches.append(arr)
+        tstamps = [torch.tensor([float(b * 2), float(b * 2 + 1)]) for b in range(3)]
+
+        self._drive_full_rollout(buf, ic_data_per_batch=batches, tstamps_per_batch=tstamps)
+        buf.finalize()
+
+        with h5.File(out_path, "r") as f:
+            data = f["fields"][...]
+            ts = f["timestamp"][...]
+
+        with self.subTest(desc="all ICs present"):
+            for ic in range(num_samples):
+                for idt in range(R + 1):
+                    self.assertTrue(
+                        np.all(data[ic, idt] == float(ic * 10 + idt)),
+                        msg=f"after auto-flush: slot (ic={ic}, idt={idt}) corrupt",
+                    )
+        with self.subTest(desc="timestamps in correct order across flushes"):
+            self.assertTrue(np.array_equal(ts, np.arange(num_samples, dtype=np.float64)))
+
+    def test_dim_scales_attached_and_correct(self, verbose=False):
+        # The fields dataset has 5 named dim scales: timestamp, lead_time,
+        # channel, lat, lon. Verify each resolves and contains the expected
+        # values (channels and lat/lon set unconditionally; timestamp populated
+        # via update() calls; lead_time computed from rollout_dt).
+        out_path = os.path.join(self.tmpdir, "scales.h5")
+        H, W = 3, 5
+        rollout_dt = 6
+        R = 2
+        channel_names = ("a", "b")
+        output_channels = ["a", "b"]
+        lat = [60.0, 0.0, -60.0]
+        lon = [0.0, 72.0, 144.0, 216.0, 288.0]
+
+        buf = self._make_buffer(
+            output_file=out_path,
+            num_samples=2, batch_size=2,
+            num_rollout_steps=R, rollout_dt=rollout_dt,
+            ensemble_size=1, img_shape=(H, W),
+            channel_names=channel_names, output_channels=output_channels,
+            lat_lon=(lat, lon),
+        )
+
+        zero_batch = torch.zeros(2, R + 1, 1, 2, H, W)
+        self._drive_full_rollout(
+            buf,
+            ic_data_per_batch=[zero_batch],
+            tstamps_per_batch=[torch.tensor([1234.0, 5678.0])],
+        )
+        buf.finalize()
+
+        with h5.File(out_path, "r") as f:
+            dset = f["fields"]
+            with self.subTest(desc="timestamp scale on dim 0"):
+                self.assertTrue(np.array_equal(dset.dims[0]["timestamp"][...], [1234.0, 5678.0]))
+            with self.subTest(desc="lead_time scale on dim 1"):
+                expected_lt = np.arange(0, (R + 1) * rollout_dt, rollout_dt, dtype=np.float64)
+                self.assertTrue(np.array_equal(dset.dims[1]["lead_time"][...], expected_lt))
+            with self.subTest(desc="channel scale on dim 3"):
+                names = [c.decode() for c in dset.dims[3]["channel"][...].tolist()]
+                self.assertEqual(names, output_channels)
+            with self.subTest(desc="lat scale on dim 4"):
+                self.assertTrue(np.allclose(dset.dims[4]["lat"][...], np.array(lat, dtype=np.float32)))
+            with self.subTest(desc="lon scale on dim 5"):
+                self.assertTrue(np.allclose(dset.dims[5]["lon"][...], np.array(lon, dtype=np.float32)))
+
+    def test_scale_and_bias_propagated_to_file(self, verbose=False):
+        # Constant input (ones) with non-trivial scale + bias should land in
+        # the file as scale*1 + bias per channel.
+        out_path = os.path.join(self.tmpdir, "scale_bias.h5")
+        scale = torch.tensor([2.0, 0.5])
+        bias = torch.tensor([1.0, -1.0])
+
+        buf = self._make_buffer(
+            output_file=out_path,
+            num_samples=2, batch_size=2,
+            num_rollout_steps=0, ensemble_size=1,
+            img_shape=(2, 2),
+            channel_names=("a", "b"), output_channels=["a", "b"],
+            scale=scale, bias=bias,
+        )
+
+        ones = torch.ones(2, 1, 1, 2, 2, 2)   # (batch, R+1, E, C, H, W)
+        self._drive_full_rollout(buf, ic_data_per_batch=[ones], tstamps_per_batch=[torch.tensor([0.0, 1.0])])
+        buf.finalize()
+
+        with h5.File(out_path, "r") as f:
+            data = f["fields"][...]   # (2, 1, 1, 2, 2, 2)
+
+        with self.subTest(desc="channel a = 2*1 + 1 = 3"):
+            self.assertTrue(np.all(data[:, :, :, 0, :, :] == 3.0))
+        with self.subTest(desc="channel b = 0.5*1 + (-1) = -0.5"):
+            self.assertTrue(np.all(data[:, :, :, 1, :, :] == -0.5))
+
+    def test_channel_mask_subset_written(self, verbose=False):
+        # full input has 3 channels (a, b, c); output_channels = (a, c).
+        # The file should have only 2 channels and they should be a/c values.
+        out_path = os.path.join(self.tmpdir, "mask.h5")
+
+        buf = self._make_buffer(
+            output_file=out_path,
+            num_samples=2, batch_size=2,
+            num_rollout_steps=0, ensemble_size=1,
+            img_shape=(2, 2),
+            channel_names=("a", "b", "c"), output_channels=["a", "c"],
+        )
+
+        # full pred has 3 channels; values 100/200/300 per channel
+        pred = torch.zeros(2, 1, 1, 3, 2, 2)
+        pred[..., 0, :, :] = 100.0   # a → kept
+        pred[..., 1, :, :] = 200.0   # b → dropped
+        pred[..., 2, :, :] = 300.0   # c → kept
+
+        self._drive_full_rollout(buf, ic_data_per_batch=[pred], tstamps_per_batch=[torch.tensor([0.0, 1.0])])
+        buf.finalize()
+
+        with h5.File(out_path, "r") as f:
+            data = f["fields"][...]
+            channel_names = [c.decode() for c in f["channel"][...].tolist()]
+
+        with self.subTest(desc="only 2 channels in file"):
+            self.assertEqual(data.shape[3], 2)
+            self.assertEqual(channel_names, ["a", "c"])
+        with self.subTest(desc="channel 'a' kept its value"):
+            self.assertTrue(np.all(data[:, :, :, 0, :, :] == 100.0))
+        with self.subTest(desc="channel 'c' kept its value"):
+            self.assertTrue(np.all(data[:, :, :, 1, :, :] == 300.0))
+
+    def test_finalize_idempotent(self, verbose=False):
+        # finalize() must be safe to call more than once. The recent fix
+        # (file_handle = None after close) makes the second call a no-op
+        # rather than an h5py error.
+        out_path = os.path.join(self.tmpdir, "idempotent.h5")
+        buf = self._make_buffer(output_file=out_path)
+
+        zero = torch.zeros(2, 2, 1, 2, 2, 4)
+        self._drive_full_rollout(buf, ic_data_per_batch=[zero], tstamps_per_batch=[torch.tensor([0.0, 1.0])])
+
+        buf.finalize()
+        with self.subTest(desc="file_handle nulled after first finalize"):
+            self.assertIsNone(buf.file_handle)
+
+        # Second finalize should not raise.
+        try:
+            buf.finalize()
+        except Exception as e:
+            self.fail(f"second finalize() raised: {e!r}")
+
+        # File on disk is unaffected and still readable.
+        with h5.File(out_path, "r") as f:
+            self.assertEqual(f["fields"].shape, (4, 2, 1, 2, 2, 4))
 
 
 if __name__ == "__main__":

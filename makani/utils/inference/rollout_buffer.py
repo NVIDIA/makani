@@ -34,6 +34,22 @@ import torch_harmonics as th
 import torch_harmonics.distributed as thd
 
 
+def _barrier(device):
+    """
+    Synchronize across ranks if a process group is initialized.
+
+    Wraps ``dist.barrier`` with two safety guards: it's a no-op when no
+    process group has been initialized, and it only passes ``device_ids``
+    on CUDA (``device.index`` is ``None`` for CPU and would make
+    ``dist.barrier(device_ids=[None])`` raise).
+    """
+    if not dist.is_initialized():
+        return
+    device_ids = [device.index] if device.type == "cuda" else None
+    dist.barrier(device_ids=device_ids)
+
+
+
 class DataBuffer(object, metaclass=ABCMeta):
     r"""
     DataBuffer class used as base class for online data analysis
@@ -268,19 +284,28 @@ class RolloutBuffer(DataBuffer):
 
     def zero_buffers(self):
         """
-        set buffers to zero
+        Reset all buffer state to a fresh post-construction state. Zeros the
+        data tensors AND resets ``buffer_offset`` so callers may invoke this
+        mid-rollout without leaving a stale offset pointing into newly-zeroed
+        slots.
+
+        This mirrors ``MeanStdBuffer.zero_buffers`` (which also resets its
+        offset analog ``num_samples_tracked``) for consistency.
         """
 
         with torch.no_grad():
             self.timestamp_data_cpu.fill_(0.0)
             self.rollout_data_cpu.fill_(0.0)
+        self.buffer_offset = 0
 
         return
 
     def _flush_to_disk(self):
 
-        # wait for everything to complete
-        torch.cuda.synchronize(device=self.device)
+        # wait for everything to complete (CUDA only — synchronize is a CUDA-specific
+        # primitive and would raise on CPU-only builds).
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(device=self.device)
 
         if self.file_handle is not None:
             # batch ranges in file
@@ -306,13 +331,12 @@ class RolloutBuffer(DataBuffer):
                 self.timestamp_buffer_disk[batch_range] = tarr[batch_range_buffer, ...]
             self.rollout_buffer_disk[batch_range, :, ens_range, :, lat_range, lon_range] = self.rollout_data_cpu.numpy()[batch_range_buffer, ...]
 
-        # reset buffers
-        self.zero_buffers()
-
-        # reset pointers
-        if self.file_handle is not None:
+            # advance the file pointer BEFORE zero_buffers — zero_buffers now
+            # resets buffer_offset, so we must capture it here while still valid.
             self.file_offset += self.buffer_offset
-        self.buffer_offset = 0
+
+        # reset buffers (also resets buffer_offset)
+        self.zero_buffers()
 
         return
 
@@ -344,18 +368,22 @@ class RolloutBuffer(DataBuffer):
 
     def finalize(self):
 
-        if dist.is_initialized():
-            dist.barrier(device_ids=[self.device.index])
+        _barrier(self.device)
 
-        # write outstanding copies to disk
-        self._flush_to_disk()
+        # Flush only when there's an output file. ``_flush_to_disk`` doubles as
+        # a destructive reset: in the no-file path it just zeros the buffer.
+        # Calling it here without a file would silently destroy the in-memory
+        # data the caller may want to read.
+        if self.file_handle is not None:
+            self._flush_to_disk()
 
-        if dist.is_initialized():
-            dist.barrier(device_ids=[self.device.index])
+        _barrier(self.device)
 
-        # close output file
+        # Close the output file and null the handle so a subsequent finalize()
+        # or __del__ doesn't try to operate on an already-closed h5py object.
         if self.file_handle is not None:
             self.file_handle.close()
+            self.file_handle = None
 
         return
 
@@ -592,8 +620,7 @@ class TemporalAverageBuffer(MeanStdBuffer):
         # close file
         file_handle.close()
 
-        if dist.is_initialized():
-            dist.barrier(device_ids=[self.device.index])
+        _barrier(self.device)
 
         return
 
@@ -614,8 +641,7 @@ class TemporalAverageBuffer(MeanStdBuffer):
 
     def finalize(self):
 
-        if dist.is_initialized():
-            dist.barrier(device_ids=[self.device.index])
+        _barrier(self.device)
 
         # compute common mean
         self._aggregate_stats("data")
@@ -627,8 +653,7 @@ class TemporalAverageBuffer(MeanStdBuffer):
         if self.output_file is not None:
             self._write_output_data(mean.cpu().numpy(), std.cpu().numpy())
 
-        if dist.is_initialized():
-            dist.barrier(device_ids=[self.device.index])
+        _barrier(self.device)
 
         return
 
@@ -760,8 +785,7 @@ class SpectrumAverageBuffer(MeanStdBuffer):
 
     def finalize(self):
 
-        if dist.is_initialized():
-            dist.barrier(device_ids=[self.device.index])
+        _barrier(self.device)
 
         # compute common mean
         self._aggregate_stats("batch")
@@ -773,8 +797,7 @@ class SpectrumAverageBuffer(MeanStdBuffer):
         if self.output_file is not None:
             self._write_output_data(mean.cpu().numpy(), std.cpu().numpy())
 
-        if dist.is_initialized():
-            dist.barrier(device_ids=[self.device.index])
+        _barrier(self.device)
 
         return
 
@@ -843,8 +866,7 @@ class SpectrumAverageBuffer(MeanStdBuffer):
         # close file
         file_handle.close()
 
-        if dist.is_initialized():
-            dist.barrier(device_ids=[self.device.index])
+        _barrier(self.device)
 
         return
 
@@ -990,8 +1012,7 @@ class ZonalSpectrumAverageBuffer(MeanStdBuffer):
 
     def finalize(self):
 
-        if dist.is_initialized():
-            dist.barrier(device_ids=[self.device.index])
+        _barrier(self.device)
 
         # compute common mean
         self._aggregate_stats("batch")
@@ -1003,8 +1024,7 @@ class ZonalSpectrumAverageBuffer(MeanStdBuffer):
         if self.output_file is not None:
             self._write_output_data(mean.cpu().numpy(), std.cpu().numpy())
 
-        if dist.is_initialized():
-            dist.barrier(device_ids=[self.device.index])
+        _barrier(self.device)
 
         return
 
@@ -1083,7 +1103,6 @@ class ZonalSpectrumAverageBuffer(MeanStdBuffer):
         # close file
         file_handle.close()
 
-        if dist.is_initialized():
-            dist.barrier(device_ids=[self.device.index])
+        _barrier(self.device)
 
         return
