@@ -286,11 +286,17 @@ class TestConcatenateDatasetChannelsAndTime(unittest.TestCase):
             cls._write_h5(os.path.join(cls.dir_b, f"{year}.h5"), data_b, ts, cls.channels_b, latitudes, longitudes)
 
     @staticmethod
-    def _write_h5(path, data, ts, channel_names, lats, lons, entry_key=H5_PATH):
-        """Write a single makani-format HDF5 file with annotation scales."""
+    def _write_h5(path, data, ts, channel_names, lats, lons, entry_key=H5_PATH, annotate=True):
+        """Write a single makani-format HDF5 file. When ``annotate=False`` the
+        coordinate datasets and dim scales are omitted, which exercises the
+        timestamp-derivation fallback in ``concatenate()``."""
         chanlen = max(len(c) for c in channel_names)
         with h5.File(path, "w") as f:
             f.create_dataset(entry_key, data=data)
+
+            if not annotate:
+                return
+
             f.create_dataset("timestamp", data=ts)
             f.create_dataset("lat", data=lats)
             f.create_dataset("lon", data=lons)
@@ -797,6 +803,114 @@ class TestConcatenateDatasetChannelsAndTime(unittest.TestCase):
                     buf = np.empty(expected.shape, dtype=expected.dtype)
                     dset.read_direct(buf, source_sel=np.s_[t_slice, :, :, :])
                     self.assertTrue(np.array_equal(buf, expected, equal_nan=True))
+
+    @parameterized.expand([1, 5], skip_on_empty=False)
+    def test_concatenate_unannotated_source_files(self, dhoursrel):
+        """
+        Verify the timestamp-derivation fallback when source files lack dim scales.
+
+        ``concatenate()`` has a try/except block that derives timestamps from
+        ``years[idx]`` and ``dhours * dhoursrel`` when
+        ``f[entry_key].dims[0]["timestamp"]`` is unavailable. We write source
+        files with no scales attached and confirm:
+          1. the derived timestamp vector matches the documented formula,
+          2. data still round-trips correctly,
+          3. dim labels still get applied to the virtual dataset.
+
+        Parameterized over ``dhoursrel`` to catch off-by-one bugs in the
+        ``h * dhours * dhoursrel`` derivation specifically.
+        """
+        from data_process.concatenate_dataset import concatenate
+
+        with tempfile.TemporaryDirectory() as sub_a, \
+             tempfile.TemporaryDirectory() as sub_b, \
+             tempfile.TemporaryDirectory() as sub_out:
+
+            n = 32
+            dhours_local = (365 * 24) // n
+            rng = np.random.default_rng(seed=4242)
+
+            data_a = {}
+            data_b = {}
+            for year in self.years:
+                da = rng.random((n, self.num_chans_a, self.img_h, self.img_w), dtype=np.float32)
+                db = rng.random((n, self.num_chans_b, self.img_h, self.img_w), dtype=np.float32)
+                data_a[year] = da
+                data_b[year] = db
+
+                # annotate=False → no scales, no timestamp/lat/lon/channel datasets.
+                # Forces concatenate() into the derive-timestamps fallback.
+                self._write_h5(
+                    os.path.join(sub_a, f"{year}.h5"),
+                    da, None, self.channels_a, self.latitudes, self.longitudes,
+                    annotate=False,
+                )
+                self._write_h5(
+                    os.path.join(sub_b, f"{year}.h5"),
+                    db, None, self.channels_b, self.latitudes, self.longitudes,
+                    annotate=False,
+                )
+
+            metadata = dict(
+                dataset_name="testing_unannotated",
+                h5_path=H5_PATH,
+                dims=["time", "channel", "lat", "lon"],
+                dhours=dhours_local,
+                coords=dict(
+                    grid_type="equiangular",
+                    lat=self.latitudes.tolist(),
+                    lon=self.longitudes.tolist(),
+                    channel=self.channels_combined,
+                ),
+            )
+
+            output_file = os.path.join(sub_out, f"concatenated_unannotated_dhrel{dhoursrel}.h5v")
+            concatenate(
+                input_dirs=[sub_a, sub_b],
+                output_file=output_file,
+                metadata=metadata,
+                channel_names=[self.channels_a, self.channels_b],
+                file_names_to_concatenate=[f"{y}.h5" for y in self.years],
+                years=self.years,
+                dhoursrel=dhoursrel,
+            )
+
+            n_red = n // dhoursrel
+
+            # Reproduce the formula from concatenate's fallback path:
+            # ts = jan_01_epoch + h * dhours * dhoursrel for h in range(ne_red)
+            # If concatenate's derivation drifts (off-by-one in dhoursrel multiplier,
+            # wrong base date, etc.), the comparison fails.
+            expected_ts = []
+            for year in self.years:
+                jan_01 = dt.datetime(year, 1, 1, 0, 0, 0, tzinfo=dt.timezone.utc)
+                ts = np.array(
+                    [(jan_01 + dt.timedelta(hours=h * dhours_local * dhoursrel)).timestamp() for h in range(n_red)],
+                    dtype=np.float64,
+                )
+                expected_ts.append(ts)
+            expected_ts = np.concatenate(expected_ts, axis=0)
+
+            expected_data = np.concatenate(
+                [
+                    np.concatenate([data_a[y][::dhoursrel], data_b[y][::dhoursrel]], axis=1)
+                    for y in self.years
+                ],
+                axis=0,
+            )
+
+            with h5.File(output_file, "r") as f_conc:
+                with self.subTest(desc="derived timestamps match formula"):
+                    self.assertTrue(
+                        compare_arrays("derived ts", f_conc["timestamp"][...], expected_ts)
+                    )
+                with self.subTest(desc="data round-trips with unannotated sources"):
+                    self.assertTrue(
+                        compare_arrays("unannotated data", f_conc[H5_PATH][...], expected_data)
+                    )
+                with self.subTest(desc="dim labels still applied"):
+                    self.assertEqual(f_conc[H5_PATH].dims[0].label, "Timestamp in UTC time zone")
+                    self.assertEqual(f_conc[H5_PATH].dims[1].label, "Channel name")
 
 
 class TestGetStats(unittest.TestCase):
