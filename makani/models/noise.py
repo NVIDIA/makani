@@ -119,6 +119,13 @@ class BaseNoiseS2(nn.Module):
     def is_stateful(self):
         raise NotImplementedError("is_stateful method not implemented for this noise class")
 
+    def extra_repr(self):
+        return (
+            f"img_shape=({self.nlat}, {self.nlon}), "
+            f"num_channels={self.num_channels}, num_time_steps={self.num_time_steps}, "
+            f"lmax={self.lmax}, reflect={self.reflect}"
+        )
+
     def set_rng(self, seed=333):
         self.rng_cpu = torch.Generator(device=torch.device("cpu"))
         self.rng_cpu.manual_seed(seed)
@@ -236,6 +243,11 @@ class IsotropicGaussianRandomFieldS2(BaseNoiseS2):
         """
         super().__init__(img_shape=img_shape, batch_size=batch_size, num_channels=num_channels, num_time_steps=num_time_steps, grid_type=grid_type, seed=seed, reflect=reflect)
 
+        # stash config for extra_repr
+        self.sigma = sigma
+        self.alpha = alpha
+        self.learnable = learnable
+
         if not isinstance(alpha, float):
             alpha = float(alpha)
 
@@ -268,6 +280,12 @@ class IsotropicGaussianRandomFieldS2(BaseNoiseS2):
     @override
     def is_stateful(self):
         return False
+
+    def extra_repr(self):
+        return (
+            super().extra_repr()
+            + f", sigma={self.sigma}, alpha={self.alpha}, learnable={self.learnable}"
+        )
 
     @override
     def forward(self, update_internal_state=False):
@@ -353,6 +371,12 @@ class DiffusionNoiseS2(BaseNoiseS2):
         """
         super().__init__(img_shape=img_shape, batch_size=batch_size, num_channels=num_channels, num_time_steps=num_time_steps, grid_type=grid_type, seed=seed, reflect=reflect)
 
+        # stash config for extra_repr (store originals before processing into tensors below)
+        self.sigma = sigma
+        self.kT = kT
+        self.lambd = lambd
+        self.learnable = learnable
+
         # Compute l:
         ls = torch.arange(self.lmax)
 
@@ -433,6 +457,12 @@ class DiffusionNoiseS2(BaseNoiseS2):
     @override
     def is_stateful(self):
         return True
+
+    def extra_repr(self):
+        return (
+            super().extra_repr()
+            + f", sigma={self.sigma}, kT={self.kT}, lambd={self.lambd}, learnable={self.learnable}"
+        )
 
     # this routine generates a noise sample for a single time step and updates the state accordingly, by appending the last time step
     @override
@@ -583,6 +613,9 @@ class DummyNoiseS2(BaseNoiseS2):
     @override
     def is_stateful(self):
         return False
+
+    def extra_repr(self):
+        return super().extra_repr() + f", mode={self.mode}"
 
     @override
     def update(self, replace_state=False, batch_size=None):
