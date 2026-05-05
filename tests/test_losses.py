@@ -1432,6 +1432,85 @@ class TestLossHandler(unittest.TestCase):
         self.assertIsNotNone(prd.grad)
         self.assertFalse(torch.isnan(prd.grad).any())
 
+    # ------------------------------------------------------------------
+    # multistep with empty {} dict — falls back to "constant" weight_type
+    # (loss.py:212, _compute_multistep_weight default branch)
+    # ------------------------------------------------------------------
+
+    def test_multistep_default_weight_type(self):
+        """params.multistep = {} (no weight_type key) must fall back to 'constant'.
+        Verifies the else branch in _compute_multistep_weight that picks the
+        default when the kwarg dict doesn't have weight_type."""
+        self.params.n_future = 2
+        self.params.losses = [{"type": "l2", "channel_weights": "constant"}]
+        self.params.multistep = {}      # no weight_type → defaults to constant
+
+        loss_obj = LossHandler(self.params)
+
+        # constant mode: each step weighted 1/(n_future+1) before tiling over channels
+        ncw = loss_obj.channel_weights.shape[1]
+        expected = torch.full(
+            ((self.params.n_future + 1) * ncw,), 1.0 / (self.params.n_future + 1)
+        )
+        self.assertTrue(
+            compare_tensors("default multistep_weight", loss_obj.multistep_weight, expected)
+        )
+
+    # ------------------------------------------------------------------
+    # channel_weights given as a Python list — loss.py:160-164
+    # The handler accepts a nested list (shape (1, N)) in addition to the
+    # named-string modes ("constant", "auto", etc.).
+    # ------------------------------------------------------------------
+
+    def test_channel_weights_as_list(self):
+        """A list-valued channel_weights bypasses the named-string branch and is
+        loaded directly. Must be nested (shape (1, N)) so the assert at
+        loss.py:164 passes."""
+        custom = [[0.1, 0.2, 0.3, 0.4, 0.5]]   # nested → shape (1, 5) for N=5
+        self.params.losses = [{"type": "l2", "channel_weights": custom}]
+        loss_obj = LossHandler(self.params)
+
+        # before normalization, chw equals the list. The handler ALSO doesn't
+        # renormalize here (that's only in compute_channel_weighting paths),
+        # so we should see the literal values up to a possible reshape.
+        self.assertEqual(loss_obj.channel_weights.shape, (1, 5))
+        self.assertTrue(
+            compare_tensors(
+                "list channel_weights",
+                loss_obj.channel_weights, torch.tensor(custom, dtype=torch.float32),
+            )
+        )
+
+    # ------------------------------------------------------------------
+    # relative_weight per loss — loss.py:172-173
+    # Multiplies the channel weights of one loss by a scalar before they're
+    # registered into the channel_weights buffer. Used to balance the
+    # contributions of multiple losses without changing their internal weights.
+    # ------------------------------------------------------------------
+
+    def test_relative_weight_scales_channel_weights(self, verbose=False):
+        """relative_weight on a loss spec multiplies that loss's chw entry.
+        Compare two LossHandlers — one with relative_weight=1.0 (identity, the
+        default-equivalent), one with 2.0 — and check that the second's
+        channel_weights are exactly 2× the first's."""
+        base = {"type": "l2", "channel_weights": "constant", "relative_weight": 1.0}
+        boosted = {"type": "l2", "channel_weights": "constant", "relative_weight": 2.0}
+
+        self.params.losses = [base]
+        loss_obj_base = LossHandler(self.params)
+
+        self.params.losses = [boosted]
+        loss_obj_boosted = LossHandler(self.params)
+
+        self.assertTrue(
+            compare_tensors(
+                "relative_weight scaling",
+                loss_obj_boosted.channel_weights,
+                2.0 * loss_obj_base.channel_weights,
+                verbose=verbose,
+            )
+        )
+
 
 # ===========================================================================
 class TestComputeChannelWeightingHelper(unittest.TestCase):
