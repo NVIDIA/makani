@@ -143,6 +143,7 @@ _COMMON_NONNEG = [
     ("spectral_l2",), ("spectral_h1",),
     ("drift_regularization",),
     ("crps_cdf",), ("crps_gauss",),
+    ("crps_pwm",), ("crps_naive_skillspread",),
 ]
 
 # Losses expected to be (near) zero when prd perfectly matches tar.
@@ -156,6 +157,7 @@ _COMMON_ZERO_PERFECT = [
     ("spectral_l2",), ("spectral_h1",),
     ("drift_regularization",),
     ("crps_cdf",), ("crps_gauss",),
+    ("crps_pwm",), ("crps_naive_skillspread",),
 ]
 
 # All losses participate in the batch-size independence test.
@@ -165,6 +167,7 @@ _COMMON_BATCHSIZE = [
     ("spectral_l2",), ("spectral_h1",),
     ("drift_regularization",),
     ("crps_cdf",), ("crps_gauss",),
+    ("crps_pwm",), ("crps_naive_skillspread",),
     ("nll",),
     ("mmd",),
 ]
@@ -205,6 +208,12 @@ class TestLossCommon(unittest.TestCase):
         if name == "crps_gauss":
             return CRPSLoss(**_GEOM_KWARGS, crps_type="gauss",
                                     spatial_distributed=False, ensemble_distributed=False, eps=1e-5)
+        if name == "crps_pwm":
+            return CRPSLoss(**_GEOM_KWARGS, crps_type="probability weighted moment",
+                                    spatial_distributed=False, ensemble_distributed=False)
+        if name == "crps_naive_skillspread":
+            return CRPSLoss(**_GEOM_KWARGS, crps_type="naive skillspread",
+                                    spatial_distributed=False, ensemble_distributed=False)
         if name == "nll":
             return EnsembleNLLLoss(**_GEOM_KWARGS)
         if name == "mmd":
@@ -217,7 +226,7 @@ class TestLossCommon(unittest.TestCase):
         """Return *(prd, tar)*.  Ensemble losses get a 5-D prd; others 4-D."""
         E = cls._E
         tar = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
-        if name in ("crps_cdf", "crps_gauss", "nll", "mmd"):
+        if name in ("crps_cdf", "crps_gauss", "crps_pwm", "crps_naive_skillspread", "nll", "mmd"):
             if perfect:
                 # all E members equal the observation
                 prd = tar.unsqueeze(1).expand(_BATCH, E, _NUM_CH, _IMG_H, _IMG_W).clone()
@@ -1311,7 +1320,62 @@ class TestCRPSLossExtended(unittest.TestCase):
             f"E={ensemble_size}: CDF and skillspread(alpha=0) gradients diverged",
         )
 
-    @parameterized.expand([("cdf",), ("skillspread",)])
+    # ------ skillspread (rank trick) == naive skillspread (O(N²) pairwise) ------
+    #
+    # Both compute fair CRPS = eskill - 0.5 * espread.  The rank-based version
+    # uses the order-statistic identity  sum_{i<j} |F_i - F_j| = sum_k (2k-N-1) F_(k)
+    # to collapse the O(N²) pairwise sum into an O(N log N) sort + weighted sum;
+    # the naive version evaluates the pairwise sum directly.  On real-valued
+    # ensembles they must produce numerically identical results, and identical
+    # gradients, for any alpha in [0, 1].
+    #
+    # Why test E=2: the rank coefficients reduce to (2*1-2-1, 2*2-2-1) = (-1, +1)
+    # at N=2, which is also the smallest case where the naive O(N²) pairwise
+    # tensor has off-diagonal terms — a known edge-case worth pinning down.
+
+    @parameterized.expand([(2, 1.0), (5, 1.0), (10, 1.0), (5, 0.0), (5, 0.5)])
+    def test_skillspread_equals_naive_skillspread(self, ensemble_size, alpha, verbose=False):
+        """Rank-based skillspread and naive skillspread must agree on real-valued forecasts
+        for any alpha (the (N - 1 + alpha) / (N²(N - 1)) factor is identical in both)."""
+        fn_skill = self._fn("skillspread", alpha=alpha)
+        fn_naive = self._fn("naive skillspread", alpha=alpha)
+        set_seed(333)
+        fc  = torch.randn(_BATCH, ensemble_size, _NUM_CH, _IMG_H, _IMG_W)
+        obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
+        result_skill = fn_skill(fc, obs)
+        result_naive = fn_naive(fc, obs)
+        self.assertTrue(
+            compare_tensors(
+                f"skillspread vs naive skillspread E={ensemble_size} alpha={alpha}",
+                result_skill, result_naive, atol=1e-5, rtol=1e-4, verbose=verbose,
+            ),
+            f"E={ensemble_size} alpha={alpha}: skillspread and naive skillspread diverged beyond float32 rounding",
+        )
+
+    @parameterized.expand([(2, 1.0), (5, 1.0), (10, 1.0), (5, 0.0), (5, 0.5)])
+    def test_skillspread_equals_naive_skillspread_gradients(self, ensemble_size, alpha, verbose=False):
+        """Rank-based and naive skillspread must produce identical gradients w.r.t. forecasts."""
+        fn_skill = self._fn("skillspread", alpha=alpha)
+        fn_naive = self._fn("naive skillspread", alpha=alpha)
+        set_seed(333)
+        fc_skill = torch.randn(_BATCH, ensemble_size, _NUM_CH, _IMG_H, _IMG_W, requires_grad=True)
+        fc_naive = fc_skill.detach().clone().requires_grad_(True)
+        obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
+
+        fn_skill(fc_skill, obs).sum().backward()
+        fn_naive(fc_naive, obs).sum().backward()
+
+        self.assertIsNotNone(fc_skill.grad)
+        self.assertIsNotNone(fc_naive.grad)
+        self.assertTrue(
+            compare_tensors(
+                f"skillspread vs naive skillspread gradients E={ensemble_size} alpha={alpha}",
+                fc_skill.grad, fc_naive.grad, atol=1e-4, rtol=1e-3, verbose=verbose,
+            ),
+            f"E={ensemble_size} alpha={alpha}: skillspread and naive skillspread gradients diverged",
+        )
+
+    @parameterized.expand([("cdf",), ("skillspread",), ("naive skillspread",), ("probability weighted moment",)])
     def test_gradient_sum_zero_on_perfect_prediction(self, crps_type, verbose=False):
         """Gradients summed over the ensemble dim must be zero at every pixel for a
         perfect forecast (all members == observation).  For the CDF kernel this
@@ -1375,7 +1439,7 @@ class TestSpectralCRPSLoss(unittest.TestCase):
 
     # ------ output shape: (B, C) for all three kernels ------
 
-    @parameterized.expand([("cdf",), ("skillspread",), ("gauss",)])
+    @parameterized.expand([("cdf",), ("skillspread",), ("gauss",), ("probability weighted moment",)])
     def test_output_shape(self, crps_type):
         fn  = self._fn(crps_type)
         fc  = torch.randn(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W)
@@ -1385,7 +1449,7 @@ class TestSpectralCRPSLoss(unittest.TestCase):
 
     # ------ non-negative output ------
 
-    @parameterized.expand([("cdf",), ("skillspread",), ("gauss",)])
+    @parameterized.expand([("cdf",), ("skillspread",), ("gauss",), ("probability weighted moment",)])
     def test_nonneg(self, crps_type):
         fn  = self._fn(crps_type)
         fc  = torch.randn(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W)
@@ -1398,7 +1462,7 @@ class TestSpectralCRPSLoss(unittest.TestCase):
 
     # ------ zero on perfect prediction for cdf and skillspread ------
 
-    @parameterized.expand([("cdf",), ("skillspread",)])
+    @parameterized.expand([("cdf",), ("skillspread",), ("probability weighted moment",)])
     def test_zero_on_perfect_prediction(self, crps_type, verbose=False):
         """Perfect ensemble (all members = observation) must give zero loss."""
         fn  = self._fn(crps_type)
@@ -1506,7 +1570,7 @@ class TestSpectralCRPSLoss(unittest.TestCase):
         self.assertFalse(torch.isnan(fc.grad).any(), "NaN in fc.grad")
         self.assertFalse(torch.isinf(fc.grad).any(), "Inf in fc.grad")
 
-    @parameterized.expand([("cdf",), ("skillspread",)])
+    @parameterized.expand([("cdf",), ("skillspread",), ("probability weighted moment",)])
     def test_backward_finite_on_perfect_prediction(self, crps_type):
         """Perfect ensemble (all members == obs) must produce finite gradients."""
         fn  = self._fn(crps_type)
