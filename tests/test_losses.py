@@ -43,6 +43,7 @@ from makani.utils.losses import (
 )
 from makani.utils.losses.energy_score import SobolevEnergyScoreLoss, SpectralCoherenceLoss, CorrectedSpectralL2EnergyScoreLoss
 from makani.utils.losses.crps_loss import KernelScoreLoss
+from makani.utils.losses.base_loss import _compute_channel_weighting_helper
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from .testutils import disable_tf32, set_seed, get_default_parameters, compare_tensors, compare_arrays
@@ -1151,6 +1152,233 @@ class TestLossHandler(unittest.TestCase):
         with self.subTest(desc="var"):
             self.assertTrue(compare_tensors("var", var, expected_var, verbose=verbose))
 
+    # ------------------------------------------------------------------
+    # multistep_loss_weight modes — _compute_multistep_weight in loss.py:206
+    # The default "constant" is exercised by test_loss_multistep above, but
+    # "balanced", "linear", "last", "last-n-1", "custom" are all currently dead.
+    # ------------------------------------------------------------------
+
+    @parameterized.expand([
+        ("constant",),
+        ("balanced",),
+        ("linear",),
+        ("last",),
+        ("last-n-1",),
+    ])
+    def test_multistep_weight_mode(self, weight_type):
+        """Each multistep weight mode must build, forward, and backward without error.
+        Also asserts the computed multistep_weight buffer has the expected length
+        (n_future + 1) — the only invariant common to all modes."""
+        self.params.n_future = 2
+        self.params.losses = [{"type": "l2", "channel_weights": "constant"}]
+        self.params.multistep = {"weight_type": weight_type}
+
+        loss_obj = LossHandler(self.params)
+
+        # the multistep_weight buffer is tiled by ncw; the per-step prefix is n_future+1 entries
+        # tiled to (n_future + 1) * ncw — verify length matches that contract
+        expected_len = (self.params.n_future + 1) * loss_obj.channel_weights.shape[1]
+        self.assertEqual(loss_obj.multistep_weight.numel(), expected_len)
+
+        shape = (self.params.batch_size, (self.params.n_future + 1) * self.params.N_out_channels,
+                 self.params.img_shape_x, self.params.img_shape_y)
+        inp = torch.randn(*shape, requires_grad=True)
+        tar = torch.randn(*shape)
+        out = loss_obj(tar, inp)
+        self.assertEqual(torch.numel(out), 1)
+        self.assertTrue(torch.isfinite(out))
+        out.backward()
+        self.assertIsNotNone(inp.grad)
+
+    def test_multistep_weight_custom(self):
+        """custom mode passes through user-supplied weights and asserts shape match."""
+        self.params.n_future = 2
+        self.params.losses = [{"type": "l2", "channel_weights": "constant"}]
+        self.params.multistep = {"weight_type": "custom", "weights": [0.1, 0.3, 0.6]}
+
+        loss_obj = LossHandler(self.params)
+        # the prefix of multistep_weight (before tiling over channels) must equal
+        # the user-supplied weights — pull out the per-step values
+        ncw = loss_obj.channel_weights.shape[1]
+        per_step = loss_obj.multistep_weight.reshape(self.params.n_future + 1, ncw)[:, 0]
+        self.assertTrue(
+            compare_tensors("custom multistep weights", per_step, torch.tensor([0.1, 0.3, 0.6]))
+        )
+
+    def test_multistep_weight_custom_wrong_length_raises(self):
+        """custom weights must match n_future + 1 — assertion in _compute_multistep_weight."""
+        self.params.n_future = 2
+        self.params.losses = [{"type": "l2"}]
+        self.params.multistep = {"weight_type": "custom", "weights": [0.1, 0.9]}  # too short
+        with self.assertRaises(AssertionError):
+            LossHandler(self.params)
+
+    def test_multistep_weight_unknown_raises(self):
+        """Unknown weight_type must raise ValueError."""
+        self.params.n_future = 2
+        self.params.losses = [{"type": "l2"}]
+        self.params.multistep = {"weight_type": "bogus_mode"}
+        with self.assertRaises(ValueError):
+            LossHandler(self.params)
+
+    # ------------------------------------------------------------------
+    # tendency: True path — loss.py:360-386
+    # When ANY loss in the list has tendency=True AND inp is passed to forward,
+    # prd/tar are transformed to (prd - inp_state) / (tar - inp_state).
+    # ------------------------------------------------------------------
+
+    def test_tendency_loss_changes_output(self, verbose=False):
+        """Passing inp= to a tendency-flagged loss must change the loss value.
+        With tendency: True the loss is computed on (prd - inp_state) vs (tar - inp_state)
+        instead of on prd vs tar directly.
+
+        We must use a loss that is NOT translation-invariant in (prd, tar) —
+        plain L2 of the difference is invariant ((prd-inp) - (tar-inp) = prd - tar),
+        so it can't distinguish the two paths. Relative L2 divides by ||tar||,
+        which becomes ||tar - inp|| under tendency, making the loss differ.
+        """
+        self.params.losses = [
+            {"type": "l2", "channel_weights": "constant", "tendency": True,
+             "parameters": {"relative": True}},
+        ]
+        loss_obj = LossHandler(self.params)
+
+        shape = (self.params.batch_size, self.params.N_out_channels,
+                 self.params.img_shape_x, self.params.img_shape_y)
+        prd = torch.randn(*shape)
+        tar = torch.randn(*shape)
+        inp = torch.randn(*shape)   # non-zero, so the tendency transform is non-trivial
+
+        # without inp, the tendency branch is skipped (inp is None) — falls back to relative L2 on (prd, tar)
+        out_no_inp = loss_obj(prd, tar)
+        # with inp, tendency transform is active — denominator becomes ||tar - inp||, so the loss differs
+        out_with_inp = loss_obj(prd, tar, inp=inp)
+
+        self.assertFalse(
+            compare_tensors("tendency vs no-tendency", out_no_inp, out_with_inp, atol=1e-6, rtol=1e-5),
+            f"tendency path didn't change the output: no_inp={out_no_inp.item()} with_inp={out_with_inp.item()}",
+        )
+
+    def test_tendency_zero_input_recovers_no_tendency(self, verbose=False):
+        """When inp is exactly zero the tendency-transformed (prd - 0) is just prd,
+        so the loss must equal the no-tendency loss. Sanity check on the formula."""
+        self.params.losses = [
+            {"type": "l2", "channel_weights": "constant", "tendency": True,
+             "parameters": {"relative": True}},
+        ]
+        loss_obj = LossHandler(self.params)
+
+        shape = (self.params.batch_size, self.params.N_out_channels,
+                 self.params.img_shape_x, self.params.img_shape_y)
+        prd = torch.randn(*shape)
+        tar = torch.randn(*shape)
+        inp_zero = torch.zeros(*shape)
+
+        out_no_inp = loss_obj(prd, tar)
+        out_inp_zero = loss_obj(prd, tar, inp=inp_zero)
+        self.assertTrue(
+            compare_tensors("tendency w/ zero inp", out_no_inp, out_inp_zero, verbose=verbose)
+        )
+
+    # ------------------------------------------------------------------
+    # random_slice_loss path — loss.py:330-349
+    # Mixes channels through a random orthonormal matrix before computing the loss.
+    # ------------------------------------------------------------------
+
+    def test_random_slice_loss(self):
+        """random_slice_loss=True must run end-to-end without crashing and produce
+        a finite scalar loss with finite gradients."""
+        self.params.losses = [{"type": "l2", "channel_weights": "constant"}]
+        self.params.random_slice_loss = True
+
+        loss_obj = LossHandler(self.params)
+
+        shape = (self.params.batch_size, self.params.N_out_channels,
+                 self.params.img_shape_x, self.params.img_shape_y)
+        inp = torch.randn(*shape, requires_grad=True)
+        tar = torch.randn(*shape)
+        out = loss_obj(tar, inp)
+        self.assertTrue(torch.isfinite(out))
+        out.backward()
+        self.assertIsNotNone(inp.grad)
+        self.assertFalse(torch.isnan(inp.grad).any())
+
+    # ------------------------------------------------------------------
+    # balanced_weighting path — loss.py:420-424
+    # Activated only when track_running_stats=True AND num_batches_tracked > 100.
+    # ------------------------------------------------------------------
+
+    def test_balanced_weighting_after_warmup(self):
+        """balanced_weighting=True with > 100 tracked batches activates the
+        chw / (mean + eps) branch. Forward must remain finite under that path."""
+        self.params.losses = [{"type": "l2"}]
+        self.params.balanced_weighting = True
+
+        loss_obj = LossHandler(self.params, track_running_stats=True)
+        loss_obj.train()
+
+        shape = (self.params.batch_size, self.params.N_out_channels,
+                 self.params.img_shape_x, self.params.img_shape_y)
+
+        # warm up past the 100-batch gate that swaps from ones-like to running mean
+        for _ in range(105):
+            prd = torch.randn(*shape)
+            tar = torch.randn(*shape)
+            loss_obj(prd, tar)
+
+        # post-warmup forward — exercises the balanced_weighting branch
+        out = loss_obj(torch.randn(*shape), torch.randn(*shape))
+        self.assertTrue(torch.isfinite(out))
+
+
+# ===========================================================================
+class TestComputeChannelWeightingHelper(unittest.TestCase):
+    """Tests for _compute_channel_weighting_helper in base_loss.py.
+
+    The helper maps a list of channel names + a mode string to a normalized
+    channel-weight vector, optionally multiplied by a time-difference scaling
+    tensor. Five named modes ("constant", "auto", "new auto", "custom",
+    "pangu") plus the unknown-mode error path.
+    """
+
+    def setUp(self):
+        set_seed(333)
+
+    def test_constant_uniform(self):
+        """constant mode produces uniformly-weighted channels (1/N each)."""
+        names = ["u10m", "v10m", "t2m", "z500", "q500"]
+        chw = _compute_channel_weighting_helper(names, "constant")
+        self.assertEqual(chw.shape, (len(names),))
+        expected = torch.full((len(names),), 1.0 / len(names))
+        self.assertTrue(compare_tensors("constant chw", chw, expected, atol=1e-7))
+
+    def test_unknown_mode_raises(self):
+        """Unknown mode strings must raise NotImplementedError."""
+        with self.assertRaises(NotImplementedError):
+            _compute_channel_weighting_helper(["t2m"], "bogus_mode_name")
+
+    def test_weights_sum_to_one_for_all_modes(self):
+        """Independent of mode, the returned channel weights must sum to 1
+        when no time_diff_scale is supplied. Also serves as branch coverage
+        for every named mode in one shot."""
+        names = ["u10m", "t2m", "z500", "q200", "msl", "sp"]
+        for mode in ["constant", "auto", "new auto", "custom", "pangu"]:
+            with self.subTest(mode=mode):
+                chw = _compute_channel_weighting_helper(names, mode)
+                self.assertAlmostEqual(chw.sum().item(), 1.0, places=5)
+
+    def test_time_diff_scale_multiplies_weights(self):
+        """When time_diff_scale is supplied, the final weights equal
+        (normalized chw) * time_diff_scale element-wise. No renormalization
+        is applied after the multiplication, so the result need not sum to 1.
+        """
+        names = ["u10m", "t2m", "z500"]
+        scale = torch.tensor([2.0, 0.5, 4.0])
+        chw_no_scale = _compute_channel_weighting_helper(names, "constant")
+        chw_scaled   = _compute_channel_weighting_helper(names, "constant", time_diff_scale=scale)
+        self.assertTrue(
+            compare_tensors("time_diff_scale", chw_scaled, chw_no_scale * scale, atol=1e-7)
+        )
 
 
 # ===========================================================================
