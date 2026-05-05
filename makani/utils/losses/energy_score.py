@@ -598,6 +598,7 @@ class SpectralCoherenceLoss(SpectralBaseLoss):
         spatial_distributed: Optional[bool] = False,
         ensemble_distributed: Optional[bool] = False,
         ensemble_weights: Optional[torch.Tensor] = None,
+        channel_reduction: Optional[bool] = True,
         alpha: Optional[float] = 1.0,
         eps: Optional[float] = 1.0e-6,
         **kwargs,
@@ -616,6 +617,7 @@ class SpectralCoherenceLoss(SpectralBaseLoss):
         self.relative = relative
         self.spatial_distributed = spatial_distributed and comm.is_distributed("spatial")
         self.ensemble_distributed = ensemble_distributed and comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1)
+        self.channel_reduction = channel_reduction
         self.eps = eps
 
         if ensemble_weights is not None:
@@ -749,8 +751,11 @@ class SpectralCoherenceLoss(SpectralBaseLoss):
         if self.spatial_distributed:
             loss = reduce_from_parallel_region(loss, "h")
 
-        # reduce over the channel dimension
-        loss = loss.sum(dim=-1)
+        # reduce over the channel dimension if requested; matches sibling loss
+        # contract: output has shape (B, n_channels) where n_channels is 1 if
+        # reduction is on, else len(channel_names)
+        if self.channel_reduction:
+            loss = loss.sum(dim=-1, keepdim=True)
 
         return loss
 
