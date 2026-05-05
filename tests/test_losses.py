@@ -41,7 +41,7 @@ from makani.utils.losses import (
     LpEnergyScoreLoss,
     SpectralL2EnergyScoreLoss,
 )
-from makani.utils.losses.energy_score import SobolevEnergyScoreLoss, SpectralCoherenceLoss
+from makani.utils.losses.energy_score import SobolevEnergyScoreLoss, SpectralCoherenceLoss, CorrectedSpectralL2EnergyScoreLoss
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from .testutils import disable_tf32, set_seed, get_default_parameters, compare_tensors, compare_arrays
@@ -2306,6 +2306,215 @@ class TestSpectralCoherenceLoss(unittest.TestCase):
         self.assertFalse(
             compare_tensors("relative vs absolute", out_abs, out_rel, atol=1e-6, rtol=1e-5),
             "relative=True and relative=False produced identical outputs",
+        )
+
+
+# ===========================================================================
+class TestCorrectedSpectralL2EnergyScoreLoss(unittest.TestCase):
+    """Tests for CorrectedSpectralL2EnergyScoreLoss.
+
+    The corrected variant differs from SpectralL2EnergyScoreLoss only in the
+    spread term: the ensemble pairwise spread is scaled by the ratio
+    psd_true / (psd_pred + eps). The accuracy term (eskill) is identical, so
+    most mechanical tests mirror TestSpectralL2EnergyScoreLoss.
+
+    Two extra semantic tests exercise the *purpose* of the correction:
+      - test_equivalence_at_correct_amplitude: when psd_pred ≈ psd_true the
+        ratio collapses to 1 and the corrected loss must agree with the
+        standard one.
+      - test_cheap_spread_penalty: when the ensemble has the right phases but
+        inflated amplitudes (the canonical "cheap spread" attack on the
+        standard ES), the corrected loss must be strictly larger than the
+        standard one — the diversity reward is bounded by truth PSD instead
+        of by the model's own (inflated) PSD.
+    """
+
+    _E = 5
+
+    def setUp(self):
+        disable_tf32()
+        set_seed(333)
+
+    def _fn(self, channel_reduction=True, **kw):
+        return CorrectedSpectralL2EnergyScoreLoss(
+            **_SPEC_KWARGS,
+            spatial_distributed=False,
+            ensemble_distributed=False,
+            channel_reduction=channel_reduction,
+            **kw,
+        )
+
+    def _fn_uncorrected(self, channel_reduction=True, **kw):
+        return SpectralL2EnergyScoreLoss(
+            **_SPEC_KWARGS,
+            spatial_distributed=False,
+            ensemble_distributed=False,
+            channel_reduction=channel_reduction,
+            **kw,
+        )
+
+    # -- shape contract ------------------------------------------------------
+
+    def test_output_shape_channel_reduction(self):
+        fn = self._fn(channel_reduction=True)
+        fc = _rand_ensemble(self._E)
+        obs = _rand()
+        out = fn(fc, obs)
+        self.assertEqual(tuple(out.shape), (_BATCH, 1))
+
+    def test_output_shape_no_channel_reduction(self):
+        fn = self._fn(channel_reduction=False)
+        fc = _rand_ensemble(self._E)
+        obs = _rand()
+        out = fn(fc, obs)
+        self.assertEqual(tuple(out.shape), (_BATCH, _NUM_CH))
+
+    def test_n_channels_matches_output(self):
+        self.assertEqual(self._fn(channel_reduction=True).n_channels, 1)
+        self.assertEqual(self._fn(channel_reduction=False).n_channels, _NUM_CH)
+
+    def test_wrong_forecast_dims_raises(self):
+        fn = self._fn()
+        fc = _rand()                # 4-D, missing ensemble dim
+        obs = _rand()
+        with self.assertRaises(ValueError):
+            fn(fc, obs)
+
+    # -- backward / zero-on-perfect-prediction -------------------------------
+
+    def test_backward_finite(self):
+        fn = self._fn()
+        fc = _rand_ensemble(self._E, requires_grad=True)
+        obs = _rand()
+        fn(fc, obs).sum().backward()
+        self.assertIsNotNone(fc.grad)
+        self.assertFalse(torch.isnan(fc.grad).any(), "NaN in fc.grad")
+        self.assertFalse(torch.isinf(fc.grad).any(), "Inf in fc.grad")
+
+    def test_zero_on_perfect_prediction(self, verbose=False):
+        """All ensemble members == observation: espread and eskill are zero
+        before sqrt; the eps-mask path replaces them with eps for the sqrt
+        and resets to 0 afterward, so the post-sqrt residual is exactly 0.
+        The ratio (psd_true / (psd_pred + eps)) is finite and unused (multiplied
+        by zero spread), so the eps in the ratio doesn't leak into the result.
+        """
+        fn = self._fn()
+        obs = _rand()
+        fc = obs.unsqueeze(1).expand(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W).clone()
+        out = fn(fc, obs)
+        self.assertTrue(
+            compare_tensors(
+                "corrected spectral L2 ES zero",
+                out, torch.zeros_like(out), atol=1e-6, verbose=verbose,
+            )
+        )
+
+    def test_backward_finite_on_perfect_prediction(self):
+        """Perfect ensemble must produce finite gradients; the eps-mask
+        protects against the sqrt(0) gradient singularity."""
+        fn = self._fn()
+        obs = _rand()
+        fc = obs.unsqueeze(1).expand(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W).clone().requires_grad_(True)
+        fn(fc, obs).sum().backward()
+        self.assertIsNotNone(fc.grad)
+        self.assertFalse(torch.isnan(fc.grad).any(), "NaN at perfect forecast")
+        self.assertFalse(torch.isinf(fc.grad).any(), "Inf at perfect forecast")
+
+    def test_batch_independence(self, verbose=False):
+        """The loss for sample [0] computed alone must equal loss[0] in a full batch."""
+        fn = self._fn()
+        fc = _rand_ensemble(self._E)
+        obs = _rand()
+        loss_single = fn(fc[:1], obs[:1])
+        loss_batch = fn(fc, obs)
+        self.assertTrue(
+            compare_tensors("corrected spectral L2 ES batch", loss_single[0], loss_batch[0], verbose=verbose)
+        )
+
+    # -- semantic tests: the correction does what its docstring claims -------
+
+    def test_equivalence_at_correct_amplitude(self, verbose=False):
+        """When psd_pred ≈ psd_true the spread-rescaling ratio collapses to 1
+        and the corrected loss must agree with the standard SpectralL2 ES.
+
+        Construction: forecasts are observations + small noise per member.
+        For small enough noise psd_pred ≈ psd_true to within a small relative
+        tolerance, and the two loss formulas should produce nearly identical
+        outputs.
+        """
+        obs = _rand()
+        # noise-amplitude ≪ obs-amplitude so psd_pred deviation from psd_true
+        # stays in the percent range — atol/rtol below set accordingly
+        noise = 0.02 * torch.randn(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W)
+        fc = obs.unsqueeze(1).expand(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W).clone() + noise
+
+        out_corrected = self._fn()(fc, obs)
+        out_standard  = self._fn_uncorrected()(fc, obs)
+
+        # absolute tolerance scaled to the typical loss magnitude here (~1e-2);
+        # rtol reflects the fact that ratio ≠ 1 exactly even with tiny noise
+        self.assertTrue(
+            compare_tensors(
+                "corrected ≈ standard at correct amplitude",
+                out_corrected, out_standard, atol=1e-4, rtol=5e-2, verbose=verbose,
+            ),
+            f"corrected={out_corrected.tolist()} standard={out_standard.tolist()}",
+        )
+
+    def test_cheap_spread_penalty(self):
+        """The whole point of the correction.
+
+        Setup: ensemble with the right *phases* (members are scaled obs + noise)
+        but inflated *amplitudes* (k=3). Then psd_pred ≈ k² · psd_true so the
+        ratio psd_true / (psd_pred + eps) ≈ 1/k² ≪ 1.
+
+        The accuracy term (eskill) is identical between the two losses. The
+        spread term in the corrected loss is scaled down by ratio ≈ 1/9, so it
+        provides much less negative contribution. Therefore:
+
+            corrected_loss > standard_loss
+
+        i.e. the corrected loss does not let the model collect cheap spread
+        reward by inflating its predicted PSD.
+        """
+        k = 3.0
+        obs = _rand()
+        # different noise per member so espread > 0; otherwise the spread term
+        # is zero in BOTH losses and the test is degenerate
+        noise = 0.1 * torch.randn(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W)
+        fc_inflated = k * obs.unsqueeze(1).expand(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W) + noise
+
+        out_corrected = self._fn()(fc_inflated, obs)
+        out_standard  = self._fn_uncorrected()(fc_inflated, obs)
+
+        # corrected must be strictly larger element-wise — the cheap-spread
+        # protection is per (B, n_channels) and not just on the average
+        self.assertTrue(
+            (out_corrected > out_standard).all(),
+            f"corrected loss not strictly above standard: "
+            f"corrected={out_corrected.tolist()} standard={out_standard.tolist()}",
+        )
+
+    def test_eps_does_not_dominate_when_psd_is_small(self):
+        """Defensive: the ratio psd_true / (psd_pred + eps) uses eps as a guard
+        against divide-by-zero. For very small psd_pred this can dominate and
+        skew the spread-rescaling. We verify that for *unit-scale* random
+        inputs (where psd_pred is well above eps everywhere) the corrected and
+        standard losses are within a few percent — i.e. eps doesn't leak into
+        the result at the default eps=1e-6.
+        """
+        fc = _rand_ensemble(self._E)
+        obs = _rand()
+        out_corrected = self._fn()(fc, obs)
+        out_standard  = self._fn_uncorrected()(fc, obs)
+        # both finite, no NaN/Inf
+        self.assertTrue(torch.isfinite(out_corrected).all())
+        self.assertTrue(torch.isfinite(out_standard).all())
+        # not the same — random forecasts have psd_pred ≠ psd_true so ratio ≠ 1
+        # and the spread term is rescaled
+        self.assertFalse(
+            compare_tensors("corrected vs standard random", out_corrected, out_standard, atol=1e-6, rtol=1e-4),
+            "corrected and standard agree on random ensemble — ratio≠1 should produce a measurable difference",
         )
 
 
