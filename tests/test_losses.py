@@ -42,6 +42,7 @@ from makani.utils.losses import (
     SpectralL2EnergyScoreLoss,
 )
 from makani.utils.losses.energy_score import SobolevEnergyScoreLoss, SpectralCoherenceLoss, CorrectedSpectralL2EnergyScoreLoss
+from makani.utils.losses.crps_loss import KernelScoreLoss
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from .testutils import disable_tf32, set_seed, get_default_parameters, compare_tensors, compare_arrays
@@ -2516,6 +2517,182 @@ class TestCorrectedSpectralL2EnergyScoreLoss(unittest.TestCase):
             compare_tensors("corrected vs standard random", out_corrected, out_standard, atol=1e-6, rtol=1e-4),
             "corrected and standard agree on random ensemble — ratio≠1 should produce a measurable difference",
         )
+
+
+# ===========================================================================
+class TestKernelScoreLoss(unittest.TestCase):
+    """Tests for KernelScoreLoss (CRPS-style score with a fixed DISCO kernel).
+
+    KernelScoreLoss applies a non-trainable spherical convolution to forecasts
+    and observations before computing the CRPS, so it scores structural error
+    rather than pointwise error. The conv is fixed (registered as a buffer) and
+    the loss dispatches on crps_type just like CRPSLoss/SpectralCRPSLoss.
+
+    Tests cover:
+      - shape contract (B, n_channels)
+      - all four crps_type branches (cdf, skillspread, naive skillspread,
+        probability weighted moment)
+      - zero on perfect prediction (the conv applies identically to both inputs
+        so any deterministic kernel preserves the perfect-forecast → zero
+        property regardless of the actual weight values)
+      - alpha < 1 guard: rejected for non-skillspread kernels, accepted for
+        both skillspread variants (regression test for the recent guard fix)
+    """
+
+    _E = 5
+
+    def setUp(self):
+        disable_tf32()
+        set_seed(333)
+
+    def _fn(self, crps_type="skillspread", **kw):
+        return KernelScoreLoss(
+            **_GEOM_KWARGS,
+            crps_type=crps_type,
+            spatial_distributed=False,
+            ensemble_distributed=False,
+            **kw,
+        )
+
+    # -- shape contract / dispatch validation --------------------------------
+
+    @parameterized.expand([
+        ("cdf",),
+        ("skillspread",),
+        ("naive skillspread",),
+        ("probability weighted moment",),
+    ])
+    def test_output_shape(self, crps_type):
+        """Output must be (B, n_channels) for every crps_type."""
+        fn = self._fn(crps_type)
+        fc = _rand_ensemble(self._E)
+        obs = _rand()
+        out = fn(fc, obs)
+        self.assertEqual(tuple(out.shape), (_BATCH, _NUM_CH))
+
+    def test_n_channels_matches_output(self):
+        fn = self._fn()
+        self.assertEqual(fn.n_channels, _NUM_CH)
+
+    def test_wrong_forecast_dims_raises(self):
+        fn = self._fn()
+        fc = _rand()                # 4-D, missing ensemble dim
+        obs = _rand()
+        with self.assertRaises(ValueError):
+            fn(fc, obs)
+
+    def test_unknown_crps_type_raises_in_forward(self):
+        """Unknown crps_type bypassed init guard must raise ValueError in forward."""
+        fn = self._fn("cdf")
+        fn.crps_type = "bogus"
+        fc = _rand_ensemble(self._E)
+        obs = _rand()
+        with self.assertRaises(ValueError):
+            fn(fc, obs)
+
+    # -- alpha guard ---------------------------------------------------------
+
+    def test_alpha_lt1_raises_for_cdf(self):
+        with self.assertRaises(NotImplementedError):
+            self._fn("cdf", alpha=0.5)
+
+    def test_alpha_lt1_raises_for_pwm(self):
+        with self.assertRaises(NotImplementedError):
+            self._fn("probability weighted moment", alpha=0.5)
+
+    def test_alpha_lt1_allowed_for_skillspread(self):
+        """Both skillspread variants accept alpha < 1 — the guard widening
+        we did earlier must hold for KernelScoreLoss too."""
+        fn_skill = self._fn("skillspread", alpha=0.5)
+        fn_naive = self._fn("naive skillspread", alpha=0.5)
+        fc = _rand_ensemble(self._E)
+        obs = _rand()
+        # both must run without raising
+        out_skill = fn_skill(fc, obs)
+        out_naive = fn_naive(fc, obs)
+        self.assertTrue(torch.isfinite(out_skill).all())
+        self.assertTrue(torch.isfinite(out_naive).all())
+
+    # -- backward / zero-on-perfect-prediction -------------------------------
+
+    def test_backward_finite(self):
+        fn = self._fn()
+        fc = _rand_ensemble(self._E, requires_grad=True)
+        obs = _rand()
+        fn(fc, obs).sum().backward()
+        self.assertIsNotNone(fc.grad)
+        self.assertFalse(torch.isnan(fc.grad).any(), "NaN in fc.grad")
+        self.assertFalse(torch.isinf(fc.grad).any(), "Inf in fc.grad")
+
+    @parameterized.expand([
+        ("cdf",),
+        ("skillspread",),
+        ("naive skillspread",),
+        ("probability weighted moment",),
+    ])
+    def test_zero_on_perfect_prediction(self, crps_type, verbose=False):
+        """Perfect ensemble (all members == obs): the conv applies the same
+        deterministic transform to both inputs, so conv(obs) - conv(F_e) = 0
+        for every member regardless of the conv weight values. Every CRPS
+        kernel reduces to zero on identical-to-truth ensembles."""
+        fn = self._fn(crps_type)
+        obs = _rand()
+        fc = obs.unsqueeze(1).expand(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W).clone()
+        out = fn(fc, obs)
+        self.assertTrue(
+            compare_tensors(
+                f"kernel score {crps_type} zero",
+                out, torch.zeros_like(out), atol=1e-4, verbose=verbose,
+            )
+        )
+
+    @parameterized.expand([
+        ("cdf",),
+        ("skillspread",),
+        ("naive skillspread",),
+        ("probability weighted moment",),
+    ])
+    def test_backward_finite_on_perfect_prediction(self, crps_type):
+        """Perfect ensemble must produce finite gradients across all crps_type
+        branches (the eps-mask paths in each kernel must protect their respective
+        sqrt(0) / 0/0 singularities)."""
+        fn = self._fn(crps_type)
+        obs = _rand()
+        fc = obs.unsqueeze(1).expand(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W).clone().requires_grad_(True)
+        fn(fc, obs).sum().backward()
+        self.assertIsNotNone(fc.grad)
+        self.assertFalse(torch.isnan(fc.grad).any(), f"NaN in {crps_type} gradient at perfect forecast")
+        self.assertFalse(torch.isinf(fc.grad).any(), f"Inf in {crps_type} gradient at perfect forecast")
+
+    def test_batch_independence(self, verbose=False):
+        """The kernel-score loss for sample [0] computed alone must equal
+        loss[0] in a full batch — the conv and CRPS kernels are per-sample."""
+        fn = self._fn()
+        fc = _rand_ensemble(self._E)
+        obs = _rand()
+        loss_single = fn(fc[:1], obs[:1])
+        loss_batch = fn(fc, obs)
+        self.assertTrue(
+            compare_tensors("kernel score batch", loss_single[0], loss_batch[0], verbose=verbose)
+        )
+
+    # -- behavioural ---------------------------------------------------------
+
+    def test_better_forecast_lower_loss(self):
+        """Monotonicity sanity: a forecast closer to obs gives a strictly
+        lower kernel score than one farther from obs. Holds for any
+        deterministic kernel because the kernel is applied identically to
+        both inputs."""
+        obs = _rand()
+        set_seed(101)
+        small = 0.05 * torch.randn_like(obs)
+        large = 0.50 * torch.randn_like(obs)
+        fc_close = (obs + small).unsqueeze(1).expand(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W).clone()
+        fc_far   = (obs + large).unsqueeze(1).expand(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W).clone()
+        fn = self._fn()
+        loss_close = fn(fc_close, obs).sum().item()
+        loss_far   = fn(fc_far, obs).sum().item()
+        self.assertLess(loss_close, loss_far, f"closer forecast had higher loss: {loss_close} vs {loss_far}")
 
 
 if __name__ == "__main__":
