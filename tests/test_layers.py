@@ -30,6 +30,7 @@ from makani.models.common.layers import (
     DownSample3D,
 )
 from makani.models.common.imputation import MLPImputation, ConstantImputation
+from makani.models.common.pos_embedding import LearnablePositionEmbedding
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from .testutils import disable_tf32, set_seed, get_default_parameters, compare_tensors
@@ -689,6 +690,152 @@ class TestConstantImputation(unittest.TestCase):
         self.assertIsNotNone(fn.weight.grad, "ConstantImputation.weight has no gradient")
         self.assertFalse(torch.isnan(fn.weight.grad).any())
         self.assertFalse(torch.isinf(fn.weight.grad).any())
+
+
+# ===========================================================================
+class TestLearnablePositionEmbedding(unittest.TestCase):
+    """Tests for LearnablePositionEmbedding in makani.models.common.pos_embedding.
+
+    Two modes:
+      - "lat":    parameter shape (1, C, H, 1); broadcast across longitude.
+                  All columns in a row share the same value.
+      - "latlon": parameter shape (1, C, H, W); independent per-pixel learnable.
+
+    forward() always returns shape (1, C, H, W) — the broadcast is materialized
+    via .expand() so downstream layers see a uniform contract regardless of mode.
+    """
+
+    def setUp(self):
+        disable_tf32()
+        set_seed(333)
+        self.H = 8
+        self.W = 12
+        self.C = 4
+
+    # -- shape / parameter contract ----------------------------------------
+
+    @parameterized.expand([("lat",), ("latlon",)])
+    def test_output_shape(self, embed_type):
+        """forward() returns (1, C, H, W) regardless of embed_type — downstream
+        code can treat the two modes identically at the call site."""
+        emb = LearnablePositionEmbedding(
+            img_shape=(self.H, self.W), num_chans=self.C, embed_type=embed_type,
+        )
+        out = emb()
+        self.assertEqual(out.shape, (1, self.C, self.H, self.W))
+
+    def test_lat_parameter_shape(self):
+        """In 'lat' mode the underlying parameter is (1, C, H, 1) — only H is
+        learnable; W is broadcast at forward time. This is the entire point of
+        the mode (latitude-only embedding) and a contract regression here would
+        silently inflate parameter count."""
+        emb = LearnablePositionEmbedding(
+            img_shape=(self.H, self.W), num_chans=self.C, embed_type="lat",
+        )
+        self.assertEqual(emb.position_embeddings.shape, (1, self.C, self.H, 1))
+
+    def test_latlon_parameter_shape(self):
+        """In 'latlon' mode every spatial position is its own free parameter."""
+        emb = LearnablePositionEmbedding(
+            img_shape=(self.H, self.W), num_chans=self.C, embed_type="latlon",
+        )
+        self.assertEqual(emb.position_embeddings.shape, (1, self.C, self.H, self.W))
+
+    def test_unknown_embed_type_raises(self):
+        with self.assertRaises(ValueError):
+            LearnablePositionEmbedding(
+                img_shape=(self.H, self.W), num_chans=self.C, embed_type="bogus",
+            )
+
+    # -- initial values ----------------------------------------------------
+
+    @parameterized.expand([("lat",), ("latlon",)])
+    def test_initial_values_zero(self, embed_type):
+        """nn.Parameter(torch.zeros(...)) ⇒ initial output is all zeros."""
+        emb = LearnablePositionEmbedding(
+            img_shape=(self.H, self.W), num_chans=self.C, embed_type=embed_type,
+        )
+        out = emb()
+        self.assertTrue(
+            compare_tensors(f"{embed_type} init zero", out, torch.zeros_like(out), atol=0.0, rtol=0.0)
+        )
+
+    # -- mode semantics: the testable difference between lat and latlon ----
+
+    def test_lat_mode_broadcasts_across_longitude(self):
+        """After writing random values into the 'lat' parameter, every longitude
+        position in the same row must be exactly equal — the broadcast is the
+        whole point of this mode."""
+        emb = LearnablePositionEmbedding(
+            img_shape=(self.H, self.W), num_chans=self.C, embed_type="lat",
+        )
+        with torch.no_grad():
+            emb.position_embeddings.copy_(torch.randn_like(emb.position_embeddings))
+        out = emb()
+        # for each (channel, row), all column values must be identical
+        for c in range(self.C):
+            for h in range(self.H):
+                row = out[0, c, h, :]
+                self.assertTrue(
+                    compare_tensors(
+                        f"lat row uniform (c={c}, h={h})",
+                        row, row[0].expand_as(row), atol=0.0, rtol=0.0,
+                    )
+                )
+
+    def test_latlon_mode_varies_within_row(self):
+        """In 'latlon' mode every (h, w) is its own parameter — after random
+        init, columns within a row should be different (statistically certain
+        for randn). This is the negation of the 'lat' invariant and confirms
+        the latlon mode actually has per-pixel freedom."""
+        emb = LearnablePositionEmbedding(
+            img_shape=(self.H, self.W), num_chans=self.C, embed_type="latlon",
+        )
+        with torch.no_grad():
+            emb.position_embeddings.copy_(torch.randn_like(emb.position_embeddings))
+        out = emb()
+        row = out[0, 0, 0, :]
+        # the row should NOT be uniform — randn has continuous distribution so
+        # exact equality between any two entries is measure-zero
+        self.assertFalse(
+            compare_tensors("latlon row not uniform", row, row[0].expand_as(row), atol=0.0, rtol=0.0),
+            "latlon row was uniform — parameter shouldn't broadcast over W in this mode",
+        )
+
+    # -- learnability ------------------------------------------------------
+
+    @parameterized.expand([("lat",), ("latlon",)])
+    def test_parameter_is_learnable(self, embed_type):
+        """position_embeddings is an nn.Parameter; gradient flows through .sum().backward()."""
+        emb = LearnablePositionEmbedding(
+            img_shape=(self.H, self.W), num_chans=self.C, embed_type=embed_type,
+        )
+        emb().sum().backward()
+        self.assertIsNotNone(emb.position_embeddings.grad,
+                             f"{embed_type}: position_embeddings has no gradient")
+        self.assertFalse(torch.isnan(emb.position_embeddings.grad).any())
+        self.assertFalse(torch.isinf(emb.position_embeddings.grad).any())
+
+    # -- distributed sharding metadata -------------------------------------
+
+    def test_sharded_dims_metadata_lat(self):
+        """In 'lat' mode: the W dim is broadcast/shared (is_shared_mp=['w']);
+        only H is sharded. Distributed model-parallel code reads these
+        attributes — a regression here silently breaks spatial parallelism."""
+        emb = LearnablePositionEmbedding(
+            img_shape=(self.H, self.W), num_chans=self.C, embed_type="lat",
+        )
+        self.assertEqual(emb.position_embeddings.is_shared_mp, ["w"])
+        self.assertEqual(emb.position_embeddings.sharded_dims_mp, [None, None, "h", None])
+
+    def test_sharded_dims_metadata_latlon(self):
+        """In 'latlon' mode: nothing is shared — both H and W get sharded
+        across their respective spatial groups."""
+        emb = LearnablePositionEmbedding(
+            img_shape=(self.H, self.W), num_chans=self.C, embed_type="latlon",
+        )
+        self.assertEqual(emb.position_embeddings.is_shared_mp, [])
+        self.assertEqual(emb.position_embeddings.sharded_dims_mp, [None, None, "h", "w"])
 
 
 if __name__ == "__main__":
