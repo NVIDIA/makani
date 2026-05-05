@@ -1285,11 +1285,16 @@ class TestLossHandler(unittest.TestCase):
     # Mixes channels through a random orthonormal matrix before computing the loss.
     # ------------------------------------------------------------------
 
-    def test_random_slice_loss(self):
-        """random_slice_loss=True must run end-to-end without crashing and produce
-        a finite scalar loss with finite gradients."""
+    @parameterized.expand([
+        ("random_slice_loss",),         # mixes channels via a random orthonormal slice BEFORE the loss
+        ("randomized_loss_weights",),   # multiplies per-channel weights by a random mask AFTER the loss
+    ])
+    def test_loss_modifier_flag(self, flag_name):
+        """Both random-channel modifier flags must run end-to-end without crashing
+        and produce a finite scalar with finite gradients. They exercise different
+        code paths in LossHandler.forward but share the same smoke-test contract."""
         self.params.losses = [{"type": "l2", "channel_weights": "constant"}]
-        self.params.random_slice_loss = True
+        setattr(self.params, flag_name, True)
 
         loss_obj = LossHandler(self.params)
 
