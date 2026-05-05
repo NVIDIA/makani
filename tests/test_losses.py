@@ -1910,6 +1910,54 @@ class TestSpectralCRPSLoss(unittest.TestCase):
         obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
         self.assertFalse(compare_tensors("abs vs real skillspread", fn_abs(fc, obs), fn_real(fc, obs)))
 
+    def test_absolute_false_zero_on_perfect_prediction(self, verbose=False):
+        """absolute=False keeps the spectral coefficients complex; at a perfect
+        ensemble both eskill and espread (computed by the naive skillspread
+        kernel via abs() of complex differences) collapse to 0, so the loss
+        must be (near) zero."""
+        fn  = self._fn("skillspread", absolute=False)
+        obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
+        fc  = obs.unsqueeze(1).expand(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W).clone()
+        out = fn(fc, obs)
+        self.assertTrue(
+            compare_tensors(
+                "absolute=False zero", out, torch.zeros_like(out), atol=1e-4, verbose=verbose,
+            )
+        )
+
+    def test_absolute_false_backward_finite(self):
+        """Gradient through the complex spectral CRPS (absolute=False path) must be
+        finite — the .abs() of complex pairwise differences has a kink at zero,
+        but with random inputs that's measure-zero."""
+        fn  = self._fn("skillspread", absolute=False)
+        fc  = torch.randn(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W, requires_grad=True)
+        obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
+        fn(fc, obs).sum().backward()
+        self.assertIsNotNone(fc.grad)
+        self.assertFalse(torch.isnan(fc.grad).any(), "NaN in absolute=False gradient")
+        self.assertFalse(torch.isinf(fc.grad).any(), "Inf in absolute=False gradient")
+
+    def test_absolute_false_e1_path(self):
+        """E=1 + absolute=False hits the early-return at loss.py:506-509 with
+        complex spectral coefficients; ``torch.abs(complex_diff)`` produces a
+        real magnitude that the spatial reduction can sum normally. No crash,
+        finite output, near-zero on perfect prediction."""
+        fn = self._fn("skillspread", absolute=False)
+        obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
+        # perfect single-member ensemble: forecasts == obs after SHT,
+        # so |obs - fc.squeeze(1)| in spectral space is 0 → output ≈ 0
+        fc_perfect = obs.unsqueeze(1).clone()    # (B, 1, C, H, W)
+        out_perfect = fn(fc_perfect, obs)
+        self.assertTrue(
+            compare_tensors(
+                "absolute=False E=1 zero", out_perfect, torch.zeros_like(out_perfect), atol=1e-4,
+            )
+        )
+        # also assert finite on a random forecast
+        fc_random = torch.randn(_BATCH, 1, _NUM_CH, _IMG_H, _IMG_W)
+        out_random = fn(fc_random, obs)
+        self.assertTrue(torch.isfinite(out_random).all())
+
     # ------ dim validation in forward (lines 398-403) ------
 
     def test_wrong_forecast_dims_raises(self):
