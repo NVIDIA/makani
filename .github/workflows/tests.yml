@@ -23,7 +23,7 @@ jobs:
         python -m pip install --no-build-isolation git+https://github.com/NVIDIA/torch-harmonics.git@main
     - name: Install package
       run: |
-        python -m pip install -e .
+        python -m pip install --no-deps -e .
     - name: Test with pytest
       run: |
         python -m pip install pytest pytest-cov parameterized
