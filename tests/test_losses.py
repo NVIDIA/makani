@@ -1330,6 +1330,103 @@ class TestLossHandler(unittest.TestCase):
         out = loss_obj(torch.randn(*shape), torch.randn(*shape))
         self.assertTrue(torch.isfinite(out))
 
+    # ------------------------------------------------------------------
+    # reset_running_stats — loss.py:292-296
+    # ------------------------------------------------------------------
+
+    def test_reset_running_stats(self, verbose=False):
+        """reset_running_stats restores running_mean=0, running_var=1, and
+        num_batches_tracked=0 after warm-up batches have populated them."""
+        self.params.losses = [{"type": "l2"}]
+        loss_obj = LossHandler(self.params, track_running_stats=True)
+        loss_obj.train()
+
+        shape = (self.params.batch_size, self.params.N_out_channels,
+                 self.params.img_shape_x, self.params.img_shape_y)
+
+        # warm up — populate running stats
+        for _ in range(5):
+            loss_obj(torch.randn(*shape), torch.randn(*shape))
+        self.assertGreater(loss_obj.num_batches_tracked.item(), 0,
+                           "warm-up failed to populate running stats")
+
+        # reset and verify each buffer is restored to its initial state
+        loss_obj.reset_running_stats()
+        self.assertTrue(
+            compare_tensors("running_mean reset", loss_obj.running_mean,
+                            torch.zeros_like(loss_obj.running_mean), verbose=verbose)
+        )
+        self.assertTrue(
+            compare_tensors("running_var reset", loss_obj.running_var,
+                            torch.ones_like(loss_obj.running_var), verbose=verbose)
+        )
+        self.assertEqual(loss_obj.num_batches_tracked.item(), 0)
+
+    # ------------------------------------------------------------------
+    # 5-D prd path of random_slice_loss — loss.py:343-346
+    # ------------------------------------------------------------------
+
+    def test_random_slice_loss_ensemble_path(self):
+        """random_slice_loss with 5-D prd reshapes to (B*E, ...) for the conv2d
+        and reshapes back. Use a probabilistic loss (ensemble_crps) so the
+        ensemble dim is preserved through the loss dispatch."""
+        self.params.losses = [{
+            "type": "ensemble_crps",
+            "channel_weights": "constant",
+            "parameters": {"crps_type": "skillspread"},
+        }]
+        self.params.random_slice_loss = True
+
+        loss_obj = LossHandler(self.params)
+
+        E = 5
+        shape_5d = (self.params.batch_size, E, self.params.N_out_channels,
+                    self.params.img_shape_x, self.params.img_shape_y)
+        shape_4d = (self.params.batch_size, self.params.N_out_channels,
+                    self.params.img_shape_x, self.params.img_shape_y)
+        prd = torch.randn(*shape_5d, requires_grad=True)
+        tar = torch.randn(*shape_4d)
+
+        out = loss_obj(prd, tar)
+        self.assertTrue(torch.isfinite(out))
+        out.backward()
+        self.assertIsNotNone(prd.grad)
+        self.assertFalse(torch.isnan(prd.grad).any())
+
+    # ------------------------------------------------------------------
+    # 5-D prd path of tendency — loss.py:377-380
+    # ------------------------------------------------------------------
+
+    def test_tendency_loss_ensemble_path(self):
+        """tendency: True with 5-D prd hits the prd_tendency = prd - inp_state.unsqueeze(1)
+        branch. We assert the path runs cleanly with a probabilistic loss; the
+        actual loss value is invariant under the tendency transform for proper-score
+        ensemble losses (CRPS depends on differences only), so we don't check value
+        change here — covering the code line is the goal."""
+        self.params.losses = [{
+            "type": "ensemble_crps",
+            "channel_weights": "constant",
+            "tendency": True,
+            "parameters": {"crps_type": "skillspread"},
+        }]
+        loss_obj = LossHandler(self.params)
+
+        E = 5
+        shape_5d = (self.params.batch_size, E, self.params.N_out_channels,
+                    self.params.img_shape_x, self.params.img_shape_y)
+        shape_4d = (self.params.batch_size, self.params.N_out_channels,
+                    self.params.img_shape_x, self.params.img_shape_y)
+
+        prd = torch.randn(*shape_5d, requires_grad=True)
+        tar = torch.randn(*shape_4d)
+        inp = torch.randn(*shape_4d)
+
+        out = loss_obj(prd, tar, inp=inp)
+        self.assertTrue(torch.isfinite(out))
+        out.backward()
+        self.assertIsNotNone(prd.grad)
+        self.assertFalse(torch.isnan(prd.grad).any())
+
 
 # ===========================================================================
 class TestComputeChannelWeightingHelper(unittest.TestCase):
