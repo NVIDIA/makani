@@ -2923,6 +2923,134 @@ class TestKernelScoreLoss(unittest.TestCase):
         self.assertLess(loss_close, loss_far, f"closer forecast had higher loss: {loss_close} vs {loss_far}")
 
 
+# ===========================================================================
+class TestEnsembleLossE1FastPath(unittest.TestCase):
+    """E=1 fast-path coverage for all CRPS-style ensemble losses.
+
+    Each of CRPSLoss, SpectralCRPSLoss, GradientCRPSLoss, VortDivCRPSLoss,
+    and KernelScoreLoss has an explicit ``(not ensemble_distributed) and (E == 1)``
+    short-circuit in its forward that bypasses the standard CRPS kernel
+    dispatch and computes ``|obs - fc.squeeze(1)|`` directly. None of the
+    existing tests use E=1 (they all parameterize over E=5), so this branch
+    is untested in production use cases that run with a single ensemble member.
+
+    For each class we verify:
+      - the E=1 path produces a finite, correctly-shaped output
+      - perfect prediction (single member == observation) gives zero loss
+      - backward through the E=1 path produces finite gradients
+
+    Note: the energy-score family (LpEnergyScore, SobolevEnergyScore,
+    SpectralL2EnergyScore, CorrectedSpectralL2EnergyScore, SpectralCoherence)
+    and MMD do *not* have an E=1 fast-path — their spread terms divide by
+    N(N-1), so calling them with E=1 hits division-by-zero. That's a separate
+    concern (whether to add explicit guards or accept E>=2 as a precondition).
+    """
+
+    def setUp(self):
+        disable_tf32()
+        set_seed(333)
+
+    # -- factories: build each loss with default kwargs --------------------
+
+    def _crps(self):
+        return CRPSLoss(
+            **_GEOM_KWARGS, crps_type="skillspread",
+            spatial_distributed=False, ensemble_distributed=False,
+        )
+
+    def _spectral_crps(self):
+        return SpectralCRPSLoss(
+            **_SPEC_KWARGS, crps_type="skillspread",
+            spatial_distributed=False, ensemble_distributed=False, absolute=True,
+        )
+
+    def _gradient_crps(self):
+        return GradientCRPSLoss(
+            **_GEOM_KWARGS, crps_type="skillspread",
+            spatial_distributed=False, ensemble_distributed=False, absolute=True,
+        )
+
+    def _vortdiv_crps(self):
+        return VortDivCRPSLoss(
+            **_WIND_GEOM_KWARGS, crps_type="skillspread",
+            spatial_distributed=False, ensemble_distributed=False,
+        )
+
+    def _kernel_score(self):
+        return KernelScoreLoss(
+            **_GEOM_KWARGS, crps_type="skillspread",
+            spatial_distributed=False, ensemble_distributed=False,
+        )
+
+    def _make(self, name):
+        return {
+            "CRPSLoss": (self._crps, _NUM_CH),
+            "SpectralCRPSLoss": (self._spectral_crps, _NUM_CH),
+            "GradientCRPSLoss": (self._gradient_crps, _NUM_CH),
+            "VortDivCRPSLoss": (self._vortdiv_crps, _NUM_WIND_CH),
+            "KernelScoreLoss": (self._kernel_score, _NUM_CH),
+        }[name]
+
+    # -- tests --------------------------------------------------------------
+
+    @parameterized.expand([
+        ("CRPSLoss",),
+        ("SpectralCRPSLoss",),
+        ("GradientCRPSLoss",),
+        ("VortDivCRPSLoss",),
+        ("KernelScoreLoss",),
+    ])
+    def test_e1_output_shape_and_finite(self, name):
+        """E=1 path produces (B, n_channels) and finite values."""
+        builder, n_ch = self._make(name)
+        fn = builder()
+        fc = torch.randn(_BATCH, 1, n_ch, _IMG_H, _IMG_W)
+        obs = torch.randn(_BATCH, n_ch, _IMG_H, _IMG_W)
+        out = fn(fc, obs)
+        self.assertEqual(out.shape[0], _BATCH)
+        self.assertEqual(out.shape[1], fn.n_channels)
+        self.assertTrue(torch.isfinite(out).all(), f"{name}: non-finite values in E=1 output")
+
+    @parameterized.expand([
+        ("CRPSLoss",),
+        ("SpectralCRPSLoss",),
+        ("GradientCRPSLoss",),
+        ("VortDivCRPSLoss",),
+        ("KernelScoreLoss",),
+    ])
+    def test_e1_zero_on_perfect_prediction(self, name, verbose=False):
+        """At E=1, fc[:,0] == obs reduces to |obs - obs| = 0; loss must be (near) zero."""
+        builder, n_ch = self._make(name)
+        fn = builder()
+        obs = torch.randn(_BATCH, n_ch, _IMG_H, _IMG_W)
+        fc = obs.unsqueeze(1).clone()    # (B, 1, C, H, W) — single member equals obs
+        out = fn(fc, obs)
+        self.assertTrue(
+            compare_tensors(
+                f"{name} E=1 zero", out, torch.zeros_like(out), atol=1e-4, verbose=verbose,
+            )
+        )
+
+    @parameterized.expand([
+        ("CRPSLoss",),
+        ("SpectralCRPSLoss",),
+        ("GradientCRPSLoss",),
+        ("VortDivCRPSLoss",),
+        ("KernelScoreLoss",),
+    ])
+    def test_e1_backward_finite(self, name):
+        """Gradient through the E=1 path must be finite — no NaN/Inf even though
+        the loss reduces to a piecewise-linear |x| at the bottom."""
+        builder, n_ch = self._make(name)
+        fn = builder()
+        fc = torch.randn(_BATCH, 1, n_ch, _IMG_H, _IMG_W, requires_grad=True)
+        obs = torch.randn(_BATCH, n_ch, _IMG_H, _IMG_W)
+        fn(fc, obs).sum().backward()
+        self.assertIsNotNone(fc.grad)
+        self.assertFalse(torch.isnan(fc.grad).any(), f"{name}: NaN grad in E=1 backward")
+        self.assertFalse(torch.isinf(fc.grad).any(), f"{name}: Inf grad in E=1 backward")
+
+
 if __name__ == "__main__":
     disable_tf32()
     unittest.main()

@@ -404,7 +404,7 @@ class SpectralBaseLoss(nn.Module, metaclass=ABCMeta):
 
     @property
     def n_channels(self):
-        return len(self.n_channels)
+        return len(self.channel_names)
 
     @torch.compiler.disable(recursive=False)
     def compute_channel_weighting(self, channel_weight_type: str, time_diff_scale: torch.Tensor = None) -> torch.Tensor:
@@ -470,7 +470,7 @@ class VortDivBaseLoss(nn.Module, metaclass=ABCMeta):
 
     @property
     def n_channels(self):
-        return len(self.n_channels)
+        return self.wind_chans.shape[0]
 
     @torch.compiler.disable(recursive=False)
     def compute_channel_weighting(self, channel_weight_type: str, time_diff_scale: torch.Tensor = None) -> torch.Tensor:
@@ -540,7 +540,7 @@ class GradientBaseLoss(nn.Module, metaclass=ABCMeta):
 
     @property
     def n_channels(self):
-        return len(self.n_channels)
+        return len(self.channel_names)
 
     @torch.compiler.disable(recursive=False)
     def compute_channel_weighting(self, channel_weight_type: str, time_diff_scale: torch.Tensor = None) -> torch.Tensor:
