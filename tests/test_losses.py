@@ -41,7 +41,7 @@ from makani.utils.losses import (
     LpEnergyScoreLoss,
     SpectralL2EnergyScoreLoss,
 )
-from makani.utils.losses.energy_score import SobolevEnergyScoreLoss
+from makani.utils.losses.energy_score import SobolevEnergyScoreLoss, SpectralCoherenceLoss
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from .testutils import disable_tf32, set_seed, get_default_parameters, compare_tensors, compare_arrays
@@ -2131,6 +2131,182 @@ class TestVortDivCRPSLoss(unittest.TestCase):
         obs = _rand(channels=_NUM_WIND_CH)
         with self.assertRaises(ValueError):
             fn(fc, obs)
+
+
+# ===========================================================================
+class TestSpectralCoherenceLoss(unittest.TestCase):
+    """Tests for SpectralCoherenceLoss.
+
+    The loss is a probabilistic spectral score with two terms:
+      - PSD skill:        ((P_F - P_T)^2) averaged over the ensemble; senses
+                          the wrong *amplitude* at each spherical-harmonic
+                          degree l
+      - Coherence skill / spread:  energy-score-style decomposition of the
+                          phase alignment between forecast↔truth and between
+                          ensemble members; senses the wrong *phase* at each l
+
+    These tests verify (a) the output-shape contract, (b) that perfect
+    predictions yield zero loss, (c) that the PSD term and the coherence term
+    each pick up the kind of error they're designed for.
+    """
+
+    _E = 5
+
+    def setUp(self):
+        disable_tf32()
+        set_seed(333)
+
+    def _fn(self, channel_reduction=True, relative=False, **kw):
+        return SpectralCoherenceLoss(
+            **_SPEC_KWARGS,
+            spatial_distributed=False,
+            ensemble_distributed=False,
+            channel_reduction=channel_reduction,
+            relative=relative,
+            **kw,
+        )
+
+    # -- output-shape contract -----------------------------------------------
+
+    def test_output_shape_channel_reduction(self):
+        fn = self._fn(channel_reduction=True)
+        fc = _rand_ensemble(self._E)
+        obs = _rand()
+        out = fn(fc, obs)
+        # contract: (B, n_channels) where n_channels=1 when reducing
+        self.assertEqual(tuple(out.shape), (_BATCH, 1))
+
+    def test_output_shape_no_channel_reduction(self):
+        fn = self._fn(channel_reduction=False)
+        fc = _rand_ensemble(self._E)
+        obs = _rand()
+        out = fn(fc, obs)
+        self.assertEqual(tuple(out.shape), (_BATCH, _NUM_CH))
+
+    def test_n_channels_matches_output(self):
+        """n_channels must agree with the per-sample output dim under both reduction modes.
+
+        Regression test for the previously-undefined self.channel_reduction:
+        before this fix, n_channels would AttributeError before forward was
+        even called.
+        """
+        fn_red = self._fn(channel_reduction=True)
+        fn_no_red = self._fn(channel_reduction=False)
+        self.assertEqual(fn_red.n_channels, 1)
+        self.assertEqual(fn_no_red.n_channels, _NUM_CH)
+
+    def test_wrong_forecast_dims_raises(self):
+        fn = self._fn()
+        fc = _rand()                # 4-D, missing ensemble dim
+        obs = _rand()
+        with self.assertRaises(ValueError):
+            fn(fc, obs)
+
+    # -- backward / zero-on-perfect-prediction -------------------------------
+
+    def test_backward_finite(self):
+        fn = self._fn()
+        fc = _rand_ensemble(self._E, requires_grad=True)
+        obs = _rand()
+        fn(fc, obs).sum().backward()
+        self.assertIsNotNone(fc.grad)
+        self.assertFalse(torch.isnan(fc.grad).any(), "NaN in fc.grad")
+        self.assertFalse(torch.isinf(fc.grad).any(), "Inf in fc.grad")
+
+    @parameterized.expand([(True,), (False,)])
+    def test_zero_on_perfect_prediction(self, relative, verbose=True):
+        """All ensemble members == observation:
+          - psd_skill = 0 exactly (same inputs through the same op)
+          - coherences = P / sqrt(P² + eps) → 1 only as eps → 0
+
+        Setting eps=0 collapses ``1 - P/sqrt(P²)`` to algebraically zero, but
+        the loss uses two paths to compute |X|²: ``X.abs().square()`` for the
+        PSD term and ``Re(X.conj() * X)`` for coherence. These are equal in
+        real arithmetic but differ by a sqrt-then-square ULP per mode in fp32,
+        so after summing 75 (l, channel) modes the residual lands at ~1e-6 for
+        the relative case. atol is set above that floor."""
+        fn = self._fn(relative=relative, eps=0.0)
+        obs = _rand()
+        fc = obs.unsqueeze(1).expand(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W).clone()
+        out = fn(fc, obs)
+        self.assertTrue(
+            compare_tensors(
+                f"spectral coherence zero (relative={relative})",
+                out, torch.zeros_like(out), atol=5e-6, verbose=verbose,
+            )
+        )
+
+    def test_backward_finite_on_perfect_prediction(self):
+        """Perfect forecast must not produce NaN/Inf gradients (eps in the
+        normalizer protects against the 0/0 in coherence)."""
+        fn = self._fn()
+        obs = _rand()
+        fc = obs.unsqueeze(1).expand(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W).clone().requires_grad_(True)
+        fn(fc, obs).sum().backward()
+        self.assertIsNotNone(fc.grad)
+        self.assertFalse(torch.isnan(fc.grad).any(), "NaN at perfect forecast")
+        self.assertFalse(torch.isinf(fc.grad).any(), "Inf at perfect forecast")
+
+    # -- the decomposition does what it claims ------------------------------
+
+    def test_negated_forecast_isolates_coherence_term(self):
+        """fc = -obs has identical PSD as obs but opposite phase, so:
+          - psd_skill ≈ 0          (amplitudes match)
+          - coherence(fc, obs) ≈ -1 → coh_skill picks up the phase mismatch
+        Loss must therefore be strictly positive even though amplitudes are right.
+        This proves the coherence/phase term is active and not masked by the
+        PSD term.
+        """
+        obs = _rand()
+        fc = (-obs).unsqueeze(1).expand(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W).clone()
+        # ensemble members are identical, so coh_spread ≈ 0; the contribution
+        # is entirely from the coh_skill term
+        out = self._fn()(fc, obs)
+        self.assertTrue((out > 0.0).all(), f"loss not strictly positive on -obs: {out}")
+
+    def test_scaled_forecast_isolates_psd_term(self):
+        """fc = 2*obs has the same phases as obs (so coherence ≈ 1) but
+        4× the PSD, so:
+          - coh_skill ≈ 0          (phases match)
+          - psd_skill ≈ (4P - P)^2 = 9P^2  per (b, c, l)
+        Loss must therefore be strictly positive even though phases are right.
+        This proves the PSD/amplitude term is active and not masked by the
+        coherence term.
+        """
+        obs = _rand()
+        fc = (2.0 * obs).unsqueeze(1).expand(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W).clone()
+        out = self._fn()(fc, obs)
+        self.assertTrue((out > 0.0).all(), f"loss not strictly positive on 2*obs: {out}")
+
+    def test_better_forecast_lower_loss(self):
+        """Monotonicity in error magnitude: a forecast closer to the obs must
+        produce a strictly lower loss than one farther from it. This is the
+        weakest-but-most-useful behavioral guarantee against the loss
+        accidentally pointing the wrong way after a refactor."""
+        obs = _rand()
+        # both forecasts are perturbations of obs, replicated across ensemble
+        set_seed(101)
+        small_noise = 0.05 * torch.randn_like(obs)
+        large_noise = 0.50 * torch.randn_like(obs)
+        fc_close = (obs + small_noise).unsqueeze(1).expand(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W).clone()
+        fc_far   = (obs + large_noise).unsqueeze(1).expand(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W).clone()
+        fn = self._fn()
+        loss_close = fn(fc_close, obs).sum().item()
+        loss_far   = fn(fc_far, obs).sum().item()
+        self.assertLess(loss_close, loss_far, f"closer forecast had higher loss: {loss_close} vs {loss_far}")
+
+    def test_relative_flag_changes_output(self):
+        """relative=True divides psd_skill by psd_observations and drops the
+        psd_observations weight on the coherence term, so the two modes must
+        produce different values on a non-trivial input."""
+        fc = _rand_ensemble(self._E)
+        obs = _rand()
+        out_abs = self._fn(relative=False)(fc, obs)
+        out_rel = self._fn(relative=True)(fc, obs)
+        self.assertFalse(
+            compare_tensors("relative vs absolute", out_abs, out_rel, atol=1e-6, rtol=1e-5),
+            "relative=True and relative=False produced identical outputs",
+        )
 
 
 if __name__ == "__main__":
