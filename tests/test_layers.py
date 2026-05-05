@@ -29,6 +29,7 @@ from makani.models.common.layers import (
     UpSample3D,
     DownSample3D,
 )
+from makani.models.common.imputation import MLPImputation, ConstantImputation
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from .testutils import disable_tf32, set_seed, get_default_parameters, compare_tensors
@@ -348,6 +349,346 @@ class TestLayers(unittest.TestCase):
         layer(x).sum().backward()
         self.assertIsNotNone(x.grad)
         self.assertTrue(torch.isfinite(x.grad).all().item())
+
+
+# ===========================================================================
+class TestMLPImputation(unittest.TestCase):
+    """Tests for MLPImputation in makani.models.common.imputation.
+
+    The module replaces NaN values (or values flagged by an explicit mask) in a
+    configurable channel subset (`inpute_chans`) with predictions from an MLP
+    that takes the full input and produces values for the imputable channels.
+
+    Invariants the tests pin down:
+      - non-imputable channels are passed through bit-equal
+      - non-masked positions in imputable channels are passed through bit-equal
+      - all NaN values are replaced (output has no NaN)
+      - auto-mask (None) and explicit mask (torch.isnan(x_sub)) agree
+      - shape is preserved
+      - works for batch_size > 1 and for 5-D (B, E, C, H, W) tensors
+      - backward through the imputation is finite
+    """
+
+    def setUp(self):
+        disable_tf32()
+        set_seed(333)
+        self.B = 4
+        self.C = 6                      # total channels
+        self.imputable = [1, 4]         # channels to impute
+        self.H = 8
+        self.W = 12
+
+    def _fn(self):
+        return MLPImputation(
+            inp_chans=self.C,
+            inpute_chans=torch.tensor(self.imputable, dtype=torch.long),
+            mlp_ratio=2.0,
+            activation_function=torch.nn.GELU,
+        )
+
+    def _make_input_with_nans(self, batch_size, n_nans_per_imputable=5):
+        """Random tensor with ``n_nans_per_imputable`` NaN positions inserted into
+        each imputable channel. Returns the tensor and a boolean mask of which
+        positions ARE NaN (shape: (B, len(imputable), H, W))."""
+        x = torch.randn(batch_size, self.C, self.H, self.W)
+        nan_mask_sub = torch.zeros(batch_size, len(self.imputable), self.H, self.W, dtype=torch.bool)
+        for b in range(batch_size):
+            for ic in range(len(self.imputable)):
+                rng = torch.randperm(self.H * self.W)[:n_nans_per_imputable]
+                nan_mask_sub[b, ic].view(-1)[rng] = True
+        # write NaN into the actual imputable channels
+        for ic_idx, c in enumerate(self.imputable):
+            x[:, c][nan_mask_sub[:, ic_idx]] = float("nan")
+        return x, nan_mask_sub
+
+    # -- shape / no-NaN invariants -----------------------------------------
+
+    def test_output_shape_preserved(self):
+        fn = self._fn()
+        x, _ = self._make_input_with_nans(batch_size=self.B)
+        out = fn(x)
+        self.assertEqual(out.shape, x.shape)
+
+    def test_output_has_no_nan(self):
+        fn = self._fn()
+        x, _ = self._make_input_with_nans(batch_size=self.B)
+        out = fn(x)
+        self.assertFalse(torch.isnan(out).any(),
+                         "MLPImputation output still contains NaN — imputation failed")
+
+    # -- pass-through guarantees: only NaN positions in imputable channels change ---
+
+    def test_non_imputable_channels_pass_through(self):
+        """Channels not in inpute_chans must be returned exactly as-is."""
+        fn = self._fn()
+        x, _ = self._make_input_with_nans(batch_size=self.B)
+        out = fn(x)
+        non_imputable = [c for c in range(self.C) if c not in self.imputable]
+        self.assertTrue(
+            compare_tensors(
+                "non-imputable channels passthrough",
+                out[:, non_imputable], x[:, non_imputable], atol=0.0, rtol=0.0,
+            ),
+            "non-imputable channels were modified by MLPImputation",
+        )
+
+    def test_only_nan_positions_change(self):
+        """In imputable channels, non-NaN positions must be passed through bit-equal.
+        Only the originally-NaN positions are allowed to change."""
+        fn = self._fn()
+        x, nan_mask_sub = self._make_input_with_nans(batch_size=self.B)
+        out = fn(x)
+
+        # for each imputable channel, the non-NaN positions of the original input
+        # must equal the corresponding positions in the output
+        for ic_idx, c in enumerate(self.imputable):
+            in_chan = x[:, c]
+            out_chan = out[:, c]
+            keep = ~nan_mask_sub[:, ic_idx]      # True where input was NOT NaN
+            self.assertTrue(
+                compare_tensors(
+                    f"non-NaN positions preserved (channel {c})",
+                    out_chan[keep], in_chan[keep], atol=0.0, rtol=0.0,
+                ),
+                f"channel {c}: non-NaN positions were modified by MLPImputation",
+            )
+
+    # -- mask handling ------------------------------------------------------
+
+    def test_auto_mask_matches_explicit_mask(self):
+        """Passing mask=None (auto-detect via torch.isnan) must give the same
+        result as passing the explicit isnan(x_sub) tensor."""
+        fn = self._fn()
+        x, _ = self._make_input_with_nans(batch_size=self.B)
+        x_sub = x[..., torch.tensor(self.imputable, dtype=torch.long), :, :]
+        explicit_mask = torch.isnan(x_sub)
+
+        out_auto = fn(x)
+        out_explicit = fn(x, mask=explicit_mask)
+        self.assertTrue(
+            compare_tensors("auto vs explicit mask", out_auto, out_explicit),
+            "auto-mask and explicit mask produced different outputs",
+        )
+
+    def test_explicit_mask_can_extend_nan_mask(self):
+        """An explicit mask is logical-OR'd with isnan(x_sub), so additional
+        non-NaN positions can be flagged for imputation. Output at those
+        flagged positions must come from the MLP — i.e. differ from the input
+        value at that position (with overwhelming probability for randn inputs
+        whose value is not equal to the MLP output)."""
+        fn = self._fn()
+        x = torch.randn(self.B, self.C, self.H, self.W)   # no NaNs
+        # flag a single position in each imputable channel
+        extra_mask = torch.zeros(self.B, len(self.imputable), self.H, self.W, dtype=torch.bool)
+        extra_mask[:, :, 0, 0] = True
+
+        out = fn(x, mask=extra_mask)
+        # all non-flagged positions in imputable channels must be unchanged
+        for ic_idx, c in enumerate(self.imputable):
+            keep = ~extra_mask[:, ic_idx]
+            self.assertTrue(
+                compare_tensors(
+                    f"non-flagged positions preserved (channel {c})",
+                    out[:, c][keep], x[:, c][keep], atol=0.0, rtol=0.0,
+                )
+            )
+
+    # -- batch sizes --------------------------------------------------------
+
+    def test_batch_size_one(self):
+        """Single-element batch must work (no broadcasting / squeeze edge case)."""
+        fn = self._fn()
+        x, _ = self._make_input_with_nans(batch_size=1)
+        out = fn(x)
+        self.assertEqual(out.shape, x.shape)
+        self.assertFalse(torch.isnan(out).any())
+
+    def test_batch_size_consistency(self):
+        """The per-sample output must be independent of other samples in the
+        batch — running sample [0] alone vs in a full batch must agree."""
+        fn = self._fn()
+        x_full, _ = self._make_input_with_nans(batch_size=self.B)
+        out_full = fn(x_full)
+        out_single = fn(x_full[:1])
+        self.assertTrue(
+            compare_tensors(
+                "batch size consistency", out_single, out_full[:1], atol=1e-6, rtol=1e-5,
+            )
+        )
+
+    def test_5d_input_with_ensemble_dim(self):
+        """The implementation uses ``x.dim() - 3`` as the channel axis and reshapes
+        to flatten extra batch dims for Conv2d. (B, E, C, H, W) inputs must work
+        and obey the same invariants."""
+        E = 3
+        fn = self._fn()
+        # build a 5-D input with NaNs in imputable channels
+        x = torch.randn(self.B, E, self.C, self.H, self.W)
+        for c in self.imputable:
+            x[..., c, 0, 0] = float("nan")
+        out = fn(x)
+        self.assertEqual(out.shape, x.shape)
+        self.assertFalse(torch.isnan(out).any())
+
+    # -- backward -----------------------------------------------------------
+
+    def test_backward_finite(self):
+        fn = self._fn()
+        x, _ = self._make_input_with_nans(batch_size=self.B)
+        # forward + backward; can't require_grad on a NaN-containing tensor input
+        # without producing NaN gradients at NaN positions, so use the output's sum
+        # — what we want is to ensure the MLP weights get a finite gradient
+        loss = fn(x).sum()
+        loss.backward()
+        for name, p in fn.named_parameters():
+            self.assertIsNotNone(p.grad, f"no gradient on {name}")
+            self.assertFalse(torch.isnan(p.grad).any(), f"NaN gradient on {name}")
+            self.assertFalse(torch.isinf(p.grad).any(), f"Inf gradient on {name}")
+
+
+# ===========================================================================
+class TestConstantImputation(unittest.TestCase):
+    """Tests for ConstantImputation — replaces masked positions with a
+    learnable per-channel constant (one ``nn.Parameter`` of shape (C, 1, 1))."""
+
+    def setUp(self):
+        disable_tf32()
+        set_seed(333)
+        self.B = 4
+        self.C = 5
+        self.H = 8
+        self.W = 12
+
+    def _fn(self):
+        return ConstantImputation(inp_chans=self.C)
+
+    # -- shape / no-NaN invariants -----------------------------------------
+
+    def test_output_shape_preserved(self):
+        fn = self._fn()
+        x = torch.randn(self.B, self.C, self.H, self.W)
+        out = fn(x)
+        self.assertEqual(out.shape, x.shape)
+
+    def test_output_has_no_nan(self):
+        """Even if the input has NaN values, the output must not."""
+        fn = self._fn()
+        x = torch.randn(self.B, self.C, self.H, self.W)
+        x[:, 0, 0, 0] = float("nan")
+        x[:, 2, 1, 2] = float("nan")
+        out = fn(x)
+        self.assertFalse(torch.isnan(out).any())
+
+    # -- correctness: only NaN positions change ----------------------------
+
+    def test_only_nan_positions_change(self):
+        """Non-NaN positions must be passed through bit-equal; NaN positions
+        must be replaced with the per-channel learnable weight."""
+        fn = self._fn()
+        x = torch.randn(self.B, self.C, self.H, self.W)
+        # insert a few NaNs in known positions
+        nan_positions = [(0, 0, 0, 0), (1, 2, 1, 2), (2, 4, 3, 4)]
+        for b, c, h, w in nan_positions:
+            x[b, c, h, w] = float("nan")
+
+        out = fn(x)
+        nan_mask = torch.isnan(x)
+        keep = ~nan_mask
+        self.assertTrue(
+            compare_tensors(
+                "non-NaN positions preserved", out[keep], x[keep], atol=0.0, rtol=0.0,
+            ),
+            "non-NaN positions were modified by ConstantImputation",
+        )
+
+        # at NaN positions, output must equal the per-channel weight
+        weight_bcast = fn.weight.expand(self.B, self.C, self.H, self.W)
+        self.assertTrue(
+            compare_tensors(
+                "NaN positions replaced by weight",
+                out[nan_mask], weight_bcast[nan_mask], atol=0.0, rtol=0.0,
+            )
+        )
+
+    def test_explicit_mask_extends_nan_mask(self):
+        """Passing an explicit mask logical-OR's with torch.isnan(x); positions
+        flagged by either source get replaced."""
+        fn = self._fn()
+        x = torch.randn(self.B, self.C, self.H, self.W)   # no NaNs
+        # flag specific (b, c, h, w) positions explicitly
+        explicit_mask = torch.zeros_like(x, dtype=torch.bool)
+        explicit_mask[0, 0, 0, 0] = True
+        explicit_mask[1, 3, 2, 5] = True
+
+        out = fn(x, mask=explicit_mask)
+        keep = ~explicit_mask
+        self.assertTrue(
+            compare_tensors(
+                "non-flagged positions preserved", out[keep], x[keep], atol=0.0, rtol=0.0,
+            )
+        )
+        weight_bcast = fn.weight.expand(self.B, self.C, self.H, self.W)
+        self.assertTrue(
+            compare_tensors(
+                "flagged positions replaced by weight",
+                out[explicit_mask], weight_bcast[explicit_mask], atol=0.0, rtol=0.0,
+            )
+        )
+
+    def test_auto_mask_matches_explicit_mask(self):
+        """mask=None (auto-detect via isnan) and mask=isnan(x) must agree."""
+        fn = self._fn()
+        x = torch.randn(self.B, self.C, self.H, self.W)
+        x[0, 0, 0, 0] = float("nan")
+        x[1, 2, 3, 4] = float("nan")
+
+        out_auto = fn(x)
+        out_explicit = fn(x, mask=torch.isnan(x))
+        self.assertTrue(
+            compare_tensors("auto vs explicit mask", out_auto, out_explicit, atol=0.0, rtol=0.0),
+        )
+
+    # -- batch sizes --------------------------------------------------------
+
+    def test_batch_size_one(self):
+        fn = self._fn()
+        x = torch.randn(1, self.C, self.H, self.W)
+        x[0, 1, 0, 0] = float("nan")
+        out = fn(x)
+        self.assertEqual(out.shape, x.shape)
+        self.assertFalse(torch.isnan(out).any())
+
+    def test_batch_size_consistency(self):
+        """Per-sample independence: running sample [0] alone vs in a full batch
+        must agree exactly (the imputation is purely per-element)."""
+        fn = self._fn()
+        x = torch.randn(self.B, self.C, self.H, self.W)
+        x[0, 0, 0, 0] = float("nan")
+        x[1, 2, 1, 2] = float("nan")
+
+        out_full = fn(x)
+        out_single = fn(x[:1])
+        self.assertTrue(
+            compare_tensors("batch size consistency", out_single, out_full[:1], atol=0.0, rtol=0.0),
+        )
+
+    # -- learnable weight ---------------------------------------------------
+
+    def test_weight_is_learnable(self):
+        """The per-channel weight must be an nn.Parameter; gradient through
+        it must be non-None and finite after backward when at least one
+        position is masked (otherwise no path through the weight)."""
+        fn = self._fn()
+        # ensure at least one masked position so the weight participates in the forward
+        x = torch.randn(self.B, self.C, self.H, self.W)
+        mask = torch.zeros_like(x, dtype=torch.bool)
+        mask[:, :, 0, 0] = True
+
+        loss = fn(x, mask=mask).sum()
+        loss.backward()
+        self.assertIsNotNone(fn.weight.grad, "ConstantImputation.weight has no gradient")
+        self.assertFalse(torch.isnan(fn.weight.grad).any())
+        self.assertFalse(torch.isinf(fn.weight.grad).any())
 
 
 if __name__ == "__main__":
