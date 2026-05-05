@@ -282,8 +282,8 @@ class CRPSLoss(GeometricBaseLoss):
         self.alpha = alpha
         self.eps = eps
 
-        if (self.crps_type != "skillspread") and (self.alpha < 1.0):
-            raise NotImplementedError("The alpha parameter (almost fair CRPS factor) is only supported for the skillspread kernel.")
+        if (self.crps_type not in ("skillspread", "naive skillspread")) and (self.alpha < 1.0):
+            raise NotImplementedError("The alpha parameter (almost fair CRPS factor) is only supported for the skillspread kernels.")
 
         # we also need a variant of the weights split in ensemble direction:
         quad_weight_split = self.quadrature.quad_weight.reshape(1, 1, -1)
@@ -448,8 +448,8 @@ class SpectralCRPSLoss(SpectralBaseLoss):
         self.alpha = alpha
         self.eps = eps
 
-        if (self.crps_type != "skillspread") and (self.alpha < 1.0):
-            raise NotImplementedError("The alpha parameter (almost fair CRPS factor) is only supported for the skillspread kernel.")
+        if (self.crps_type not in ("skillspread", "naive skillspread")) and (self.alpha < 1.0):
+            raise NotImplementedError("The alpha parameter (almost fair CRPS factor) is only supported for the skillspread kernels.")
 
         if ensemble_weights is not None:
             self.register_buffer("ensemble_weights", ensemble_weights, persistent=False)
@@ -623,8 +623,8 @@ class GradientCRPSLoss(GradientBaseLoss):
         self.alpha = alpha
         self.eps = eps
 
-        if (self.crps_type != "skillspread") and (self.alpha < 1.0):
-            raise NotImplementedError("The alpha parameter (almost fair CRPS factor) is only supported for the skillspread kernel.")
+        if (self.crps_type not in ("skillspread", "naive skillspread")) and (self.alpha < 1.0):
+            raise NotImplementedError("The alpha parameter (almost fair CRPS factor) is only supported for the skillspread kernels.")
 
         # we also need a variant of the weights split in ensemble direction:
         quad_weight_split = self.quadrature.quad_weight.reshape(1, 1, -1)
@@ -809,8 +809,8 @@ class VortDivCRPSLoss(VortDivBaseLoss):
         self.alpha = alpha
         self.eps = eps
 
-        if (self.crps_type != "skillspread") and (self.alpha < 1.0):
-            raise NotImplementedError("The alpha parameter (almost fair CRPS factor) is only supported for the skillspread kernel.")
+        if (self.crps_type not in ("skillspread", "naive skillspread")) and (self.alpha < 1.0):
+            raise NotImplementedError("The alpha parameter (almost fair CRPS factor) is only supported for the skillspread kernels.")
 
         # we also need a variant of the weights split in ensemble direction:
         quad_weight_split = self.quadrature.quad_weight.reshape(1, 1, -1)
@@ -974,8 +974,8 @@ class KernelScoreLoss(GeometricBaseLoss):
         self.alpha = alpha
         self.eps = eps
 
-        if (self.crps_type != "skillspread") and (self.alpha < 1.0):
-            raise NotImplementedError("The alpha parameter (almost fair CRPS factor) is only supported for the skillspread kernel.")
+        if (self.crps_type not in ("skillspread", "naive skillspread")) and (self.alpha < 1.0):
+            raise NotImplementedError("The alpha parameter (almost fair CRPS factor) is only supported for the skillspread kernels.")
 
         # we also need a variant of the weights split in ensemble direction:
         quad_weight_split = self.quadrature.quad_weight.reshape(1, 1, -1)
