@@ -1049,7 +1049,8 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         group the channels appropriately into atmospheric pressure levels and surface variables
         """
 
-        atmo_chans, surf_chans, aux_chans, pressure_lvls = get_channel_groups(channel_names, aux_channel_names)
+        atmo_chans, surf_chans, dyn_aux_chans, stat_aux_chans, pressure_lvls = get_channel_groups(channel_names, aux_channel_names)
+        aux_chans = dyn_aux_chans + stat_aux_chans
 
         # compute how many channel groups will be kept internally
         self.n_atmo_groups = len(pressure_lvls)
