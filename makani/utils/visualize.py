@@ -24,9 +24,45 @@ import wandb
 
 import torch
 
-
+# we can run matplotlib in Agg mode in the subprocesses to save some memory overhead
 def _worker_init():
     os.environ["MPLBACKEND"] = "Agg"
+
+# per-process cache of (figure, pred_axes, truth_axes, pred_mesh, truth_mesh)
+# keyed on (H, W, figsize, projection, cmap). Each ProcessPoolExecutor worker
+# has its own copy; setting up mollweide axes is the dominant per-frame cost,
+# so amortizing it across calls is the main speedup here.
+_figure_cache = {}
+
+
+def _get_or_create_figure(H, W, lat, lon, figsize, projection, cmap):
+    import matplotlib.pyplot as plt
+
+    key = (H, W, figsize, projection, cmap)
+    if key in _figure_cache:
+        return _figure_cache[key]
+
+    Lon, Lat = np.meshgrid(lon, lat)
+    fig = plt.figure(figsize=figsize)
+    placeholder = np.zeros((H, W))
+
+    ax_pred = fig.add_subplot(2, 1, 1, projection=projection)
+    mesh_pred = ax_pred.pcolormesh(Lon, Lat, placeholder, cmap=cmap)
+    ax_pred.grid(True)
+    ax_pred.set_xticklabels([])
+    ax_pred.set_yticklabels([])
+
+    ax_truth = fig.add_subplot(2, 1, 2, projection=projection)
+    mesh_truth = ax_truth.pcolormesh(Lon, Lat, placeholder, cmap=cmap)
+    ax_truth.grid(True)
+    ax_truth.set_xticklabels([])
+    ax_truth.set_yticklabels([])
+
+    fig.tight_layout()
+
+    entry = (fig, ax_pred, ax_truth, mesh_pred, mesh_truth)
+    _figure_cache[key] = entry
+    return entry
 
 
 def plot_comparison(
@@ -49,8 +85,6 @@ def plot_comparison(
     cmap: colormap
     projection: "mollweide", "hammer", "aitoff" or None
     """
-    import matplotlib.pyplot as plt
-
     assert len(pred.shape) == 2
     assert len(truth.shape) == 2
     assert pred.shape == truth.shape
@@ -59,7 +93,6 @@ def plot_comparison(
     if (lat is None) or (lon is None):
         lon = np.linspace(-np.pi, np.pi, W)
         lat = np.linspace(np.pi / 2.0, -np.pi / 2.0, H)
-    Lon, Lat = np.meshgrid(lon, lat)
 
     # only normalize with the truth
     if diverging:
@@ -69,36 +102,23 @@ def plot_comparison(
         vmax = truth.max()
         vmin = truth.min()
 
-    fig = plt.figure(figsize=figsize)
+    fig, ax_pred, ax_truth, mesh_pred, mesh_truth = _get_or_create_figure(
+        H, W, lat, lon, figsize, projection, cmap,
+    )
 
-    ax = fig.add_subplot(2, 1, 1, projection=projection)  # can also be Mollweide
+    mesh_pred.set_array(pred.ravel())
+    mesh_pred.set_clim(vmin, vmax)
+    ax_pred.set_title(pred_title)
 
-    ax.pcolormesh(Lon, Lat, pred, cmap=cmap, vmin=vmin, vmax=vmax)
-    ax.set_title(pred_title)
-    ax.grid(True)
-    ax.set_xticklabels([])
-    ax.set_yticklabels([])
+    mesh_truth.set_array(truth.ravel())
+    mesh_truth.set_clim(vmin, vmax)
+    ax_truth.set_title(truth_title)
 
-    ax = fig.add_subplot(2, 1, 2, projection=projection)  # can also be Mollweide
-
-    ax.pcolormesh(Lon, Lat, truth, cmap=cmap, vmin=vmin, vmax=vmax)
-    ax.set_title(truth_title)
-    ax.grid(True)
-    ax.set_xticklabels([])
-    ax.set_yticklabels([])
-
-    plt.tight_layout()
-
-    # save into memory buffer
     buf = io.BytesIO()
-    plt.savefig(buf)
-    plt.close(fig)
+    fig.savefig(buf)
     buf.seek(0)
 
-    # create image
-    image = Image.open(buf)
-
-    return image
+    return Image.open(buf)
 
 
 def plot_rollout_metrics(metric_curves, var_names, score_path=None, file_prefix="curve", dtxdh=6):
