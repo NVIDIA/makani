@@ -20,24 +20,30 @@ import os
 import tempfile
 import unittest
 
-import matplotlib
-
-matplotlib.use("Agg")
-
 import numpy as np
-from PIL import Image
 
-from makani.utils.visualize import (
-    VisualizationWrapper,
-    _worker_init,
-    plot_comparison,
-    plot_rollout_metrics,
-    visualize_field,
-)
-
+_have_matplotlib = importlib.util.find_spec("matplotlib") is not None
+_have_pil = importlib.util.find_spec("PIL") is not None
 _have_moviepy = importlib.util.find_spec("moviepy") is not None
+_have_visualize_deps = _have_matplotlib and _have_pil
+
+if _have_visualize_deps:
+    import matplotlib
+
+    matplotlib.use("Agg")
+
+    from PIL import Image
+
+    from makani.utils.visualize import (
+        VisualizationWrapper,
+        _worker_init,
+        plot_comparison,
+        plot_rollout_metrics,
+        visualize_field,
+    )
 
 
+@unittest.skipUnless(_have_visualize_deps, "matplotlib and/or PIL are not installed")
 class TestPlotComparison(unittest.TestCase):
     def setUp(self):
         rng = np.random.default_rng(0)
@@ -74,6 +80,7 @@ class TestPlotComparison(unittest.TestCase):
         self.assertIsInstance(img, Image.Image)
 
 
+@unittest.skipUnless(_have_visualize_deps, "matplotlib and/or PIL are not installed")
 class TestVisualizeField(unittest.TestCase):
     def setUp(self):
         rng = np.random.default_rng(1)
@@ -109,6 +116,7 @@ class TestVisualizeField(unittest.TestCase):
         self.assertIsInstance(img, Image.Image)
 
 
+@unittest.skipUnless(_have_visualize_deps, "matplotlib and/or PIL are not installed")
 class TestPlotRolloutMetrics(unittest.TestCase):
     def test_writes_png_files(self):
         curves = [np.linspace(0.0, 1.0, 10), np.linspace(1.0, 0.0, 10)]
@@ -125,6 +133,7 @@ class TestPlotRolloutMetrics(unittest.TestCase):
         plot_rollout_metrics(curves, ["t2m"], score_path=None)
 
 
+@unittest.skipUnless(_have_visualize_deps, "matplotlib and/or PIL are not installed")
 class TestWorkerInit(unittest.TestCase):
     def test_sets_mplbackend_env(self):
         original = os.environ.get("MPLBACKEND")
@@ -139,7 +148,7 @@ class TestWorkerInit(unittest.TestCase):
                 os.environ["MPLBACKEND"] = original
 
 
-@unittest.skipUnless(_have_moviepy, "moviepy is not installed")
+@unittest.skipUnless(_have_visualize_deps and _have_moviepy, "matplotlib, PIL, or moviepy is not installed")
 class TestVisualizationWrapper(unittest.TestCase):
     """End-to-end smoke test for the multiprocess visualization pipeline."""
 
