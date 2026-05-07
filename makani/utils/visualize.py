@@ -220,7 +220,7 @@ class VisualizationWrapper(object):
                     video.append(np.asarray(image))
 
                 video = ImageSequenceClip(video, fps=3)
-                video.write_gif("video_output.gif")
+                video.write_gif("video_output.gif", logger=None)
 
         else:
             results = [wandb.Image(image, caption=prefix) for prefix, image in results.items()]
