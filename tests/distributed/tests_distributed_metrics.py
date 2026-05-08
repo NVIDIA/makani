@@ -34,7 +34,7 @@ from makani.utils import MetricsHandler
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
-from .distributed_helpers import _init_grid, _split_helper, get_default_parameters
+from .distributed_helpers import _init_grid, _split_helper, get_default_parameters, set_image_shape
 from ..testutils import disable_tf32, set_seed, compare_arrays
 
 # because of physicsnemo/NCCL tear down issues, we can only run one test at a time
@@ -72,7 +72,10 @@ class TestDistributedMetricHandler(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.tmpdir.cleanup()
-        cls.mpi_comm.finalize()
+        # Free the duplicated communicator. mpi_comm is an mpi4py Intracomm
+        # (returned by MPI.COMM_WORLD.Dup()), whose disposal API is Free(),
+        # not the previously-used (and non-existent) finalize().
+        cls.mpi_comm.Free()
 
 
     def _init_comms(self):
@@ -134,15 +137,9 @@ class TestDistributedMetricHandler(unittest.TestCase):
         self.params = get_default_parameters()
         self.params["dhours"] = 1
 
-        # generating the image logic that is typically used by the dataloader
-        self.params.img_shape_x = 36
-        self.params.img_shape_y = 72
-        self.params.img_local_shape_x = self.params.img_crop_shape_x = self.params.img_shape_x
-        self.params.img_local_shape_y = self.params.img_crop_shape_y = self.params.img_shape_y
-        self.params.img_local_offset_x = 0
-        self.params.img_local_offset_y = 0
-        self.params.img_crop_offset_x = 0
-        self.params.img_crop_offset_y = 0
+        # set image shape, local/crop shapes, offsets, and resampled shapes
+        # consistently — see set_image_shape for the rationale.
+        set_image_shape(self.params, h=36, w=72)
 
         return
 

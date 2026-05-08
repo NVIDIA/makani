@@ -25,6 +25,10 @@ import wandb
 import torch
 
 
+def _worker_init():
+    os.environ["MPLBACKEND"] = "Agg"
+
+
 def plot_comparison(
     pred,
     truth,
@@ -174,7 +178,7 @@ class VisualizationWrapper(object):
 
         # this is for parallel processing
         ctx = mp.get_context("spawn")
-        self.executor = cf.ProcessPoolExecutor(max_workers=num_workers, mp_context=ctx)
+        self.executor = cf.ProcessPoolExecutor(max_workers=num_workers, mp_context=ctx, initializer=_worker_init)
         self.requests = []
 
     def reset(self):
@@ -220,7 +224,7 @@ class VisualizationWrapper(object):
                     video.append(np.asarray(image))
 
                 video = ImageSequenceClip(video, fps=3)
-                video.write_gif("video_output.gif")
+                video.write_gif("video_output.gif", logger=None)
 
         else:
             results = [wandb.Image(image, caption=prefix) for prefix, image in results.items()]

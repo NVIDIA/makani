@@ -32,7 +32,7 @@ from makani.mpu.mappings import init_gradient_reduction_hooks
 from makani.mpu.mappings import reduce_from_parallel_region
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-from .distributed_helpers import get_default_parameters, _split_helper, _gather_helper
+from .distributed_helpers import get_default_parameters, set_image_shape, _split_helper, _gather_helper
 from ..testutils import disable_tf32, set_seed, compare_tensors
 
 
@@ -52,13 +52,20 @@ class TestDistributedModel(unittest.TestCase):
             cls.device = torch.device(f"cuda:{local_rank}")
             torch.cuda.set_device(cls.device)
         else:
-            if self.mpi_comm_rank == 0:
+            if cls.mpi_comm_rank == 0:
                 print("Running test on CPU")
             cls.device = torch.device("cpu")
         set_seed(333)
 
         return
 
+    @classmethod
+    def tearDownClass(cls):
+        # Free the duplicated communicator. mpi_comm is an mpi4py Intracomm
+        # (returned by MPI.COMM_WORLD.Dup()), whose disposal API is Free()
+        # — release the duplicated comm explicitly rather than relying on
+        # interpreter shutdown to clean it up.
+        cls.mpi_comm.Free()
 
     def setUp(self):
 
@@ -68,15 +75,9 @@ class TestDistributedModel(unittest.TestCase):
 
         self.params.history_normalization_mode = "none"
 
-        # generating the image logic that is typically used by the dataloader
-        self.params.img_shape_x = 36
-        self.params.img_shape_y = 72
-        self.params.img_local_shape_x = self.params.img_crop_shape_x = self.params.img_shape_x
-        self.params.img_local_shape_y = self.params.img_crop_shape_y = self.params.img_shape_y
-        self.params.img_local_offset_x = 0
-        self.params.img_local_offset_y = 0
-        self.params.img_crop_offset_x = 0
-        self.params.img_crop_offset_y = 0
+        # set image shape, local/crop shapes, offsets, and resampled shapes
+        # consistently — see set_image_shape for the rationale.
+        set_image_shape(self.params, h=36, w=72)
 
         # also set the batch size for testing
         self.params.batch_size = 4
@@ -119,8 +120,6 @@ class TestDistributedModel(unittest.TestCase):
     def _destroy_comms(self):
         comm.cleanup()
         return
-
-
 
 
     def _split_helper(self, tensor, hdim=None, wdim=None):
@@ -204,7 +203,7 @@ class TestDistributedModel(unittest.TestCase):
     @parameterized.expand(
         [
             #("SNO", 1e-4),
-            #("FCN3", 1e-4),
+            ("FCN3", 1e-4),
         ],
         skip_on_empty=True,
     )

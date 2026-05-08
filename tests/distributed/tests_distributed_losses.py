@@ -273,13 +273,16 @@ class TestDistributedLoss(unittest.TestCase):
 
     @parameterized.expand(
         [
-            [128, 256, 32, 8, 4, "ensemble_crps", False, 1e-4],
-            [129, 256, 1, 10, 4, "ensemble_crps", False, 1e-4],
-            [128, 256, 32, 8, 4, "ensemble_crps", True, 1e-4],
-            [128, 256, 32, 8, 4, "skillspread_crps", False, 1e-4],
-            [129, 256, 1, 10, 4, "skillspread_crps", False, 1e-4],
-            [128, 256, 32, 8, 4, "skillspread_crps", True, 1e-4],
-            [129, 256, 1, 10, 4, "skillspread_crps", True, 5e-4],
+            # crps_type was renamed: "ensemble_crps" → "cdf", "skillspread_crps" → "skillspread".
+            # SpectralCRPSLoss enforces (absolute=False) ⇒ (crps_type == "skillspread")
+            # because cdf requires sorting and sorting complex spectral coefficients
+            # only makes sense after abs(). So "cdf" rows must have absolute=True.
+            [128, 256, 32, 8, 4, "cdf", True, 1e-4],
+            [129, 256, 1, 10, 4, "cdf", True, 1e-4],
+            [128, 256, 32, 8, 4, "skillspread", False, 1e-4],
+            [129, 256, 1, 10, 4, "skillspread", False, 1e-4],
+            [128, 256, 32, 8, 4, "skillspread", True, 1e-4],
+            [129, 256, 1, 10, 4, "skillspread", True, 5e-4],
         ], skip_on_empty=True
     )
     def test_distributed_spectral_crps(self, nlat, nlon, batch_size, num_chan, ens_size, loss_type, absolute, tol, verbose=False):

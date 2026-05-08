@@ -701,7 +701,7 @@ class Driver(metaclass=abc.ABCMeta):
         if params.lr_warmup_steps > 0:
             if params.scheduler == "ReduceLROnPlateau":
                 raise NotImplementedError("Error, warmup scheduler not implemented for ReduceLROnPlateau scheduler")
-            warmup_scheduler = lr_scheduler.LinearLR(optimizer, start_factor=params.get("lr_start", 0.0), end_factor=1.0, total_iters=params.get("lr_warmup_steps", 0))
+            warmup_scheduler = lr_scheduler.LinearLR(optimizer, start_factor=params.get("lr_start", 1E-5), end_factor=1.0, total_iters=params.get("lr_warmup_steps", 0))
 
             scheduler = lr_scheduler.SequentialLR(optimizer, [warmup_scheduler, scheduler], milestones=[params.get("lr_warmup_steps", 0)])
 
