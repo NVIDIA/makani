@@ -432,12 +432,6 @@ class RolloutBuffer(DataBuffer):
                 tarr,
                 dest_sel=batch_range,
             )
-            # advance the file pointer BEFORE zero_buffers — zero_buffers now
-            # resets buffer_offset, so we must capture it here while still valid.
-            self.file_offset += self.buffer_offset
-
-        # reset buffers (also resets buffer_offset)
-        self.zero_buffers()
 
         return
 
