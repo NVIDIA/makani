@@ -72,8 +72,8 @@ RUN pip install --ignore-installed "git+https://github.com/NVIDIA/mlperf-common.
 # torch-harmonics
 ENV FORCE_CUDA_EXTENSION 1
 ENV TORCH_CUDA_ARCH_LIST "8.0 8.6 8.7 9.0 10.0 12.0+PTX"
-ENV HARMONICS_VERSION 0.8.5
-RUN cd /opt && git clone https://github.com/NVIDIA/torch-harmonics.git && \
+ENV HARMONICS_VERSION 0.9.0
+RUN cd /opt && git clone --branch v${HARMONICS_VERSION} https://github.com/NVIDIA/torch-harmonics.git && \
     cd torch-harmonics && \
     pip install --no-build-isolation -e .
 
@@ -90,4 +90,4 @@ COPY makani /opt/makani/makani
 COPY tests /opt/makani/tests
 COPY pyproject.toml /opt/makani/pyproject.toml
 COPY README.md /opt/makani/README.md
-RUN cd /opt/makani && pip install -e .
+RUN cd /opt/makani && pip install --no-deps -e .
