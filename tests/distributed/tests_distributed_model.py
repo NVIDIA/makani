@@ -21,7 +21,6 @@ import unittest
 from parameterized import parameterized
 
 import torch
-import torch_harmonics.distributed as thd
 
 from makani.utils import comm
 from makani.utils import driver
