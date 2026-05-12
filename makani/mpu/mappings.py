@@ -263,6 +263,29 @@ def init_gradient_reduction_hooks(model, device, reduction_buffer_count=1, broad
             broadcast_buffers = False
             need_hooks = True
 
+    # pre-divide grads so that the SUM-everywhere comm hook below produces the
+    # right answer for groups where the input is replicated (i.e. all ranks in
+    # that group computed the same local grad — SUM would over-count by the
+    # group size, MEAN is what we want). The heuristic: a group in
+    # is_shared_mp that does NOT shard any param dim (i.e. doesn't appear in
+    # sharded_dims_mp) reduces with MEAN. SHT-style exceptions where the input
+    # is sharded along an axis the weight doesn't carry must override this via
+    # `param.is_shared_mp_op = {"<group>": "sum"}`.
+    if need_hooks:
+        for param in model.parameters():
+            if not hasattr(param, "is_shared_mp"):
+                continue
+            sharded_dims = getattr(param, "sharded_dims_mp", None)
+            sharded_groups = {g for g in sharded_dims if g is not None} if sharded_dims is not None else set()
+            override = getattr(param, "is_shared_mp_op", {})
+            scaling = 1
+            for group in param.is_shared_mp:
+                op = override.get(group, "sum" if group in sharded_groups else "mean")
+                if op == "mean":
+                    scaling *= comm.get_size(group)
+            if scaling > 1:
+                param.register_hook(lambda grad, s=scaling: grad / s)
+
     # compute bucket cap in MB:
     if need_hooks:
         # if we need hooks, we can only use a single reduction buffer:

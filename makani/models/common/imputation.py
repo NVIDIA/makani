@@ -86,8 +86,12 @@ class ConstantImputation(nn.Module):
         self.weight = nn.Parameter(torch.randn(inp_chans, 1, 1))
 
         if comm.get_size("spatial") > 1:
+            # Per-channel imputation value broadcast over a spatially-sharded
+            # input → local grads are partials, SUM-reduce (heuristic defaults
+            # to MEAN here since sharded_dims_mp is all None).
             self.weight.is_shared_mp = ["spatial"]
             self.weight.sharded_dims_mp = [None, None, None]
+            self.weight.is_shared_mp_op = {"spatial": "sum"}
 
     def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None):
         if mask is None:

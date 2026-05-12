@@ -466,8 +466,10 @@ class SphericalFourierNeuralOperatorNet(nn.Module):
         # output transform
         if self.big_skip:
             self.residual_transform = nn.Conv2d(self.inp_chans, self.out_chans, 1, bias=False)
+            # 1x1 conv on spatially-sharded input: SUM across spatial.
             self.residual_transform.weight.is_shared_mp = ["spatial"]
             self.residual_transform.weight.sharded_dims_mp = [None, None, None, None]
+            self.residual_transform.weight.is_shared_mp_op = {"spatial": "sum"}
             scale = math.sqrt(0.5 / self.inp_chans)
             nn.init.normal_(self.residual_transform.weight, mean=0.0, std=scale)
 

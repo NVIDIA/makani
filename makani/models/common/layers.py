@@ -90,8 +90,12 @@ class PatchEmbed2D(nn.Module):
         self.img_size = img_size
         self.patch_size = patch_size
         self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size, bias=True)
+        # Conv2d on spatially-sharded input → spatial grads are partials,
+        # SUM-reduce (heuristic defaults to MEAN without sharded_dims_mp).
         self.proj.weight.is_shared_mp = ["spatial"]
+        self.proj.weight.is_shared_mp_op = {"spatial": "sum"}
         self.proj.bias.is_shared_mp = ["spatial"]
+        self.proj.bias.is_shared_mp_op = {"spatial": "sum"}
         self.padding=padding
         self.flatten = flatten
 
@@ -302,8 +306,10 @@ class EncoderDecoder(nn.Module):
             else:
                 raise NotImplementedError(f"Error, input format {input_format} not supported.")
 
-            # weight sharing
+            # weight sharing — input is spatially sharded, so grads are partials
+            # that must be SUM-reduced (heuristic defaults to MEAN here).
             encoder_modules[-1].weight.is_shared_mp = ["spatial"]
+            encoder_modules[-1].weight.is_shared_mp_op = {"spatial": "sum"}
 
             # proper initializaiton (fan-in per group for grouped conv)
             fan_in = (current_dim // groups) if input_format == "nchw" else current_dim
@@ -311,6 +317,7 @@ class EncoderDecoder(nn.Module):
             nn.init.normal_(encoder_modules[-1].weight, mean=0.0, std=scale)
             if encoder_modules[-1].bias is not None:
                 encoder_modules[-1].bias.is_shared_mp = ["spatial"]
+                encoder_modules[-1].bias.is_shared_mp_op = {"spatial": "sum"}
                 nn.init.constant_(encoder_modules[-1].bias, 0.0)
 
             encoder_modules.append(act_layer())
@@ -322,8 +329,10 @@ class EncoderDecoder(nn.Module):
         elif input_format == "traditional":
             encoder_modules.append(nn.Linear(current_dim, output_dim, bias=False))
 
-        # weight sharing
+        # weight sharing — input is spatially sharded, so grads are partials
+        # that must be SUM-reduced (heuristic defaults to MEAN here).
         encoder_modules[-1].weight.is_shared_mp = ["spatial"]
+        encoder_modules[-1].weight.is_shared_mp_op = {"spatial": "sum"}
 
         # proper initializaiton
         fan_in = (current_dim // groups) if input_format == "nchw" else current_dim
@@ -331,6 +340,7 @@ class EncoderDecoder(nn.Module):
         nn.init.normal_(encoder_modules[-1].weight, mean=0.0, std=scale)
         if encoder_modules[-1].bias is not None:
             encoder_modules[-1].bias.is_shared_mp = ["spatial"]
+            encoder_modules[-1].bias.is_shared_mp_op = {"spatial": "sum"}
             nn.init.constant_(encoder_modules[-1].bias, 0.0)
 
         self.fwd = nn.Sequential(*encoder_modules)
@@ -366,9 +376,12 @@ class MLP(nn.Module):
         else:
             raise NotImplementedError(f"Error, input format {input_format} not supported.")
 
-        # sharing settings
+        # sharing settings — input is spatially sharded, grads are partials
+        # that need SUM-reduction (heuristic defaults to MEAN here).
         fc1.weight.is_shared_mp = ["spatial"]
+        fc1.weight.is_shared_mp_op = {"spatial": "sum"}
         fc1.bias.is_shared_mp = ["spatial"]
+        fc1.bias.is_shared_mp_op = {"spatial": "sum"}
 
         # initialize the weights correctly
         scale = math.sqrt(2.0 / in_features)
@@ -390,10 +403,13 @@ class MLP(nn.Module):
         else:
             raise NotImplementedError(f"Error, input format {input_format} not supported.")
 
-        # sharing settings
+        # sharing settings — input is spatially sharded, grads are partials
+        # that need SUM-reduction (heuristic defaults to MEAN here).
         fc2.weight.is_shared_mp = ["spatial"]
+        fc2.weight.is_shared_mp_op = {"spatial": "sum"}
         if fc2.bias is not None:
             fc2.bias.is_shared_mp = ["spatial"]
+            fc2.bias.is_shared_mp_op = {"spatial": "sum"}
 
         # gain factor for the output determines the scaling of the output init
         scale = math.sqrt(gain / hidden_features)

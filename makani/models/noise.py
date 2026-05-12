@@ -273,6 +273,11 @@ class IsotropicGaussianRandomFieldS2(BaseNoiseS2):
         # register buffer
         if learnable:
             self.register_parameter("sigma_l", nn.Parameter(sigma_l))
+            # sigma_l is sharded by both h and w (different shapes per spatial
+            # rank). Replicated only across matmul, so only matmul reduction
+            # is meaningful — defaulting to ["model"] would attempt an
+            # all_reduce across mismatched shapes. Matmul-replicated → MEAN.
+            self.sigma_l.is_shared_mp = ["matmul"]
             self.sigma_l.sharded_dims_mp = [None, None, None, "h", "w"]
         else:
             self.register_buffer("sigma_l", sigma_l, persistent=False)
@@ -424,11 +429,22 @@ class DiffusionNoiseS2(BaseNoiseS2):
         # register buffer
         if learnable:
             self.phi = nn.Parameter(phi)
-            self.phi.is_shared_mp = ["matmul", "h", "w"]
+            # phi is per-channel and broadcast over a state sharded by both h
+            # (lmax) and w (mmax). Different spatial ranks accumulate partial
+            # gradients into phi → SUM across spatial. Matmul-replicated →
+            # MEAN (default).
+            self.phi.is_shared_mp = ["matmul", "spatial"]
             self.phi.sharded_dims_mp = [None, None, None]
+            self.phi.is_shared_mp_op = {"spatial": "sum"}
             self.sigma_l = nn.Parameter(sigma_l)
+            # sigma_l has lmax sharded by h (different h-ranks already hold
+            # disjoint slices, no reduction across h), but no mmax dim, so it
+            # broadcasts over a w-sharded mmax → SUM across w. Matmul default
+            # MEAN is correct. Cannot use "spatial" here because that would
+            # imply replication across h, which is false.
             self.sigma_l.is_shared_mp = ["matmul", "w"]
             self.sigma_l.sharded_dims_mp = [None, None, None, "h", None, None]
+            self.sigma_l.is_shared_mp_op = {"w": "sum"}
         else:
             self.register_buffer("phi", phi, persistent=False)
             self.register_buffer("sigma_l", sigma_l, persistent=False)

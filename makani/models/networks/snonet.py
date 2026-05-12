@@ -87,11 +87,17 @@ class DiscreteContinuousEncoder(nn.Module):
             theta_cutoff=theta_cutoff,
         )
         if comm.get_size("spatial") > 1:
+            # DISCO conv weight on spatially-sharded input: SUM across spatial.
             self.conv.weight.is_shared_mp = ["spatial"]
             self.conv.weight.sharded_dims_mp = [None, None, None]
+            self.conv.weight.is_shared_mp_op = {"spatial": "sum"}
             if self.conv.bias is not None:
-                self.conv.bias.is_shared_mp = ["model"]
+                # Bias is added after conv → input is spatially sharded AND
+                # matmul-replicated. "model" as one group can't express SUM
+                # across spatial + MEAN across matmul, so split it.
+                self.conv.bias.is_shared_mp = ["spatial", "matmul"]
                 self.conv.bias.sharded_dims_mp = [None]
+                self.conv.bias.is_shared_mp_op = {"spatial": "sum"}
 
         if use_mlp:
             with torch.no_grad():
@@ -192,11 +198,15 @@ class DiscreteContinuousDecoder(nn.Module):
             theta_cutoff=theta_cutoff,
         )
         if comm.get_size("spatial") > 1:
+            # DISCO conv weight on spatially-sharded input: SUM across spatial.
             self.conv.weight.is_shared_mp = ["spatial"]
             self.conv.weight.sharded_dims_mp = [None, None, None]
+            self.conv.weight.is_shared_mp_op = {"spatial": "sum"}
             if self.conv.bias is not None:
-                self.conv.bias.is_shared_mp = ["model"]
+                # Bias post-conv → spatially sharded, matmul-replicated.
+                self.conv.bias.is_shared_mp = ["spatial", "matmul"]
                 self.conv.bias.sharded_dims_mp = [None]
+                self.conv.bias.is_shared_mp_op = {"spatial": "sum"}
 
     def forward(self, x):
         dtype = x.dtype
@@ -268,11 +278,15 @@ class NeuralOperatorBlock(nn.Module):
                 theta_cutoff=math.sqrt(2) * torch.pi / float(self.input_shape[0] - 1),
             )
             if comm.get_size("spatial") > 1:
+                # Local DISCO conv weight on spatially-sharded input → SUM.
                 self.local_conv.weight.is_shared_mp = ["spatial"]
                 self.local_conv.weight.sharded_dims_mp = [None, None, None]
+                self.local_conv.weight.is_shared_mp_op = {"spatial": "sum"}
                 if self.local_conv.bias is not None:
-                    self.local_conv.bias.is_shared_mp = ["model"]
+                    # Bias post-conv → spatially sharded, matmul-replicated.
+                    self.local_conv.bias.is_shared_mp = ["spatial", "matmul"]
                     self.local_conv.bias.sharded_dims_mp = [None]
+                    self.local_conv.bias.is_shared_mp_op = {"spatial": "sum"}
 
             with torch.no_grad():
                 self.local_conv.weight *= gain_factor
@@ -315,8 +329,11 @@ class NeuralOperatorBlock(nn.Module):
         if layer_scale:
             self.layer_scale = LayerScale(out_chans)
             if comm.get_size("spatial") > 1:
-                self.layer_scale.weight.is_shared_mp = ["model"]
+                # Per-channel scale on spatially-sharded, matmul-replicated
+                # activation → SUM across spatial, MEAN across matmul.
+                self.layer_scale.weight.is_shared_mp = ["spatial", "matmul"]
                 self.layer_scale.weight.sharded_dims_mp = [None, None, None, None]
+                self.layer_scale.weight.is_shared_mp_op = {"spatial": "sum"}
         else:
             self.layer_scale = nn.Identity()
 
@@ -326,11 +343,14 @@ class NeuralOperatorBlock(nn.Module):
             self.skip = nn.Conv2d(inp_chans, out_chans, 1, 1, bias=False)
             torch.nn.init.normal_(self.skip.weight, std=math.sqrt(gain_factor / inp_chans))
             if comm.get_size("spatial") > 1:
-                self.skip.weight.is_shared_mp = ["model"]
+                # 1x1 conv on spatially-sharded, matmul-replicated input.
+                self.skip.weight.is_shared_mp = ["spatial", "matmul"]
                 self.skip.weight.sharded_dims_mp = [None, None, None, None]
+                self.skip.weight.is_shared_mp_op = {"spatial": "sum"}
                 if self.skip.bias is not None:
-                    self.skip.bias.is_shared_mp = ["model"]
+                    self.skip.bias.is_shared_mp = ["spatial", "matmul"]
                     self.skip.bias.sharded_dims_mp = [None]
+                    self.skip.bias.is_shared_mp_op = {"spatial": "sum"}
 
         elif skip == "identity":
             self.skip = nn.Identity()
@@ -522,8 +542,10 @@ class SphericalNeuralOperatorNet(nn.Module):
         # residual prediction
         if self.big_skip:
             self.residual_transform = nn.Conv2d(self.out_chans, self.out_chans, 1, bias=False)
+            # 1x1 conv on spatially-sharded input: SUM across spatial.
             self.residual_transform.weight.is_shared_mp = ["spatial"]
             self.residual_transform.weight.sharded_dims_mp = [None, None, None, None]
+            self.residual_transform.weight.is_shared_mp_op = {"spatial": "sum"}
             scale = math.sqrt(0.5 / self.out_chans)
             nn.init.normal_(self.residual_transform.weight, mean=0.0, std=scale)
 

@@ -97,6 +97,12 @@ class SpectralConv(nn.Module):
             self.weight.is_shared_mp = ["matmul", "w"]
             self.weight.sharded_dims_mp = [None for _ in weight_shape]
             self.weight.sharded_dims_mp[-1] = "h"
+            # The weight has no m-dim, but the contract input is w-sharded
+            # along m by the upstream SHT, so the local weight grad on each
+            # w-rank is a partial sum over m and must be SUM-reduced (the
+            # heuristic would otherwise pick MEAN since "w" is not in
+            # sharded_dims_mp).
+            self.weight.is_shared_mp_op = {"w": "sum"}
         else:
             self.weight.is_shared_mp = ["matmul"]
             self.weight.sharded_dims_mp = [None for _ in weight_shape]
@@ -108,7 +114,13 @@ class SpectralConv(nn.Module):
 
         if bias == True:
             self.bias = nn.Parameter(torch.zeros(1, self.out_channels, 1, 1))
-            self.bias.is_shared_mp = ["model"]
+            # Bias is fully replicated, but applied after the inverse SHT — so
+            # the activation it sees is spatially sharded across (h, w) and
+            # matmul-replicated. spatial needs SUM (partials combine), matmul
+            # needs MEAN (identical local grads). "model" as a single group
+            # cannot express this split.
+            self.bias.is_shared_mp = ["spatial", "matmul"]
+            self.bias.is_shared_mp_op = {"spatial": "sum"}
             self.bias.sharded_dims_mp = [None, None, None, None]
 
     def forward(self, x):
