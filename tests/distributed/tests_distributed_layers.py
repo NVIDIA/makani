@@ -192,6 +192,153 @@ class TestDistributedLayers(unittest.TestCase):
 
     @parameterized.expand(
         [
+            # B, H, W, C_in, C_out, bias, input_format,    freeze_mode, tol
+            [2, 8, 16, 16, 24, True,  "nchw",        "none",   1e-5],
+            [2, 8, 16, 16, 24, True,  "nchw",        "input",  1e-5],
+            [2, 8, 16, 16, 24, True,  "nchw",        "weight", 1e-5],
+            [2, 8, 16, 16, 24, True,  "nchw",        "bias",   1e-5],
+            [2, 8, 16, 16, 24, False, "nchw",        "none",   1e-5],
+            [2, 1, 32, 16, 24, True,  "traditional", "none",   1e-5],
+            [2, 1, 32, 16, 24, True,  "traditional", "input",  1e-5],
+            [2, 1, 32, 16, 24, True,  "traditional", "weight", 1e-5],
+            [2, 1, 32, 16, 24, True,  "traditional", "bias",   1e-5],
+        ],
+        skip_on_empty=True,
+    )
+    def test_distributed_matmul(self, B, H, W, C_in, C_out, bias, input_format, freeze_mode, tol, verbose=False):
+        """Compare DistributedMatmul to a serial F.conv2d / F.linear reference.
+
+        Uses the ``fin``/``fout`` feature-parallel comm groups (sized via the
+        ``GRID_FIN`` / ``GRID_FOUT`` env vars in ``_init_grid``). ``freeze_mode``
+        picks one tensor to mark as not requiring grad and asserts that its
+        gradient is None while the remaining gradients still match the serial
+        reference.
+        """
+        from makani.mpu.layers import DistributedMatmul
+
+        comm_inp_name = "fin"
+        comm_out_name = "fout"
+        inp_size = comm.get_size(comm_inp_name)
+        out_size = comm.get_size(comm_out_name)
+
+        if C_in % inp_size != 0 or C_out % out_size != 0:
+            self.skipTest(
+                f"channel dims ({C_in}, {C_out}) not divisible by comm sizes "
+                f"({inp_size}, {out_size})"
+            )
+
+        set_seed(333)
+
+        # build full reference inputs / params, then derive layouts
+        if input_format == "nchw":
+            inp_full = torch.randn((B, C_in, H, W), dtype=torch.float32, device=self.device)
+            weight_full = torch.randn((C_out, C_in, 1, 1), dtype=torch.float32, device=self.device)
+            bias_full = torch.randn((1, C_out, 1, 1), dtype=torch.float32, device=self.device) if bias else None
+            chan_dim_inp = 1
+            chan_dim_out = 1
+            bias_chan_dim = 1
+        else:  # traditional: (..., C)
+            inp_full = torch.randn((B, H * W, C_in), dtype=torch.float32, device=self.device)
+            weight_full = torch.randn((C_out, C_in), dtype=torch.float32, device=self.device)
+            bias_full = torch.randn((C_out,), dtype=torch.float32, device=self.device) if bias else None
+            chan_dim_inp = -1
+            chan_dim_out = -1
+            bias_chan_dim = 0
+
+        ################################################################
+        # serial reference
+        ################################################################
+        inp_ref = inp_full.detach().clone()
+        weight_ref = weight_full.detach().clone()
+        bias_ref = bias_full.detach().clone() if bias else None
+
+        inp_ref.requires_grad = (freeze_mode != "input")
+        weight_ref.requires_grad = (freeze_mode != "weight")
+        if bias_ref is not None:
+            bias_ref.requires_grad = (freeze_mode != "bias")
+
+        if input_format == "nchw":
+            out_ref = nn.functional.conv2d(inp_ref, weight_ref, bias=None)
+        else:
+            out_ref = nn.functional.linear(inp_ref, weight_ref)
+        if bias_ref is not None:
+            out_ref = out_ref + bias_ref
+
+        with torch.no_grad():
+            ograd_full = torch.randn_like(out_ref)
+        out_ref.backward(ograd_full)
+
+        igrad_ref = inp_ref.grad.clone() if inp_ref.grad is not None else None
+        wgrad_ref = weight_ref.grad.clone() if weight_ref.grad is not None else None
+        bgrad_ref = bias_ref.grad.clone() if (bias_ref is not None and bias_ref.grad is not None) else None
+
+        ################################################################
+        # distributed version
+        ################################################################
+        matmul_dist = DistributedMatmul(
+            C_in, C_out,
+            input_format=input_format,
+            comm_inp_name=comm_inp_name,
+            comm_out_name=comm_out_name,
+            bias=bias,
+        ).to(self.device)
+
+        # copy the matching shard of the reference weight/bias into the dist module
+        with torch.no_grad():
+            w_local = _split_helper(weight_full, dim=0, group=comm.get_group(comm_out_name))
+            w_local = _split_helper(w_local, dim=1, group=comm.get_group(comm_inp_name))
+            matmul_dist.weight.copy_(w_local)
+            if bias:
+                b_local = _split_helper(bias_full, dim=bias_chan_dim, group=comm.get_group(comm_out_name))
+                matmul_dist.bias.copy_(b_local)
+
+        # freeze parameters according to mode
+        matmul_dist.weight.requires_grad_(freeze_mode != "weight")
+        if bias:
+            matmul_dist.bias.requires_grad_(freeze_mode != "bias")
+
+        # split input along its channel dim
+        inp_dist = _split_helper(inp_full, dim=chan_dim_inp, group=comm.get_group(comm_inp_name))
+        inp_dist = inp_dist.detach().clone()
+        inp_dist.requires_grad = (freeze_mode != "input")
+
+        out_dist = matmul_dist(inp_dist)
+        ograd_dist = _split_helper(ograd_full, dim=chan_dim_out, group=comm.get_group(comm_out_name))
+        out_dist.backward(ograd_dist)
+
+        ################################################################
+        # compare
+        ################################################################
+        with self.subTest(desc="output"):
+            out_gathered = _gather_helper(out_dist, dim=chan_dim_out, group=comm.get_group(comm_out_name))
+            self.assertTrue(compare_tensors("output", out_gathered, out_ref.detach(), tol, tol, verbose=verbose))
+
+        with self.subTest(desc="input grad"):
+            if freeze_mode == "input":
+                self.assertIsNone(inp_dist.grad)
+            else:
+                igrad_gathered = _gather_helper(inp_dist.grad, dim=chan_dim_inp, group=comm.get_group(comm_inp_name))
+                self.assertTrue(compare_tensors("input grad", igrad_gathered, igrad_ref, tol, tol, verbose=verbose))
+
+        with self.subTest(desc="weight grad"):
+            if freeze_mode == "weight":
+                self.assertIsNone(matmul_dist.weight.grad)
+            else:
+                wg = _gather_helper(matmul_dist.weight.grad, dim=0, group=comm.get_group(comm_out_name))
+                wg = _gather_helper(wg, dim=1, group=comm.get_group(comm_inp_name))
+                self.assertTrue(compare_tensors("weight grad", wg, wgrad_ref, tol, tol, verbose=verbose))
+
+        if bias:
+            with self.subTest(desc="bias grad"):
+                if freeze_mode == "bias":
+                    self.assertIsNone(matmul_dist.bias.grad)
+                else:
+                    bg = _gather_helper(matmul_dist.bias.grad, dim=bias_chan_dim, group=comm.get_group(comm_out_name))
+                    self.assertTrue(compare_tensors("bias grad", bg, bgrad_ref, tol, tol, verbose=verbose))
+
+
+    @parameterized.expand(
+        [
             [256, 512, 32, 8, True, 1e-4],
             [181, 360, 1, 10, True, 1e-4],
             [256, 512, 32, 8, False, 1e-4],

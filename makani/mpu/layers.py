@@ -17,7 +17,6 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.distributed as dist
 from torch.utils.checkpoint import checkpoint
 from makani.utils import comm
 
@@ -26,56 +25,6 @@ from torch_harmonics.distributed import compute_split_shapes
 from makani.mpu.mappings import reduce_from_parallel_region
 from makani.mpu.mappings import gather_from_parallel_region
 from makani.mpu.mappings import copy_to_parallel_region
-
-
-class _DistMatmulHelper(torch.autograd.Function):
-    @staticmethod
-    def forward(X, weight, bias, inp_group_name, out_group_name):
-        # matrix multiplication
-        xconv = F.conv2d(X, weight, bias=None)
-
-        # reduce
-        if comm.get_size(inp_group_name) > 1:
-            dist.all_reduce(xconv, group=comm.get_group(inp_group_name))
-
-        # add bias
-        if bias is not None:
-            xconvbias = xconv + bias
-        else:
-            xconvbias = xconv
-
-        return xconvbias
-
-    @staticmethod
-    def setup_context(ctx, inputs, output):
-        X, weight, bias, inp_group_name, out_group_name = inputs
-        ctx.save_for_backward(X, weight, bias)
-        ctx.out_group_name = out_group_name
-
-    @staticmethod
-    def backward(ctx, grad_out):
-        X, weight, bias = ctx.saved_tensors
-        gname = ctx.out_group_name
-
-        # do the bwd pass on dgrad
-        grad_input = F.conv_transpose2d(grad_out, weight, bias=None)
-
-        # reduce across nodes
-        if comm.get_size(gname) > 1:
-            dgrad_handle = dist.all_reduce(grad_input, group=comm.get_group(gname), async_op=True)
-
-        # weight grad
-        grad_weight = F.conv2d(X.transpose(0, 1), grad_out.transpose(0, 1), bias=None).transpose(0, 1)
-
-        if bias is not None:
-            grad_bias = torch.sum(grad_out, dim=(0, 2, 3), keepdim=True)
-        else:
-            grad_bias = None
-
-        if comm.get_size(gname) > 1:
-            dgrad_handle.wait()
-
-        return grad_input, grad_weight, grad_bias, None, None
 
 
 class DistributedMatmul(nn.Module):

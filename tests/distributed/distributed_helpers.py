@@ -111,12 +111,18 @@ def _init_grid(cls):
     # set up distributed
     cls.grid_size_h = int(os.getenv("GRID_H", 1))
     cls.grid_size_w = int(os.getenv("GRID_W", 1))
+    cls.grid_size_fin = int(os.getenv("GRID_FIN", 1))
+    cls.grid_size_fout = int(os.getenv("GRID_FOUT", 1))
     cls.grid_size_e = int(os.getenv("GRID_E", 1))
-    cls.world_size = cls.grid_size_h * cls.grid_size_w * cls.grid_size_e
+    cls.world_size = (
+        cls.grid_size_h * cls.grid_size_w
+        * cls.grid_size_fin * cls.grid_size_fout
+        * cls.grid_size_e
+    )
 
     # init groups
     comm.init(
-        model_parallel_sizes=[cls.grid_size_h, cls.grid_size_w, 1, 1],
+        model_parallel_sizes=[cls.grid_size_h, cls.grid_size_w, cls.grid_size_fin, cls.grid_size_fout],
         model_parallel_names=["h", "w", "fin", "fout"],
         data_parallel_sizes=[cls.grid_size_e, -1],
         data_parallel_names=["ensemble", "batch"],
@@ -139,16 +145,24 @@ def _init_grid(cls):
     # store comm group parameters
     cls.wrank = comm.get_rank("w")
     cls.hrank = comm.get_rank("h")
+    cls.finrank = comm.get_rank("fin")
+    cls.foutrank = comm.get_rank("fout")
     cls.erank = comm.get_rank("ensemble")
     cls.w_group = comm.get_group("w")
     cls.h_group = comm.get_group("h")
+    cls.fin_group = comm.get_group("fin")
+    cls.fout_group = comm.get_group("fout")
     cls.e_group = comm.get_group("ensemble")
 
     # initializing sht process groups just to be sure
     thd.init(cls.h_group, cls.w_group)
 
     if cls.world_rank == 0:
-        print(f"Running distributed tests on grid H x W x E = {cls.grid_size_h} x {cls.grid_size_w} x {cls.grid_size_e}")
+        print(
+            f"Running distributed tests on grid H x W x Fin x Fout x E = "
+            f"{cls.grid_size_h} x {cls.grid_size_w} x "
+            f"{cls.grid_size_fin} x {cls.grid_size_fout} x {cls.grid_size_e}"
+        )
 
     return
 
