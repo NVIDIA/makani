@@ -19,20 +19,29 @@ import unittest
 from parameterized import parameterized
 
 import torch
+from makani.utils import comm
 from makani.models.common import RealFFT1, InverseRealFFT1, RealFFT2, InverseRealFFT2, RealFFT3, InverseRealFFT3
 from makani.mpu.fft import DistributedRealFFT1, DistributedInverseRealFFT1, DistributedRealFFT2, DistributedInverseRealFFT2, DistributedRealFFT3, DistributedInverseRealFFT3
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
-from .distributed_helpers import _init_grid, _split_helper, _gather_helper
+from .distributed_helpers import _init_grid_module, _copy_grid_state, _split_helper, _gather_helper
 from ..testutils import disable_tf32, set_seed, compare_tensors
+
+
+def setUpModule():
+    _init_grid_module()
+
+
+def tearDownModule():
+    comm.cleanup()
 
 
 class TestDistributedRealFFT(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        _init_grid(cls)
+        _copy_grid_state(cls)
 
     def setUp(self):
         disable_tf32()

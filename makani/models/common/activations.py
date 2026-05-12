@@ -32,6 +32,13 @@ class ComplexReLU(nn.Module):
                 self.bias = nn.Parameter(scale * torch.ones(bias_shape, dtype=torch.float32))
             else:
                 self.bias = nn.Parameter(scale * torch.ones((1), dtype=torch.float32))
+            # Bias is broadcast over a (B, C, H, W)-shaped activation that is
+            # spatially sharded by h/w (and matmul-replicated) in distributed
+            # runs — local grads are partial sums over (B, H_local, W_local),
+            # so SUM across spatial + MEAN across matmul.
+            self.bias.is_shared_mp = ["spatial", "matmul"]
+            self.bias.is_shared_mp_op = {"spatial": "sum"}
+            self.bias.sharded_dims_mp = [None] * self.bias.dim()
         else:
             self.bias = 0
 
@@ -78,6 +85,12 @@ class ComplexActivation(nn.Module):
                 self.bias = nn.Parameter(torch.zeros(bias_shape, dtype=torch.float32))
             else:
                 self.bias = nn.Parameter(torch.zeros((1), dtype=torch.float32))
+            # Same regime as ComplexReLU.bias above: broadcast over a
+            # (B, C, H, W) activation that is spatially sharded by h/w and
+            # matmul-replicated. SUM across spatial + MEAN across matmul.
+            self.bias.is_shared_mp = ["spatial", "matmul"]
+            self.bias.is_shared_mp_op = {"spatial": "sum"}
+            self.bias.sharded_dims_mp = [None] * self.bias.dim()
         else:
             bias = torch.zeros((1), dtype=torch.float32)
             self.register_buffer("bias", bias, persistent=False)

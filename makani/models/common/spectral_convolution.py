@@ -220,6 +220,16 @@ class SpectralAttention(nn.Module):
             for l in range(0, self.spectral_layers):
                 self.activations.append(ComplexReLU(mode=complex_activation, bias_shape=(hidden_size, 1, 1), scale=scale))
 
+            # Activation MLP operates in the spectral domain on a (B, C, lmax_local,
+            # mmax_local) tensor (spatially sharded by h/w, matmul-replicated).
+            # Weights have no lmax/mmax dim — they broadcast over the spectral
+            # plane — so every (h, w) rank holds a partial gradient. SUM across
+            # spatial + MEAN across matmul.
+            for p in list(self.w) + [self.wout] + (list(self.b) if bias else []):
+                p.is_shared_mp = ["spatial", "matmul"]
+                p.is_shared_mp_op = {"spatial": "sum"}
+                p.sharded_dims_mp = [None] * p.dim()
+
         elif operator_type == "l-dependant":
             self.mul_add_handle = compl_exp_muladd2d_fwd
             self.mul_handle = compl_exp_mul2d_fwd
@@ -241,6 +251,16 @@ class SpectralAttention(nn.Module):
             self.activations = nn.ModuleList([])
             for l in range(0, self.spectral_layers):
                 self.activations.append(ComplexReLU(mode=complex_activation, bias_shape=(hidden_size, 1, 1), scale=scale))
+
+            # Same regime as the "diagonal" branch — only mmax is sharded by w
+            # in the input (h shards lmax but the weight carries a full
+            # modes_lat dim and is therefore replicated across h as well, so
+            # all h ranks hold partials of the same param). SUM across spatial
+            # + MEAN across matmul.
+            for p in list(self.w) + [self.wout] + (list(self.b) if bias else []):
+                p.is_shared_mp = ["spatial", "matmul"]
+                p.is_shared_mp_op = {"spatial": "sum"}
+                p.sharded_dims_mp = [None] * p.dim()
 
         else:
             raise ValueError("Unknown operator type")

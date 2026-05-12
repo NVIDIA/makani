@@ -107,63 +107,117 @@ def set_image_shape(params, h, w, *, h_resampled=None, w_resampled=None):
     params.img_shape_y_resampled = w if w_resampled is None else w_resampled
 
 
-def _init_grid(cls):
-    # set up distributed
-    cls.grid_size_h = int(os.getenv("GRID_H", 1))
-    cls.grid_size_w = int(os.getenv("GRID_W", 1))
-    cls.grid_size_fin = int(os.getenv("GRID_FIN", 1))
-    cls.grid_size_fout = int(os.getenv("GRID_FOUT", 1))
-    cls.grid_size_e = int(os.getenv("GRID_E", 1))
-    cls.world_size = (
-        cls.grid_size_h * cls.grid_size_w
-        * cls.grid_size_fin * cls.grid_size_fout
-        * cls.grid_size_e
-    )
+# Module-level grid state, populated on first call to ``_init_grid_module``.
+# Subsequent calls are no-ops, and ``_copy_grid_state`` is used to shadow the
+# state onto individual TestCase classes (so tests can keep using ``cls.x``
+# / ``self.x`` while comm is initialised exactly once per process).
+_GRID_STATE = None
 
-    # init groups
+
+def _init_grid_module():
+    """Initialise the test comm groups exactly once per Python process.
+
+    Reads ``GRID_H``/``GRID_W``/``GRID_FIN``/``GRID_FOUT``/``GRID_E`` env vars,
+    calls ``comm.init`` and ``thd.init``, and captures every derived handle
+    (group, rank, size, device) into the module-level ``_GRID_STATE`` dict.
+    Idempotent: a second call is a no-op.
+    """
+    global _GRID_STATE
+    if _GRID_STATE is not None:
+        return
+
+    grid_size_h = int(os.getenv("GRID_H", 1))
+    grid_size_w = int(os.getenv("GRID_W", 1))
+    grid_size_fin = int(os.getenv("GRID_FIN", 1))
+    grid_size_fout = int(os.getenv("GRID_FOUT", 1))
+    grid_size_e = int(os.getenv("GRID_E", 1))
+    # GRID_B is optional. Most tests leave batch as -1 (auto-sized to fill the
+    # remaining world); the metrics test sets it explicitly.
+    grid_size_b = int(os.getenv("GRID_B", -1))
+    world_size = grid_size_h * grid_size_w * grid_size_fin * grid_size_fout * grid_size_e
+    if grid_size_b > 0:
+        world_size *= grid_size_b
+
     comm.init(
-        model_parallel_sizes=[cls.grid_size_h, cls.grid_size_w, cls.grid_size_fin, cls.grid_size_fout],
+        model_parallel_sizes=[grid_size_h, grid_size_w, grid_size_fin, grid_size_fout],
         model_parallel_names=["h", "w", "fin", "fout"],
-        data_parallel_sizes=[cls.grid_size_e, -1],
+        data_parallel_sizes=[grid_size_e, grid_size_b],
         data_parallel_names=["ensemble", "batch"],
     )
-    cls.world_rank = comm.get_world_rank()
+
+    world_rank = comm.get_world_rank()
 
     if torch.cuda.is_available():
-        if cls.world_rank == 0:
+        if world_rank == 0:
             print("Running test on GPU")
         local_rank = comm.get_local_rank()
-        cls.device = torch.device(f"cuda:{local_rank}")
-        torch.cuda.set_device(cls.device)
+        device = torch.device(f"cuda:{local_rank}")
+        torch.cuda.set_device(device)
         torch.cuda.manual_seed(333)
     else:
-        if cls.world_rank == 0:
+        if world_rank == 0:
             print("Running test on CPU")
-        cls.device = torch.device("cpu")
+        device = torch.device("cpu")
     torch.manual_seed(333)
 
-    # store comm group parameters
-    cls.wrank = comm.get_rank("w")
-    cls.hrank = comm.get_rank("h")
-    cls.finrank = comm.get_rank("fin")
-    cls.foutrank = comm.get_rank("fout")
-    cls.erank = comm.get_rank("ensemble")
-    cls.w_group = comm.get_group("w")
-    cls.h_group = comm.get_group("h")
-    cls.fin_group = comm.get_group("fin")
-    cls.fout_group = comm.get_group("fout")
-    cls.e_group = comm.get_group("ensemble")
+    state = dict(
+        grid_size_h=grid_size_h,
+        grid_size_w=grid_size_w,
+        grid_size_fin=grid_size_fin,
+        grid_size_fout=grid_size_fout,
+        grid_size_e=grid_size_e,
+        grid_size_b=comm.get_size("batch"),
+        world_size=world_size,
+        world_rank=world_rank,
+        device=device,
+        wrank=comm.get_rank("w"),
+        hrank=comm.get_rank("h"),
+        finrank=comm.get_rank("fin"),
+        foutrank=comm.get_rank("fout"),
+        erank=comm.get_rank("ensemble"),
+        batchrank=comm.get_rank("batch"),
+        w_group=comm.get_group("w"),
+        h_group=comm.get_group("h"),
+        fin_group=comm.get_group("fin"),
+        fout_group=comm.get_group("fout"),
+        e_group=comm.get_group("ensemble"),
+        b_group=comm.get_group("batch"),
+    )
 
-    # initializing sht process groups just to be sure
-    thd.init(cls.h_group, cls.w_group)
+    thd.init(state["h_group"], state["w_group"])
 
-    if cls.world_rank == 0:
+    if world_rank == 0:
         print(
             f"Running distributed tests on grid H x W x Fin x Fout x E = "
-            f"{cls.grid_size_h} x {cls.grid_size_w} x "
-            f"{cls.grid_size_fin} x {cls.grid_size_fout} x {cls.grid_size_e}"
+            f"{grid_size_h} x {grid_size_w} x "
+            f"{grid_size_fin} x {grid_size_fout} x {grid_size_e}"
         )
 
+    _GRID_STATE = state
+
+
+def _copy_grid_state(cls):
+    """Shadow the module-level grid state onto a TestCase class.
+
+    ``_init_grid_module`` must have been called first (typically from
+    ``setUpModule``). After this call every ``cls.<name>`` / ``self.<name>``
+    access for the standard handle names (``device``, ``world_rank``,
+    ``h_group``, …) resolves to the module-level value.
+    """
+    if _GRID_STATE is None:
+        raise RuntimeError("_init_grid_module() must be called before _copy_grid_state()")
+    for k, v in _GRID_STATE.items():
+        setattr(cls, k, v)
+
+
+def _init_grid(cls):
+    """Backwards-compatible helper: init the module-level grid (idempotent)
+    and shadow the handles onto ``cls`` in a single call. Use this from
+    ``setUpClass`` when the test file has only one TestCase class; otherwise
+    prefer ``setUpModule`` → ``_init_grid_module`` plus ``_copy_grid_state``
+    in each ``setUpClass``."""
+    _init_grid_module()
+    _copy_grid_state(cls)
     return
 
 

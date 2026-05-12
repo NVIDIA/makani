@@ -25,7 +25,15 @@ import torch.distributed as dist
 from makani.utils import comm
 from makani.utils.driver import Driver
 
-from .distributed_helpers import _init_grid
+from .distributed_helpers import _init_grid_module, _copy_grid_state
+
+
+def setUpModule():
+    _init_grid_module()
+
+
+def tearDownModule():
+    comm.cleanup()
 
 
 class _ShardedTestModel(nn.Module):
@@ -70,9 +78,10 @@ class TestDistributedCheckpoint(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        # Standard distributed-test bootstrap. Reads GRID_H/GRID_W/GRID_E from
-        # env, calls comm.init, sets up cls.device and cls.{w,h,e}rank etc.
-        _init_grid(cls)
+        # Shadow the module-level grid state (group handles, ranks, sizes,
+        # device) onto the class. The comm groups themselves are initialised
+        # once in setUpModule above.
+        _copy_grid_state(cls)
 
         # Ensure a power-of-2 multiple of the grid for clean splitting. Using
         # 8 per direction × grid dim gives at least 8 elements per rank.

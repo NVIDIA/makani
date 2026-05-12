@@ -34,10 +34,44 @@ from makani.utils import MetricsHandler
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
-from .distributed_helpers import _init_grid, _split_helper, get_default_parameters, set_image_shape
+from .distributed_helpers import (
+    _init_grid_module, _copy_grid_state,
+    _split_helper, get_default_parameters, set_image_shape,
+)
 from ..testutils import disable_tf32, set_seed, compare_arrays
 
-# because of physicsnemo/NCCL tear down issues, we can only run one test at a time
+
+# Comm groups to override to size 1 around the serial reference build/run.
+_SERIAL_OVERRIDE = dict(
+    model=1, spatial=1, matmul=1,
+    h=1, w=1, fin=1, fout=1,
+    ensemble=1, batch=1,
+)
+
+# Module-level MPI communicator (duplicated from MPI.COMM_WORLD once per
+# process, freed in tearDownModule).
+_MPI_COMM = None
+
+
+def setUpModule():
+    """Initialise MPI + comm groups once for the whole module (see
+    tests_distributed_model.setUpModule for the rationale). Reads ``GRID_B``
+    in addition to the usual H/W/FIN/FOUT/E."""
+    global _MPI_COMM
+    from mpi4py import MPI
+    _MPI_COMM = MPI.COMM_WORLD.Dup()
+    _init_grid_module()
+
+
+def tearDownModule():
+    comm.cleanup()
+    if _MPI_COMM is not None:
+        # mpi_comm is an mpi4py Intracomm (returned by MPI.COMM_WORLD.Dup());
+        # its disposal API is Free(), called explicitly rather than relying on
+        # interpreter shutdown.
+        _MPI_COMM.Free()
+
+
 _metric_handler_params = [
     ("equiangular", 4, 16, 3, "mean"),
     #("equiangular", 4, 16, 3, "sum"),
@@ -47,21 +81,13 @@ class TestDistributedMetricHandler(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls, path="/tmp"):
-        from mpi4py import MPI
-        cls.mpi_comm = MPI.COMM_WORLD.Dup()
-        cls.mpi_comm_rank = cls.mpi_comm.Get_rank()
-        cls.mpi_comm_size = cls.mpi_comm.Get_size()
+        # Shadow module-level state (MPI handle + grid state) onto the class
+        # so tests can keep using ``self.mpi_comm`` / ``self.h_group`` etc.
+        cls.mpi_comm = _MPI_COMM
+        cls.mpi_comm_rank = _MPI_COMM.Get_rank()
+        cls.mpi_comm_size = _MPI_COMM.Get_size()
+        _copy_grid_state(cls)
 
-        if torch.cuda.is_available():
-            if cls.mpi_comm_rank == 0:
-                print("Running test on GPU")
-            local_rank = cls.mpi_comm_rank % torch.cuda.device_count()
-            cls.device = torch.device(f"cuda:{local_rank}")
-            torch.cuda.set_device(cls.device)
-        else:
-            if self.mpi_comm_rank == 0:
-                print("Running test on CPU")
-            cls.device = torch.device("cpu")
         set_seed(333)
 
         # create temporary directory
@@ -72,46 +98,6 @@ class TestDistributedMetricHandler(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.tmpdir.cleanup()
-        # Free the duplicated communicator. mpi_comm is an mpi4py Intracomm
-        # (returned by MPI.COMM_WORLD.Dup()), whose disposal API is Free(),
-        # not the previously-used (and non-existent) finalize().
-        cls.mpi_comm.Free()
-
-
-    def _init_comms(self):
-
-        # set up distributed
-        self.grid_size_h = int(os.getenv("GRID_H", 1))
-        self.grid_size_w = int(os.getenv("GRID_W", 1))
-        self.grid_size_e = int(os.getenv("GRID_E", 1))
-        self.grid_size_b = int(os.getenv("GRID_B", 1))
-        self.world_size = self.grid_size_h * self.grid_size_w * self.grid_size_e * self.grid_size_b
-
-        # init groups
-        comm.init(
-            model_parallel_sizes=[self.grid_size_h, self.grid_size_w, 1, 1],
-            model_parallel_names=["h", "w", "fin", "fout"],
-            data_parallel_sizes=[self.grid_size_e, self.grid_size_b],
-            data_parallel_names=["ensemble", "batch"],
-        )
-        self.world_rank = comm.get_world_rank()
-
-        # store comm group parameters
-        self.wrank = comm.get_rank("w")
-        self.hrank = comm.get_rank("h")
-        self.erank = comm.get_rank("ensemble")
-        self.w_group = comm.get_group("w")
-        self.h_group = comm.get_group("h")
-        self.e_group = comm.get_group("ensemble")
-        self.b_group = comm.get_group("batch")
-
-        # initializing sht process groups just to be sure
-        thd.init(self.h_group, self.w_group)
-
-        if self.world_rank == 0:
-            print(f"Running distributed tests on grid H x W x E x B = {self.grid_size_h} x {self.grid_size_w} x {self.grid_size_e} x {self.grid_size_b}")
-
-        return
 
     def _split_helper(self, tensor):
         with torch.no_grad():
@@ -150,55 +136,54 @@ class TestDistributedMetricHandler(unittest.TestCase):
         num_channels = len(self.params.channel_names)
         clim = torch.zeros(1, num_channels, self.params.img_local_shape_x, self.params.img_local_shape_y)
 
-        # local
-        self.params.img_local_shape_x = self.params.img_crop_shape_x = self.params.img_shape_x
-        self.params.img_local_shape_y = self.params.img_crop_shape_y = self.params.img_shape_y
-        self.params.img_local_offset_x = 0
-        self.params.img_local_offset_y = 0
+        # local — every comm-size-based branch inside MetricsHandler resolves
+        # to the serial path while this override scope is active.
+        with comm.override_sizes(**_SERIAL_OVERRIDE):
+            self.params.img_local_shape_x = self.params.img_crop_shape_x = self.params.img_shape_x
+            self.params.img_local_shape_y = self.params.img_crop_shape_y = self.params.img_shape_y
+            self.params.img_local_offset_x = 0
+            self.params.img_local_offset_y = 0
 
-        # set batch size and ensemble size:
-        self.params.batch_size = batch_size
-        self.params.ensemble_size = ensemble_size
+            # set batch size and ensemble size:
+            self.params.batch_size = batch_size
+            self.params.ensemble_size = ensemble_size
 
-        metric_handler_local = MetricsHandler(self.params,
-                                              clim,
-                                              num_rollout_steps,
-                                              self.device,
-                                              l1_var_names=self.params.channel_names,
-                                              rmse_var_names=self.params.channel_names,
-                                              acc_var_names=self.params.channel_names,
-                                              crps_var_names=self.params.channel_names,
-                                              spread_var_names=self.params.channel_names,
-                                              ssr_var_names=self.params.channel_names,
-                                              rh_var_names=self.params.channel_names,
-                                              wb2_compatible=False)
-        metric_handler_local.initialize_buffers()
-        metric_handler_local.zero_buffers()
+            metric_handler_local = MetricsHandler(self.params,
+                                                  clim,
+                                                  num_rollout_steps,
+                                                  self.device,
+                                                  l1_var_names=self.params.channel_names,
+                                                  rmse_var_names=self.params.channel_names,
+                                                  acc_var_names=self.params.channel_names,
+                                                  crps_var_names=self.params.channel_names,
+                                                  spread_var_names=self.params.channel_names,
+                                                  ssr_var_names=self.params.channel_names,
+                                                  rh_var_names=self.params.channel_names,
+                                                  wb2_compatible=False)
+            metric_handler_local.initialize_buffers()
+            metric_handler_local.zero_buffers()
 
-        inplist = [torch.randn((num_rollout_steps, batch_size, ensemble_size, num_channels, self.params.img_local_shape_x, self.params.img_local_shape_y),
-                               dtype=torch.float32, device=self.device) for _ in range(num_steps)]
-        tarlist = [torch.randn((num_rollout_steps, batch_size, num_channels, self.params.img_local_shape_x, self.params.img_local_shape_y),
-                               dtype=torch.float32, device=self.device) for _ in range(num_steps)]
+            inplist = [torch.randn((num_rollout_steps, batch_size, ensemble_size, num_channels, self.params.img_local_shape_x, self.params.img_local_shape_y),
+                                   dtype=torch.float32, device=self.device) for _ in range(num_steps)]
+            tarlist = [torch.randn((num_rollout_steps, batch_size, num_channels, self.params.img_local_shape_x, self.params.img_local_shape_y),
+                                   dtype=torch.float32, device=self.device) for _ in range(num_steps)]
 
-        for inp, tar in zip(inplist, tarlist):
-            for idt in range(num_rollout_steps):
-                inpp = inp[idt, ...]
-                tarp = tar[idt, ...]
+            for inp, tar in zip(inplist, tarlist):
+                for idt in range(num_rollout_steps):
+                    inpp = inp[idt, ...]
+                    tarp = tar[idt, ...]
 
-                # dummy loss
-                loss = torch.tensor(1., dtype=torch.float32, device=self.device)
+                    # dummy loss
+                    loss = torch.tensor(1., dtype=torch.float32, device=self.device)
 
-                # update metric handler
-                metric_handler_local.update(inpp, tarp, loss, idt)
+                    # update metric handler
+                    metric_handler_local.update(inpp, tarp, loss, idt)
 
-        # finalize
-        logs_local = metric_handler_local.finalize()
+            # finalize
+            logs_local = metric_handler_local.finalize()
 
         # wait for everybody
         self.mpi_comm.Barrier()
-
-        # init comms
-        self._init_comms()
 
         # distributed
         #set up shapes
