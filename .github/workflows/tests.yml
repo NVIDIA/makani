@@ -41,4 +41,4 @@ jobs:
         python -m pip install -e .[test,vis]
     - name: Test with pytest
       run: |
-        python -m pytest ./tests --cov=makani --cov-report=term-missing
+        python -m pytest -ra ./tests --cov=makani --cov-report=term-missing
