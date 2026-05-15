@@ -30,7 +30,7 @@ RUN apt remove cmake -y && \
 RUN SETUPTOOLS_USE_DISTUTILS=local pip install mpi4py
 
 # install onnx
-RUN pip install onnx onnxruntime onnxruntime-gpu
+RUN pip install onnxruntime onnxruntime-gpu
 
 # install AWS prereqs for HDF5
 RUN cd /opt && git clone https://github.com/awslabs/aws-c-common.git && \
@@ -138,10 +138,10 @@ ENV PATH=/opt/hdf5/bin:${PATH}
 RUN pip install cdsapi>=0.7.2
 
 # install zarr and data stuff
-RUN pip install more_itertools zarr xarray pandas gcsfs boto3
+RUN pip install more_itertools zarr xarray gcsfs boto3
 
-# moviepy imageio for wandb video logging
-RUN pip install moviepy imageio
+# moviepy for wandb video logging
+RUN pip install moviepy
 
 # other python stuff
 RUN pip install --upgrade wandb ruamel.yaml tqdm progressbar2
