@@ -161,7 +161,8 @@ def get_model(params: ParamsBase, use_stochastic_interpolation: bool = False, mu
 
     model_handle = _model_registry.get(params.nettype)
     if model_handle is not None:
-        # EntryPoint-like (stdlib or backport importlib_metadata): call .load() to get the callable
+        # Registry entries are either EntryPoint objects (from entry_points discovery)
+        # or direct class refs (from register_model). Resolve EntryPoints to the callable.
         if hasattr(model_handle, "load") and callable(model_handle.load):
             model_handle = model_handle.load()
 
