@@ -415,6 +415,13 @@ class RolloutBuffer(DataBuffer):
             else:
                 self._write_to_disk(tstamps, predp, idt)
 
+                # In streaming mode there's no in-memory buffer to flush, so the
+                # file offset has to be advanced here once a full rollout for the
+                # current IC has been written — otherwise the next IC overwrites
+                # slot 0 again.
+                if (idt + 1) == (self.num_rollout_steps + 1):
+                    self.file_offset += current_batch_size
+
         return
 
     def finalize(self):
