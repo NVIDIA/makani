@@ -29,16 +29,16 @@ jobs:
         echo "torch_harmonics was built against torch ${TH_TORCH}"
         echo "torch==${TH_TORCH}" > "${GITHUB_WORKSPACE}/constraints.txt"
         cat "${GITHUB_WORKSPACE}/constraints.txt"
-        # Make the constraint visible to later workflow steps.
-        echo "PIP_CONSTRAINT=${GITHUB_WORKSPACE}/constraints.txt" >> "$GITHUB_ENV"
-        # Everything from here on must honor the constraint, so timm / physicsnemo
+        # Make the constraint visible to later workflow steps so timm / physicsnemo
         # / etc. can't silently upgrade torch and break TH's _C.so.
-        python -m pip install tqdm numpy parameterized xarray xskillscore timm jsbeautifier pynvml h5py wandb ruamel.yaml moviepy matplotlib pillow tensorly tensorly-torch more_itertools importlib-metadata
+        echo "PIP_CONSTRAINT=${GITHUB_WORKSPACE}/constraints.txt" >> "$GITHUB_ENV"
+        # Pin physicsnemo to the git tag before installing the package so the
+        # `nvidia-physicsnemo>=1.1.1` dep in pyproject.toml resolves to this
+        # build rather than whatever PyPI offers.
         python -m pip install git+https://github.com/NVIDIA/physicsnemo.git@v1.1.1
     - name: Install package
       run: |
-        python -m pip install --no-deps -e .
+        python -m pip install -e .[test,vis]
     - name: Test with pytest
       run: |
-        python -m pip install pytest pytest-cov parameterized
         python -m pytest ./tests --cov=makani --cov-report=term-missing
