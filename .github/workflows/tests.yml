@@ -29,8 +29,8 @@ jobs:
         echo "torch_harmonics was built against torch ${TH_TORCH}"
         echo "torch==${TH_TORCH}" > "${GITHUB_WORKSPACE}/constraints.txt"
         cat "${GITHUB_WORKSPACE}/constraints.txt"
-        # Make the constraint visible to later workflow steps so timm / physicsnemo
-        # / etc. can't silently upgrade torch and break TH's _C.so.
+        # Make the constraint visible to later workflow steps so physicsnemo
+        # or any transitive dep can't silently upgrade torch and break TH's _C.so.
         echo "PIP_CONSTRAINT=${GITHUB_WORKSPACE}/constraints.txt" >> "$GITHUB_ENV"
         # Pin physicsnemo to the git tag before installing the package so the
         # `nvidia-physicsnemo>=1.1.1` dep in pyproject.toml resolves to this
