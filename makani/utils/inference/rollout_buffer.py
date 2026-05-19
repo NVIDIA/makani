@@ -151,7 +151,12 @@ class RolloutBuffer(DataBuffer):
     output_file: str, optional
         Outputfile to write to
     output_memory_buffer_size: int, optional
-        Number of samples to cache in memory before writing to disk
+        Number of (initial-condition × leadtime) steps to cache in memory before writing to disk.
+        With ``valid_autoreg_steps = R``, each initial condition produces ``R + 1`` steps, so a
+        full rollout for one IC fits in ``R + 1`` slots. Setting ``output_memory_buffer_size``
+        below ``R + 1`` enables mid-rollout flushing, which is useful when a single trajectory
+        does not fit in memory. Clamped to ``[batch_size, num_samples * (R + 1)]``. Defaults
+        to ``num_samples * (R + 1)`` (i.e., buffer the entire run).
     streaming_mode: bool, optional
         When ``True``, every ``update()`` call writes directly to disk and no
         in-memory rollout buffer is allocated. Requires ``output_file`` to be
@@ -210,8 +215,12 @@ class RolloutBuffer(DataBuffer):
         self.batch_size = batch_size
         self.ensemble_size = ensemble_size
         self.output_channels = output_channels
-        self.num_buffered_samples = output_memory_buffer_size if output_memory_buffer_size is not None else num_samples
-        self.num_buffered_samples = max(min(self.num_buffered_samples, num_samples), batch_size)
+        # buffer size is in STEP units (one slot = one (IC, leadtime) pair × E ensemble × C × H × W).
+        # default: buffer the whole run; clamp floor=batch_size (must fit one update() call),
+        # ceiling=num_samples * (R + 1) (no point allocating beyond the full run).
+        full_steps = num_samples * (num_rollout_steps + 1)
+        self.num_buffered_samples = output_memory_buffer_size if output_memory_buffer_size is not None else full_steps
+        self.num_buffered_samples = max(min(self.num_buffered_samples, full_steps), batch_size)
 
         # little hacky but we use this to compute the range where to write the output to
         if comm.is_distributed("batch") and comm.get_size("batch") > 1:
@@ -226,7 +235,12 @@ class RolloutBuffer(DataBuffer):
             self.num_samples_offsets = [0, self.num_samples]
         self.num_samples_total = self.num_samples_offsets[-1]
 
-        # rollout buffer dimensions: initial_conditions x num_rollout_steps x ensemble_size x num_channels x nlat x nlon
+        # rollout buffer is flat over (IC × leadtime) — one slot per step.
+        # shape: num_steps x ensemble_size x num_channels x nlat x nlon
+        # per-slot (ic, idt) bookkeeping lives in ``self.chunks`` (a list of batch-group
+        # records), not in parallel index tensors — the producer's natural fill pattern is
+        # B parallel ICs progressing through their R+1 leadtimes in lockstep, which the
+        # chunk records capture compactly and let us coalesce into per-batch slab writes.
         if self.streaming_mode:
             # No in-memory buffer; each update() flushes to disk directly.
             self.rollout_data = None
@@ -235,20 +249,43 @@ class RolloutBuffer(DataBuffer):
             # pin_memory only applies to CPU buffers, and is only useful when the
             # compute device is CUDA (it accelerates async H2D/D2H transfers).
             pin_memory = (self.buffer_device.type == "cpu") and (self.device.type == "cuda")
-            local_buffer_size = (self.num_buffered_samples, self.num_rollout_steps + 1, self.ensemble_size, self.num_channels, *self.local_shape)
+            local_buffer_size = (self.num_buffered_samples, self.ensemble_size, self.num_channels, *self.local_shape)
             self.rollout_data = torch.zeros(local_buffer_size, dtype=torch.float32, device=self.buffer_device, pin_memory=pin_memory)
-            self.timestamp_data = torch.zeros((self.num_buffered_samples), dtype=torch.float64, device=self.buffer_device, pin_memory=pin_memory)
+            # worst case (R+1 == 1) every slot is a distinct IC, so the timestamp buffer
+            # is sized to the data buffer; in practice only a fraction is used per flush.
+            self.timestamp_data = torch.zeros((self.num_buffered_samples,), dtype=torch.float64, device=self.buffer_device, pin_memory=pin_memory)
 
         # open output_file
         self.file_handle = None
         if self.output_file is not None:
             self._create_output_file(self.output_file)
 
-            # set up local buffer offsets
-            self.file_offset = self.num_samples_offsets[comm.get_rank("batch")]
+        # set up the local IC file pointer unconditionally — update() consults it to
+        # snapshot each chunk's ic_offset and to advance at end-of-rollout, regardless
+        # of whether there is an actual file to write to (no-file mode is used by the
+        # in-memory unit tests).
+        self.file_offset = self.num_samples_offsets[comm.get_rank("batch")]
 
         # initialize buffer offsets
         self.buffer_offset = 0
+
+        # per-batch chunk records, each a dict with keys:
+        #   start_slot  — first data slot in ``rollout_data`` owned by this chunk
+        #   ic_offset   — file IC offset for the first IC of this chunk
+        #   batch_size  — number of parallel ICs (B) in this chunk
+        #   idt_start   — first leadtime index this chunk covers (0 normally; > 0 for a
+        #                 mid-rollout carry-over chunk created by a flush)
+        #   idt_count   — leadtimes written so far for this chunk
+        # slot layout within one chunk: slot[start_slot + j*B + i] == (ic[i], idt_start + j)
+        self.chunks = []
+
+        # pending timestamps that have not yet been flushed to disk.
+        # within one flush cycle, the buffered timestamps occupy slots [0, ts_buffer_offset)
+        # of ``timestamp_data`` and map to file IC offsets
+        # [ts_first_ic_offset, ts_first_ic_offset + ts_buffer_offset) — one contiguous
+        # slab because each rank processes its ICs sequentially.
+        self.ts_buffer_offset = 0
+        self.ts_first_ic_offset = None
 
         # reshape bias and scale
         self.bias = self.bias.reshape(-1, 1, 1)
@@ -324,10 +361,10 @@ class RolloutBuffer(DataBuffer):
         Reset all buffer state to a fresh post-construction state. Zeros the
         data tensors AND resets ``buffer_offset`` so callers may invoke this
         mid-rollout without leaving a stale offset pointing into newly-zeroed
-        slots.
+        slots. Also clears the chunk records and pending-timestamp bookkeeping.
 
-        This mirrors ``MeanStdBuffer.zero_buffers`` (which also resets its
-        offset analog ``num_samples_tracked``) for consistency.
+        Does NOT reset ``file_offset`` — callers calling this mid-flow keep
+        their position in the output file.
 
         In streaming mode there are no in-memory buffers, so this is a no-op.
         """
@@ -339,11 +376,68 @@ class RolloutBuffer(DataBuffer):
             self.timestamp_data.fill_(0.0)
             self.rollout_data.fill_(0.0)
         self.buffer_offset = 0
+        self.chunks = []
+        self.ts_buffer_offset = 0
+        self.ts_first_ic_offset = None
+
+        return
+
+    def _write_chunk_to_disk(self, chunk):
+        """
+        Write one batch-group chunk to the HDF5 ``fields`` dataset.
+
+        The chunk holds ``B`` parallel ICs at leadtimes ``[idt_start, idt_start + idt_count)``.
+        Slots in the data buffer follow an (idt-major, ic-minor) layout
+        (``slot = start_slot + j*B + i``), so we reshape into
+        ``(idt_count, B, E, C, H, W)`` and transpose to ``(B, idt_count, ...)`` to match
+        the file's (IC-major, idt-minor) layout. One slab write per chunk.
+        """
+
+        idt_count = chunk["idt_count"]
+        if idt_count == 0:
+            return
+
+        start_slot = chunk["start_slot"]
+        B = chunk["batch_size"]
+        ic_offset = chunk["ic_offset"]
+        idt_start = chunk["idt_start"]
+
+        # gather the chunk's slab from the data buffer
+        slab = self.rollout_data[start_slot:start_slot + B * idt_count]
+        slab = slab.reshape(idt_count, B, self.ensemble_size, self.num_channels, *self.local_shape)
+        # transpose to (B, idt_count, E, C, H, W) to match the file's IC-major layout
+        slab = slab.transpose(0, 1).contiguous()
+
+        # bring to host if buffer lives on a non-CPU device
+        if self.buffer_device.type != "cpu":
+            slab = slab.cpu()
+        slab_arr = np.ascontiguousarray(slab.numpy())
+
+        # destination slice in the file
+        ic_range = slice(ic_offset, ic_offset + B)
+        idt_range = slice(idt_start, idt_start + idt_count)
+        ens_start = self.ensemble_size * comm.get_rank("ensemble")
+        ens_range = slice(ens_start, ens_start + self.ensemble_size)
+        lat_range = slice(self.local_offset[0], self.local_offset[0] + self.local_shape[0])
+        lon_range = slice(self.local_offset[1], self.local_offset[1] + self.local_shape[1])
+
+        self.rollout_buffer_disk.write_direct(
+            slab_arr,
+            dest_sel=np.s_[ic_range, idt_range, ens_range, :, lat_range, lon_range],
+        )
 
         return
 
     def _flush_buffer_to_disk(self):
-        """Write the accumulated in-memory buffer to disk (non-streaming mode)."""
+        """
+        Write the accumulated in-memory buffer to disk (non-streaming mode).
+
+        Data is written one batch-group chunk at a time (coalesced slab per chunk).
+        Timestamps were buffered contiguously and are written as a single slab.
+        If the most recent chunk's rollout is incomplete (i.e. the buffer filled mid-rollout),
+        a carry-over chunk is installed so the next ``update()`` for the in-flight batch
+        continues writing into the freshly-zeroed buffer at the correct idt offset.
+        """
 
         # wait for everything to complete (CUDA only — synchronize is a CUDA-specific
         # primitive and would raise on CPU-only builds).
@@ -351,50 +445,43 @@ class RolloutBuffer(DataBuffer):
             torch.cuda.synchronize(device=self.device)
 
         if (self.file_handle is not None) and (self.buffer_offset > 0):
-            # batch ranges in file
-            batch_start_file = self.file_offset
-            # the buffer offset represents the current filling level of the local buffer
-            batch_end_file = batch_start_file + self.buffer_offset
-            batch_range = slice(batch_start_file, batch_end_file)
+            # write each batch chunk as one coalesced slab
+            for chunk in self.chunks:
+                self._write_chunk_to_disk(chunk)
 
-            # batch ranges in memory buffer
-            batch_range_buffer = slice(0, self.buffer_offset)
-
-            # ensemble range
-            ens_start = self.ensemble_size * comm.get_rank("ensemble")
-            ens_range = slice(ens_start, ens_start + self.ensemble_size)
-
-            # spatial range
-            lat_range = slice(self.local_offset[0], self.local_offset[0] + self.local_shape[0])
-            lon_range = slice(self.local_offset[1], self.local_offset[1] + self.local_shape[1])
-
-            # bring buffer to host if it lives on a non-CPU device
-            rollout_src = self.rollout_data if self.buffer_device.type == "cpu" else self.rollout_data.cpu()
-            timestamp_src = self.timestamp_data if self.buffer_device.type == "cpu" else self.timestamp_data.cpu()
-
-            # write_direct requires C-contiguous source arrays
-            rollout_arr = np.ascontiguousarray(rollout_src.numpy())
-            timestamp_arr = np.ascontiguousarray(timestamp_src.numpy())
-
-            # concurrent writing
-            if (comm.get_rank("model") == 0) and (comm.get_rank("ensemble") == 0):
+            # write the pending timestamps (one contiguous slab per flush)
+            if (self.ts_buffer_offset > 0) and (comm.get_rank("model") == 0) and (comm.get_rank("ensemble") == 0):
+                timestamp_src = self.timestamp_data if self.buffer_device.type == "cpu" else self.timestamp_data.cpu()
+                timestamp_arr = np.ascontiguousarray(timestamp_src.numpy())
+                ts_buf_range = slice(0, self.ts_buffer_offset)
+                ts_file_range = slice(self.ts_first_ic_offset, self.ts_first_ic_offset + self.ts_buffer_offset)
                 self.timestamp_buffer_disk.write_direct(
                     timestamp_arr,
-                    source_sel=batch_range_buffer,
-                    dest_sel=batch_range,
+                    source_sel=ts_buf_range,
+                    dest_sel=ts_file_range,
                 )
-            self.rollout_buffer_disk.write_direct(
-                rollout_arr,
-                source_sel=np.s_[batch_range_buffer, ...],
-                dest_sel=np.s_[batch_range, :, ens_range, :, lat_range, lon_range],
-            )
 
-            # advance the file pointer BEFORE zero_buffers — zero_buffers now
-            # resets buffer_offset, so we must capture it here while still valid.
-            self.file_offset += self.buffer_offset
+        # determine whether the last chunk's rollout is incomplete; if so, the next
+        # update() for the same batch continues into a freshly-zeroed buffer and we
+        # need a carry-over chunk to remember where in the file it goes.
+        carry = None
+        if self.chunks:
+            last = self.chunks[-1]
+            completed_idts = last["idt_start"] + last["idt_count"]
+            if completed_idts < (self.num_rollout_steps + 1):
+                carry = {
+                    "start_slot": 0,
+                    "ic_offset": last["ic_offset"],
+                    "batch_size": last["batch_size"],
+                    "idt_start": completed_idts,
+                    "idt_count": 0,
+                }
 
-        # reset buffers (also resets buffer_offset)
+        # reset all buffer state (data, timestamps, chunks, offsets); file_offset preserved
         self.zero_buffers()
+
+        if carry is not None:
+            self.chunks.append(carry)
 
         return
 
@@ -436,14 +523,21 @@ class RolloutBuffer(DataBuffer):
         return
 
     def update(self, pred, tstamps, idt):
-        """update local buffers"""
+        """
+        Record one (leadtime × B-IC × E-ensemble) prediction tile.
+
+        ``pred`` has shape ``(B, E, C, H, W)`` and represents B parallel ICs at leadtime
+        ``idt``. In non-streaming mode this consumes B slots in the flat data buffer; if
+        the buffer would overflow, we flush first. A carry-over chunk left behind by a
+        mid-rollout flush is continued transparently.
+        """
 
         # get the current batch size
         current_batch_size = pred.shape[0]
 
         # check if we can buffer the next element or if we need to flush now
         # (only meaningful in non-streaming mode — streaming has no buffer to fill)
-        if (not self.streaming_mode) and (idt == 0) and (self.buffer_offset + current_batch_size > self.num_buffered_samples):
+        if (not self.streaming_mode) and (self.buffer_offset + current_batch_size > self.num_buffered_samples):
             self._flush_buffer_to_disk()
 
         with torch.no_grad():
@@ -455,16 +549,41 @@ class RolloutBuffer(DataBuffer):
                 if (idt + 1) == (self.num_rollout_steps + 1):
                     self.file_offset += current_batch_size
             else:
+                # at idt == 0 we are starting a NEW batch of B initial conditions:
+                # open a fresh chunk record and stash this batch's timestamps. A
+                # carry-over chunk from a mid-rollout flush keeps idt > 0, so it
+                # falls through to the data-write branch and reuses the existing
+                # chunks[-1] entry installed at flush time.
+                if idt == 0:
+                    chunk = {
+                        "start_slot": self.buffer_offset,
+                        "ic_offset": self.file_offset,
+                        "batch_size": current_batch_size,
+                        "idt_start": 0,
+                        "idt_count": 0,
+                    }
+                    self.chunks.append(chunk)
+
+                    # buffer this batch's timestamps; they form one contiguous slab with
+                    # earlier pending batches in the current flush cycle.
+                    if self.ts_first_ic_offset is None:
+                        self.ts_first_ic_offset = self.file_offset
+                    ts_slot = self.ts_buffer_offset
+                    self.timestamp_data[ts_slot:ts_slot + current_batch_size].copy_(tstamps, non_blocking=True)
+                    self.ts_buffer_offset += current_batch_size
+
+                # write the (B, E, C, H, W) tile into the flat buffer
                 batch_start = self.buffer_offset
                 batch_end = batch_start + current_batch_size
+                self.rollout_data[batch_start:batch_end].copy_(predp, non_blocking=True)
+                self.buffer_offset = batch_end
 
-                if idt == 0:
-                    self.timestamp_data[batch_start:batch_end].copy_(tstamps, non_blocking=True)
-                self.rollout_data[batch_start:batch_end, idt].copy_(predp, non_blocking=True)
+                # advance the active chunk's leadtime counter
+                self.chunks[-1]["idt_count"] += 1
 
-                # increase buffer pointer if the next one is a new IC
+                # advance the file IC pointer once this batch's rollout completes
                 if (idt + 1) == (self.num_rollout_steps + 1):
-                    self.buffer_offset += current_batch_size
+                    self.file_offset += current_batch_size
 
         return
 

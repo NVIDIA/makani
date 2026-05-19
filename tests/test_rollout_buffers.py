@@ -546,14 +546,14 @@ class TestRolloutBuffer(unittest.TestCase):
     write to disk (``output_file=None``), so they exercise the pure logic of
     update/flush/zero in isolation:
 
-      * update() routing into (sample, step, ensemble, channel, lat, lon)
-      * buffer_offset advance only on rollout completion
+      * update() routing into the flat (slot, ensemble, channel, lat, lon) buffer
+      * buffer_offset advance by B slots per update() call
       * scale*x + bias projection
       * channel_mask channel selection
       * timestamp-only-at-idt=0
       * zero_buffers() data reset
-      * auto-flush on buffer-overflow at idt=0
-      * output_memory_buffer_size defaults and clamping
+      * auto-flush when a fresh update would overflow the buffer
+      * output_memory_buffer_size defaults and clamping (step semantics)
 
     Runs on CPU end-to-end: ``_flush_buffer_to_disk``'s
     ``torch.cuda.synchronize`` is now device-guarded, so the auto-flush test
@@ -603,8 +603,8 @@ class TestRolloutBuffer(unittest.TestCase):
 
     def test_update_writes_to_correct_slot(self, verbose=False):
         # Channel mask should select 'a' (idx 0) and 'c' (idx 2), drop 'b' (idx 1).
-        # Verify the slot at (sample=0:2, step=0, ensemble=:, channel=:, lat=:, lon=:)
-        # holds the projected per-channel constants.
+        # The flat buffer has shape (num_steps, E, C', H, W). After one update at idt=0
+        # with B=2, slots 0..1 hold the two ICs at idt=0; later slots are untouched.
         buf = self._make_buffer(
             num_samples=4,
             batch_size=2,
@@ -623,19 +623,20 @@ class TestRolloutBuffer(unittest.TestCase):
 
         buf.update(pred, tstamps, idt=0)
 
-        # Expected output shape (2 samples, 2 ensemble, 2 channels, 4 lat, 6 lon)
+        # buffer shape: (num_steps, E=2, C'=2, H=4, W=6); the two ICs at idt=0
+        # occupy slots [0, 2).
         with self.subTest(desc="channel a values"):
-            self.assertTrue(torch.all(buf.rollout_data[0:2, 0, :, 0, :, :] == 1.0))
+            self.assertTrue(torch.all(buf.rollout_data[0:2, :, 0, :, :] == 1.0))
         with self.subTest(desc="channel c values"):
-            self.assertTrue(torch.all(buf.rollout_data[0:2, 0, :, 1, :, :] == 3.0))
+            self.assertTrue(torch.all(buf.rollout_data[0:2, :, 1, :, :] == 3.0))
         with self.subTest(desc="other slots untouched"):
-            # step 1 should still be zero (we only updated idt=0)
-            self.assertTrue(torch.all(buf.rollout_data[:, 1, :, :, :, :] == 0.0))
+            # remaining slots (those reserved for later leadtimes / batches) are still zero
+            self.assertTrue(torch.all(buf.rollout_data[2:] == 0.0))
 
-    def test_buffer_offset_advances_only_on_rollout_completion(self, verbose=False):
-        # buffer_offset increments only when idt+1 == num_rollout_steps+1
-        # (i.e., the final step of an IC's rollout). This is the trickiest
-        # invariant — getting it wrong silently corrupts the recorded slots.
+    def test_buffer_offset_advances_per_update(self, verbose=False):
+        # With step-granular buffering, every update() consumes B slots regardless
+        # of the leadtime — buffer_offset advances by batch_size on each call.
+        # ``file_offset``, by contrast, advances only when a batch finishes its rollout.
         num_rollout_steps = 3
         batch_size = 2
         buf = self._make_buffer(
@@ -643,6 +644,7 @@ class TestRolloutBuffer(unittest.TestCase):
             batch_size=batch_size,
             num_rollout_steps=num_rollout_steps,
         )
+        file_offset_start = buf.file_offset
 
         pred = torch.zeros(batch_size, 1, 1, 2, 2)
         tstamps = torch.tensor([0.0, 1.0])
@@ -650,19 +652,26 @@ class TestRolloutBuffer(unittest.TestCase):
         with self.subTest(desc="initial offset"):
             self.assertEqual(buf.buffer_offset, 0)
 
-        # Steps 0..R-1: buffer_offset must NOT advance.
+        # Intermediate steps: buffer_offset advances by B, file_offset stays put.
         for idt in range(num_rollout_steps):
             buf.update(pred, tstamps, idt=idt)
-            with self.subTest(desc=f"idt={idt} (intermediate)"):
-                self.assertEqual(buf.buffer_offset, 0)
+            with self.subTest(desc=f"idt={idt} buffer_offset"):
+                self.assertEqual(buf.buffer_offset, batch_size * (idt + 1))
+            with self.subTest(desc=f"idt={idt} file_offset"):
+                self.assertEqual(buf.file_offset, file_offset_start)
 
-        # Final step (idt == num_rollout_steps): buffer_offset advances by batch_size.
+        # Final step (idt == num_rollout_steps): file_offset advances by batch_size,
+        # buffer_offset advances one more time too.
         buf.update(pred, tstamps, idt=num_rollout_steps)
-        with self.subTest(desc="post-final-step offset"):
-            self.assertEqual(buf.buffer_offset, batch_size)
+        with self.subTest(desc="post-final-step buffer_offset"):
+            self.assertEqual(buf.buffer_offset, batch_size * (num_rollout_steps + 1))
+        with self.subTest(desc="post-final-step file_offset"):
+            self.assertEqual(buf.file_offset, file_offset_start + batch_size)
 
     def test_multi_step_rollout_fills_slots_in_order(self, verbose=False):
-        # Each step writes a known constant; verify slot[idt] == idt afterwards.
+        # Each step writes a known constant. With B=1, the flat slot index equals idt:
+        # slot[j*B + i] == (ic[i], idt_start + j), so for B=1 the j-th leadtime
+        # of the single IC lands at slot j.
         num_rollout_steps = 3
         buf = self._make_buffer(
             num_samples=1,
@@ -676,7 +685,7 @@ class TestRolloutBuffer(unittest.TestCase):
 
         for idt in range(num_rollout_steps + 1):
             with self.subTest(desc=f"slot {idt}"):
-                slot = buf.rollout_data[0, idt]
+                slot = buf.rollout_data[idt]
                 self.assertTrue(torch.all(slot == float(idt)))
 
     def test_scale_and_bias_applied(self, verbose=False):
@@ -698,9 +707,9 @@ class TestRolloutBuffer(unittest.TestCase):
         buf.update(pred, torch.tensor([0.0]), idt=0)
 
         with self.subTest(desc="ch a = 2*1 + 1"):
-            self.assertTrue(torch.all(buf.rollout_data[0, 0, :, 0, :, :] == 3.0))
+            self.assertTrue(torch.all(buf.rollout_data[0, :, 0, :, :] == 3.0))
         with self.subTest(desc="ch b = 3*1 - 1"):
-            self.assertTrue(torch.all(buf.rollout_data[0, 0, :, 1, :, :] == 2.0))
+            self.assertTrue(torch.all(buf.rollout_data[0, :, 1, :, :] == 2.0))
 
     def test_default_scale_and_bias_are_identity(self, verbose=False):
         # When scale and bias are None, DataBuffer fills them with ones/zeros so
@@ -710,7 +719,7 @@ class TestRolloutBuffer(unittest.TestCase):
         pred = torch.full((1, 1, 1, 2, 2), 7.5)
         buf.update(pred, torch.tensor([0.0]), idt=0)
 
-        self.assertTrue(torch.all(buf.rollout_data[0, 0] == 7.5))
+        self.assertTrue(torch.all(buf.rollout_data[0] == 7.5))
 
     def test_timestamps_recorded_only_at_idt_zero(self, verbose=False):
         # Timestamps for a given IC should be captured at idt=0 and NOT
@@ -755,12 +764,11 @@ class TestRolloutBuffer(unittest.TestCase):
             self.assertEqual(buf.buffer_offset, 0)
 
     def test_auto_flush_on_buffer_overflow(self, verbose=False):
-        # Buffer holds 2 ICs (output_memory_buffer_size=2), batch_size=2,
-        # rollout_steps=0 (one timestep per IC). The first batch fills the
-        # buffer; the second batch's idt=0 must trigger _flush_buffer_to_disk before
-        # writing, leaving the buffer holding only the second batch's data.
-        # _flush_buffer_to_disk's cuda.synchronize is now device-guarded, so this
-        # test runs on either CPU or CUDA.
+        # Buffer holds 2 steps (output_memory_buffer_size=2), batch_size=2,
+        # rollout_steps=0 (R+1=1 step per IC). The first batch fills the
+        # buffer; the second batch's idt=0 must trigger _flush_buffer_to_disk
+        # before writing, leaving the buffer holding only the second batch's data.
+        # _flush_buffer_to_disk's cuda.synchronize is device-guarded so this runs on CPU.
         buf = self._make_buffer(
             num_samples=4,
             batch_size=2,
@@ -782,36 +790,70 @@ class TestRolloutBuffer(unittest.TestCase):
 
         with self.subTest(desc="buffer holds second batch only"):
             self.assertEqual(buf.buffer_offset, 2)
-            self.assertTrue(torch.all(buf.rollout_data[0:2, 0] == 9.0))
+            self.assertTrue(torch.all(buf.rollout_data[0:2] == 9.0))
 
-    def test_output_memory_buffer_size_defaults_to_num_samples(self, verbose=False):
-        # output_memory_buffer_size=None means "buffer the entire run in memory".
+    def test_auto_flush_mid_rollout(self, verbose=False):
+        # Step-granular buffering: with R+1=3 steps per IC and buffer_size=2 (below R+1),
+        # the buffer cannot hold even one full rollout. The flush must happen mid-rollout
+        # and the carry-over chunk must point at the in-flight batch's next leadtime.
+        num_rollout_steps = 2   # R+1 = 3
+        buf = self._make_buffer(
+            num_samples=1,
+            batch_size=1,
+            num_rollout_steps=num_rollout_steps,
+            output_memory_buffer_size=2,
+            device=self.device,
+        )
+
+        # idt=0 and idt=1 fit into the buffer; idt=2 triggers a flush.
+        for idt in range(num_rollout_steps + 1):
+            pred = torch.full((1, 1, 1, 2, 2), float(idt), device=self.device)
+            buf.update(pred, torch.tensor([42.0]), idt=idt)
+            with self.subTest(desc=f"after idt={idt}"):
+                if idt < 2:
+                    # still filling the buffer
+                    self.assertEqual(buf.buffer_offset, idt + 1)
+                else:
+                    # idt=2 triggered a flush before the write, then wrote slot 0.
+                    self.assertEqual(buf.buffer_offset, 1)
+                    # carry-over chunk pinpoints the in-flight batch at idt=2.
+                    self.assertEqual(len(buf.chunks), 1)
+                    self.assertEqual(buf.chunks[-1]["idt_start"], 2)
+                    self.assertEqual(buf.chunks[-1]["idt_count"], 1)
+                    self.assertEqual(buf.chunks[-1]["batch_size"], 1)
+                    # post-flush slot 0 holds the idt=2 data
+                    self.assertTrue(torch.all(buf.rollout_data[0] == 2.0))
+
+    def test_output_memory_buffer_size_defaults_to_full_run(self, verbose=False):
+        # output_memory_buffer_size=None means "buffer the entire run in memory",
+        # which is num_samples * (R + 1) steps under the step-granular semantics.
+        # _make_buffer's defaults give num_samples=10, num_rollout_steps=1 → 10 * 2 = 20.
         buf = self._make_buffer(
             num_samples=10,
             batch_size=2,
             output_memory_buffer_size=None,
         )
-        self.assertEqual(buf.num_buffered_samples, 10)
+        self.assertEqual(buf.num_buffered_samples, 20)
 
     def test_output_memory_buffer_size_clamping(self, verbose=False):
-        # The buffer size is clamped to [batch_size, num_samples] inclusive.
+        # The buffer size is clamped to [batch_size, num_samples * (R + 1)] inclusive.
         # Below the floor: clamped up to batch_size (otherwise update() with a
         # full batch would never fit).
         with self.subTest(desc="clamps below batch_size"):
             buf = self._make_buffer(
-                num_samples=10, batch_size=4,
-                output_memory_buffer_size=2,    # below floor
+                num_samples=10, batch_size=4, num_rollout_steps=1,
+                output_memory_buffer_size=2,    # below floor (batch_size=4)
             )
             self.assertEqual(buf.num_buffered_samples, 4)
 
-        # Above the ceiling: clamped down to num_samples (no point in
-        # over-allocating).
-        with self.subTest(desc="clamps above num_samples"):
+        # Above the ceiling: clamped down to num_samples * (R + 1) (no point
+        # in over-allocating beyond the full run).
+        with self.subTest(desc="clamps above num_samples * (R + 1)"):
             buf = self._make_buffer(
-                num_samples=10, batch_size=2,
-                output_memory_buffer_size=100,  # above ceiling
+                num_samples=10, batch_size=2, num_rollout_steps=1,
+                output_memory_buffer_size=100,  # above ceiling (10 * 2 = 20)
             )
-            self.assertEqual(buf.num_buffered_samples, 10)
+            self.assertEqual(buf.num_buffered_samples, 20)
 
 
 class TestRolloutBufferIO(unittest.TestCase):
@@ -1032,6 +1074,54 @@ class TestRolloutBufferIO(unittest.TestCase):
                         msg=f"after auto-flush: slot (ic={ic}, idt={idt}) corrupt",
                     )
         with self.subTest(desc="timestamps in correct order across flushes"):
+            self.assertTrue(np.array_equal(ts, np.arange(num_samples, dtype=np.float64)))
+
+    def test_round_trip_with_mid_rollout_flush(self, verbose=False):
+        # Step-granular buffering: ``output_memory_buffer_size`` smaller than R+1
+        # forces flushes mid-rollout (a single trajectory does not fit in the buffer).
+        # The carry-over chunk must correctly continue the in-flight batch at the
+        # next leadtime so the round-trip file matches the non-flushed case exactly.
+        # Mirrors the production motivation: long rollouts that overflow CPU memory.
+        out_path = os.path.join(self.tmpdir, "mid_rollout_flush.h5")
+        num_samples = 4
+        R = 6                      # R+1 = 7 steps per IC
+        H, W = 2, 3
+        buffer_steps = 3           # below R+1 — forces multiple mid-rollout flushes
+
+        buf = self._make_buffer(
+            output_file=out_path,
+            num_samples=num_samples, batch_size=2,
+            num_rollout_steps=R, ensemble_size=1,
+            img_shape=(H, W), channel_names=("a",),
+            output_memory_buffer_size=buffer_steps,
+        )
+
+        # 2 batches × 2 ICs each = 4 ICs. data[ic, idt] = ic * 100 + idt.
+        batches = []
+        for b in range(2):
+            arr = torch.zeros(2, R + 1, 1, 1, H, W)
+            for i in range(2):
+                ic = b * 2 + i
+                for idt in range(R + 1):
+                    arr[i, idt, ...] = float(ic * 100 + idt)
+            batches.append(arr)
+        tstamps = [torch.tensor([float(b * 2), float(b * 2 + 1)]) for b in range(2)]
+
+        self._drive_full_rollout(buf, ic_data_per_batch=batches, tstamps_per_batch=tstamps)
+        buf.finalize()
+
+        with h5.File(out_path, "r") as f:
+            data = f["fields"][...]
+            ts = f["timestamp"][...]
+
+        with self.subTest(desc="all (ic, idt) slots correct after mid-rollout flushes"):
+            for ic in range(num_samples):
+                for idt in range(R + 1):
+                    self.assertTrue(
+                        np.all(data[ic, idt] == float(ic * 100 + idt)),
+                        msg=f"slot (ic={ic}, idt={idt}) corrupt after mid-rollout flush",
+                    )
+        with self.subTest(desc="timestamps survive mid-rollout flushes"):
             self.assertTrue(np.array_equal(ts, np.arange(num_samples, dtype=np.float64)))
 
     def test_dim_scales_attached_and_correct(self, verbose=False):
