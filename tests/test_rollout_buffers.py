@@ -1341,6 +1341,33 @@ class TestRolloutBufferStreaming(unittest.TestCase):
         with self.assertRaises(ValueError):
             self._make_buffer(output_file=None, streaming_mode=True)
 
+    def test_output_memory_buffer_size_zero_implies_streaming(self, verbose=False):
+        # Legacy shorthand from tkurth/gds-support: passing
+        # ``output_memory_buffer_size=0`` (or any non-positive value) enables
+        # streaming mode without the caller needing to set streaming_mode=True.
+        # Inference dispatcher scripts pass ``--output_memory_buffer_size=0`` to
+        # disable buffering; this test pins that contract.
+        out_path = os.path.join(self.tmpdir, "stream_via_zero.h5")
+        buf = self._make_buffer(output_file=out_path, output_memory_buffer_size=0)
+        try:
+            with self.subTest(desc="streaming_mode auto-enabled"):
+                self.assertTrue(buf.streaming_mode)
+            with self.subTest(desc="no in-memory rollout_data allocated"):
+                self.assertIsNone(buf.rollout_data)
+            with self.subTest(desc="no in-memory timestamp_data allocated"):
+                self.assertIsNone(buf.timestamp_data)
+        finally:
+            zero = torch.zeros(2, 2, 1, 2, 2, 4)
+            self._drive_full_rollout(buf, ic_data_per_batch=[zero], tstamps_per_batch=[torch.tensor([0.0, 1.0])])
+            buf.finalize()
+
+    def test_output_memory_buffer_size_zero_without_file_raises(self, verbose=False):
+        # The same validation that fires for explicit streaming_mode=True must
+        # also fire when streaming is triggered via the size-shorthand: streaming
+        # without an output_file is meaningless.
+        with self.assertRaises(ValueError):
+            self._make_buffer(output_file=None, output_memory_buffer_size=0)
+
     def test_streaming_skips_in_memory_buffer_allocation(self, verbose=False):
         # Streaming mode must NOT allocate the (potentially huge) rollout
         # tensors. ``rollout_data`` and ``timestamp_data`` are None.

@@ -156,7 +156,10 @@ class RolloutBuffer(DataBuffer):
         full rollout for one IC fits in ``R + 1`` slots. Setting ``output_memory_buffer_size``
         below ``R + 1`` enables mid-rollout flushing, which is useful when a single trajectory
         does not fit in memory. Clamped to ``[batch_size, num_samples * (R + 1)]``. Defaults
-        to ``num_samples * (R + 1)`` (i.e., buffer the entire run).
+        to ``num_samples * (R + 1)`` (i.e., buffer the entire run). A value of ``0`` (or any
+        non-positive integer) is a legacy shorthand for ``streaming_mode=True`` — no in-memory
+        buffer is allocated and each ``update()`` writes straight to disk; this preserves the
+        behavior of dispatcher scripts that pass ``--output_memory_buffer_size=0``.
     streaming_mode: bool, optional
         When ``True``, every ``update()`` call writes directly to disk and no
         in-memory rollout buffer is allocated. Requires ``output_file`` to be
@@ -194,12 +197,20 @@ class RolloutBuffer(DataBuffer):
         super().__init__(num_rollout_steps, rollout_dt, channel_names, device, scale, bias, output_channels, output_file)
 
         # streaming mode has no in-memory fallback — every update writes to disk.
-        if streaming_mode and output_file is None:
+        # Two ways to opt in:
+        #   - explicit streaming_mode=True (preferred for new code)
+        #   - output_memory_buffer_size <= 0 (legacy shorthand from tkurth/gds-support;
+        #     preserved so existing inference dispatchers that pass
+        #     ``--output_memory_buffer_size=0`` keep working without code changes).
+        # ``output_memory_buffer_size=None`` (the unset default) does NOT trigger
+        # streaming — it still means "buffer the whole run".
+        streaming_via_size = (output_memory_buffer_size is not None) and (output_memory_buffer_size <= 0)
+        self.streaming_mode = streaming_mode or streaming_via_size
+        if self.streaming_mode and output_file is None:
             raise ValueError(
-                "streaming_mode=True requires output_file to be set; "
+                "streaming mode requires output_file to be set; "
                 "there is no in-memory buffer in streaming mode."
             )
-        self.streaming_mode = streaming_mode
 
         # resolve buffer device (mirrors DataBuffer's str→torch.device coercion).
         # CUDA buffers avoid GPU→CPU transfers per update() call but pay one
