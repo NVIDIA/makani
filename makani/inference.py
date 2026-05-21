@@ -225,6 +225,7 @@ if __name__ == "__main__":
                     end_date=args.end_date,
                     date_step=args.date_step,
                     wb2_compatible=args.wb2_compatible,
+                    enable_odirect=args.enable_odirect,
                     profiler=profiler,
                 )
         elif args.capture_type == "cupti":
@@ -242,6 +243,7 @@ if __name__ == "__main__":
                         end_date=args.end_date,
                         date_step=args.date_step,
                         wb2_compatible=args.wb2_compatible,
+                        enable_odirect=args.enable_odirect,
                         profiler=profiler,
                     )
 
@@ -258,6 +260,7 @@ if __name__ == "__main__":
             end_date=args.end_date,
             date_step=args.date_step,
             wb2_compatible=args.wb2_compatible,
+            enable_odirect=args.enable_odirect,
         )
 
     # cleanup

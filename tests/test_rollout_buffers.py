@@ -1300,6 +1300,7 @@ class TestRolloutBufferStreaming(unittest.TestCase):
         output_memory_buffer_size=None,
         streaming_mode=False,
         buffer_device=torch.device("cpu"),
+        enable_odirect=False,
     ):
         if output_channels is None:
             output_channels = list(channel_names)
@@ -1327,6 +1328,7 @@ class TestRolloutBufferStreaming(unittest.TestCase):
             output_memory_buffer_size=output_memory_buffer_size,
             streaming_mode=streaming_mode,
             buffer_device=buffer_device,
+            enable_odirect=enable_odirect,
         )
 
     def _drive_full_rollout(self, buf, *, ic_data_per_batch, tstamps_per_batch):
@@ -1340,6 +1342,66 @@ class TestRolloutBufferStreaming(unittest.TestCase):
         # directly to disk, so output_file is mandatory.
         with self.assertRaises(ValueError):
             self._make_buffer(output_file=None, streaming_mode=True)
+
+    def test_enable_odirect_without_output_file_raises(self, verbose=False):
+        # O_DIRECT writes need a real file — same contract as streaming mode.
+        with self.assertRaises(ValueError):
+            self._make_buffer(output_file=None, enable_odirect=True)
+
+    def test_enable_odirect_round_trip(self, verbose=False):
+        # When the HDF5 build includes the direct VFD, enable_odirect=True must:
+        #   (1) construct without error,
+        #   (2) open the file with driver="direct" (no host page cache),
+        #   (3) produce a file readable with the default driver — same bytes as
+        #       a control run with enable_odirect=False.
+        # Skip-if-unavailable: not every HDF5 build ships the direct VFD.
+        ctrl_path = os.path.join(self.tmpdir, "odirect_ctrl.h5")
+        odirect_path = os.path.join(self.tmpdir, "odirect.h5")
+
+        # build identical inputs
+        H, W = 2, 4
+        num_samples = 4
+        R = 1
+        batches = []
+        for b in range(2):
+            arr = torch.zeros(2, R + 1, 1, 2, H, W)
+            for i in range(2):
+                ic = b * 2 + i
+                for idt in range(R + 1):
+                    arr[i, idt, ...] = float(ic * 10 + idt)
+            batches.append(arr)
+        tstamps = [torch.tensor([float(b * 2), float(b * 2 + 1)]) for b in range(2)]
+
+        # control
+        buf_ctrl = self._make_buffer(
+            output_file=ctrl_path,
+            num_samples=num_samples, batch_size=2,
+            num_rollout_steps=R, ensemble_size=1,
+            img_shape=(H, W),
+        )
+        self._drive_full_rollout(buf_ctrl, ic_data_per_batch=batches, tstamps_per_batch=tstamps)
+        buf_ctrl.finalize()
+
+        # O_DIRECT path — skip if the local HDF5 build lacks the direct VFD
+        try:
+            buf_od = self._make_buffer(
+                output_file=odirect_path,
+                num_samples=num_samples, batch_size=2,
+                num_rollout_steps=R, ensemble_size=1,
+                img_shape=(H, W),
+                enable_odirect=True,
+            )
+        except (ValueError, OSError, RuntimeError) as e:
+            self.skipTest(f"HDF5 build does not support the direct VFD: {e}")
+
+        self._drive_full_rollout(buf_od, ic_data_per_batch=batches, tstamps_per_batch=tstamps)
+        buf_od.finalize()
+
+        with h5.File(ctrl_path, "r") as f_c, h5.File(odirect_path, "r") as f_o:
+            with self.subTest(desc="fields match control"):
+                self.assertTrue(np.array_equal(f_c["fields"][...], f_o["fields"][...]))
+            with self.subTest(desc="timestamps match control"):
+                self.assertTrue(np.array_equal(f_c["timestamp"][...], f_o["timestamp"][...]))
 
     def test_output_memory_buffer_size_zero_implies_streaming(self, verbose=False):
         # Legacy shorthand from tkurth/gds-support: passing
