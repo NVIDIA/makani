@@ -171,6 +171,13 @@ class RolloutBuffer(DataBuffer):
         avoid GPU→CPU transfers on every ``update()``; the buffer is copied
         to host once at flush time. Ignored when ``streaming_mode`` is
         ``True``.
+    enable_odirect: bool, optional
+        When ``True``, open the output file with HDF5's ``direct`` VFD so
+        writes bypass the host page cache (O_DIRECT). Requires an HDF5 build
+        with the direct VFD compiled in (``--enable-direct-vfd``) and
+        ``output_file`` to be set. Incompatible with the MPI-IO driver used
+        for distributed writes; use only on single-rank or per-rank file
+        layouts. Default is ``False``.
     """
 
     def __init__(
@@ -193,8 +200,17 @@ class RolloutBuffer(DataBuffer):
         output_memory_buffer_size: Optional[int] = None,
         streaming_mode: bool = False,
         buffer_device: Union[str, torch.device] = torch.device("cpu"),
+        enable_odirect: bool = False,
     ):
         super().__init__(num_rollout_steps, rollout_dt, channel_names, device, scale, bias, output_channels, output_file)
+
+        # O_DIRECT (HDF5 ``direct`` VFD): bypasses the host page cache. Requires an
+        # output file and a non-MPI single-writer layout — the direct VFD is mutually
+        # exclusive with ``mpio``. Validation against the MPI driver happens later
+        # in ``_create_output_file`` where we know whether ``mpi_comm`` was created.
+        if enable_odirect and output_file is None:
+            raise ValueError("enable_odirect=True requires output_file to be set.")
+        self.enable_odirect = enable_odirect
 
         # streaming mode has no in-memory fallback — every update writes to disk.
         # Two ways to opt in:
@@ -304,8 +320,17 @@ class RolloutBuffer(DataBuffer):
 
     def _create_output_file(self, output_file):
         if self.mpi_comm is not None:
+            # MPI-IO is mutually exclusive with the direct VFD; the user picks one.
+            if self.enable_odirect:
+                raise ValueError(
+                    "enable_odirect=True is incompatible with the MPI-IO driver "
+                    "(used whenever world_size > 1). Use a per-rank file layout or disable O_DIRECT."
+                )
             # initialize MPI. This call is collective!
             self.file_handle = h5.File(output_file, "w", driver="mpio", comm=self.mpi_comm)
+        elif self.enable_odirect:
+            # HDF5 ``direct`` VFD: writes go through O_DIRECT, bypassing the page cache.
+            self.file_handle = h5.File(output_file, "w", driver="direct")
         else:
             self.file_handle = h5.File(output_file, "w")
 
