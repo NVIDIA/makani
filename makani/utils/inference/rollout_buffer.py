@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import ctypes
+from math import prod
 from typing import Optional, List, Tuple, Union
 from abc import ABCMeta, abstractmethod
 
@@ -47,6 +49,21 @@ def _barrier(device):
         return
     device_ids = [device.index] if device.type == "cuda" else None
     dist.barrier(device_ids=device_ids)
+
+
+def _as_numpy(tensor: torch.Tensor, ctype, nptype):
+    """
+    Reinterpret a (CUDA) tensor's ``data_ptr()`` as a numpy view without a host copy.
+
+    Used by the GDS write path: h5py's GDS VFD only consumes the pointer for cuFile
+    DMA setup and never dereferences it as host memory, so a "numpy view" of GPU
+    memory is safe to hand off. Caller must keep the source tensor alive for the
+    duration of the write and must have synchronized any kernels that produced
+    its data — there is no implicit copy/sync here.
+    """
+    pointer = ctypes.cast(tensor.data_ptr(), ctypes.POINTER(ctype))
+    buff = (pointer._type_ * prod(tensor.shape)).from_address(ctypes.addressof(pointer.contents))
+    return np.frombuffer(buff, dtype=nptype).reshape(*tensor.shape)
 
 
 
@@ -177,7 +194,16 @@ class RolloutBuffer(DataBuffer):
         with the direct VFD compiled in (``--enable-direct-vfd``) and
         ``output_file`` to be set. Incompatible with the MPI-IO driver used
         for distributed writes; use only on single-rank or per-rank file
-        layouts. Default is ``False``.
+        layouts. Mutually exclusive with ``enable_gds``. Default is ``False``.
+    enable_gds: bool, optional
+        When ``True``, open the output file with the HDF5 ``gds`` driver and
+        route ``write_direct`` calls through a numpy view of GPU memory
+        (zero-copy DMA via cuFile/nvidia-fs) instead of staging through host.
+        Requires an HDF5 build with the GDS VFD, a CUDA-resident write source
+        (``buffer_device=cuda`` for buffered mode; ``device=cuda`` for
+        streaming), and that the source memory be cuFile-compatible
+        (classic ``cudaMalloc``, not VMM-backed). Mutually exclusive with
+        ``enable_odirect``. Default is ``False``.
     """
 
     def __init__(
@@ -201,6 +227,7 @@ class RolloutBuffer(DataBuffer):
         streaming_mode: bool = False,
         buffer_device: Union[str, torch.device] = torch.device("cpu"),
         enable_odirect: bool = False,
+        enable_gds: bool = False,
     ):
         super().__init__(num_rollout_steps, rollout_dt, channel_names, device, scale, bias, output_channels, output_file)
 
@@ -211,6 +238,16 @@ class RolloutBuffer(DataBuffer):
         if enable_odirect and output_file is None:
             raise ValueError("enable_odirect=True requires output_file to be set.")
         self.enable_odirect = enable_odirect
+
+        # GDS path requires an output file (no in-memory equivalent) and a CUDA source
+        # for the writes; validation against buffer_device/device is deferred to where
+        # the actual write happens since the user may want streaming OR buffered GDS.
+        if enable_gds and output_file is None:
+            raise ValueError("enable_gds=True requires output_file to be set.")
+        # O_DIRECT and GDS open the file with different VFDs; only one can win.
+        if enable_odirect and enable_gds:
+            raise ValueError("enable_odirect and enable_gds are mutually exclusive — pick one I/O backend.")
+        self.enable_gds = enable_gds
 
         # streaming mode has no in-memory fallback — every update writes to disk.
         # Two ways to opt in:
@@ -331,6 +368,9 @@ class RolloutBuffer(DataBuffer):
         elif self.enable_odirect:
             # HDF5 ``direct`` VFD: writes go through O_DIRECT, bypassing the page cache.
             self.file_handle = h5.File(output_file, "w", driver="direct")
+        elif self.enable_gds:
+            # GDS VFD: writes go straight from GPU memory to storage via cuFile/nvidia-fs.
+            self.file_handle = h5.File(output_file, "w", driver="gds")
         else:
             self.file_handle = h5.File(output_file, "w")
 
@@ -418,6 +458,25 @@ class RolloutBuffer(DataBuffer):
 
         return
 
+    _CTYPE_BY_DTYPE = {torch.float32: (ctypes.c_float, np.float32),
+                       torch.float64: (ctypes.c_double, np.float64)}
+
+    def _np_view_for_write(self, tensor: torch.Tensor):
+        """
+        Produce the numpy buffer to hand to ``write_direct``.
+
+        With GDS, returns a zero-copy view of GPU memory (and pre-syncs CUDA so any
+        producer kernels have committed). Without GDS, returns a contiguous host
+        array — bringing the tensor over from a non-CPU device if necessary.
+        """
+        if self.enable_gds:
+            if self.device.type == "cuda":
+                torch.cuda.synchronize(device=self.device)
+            ctype, nptype = self._CTYPE_BY_DTYPE[tensor.dtype]
+            return _as_numpy(tensor.contiguous(), ctype, nptype)
+        src = tensor if tensor.device.type == "cpu" else tensor.cpu()
+        return np.ascontiguousarray(src.numpy())
+
     def _write_chunk_to_disk(self, chunk):
         """
         Write one batch-group chunk to the HDF5 ``fields`` dataset.
@@ -444,10 +503,9 @@ class RolloutBuffer(DataBuffer):
         # transpose to (B, idt_count, E, C, H, W) to match the file's IC-major layout
         slab = slab.transpose(0, 1).contiguous()
 
-        # bring to host if buffer lives on a non-CPU device
-        if self.buffer_device.type != "cpu":
-            slab = slab.cpu()
-        slab_arr = np.ascontiguousarray(slab.numpy())
+        # GDS path keeps slab on GPU and hands the pointer to cuFile;
+        # non-GDS path stages through host.
+        slab_arr = self._np_view_for_write(slab)
 
         # destination slice in the file
         ic_range = slice(ic_offset, ic_offset + B)
@@ -487,8 +545,7 @@ class RolloutBuffer(DataBuffer):
 
             # write the pending timestamps (one contiguous slab per flush)
             if (self.ts_buffer_offset > 0) and (comm.get_rank("model") == 0) and (comm.get_rank("ensemble") == 0):
-                timestamp_src = self.timestamp_data if self.buffer_device.type == "cpu" else self.timestamp_data.cpu()
-                timestamp_arr = np.ascontiguousarray(timestamp_src.numpy())
+                timestamp_arr = self._np_view_for_write(self.timestamp_data)
                 ts_buf_range = slice(0, self.ts_buffer_offset)
                 ts_file_range = slice(self.ts_first_ic_offset, self.ts_first_ic_offset + self.ts_buffer_offset)
                 self.timestamp_buffer_disk.write_direct(
@@ -540,8 +597,9 @@ class RolloutBuffer(DataBuffer):
         lat_range = slice(self.local_offset[0], self.local_offset[0] + self.local_shape[0])
         lon_range = slice(self.local_offset[1], self.local_offset[1] + self.local_shape[1])
 
-        # bring data to host for h5py write; ensure C-contiguity for write_direct
-        predp_arr = np.ascontiguousarray(predp.detach().cpu().numpy())
+        # GDS path keeps data on GPU and hands the pointer to cuFile;
+        # non-GDS path copies to host first.
+        predp_arr = self._np_view_for_write(predp.detach())
 
         self.rollout_buffer_disk.write_direct(
             predp_arr,
@@ -550,7 +608,7 @@ class RolloutBuffer(DataBuffer):
 
         # write timestamps once per IC (on the first leadtime), single-writer
         if (idt == 0) and (comm.get_rank("model") == 0) and (comm.get_rank("ensemble") == 0):
-            tarr = np.ascontiguousarray(tstamps.detach().cpu().numpy())
+            tarr = self._np_view_for_write(tstamps.detach())
             self.timestamp_buffer_disk.write_direct(
                 tarr,
                 dest_sel=batch_range,

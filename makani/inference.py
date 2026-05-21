@@ -66,6 +66,7 @@ if __name__ == "__main__":
         help="At what interval to sample initial conditions. Needs to be an integer number specifying the step in terms of dhours.",
     )
     parser.add_argument("--wb2_compatible", action="store_true", help="Makes metrics and quadratures compatible with weatherbench2.")
+    parser.add_argument("--enable_gds", action="store_true", help="Enable GPUDirect Storage. Opens the output file with the HDF5 GDS driver (requires HDF5 built with the GDS VFD and a cuFile-compatible GPU buffer).")
 
     # parse
     args = parser.parse_args()
@@ -226,6 +227,7 @@ if __name__ == "__main__":
                     date_step=args.date_step,
                     wb2_compatible=args.wb2_compatible,
                     enable_odirect=args.enable_odirect,
+                    enable_gds=args.enable_gds,
                     profiler=profiler,
                 )
         elif args.capture_type == "cupti":
@@ -244,6 +246,7 @@ if __name__ == "__main__":
                         date_step=args.date_step,
                         wb2_compatible=args.wb2_compatible,
                         enable_odirect=args.enable_odirect,
+                        enable_gds=args.enable_gds,
                         profiler=profiler,
                     )
 
@@ -261,6 +264,7 @@ if __name__ == "__main__":
             date_step=args.date_step,
             wb2_compatible=args.wb2_compatible,
             enable_odirect=args.enable_odirect,
+            enable_gds=args.enable_gds,
         )
 
     # cleanup
