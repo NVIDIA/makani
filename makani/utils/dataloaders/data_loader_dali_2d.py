@@ -112,6 +112,14 @@ class ERA5DaliESDataloader(object):
     def __init__(self, params, location, train, seed=333, dali_device="gpu"):
         # set up workers and devices
         self.num_data_workers = params.num_data_workers
+        # The parallel external_source path requires py_num_workers >= 1 and uses
+        # num_data_workers as the ES prefetch_queue_depth (must be >= 1 too). With 0,
+        # DALI silently disables the worker pool while parallel=True still requests
+        # parallel scheduling, which is an inconsistent configuration.
+        if self.num_data_workers < 1:
+            raise ValueError(
+                f"num_data_workers must be >= 1 for the DALI loader, got {self.num_data_workers}."
+            )
         self.dali_device = dali_device
         if self.dali_device == "gpu":
             self.device_index = torch.cuda.current_device()

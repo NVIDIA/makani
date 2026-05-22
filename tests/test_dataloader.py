@@ -502,11 +502,19 @@ class TestDataLoader(unittest.TestCase):
         """
         DALI path, eval mode on the 2-year training set with n_future > 0.
 
-        Invariant: a full non-shuffled epoch must yield distinct samples.
-        The per-year clamp in GeneralES.__call__ silently maps indices near
-        a year boundary to the same frame, which would show up here as
-        duplicate input tensors.  If this test fails, it is flagging exactly
-        that boundary handling.
+        Invariants on a full non-shuffled epoch:
+          1) every loaded sample is distinct, and
+          2) the loaded set equals direct HDF5 reads of the indices the
+             loader claims to visit (loader.extsource.indices_select).
+
+        (1) catches the original failure mode: a per-year clamp in
+        GeneralES.__call__ that silently maps indices near a year boundary
+        to the same frame, producing duplicates.  (2) additionally catches
+        a regression where the clamp returned a fixed-but-different frame
+        (no duplicates but every sample wrong) and other indexing slips
+        that uniqueness alone would miss.  The test stats fixture is
+        zero-mean / unit-std (testutils.py:311-315) so zscore is a
+        pass-through and the loader's float32 output equals on-disk bytes.
         """
         params = copy.deepcopy(self.params)
         params.multifiles = False
@@ -529,6 +537,83 @@ class TestDataLoader(unittest.TestCase):
             unique, total,
             f"{total - unique} duplicate samples in a non-shuffled DALI epoch "
             f"(total={total}, unique={unique}).",
+        )
+
+        expected = {
+            get_sample(params.train_data_path, int(idx)).tobytes()
+            for idx in loader.extsource.indices_select
+        }
+        self.assertEqual(
+            set(fingerprints), expected,
+            "loaded samples do not match direct HDF5 reads of indices_select",
+        )
+
+    @parameterized.expand([(1,), (2,), (4,)], skip_on_empty=False)
+    @unittest.skipUnless(_have_dali, "nvidia.dali is not installed")
+    def test_dali_parallel_workers_full_epoch_coverage(self, num_workers):
+        """
+        DALI path, eval mode, parameterized on num_data_workers.
+
+        num_data_workers is plumbed through to both py_num_workers and the
+        external_source's prefetch_queue_depth (data_loader_dali_2d.py:41,70).
+        Under parallel execution DALI runs a SharedBatchDispatcher in a
+        thread per worker that serialises the callback's returned numpy
+        arrays into shared memory.  If GeneralES.__call__ ever returned a
+        reference to a reused per-worker buffer instead of a fresh copy,
+        the main worker thread would invoke the next sample-fetch before
+        the dispatcher had finished reading the previous buffer, producing
+        either duplicate or torn samples.  GeneralES._reorder_channels
+        sidesteps this by always returning a copy; this test locks that
+        invariant in.
+
+        Baseline: raw HDF5 reads via get_sample(), since the test stats
+        fixture is zero-mean / unit-std (testutils.py:311-315) so the
+        zscore normalisation is a pass-through and the loader's float32
+        output matches the on-disk bytes.  This catches a wider class of
+        bugs than a loader-vs-loader comparison would (e.g. wrong-index
+        reads that would alias themselves).
+
+        For each worker count, a full non-shuffled eval epoch must
+          1) be duplicate-free,
+          2) yield exactly the loader's reported step count,
+          3) yield the same SET of samples as direct HDF5 reads of the
+             indices the loader claims to visit.
+        """
+        params = copy.deepcopy(self.params)
+        params.multifiles = False
+        params.batch_size = 1
+        # cap dataset to keep the multi-config sweep cheap; truncate_old
+        # picks the trailing window, so a small cap still exercises a full
+        # epoch through the parallel ES path
+        params.n_eval_samples = 40
+        params.num_data_workers = num_workers
+
+        loader, _, _ = get_dataloader(
+            params, params.valid_data_path, mode="eval", device=self.device,
+        )
+
+        fps = []
+        for token in loader:
+            inp = token[0]
+            for b in range(inp.shape[0]):
+                fps.append(inp[b].cpu().numpy().tobytes())
+
+        self.assertEqual(
+            len(set(fps)), len(fps),
+            f"{len(fps) - len(set(fps))} duplicates with num_data_workers={num_workers} "
+            f"(total={len(fps)}, unique={len(set(fps))})",
+        )
+        self.assertEqual(len(fps), len(loader))
+
+        # ground truth: read the same indices straight from the HDF5 file
+        expected = {
+            get_sample(params.valid_data_path, int(idx)).tobytes()
+            for idx in loader.extsource.indices_select
+        }
+        self.assertEqual(
+            set(fps), expected,
+            f"loader samples at num_data_workers={num_workers} do not match "
+            f"direct HDF5 reads",
         )
 
     @unittest.skipUnless(_have_dali, "nvidia.dali is not installed")
