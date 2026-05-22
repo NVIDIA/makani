@@ -116,6 +116,13 @@ testpaths = [
     "tests",
     "makani",
 ]
+# Python 3.12 warns when fork() is called from a multi-threaded process. DALI
+# spins up threads at import time, so torch DataLoader's default fork-based
+# worker spawn trips this on every test. The warning is informational; we have
+# not observed deadlocks with the test fixtures.
+filterwarnings = [
+    "ignore:.*fork.*may lead to deadlocks.*:DeprecationWarning",
+]
 
 [tool.black]
 line-length = 120
