@@ -307,10 +307,12 @@ class ERA5DaliESDataloader(object):
             self.out_bias = None
             self.out_scale = None
 
-        # create pipeline
+        # create pipeline; build() is auto-called by DALIGenericIterator on
+        # first run since DALI 1.46 (#5754). start_py_workers() is still
+        # explicit to keep worker startup ordered before any CUDA context is
+        # acquired in this process.
         self.pipeline = self.get_pipeline()
         self.pipeline.start_py_workers()
-        self.pipeline.build()
 
         # create iterator
         outnames = ["inp", "tar"]
