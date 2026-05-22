@@ -75,7 +75,7 @@ version = {attr = "makani.__version__"}
 dev = [
     "black>=22.10.0",
     "coverage>=6.5.0",
-    "nvidia-dali-cuda120>=1.40.0",
+    "nvidia-dali-cuda120>=2.0.0",
 ]
 
 test = [
