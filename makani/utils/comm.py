@@ -14,6 +14,8 @@
 # limitations under the License.
 
 import math
+import threading
+from contextlib import contextmanager
 
 # we are using the distributed manager from physicsnemo
 from physicsnemo.distributed.manager import DistributedManager
@@ -23,8 +25,32 @@ from physicsnemo.distributed.config import ProcessGroupNode, ProcessGroupConfig
 _DM = None
 _COMM_ROOTS = {}
 
+# Thread-local stack of size/rank/group overrides. Used by tests that need to
+# construct a "serial" reference model alongside a distributed model in the
+# same process — wrapping the serial __init__ in ``with override_sizes(...)``
+# makes the model's comm-size-based branching pick the serial sub-modules.
+_OVERRIDES = threading.local()
+
+
+def _override_stack():
+    if not hasattr(_OVERRIDES, "stack"):
+        _OVERRIDES.stack = []
+    return _OVERRIDES.stack
+
+
+def _lookup_override(name: str):
+    """Search the override stack from innermost outward; return the override
+    dict that contains ``name``, or None if not present."""
+    for frame in reversed(_override_stack()):
+        if name in frame:
+            return frame[name]
+    return None
+
 
 def get_size(name: str) -> int:
+    ov = _lookup_override(name)
+    if ov is not None:
+        return ov
     global _DM
     if (_DM is not None) and (_DM.world_size > 1):
         return _DM.group_size(name)
@@ -33,6 +59,10 @@ def get_size(name: str) -> int:
 
 
 def get_rank(name: str) -> int:
+    ov = _lookup_override(name)
+    if ov is not None:
+        # Within an override scope a group has size 1, so the local rank is 0.
+        return 0
     global _DM
     if (_DM is not None) and (_DM.world_size > 1):
         return _DM.group_rank(name)
@@ -41,11 +71,42 @@ def get_rank(name: str) -> int:
 
 
 def get_group(name: str):
+    ov = _lookup_override(name)
+    if ov is not None:
+        # Returning None makes downstream collectives in torch_harmonics
+        # short-circuit when they check ``dist.get_world_size(group)`` — only
+        # if the caller also verifies group is None first, which the comm
+        # primitives in mappings.py do via their own size==1 short-circuits.
+        # The intent of override_sizes is to keep callers out of the
+        # distributed branch entirely (they should observe size 1 and skip
+        # the collective), so this is a fallback for any stray lookup.
+        return None
     global _DM
     if _DM is not None:
         return _DM.group(name)
     else:
         return None
+
+
+@contextmanager
+def override_sizes(**sizes):
+    """Context manager that pretends a set of named comm groups have a given
+    size (typically 1) inside the block.
+
+    Intended for tests that need to construct a serial reference model in the
+    same process as a distributed model. Wrap the serial model's __init__ in
+    ``with comm.override_sizes(spatial=1, h=1, w=1, matmul=1, fin=1, fout=1):``
+    and every ``comm.get_size(name)`` / ``comm.get_rank(name)`` /
+    ``comm.get_group(name)`` lookup inside the block sees the overridden value.
+
+    The override is thread-local and stacks (inner scope wins), so nested use
+    is safe.
+    """
+    _override_stack().append(dict(sizes))
+    try:
+        yield
+    finally:
+        _override_stack().pop()
 
 
 def get_root(name: str) -> int:

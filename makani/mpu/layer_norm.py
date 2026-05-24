@@ -112,8 +112,13 @@ class DistributedInstanceNorm2d(nn.Module):
         if self.affine:
             self.weight = nn.Parameter(torch.ones(num_features))
             self.bias = nn.Parameter(torch.zeros(num_features))
+            # Per-channel affine params applied to spatially-sharded input:
+            # local grads on each spatial rank are partial sums over (b, h, w)
+            # that must be SUM-reduced.
             self.weight.is_shared_mp = ["spatial"]
+            self.weight.is_shared_mp_op = {"spatial": "sum"}
             self.bias.is_shared_mp = ["spatial"]
+            self.bias.is_shared_mp_op = {"spatial": "sum"}
 
     def _stats_welford(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Computes the statistics locally, then uses the Welford online algorithm to reduce them"""
@@ -255,12 +260,16 @@ class DistributedLayerNorm(nn.Module):
         self.norm = nn.LayerNorm(normalized_shape, eps=eps, elementwise_affine=elementwise_affine, bias=bias, device=device, dtype=dtype)
 
         if elementwise_affine:
-            # set up weight sharing and sharding
+            # set up weight sharing and sharding. The class above asserts that
+            # comm.get_size("matmul") == 1, so "model" reduces only over
+            # spatial here, and the input is spatially sharded → SUM.
             self.norm.weight.is_shared_mp = ["model"]
             self.norm.weight.sharded_dims_mp = [None]
+            self.norm.weight.is_shared_mp_op = {"model": "sum"}
             if bias:
                 self.norm.bias.is_shared_mp = ["model"]
                 self.norm.bias.sharded_dims_mp = [None]
+                self.norm.bias.is_shared_mp_op = {"model": "sum"}
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
 

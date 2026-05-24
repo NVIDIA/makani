@@ -90,8 +90,12 @@ class LearnablePositionEmbedding(PositionEmbedding):
             self.position_embeddings.sharded_dims_mp = [None, None, "h", "w"]
         elif embed_type == "lat":
             self.position_embeddings = nn.Parameter(torch.zeros(1, self.num_chans, self.local_shape_h, 1))
+            # The embedding has no w-dim but is broadcast over a w-sharded
+            # input — each w-rank holds a partial gradient summed over its
+            # local W slice, so SUM across w is required.
             self.position_embeddings.is_shared_mp = ["w"]
             self.position_embeddings.sharded_dims_mp = [None, None, "h", None]
+            self.position_embeddings.is_shared_mp_op = {"w": "sum"}
         else:
             raise ValueError(f"Unknown learnable position embedding type {embed_type}")
 

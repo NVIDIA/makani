@@ -21,7 +21,6 @@ import unittest
 from parameterized import parameterized
 
 import torch
-import torch_harmonics.distributed as thd
 
 from makani.utils import comm
 from makani.utils import driver
@@ -32,40 +31,71 @@ from makani.mpu.mappings import init_gradient_reduction_hooks
 from makani.mpu.mappings import reduce_from_parallel_region
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-from .distributed_helpers import get_default_parameters, set_image_shape, _split_helper, _gather_helper
+from .distributed_helpers import (
+    get_default_parameters, set_image_shape,
+    _split_helper, _gather_helper,
+    _init_grid_module, _copy_grid_state,
+)
 from ..testutils import disable_tf32, set_seed, compare_tensors
+
+
+# Comm groups to override to size 1 when constructing the serial reference
+# model alongside the distributed one. Covers every model-parallel group plus
+# the "model" / "spatial" / "matmul" parent groups that model code branches on.
+_SERIAL_OVERRIDE = dict(
+    model=1, spatial=1, matmul=1,
+    h=1, w=1, fin=1, fout=1,
+)
+
+
+# Module-level MPI communicator (duplicated from MPI.COMM_WORLD once per
+# process, freed in tearDownModule). Both comm and MPI are initialised once
+# per process so test cases can construct serial and distributed models
+# side-by-side without re-initialising any communication state.
+_MPI_COMM = None
+
+
+def setUpModule():
+    """Initialise MPI + comm groups once per Python process.
+
+    The distributed model tests used to tear down and re-create comm in every
+    test method so that a serial reference model could be constructed before
+    comm was initialised. That pattern failed when running multiple tests in
+    the same process because comm/NCCL state did not survive teardown +
+    re-init. Instead we init both communicators exactly once at module load,
+    and tests construct their serial reference model inside a
+    ``with comm.override_sizes(**_SERIAL_OVERRIDE):`` block — comm itself
+    keeps its real sizes for the distributed model.
+    """
+    global _MPI_COMM
+    from mpi4py import MPI
+    _MPI_COMM = MPI.COMM_WORLD.Dup()
+    _init_grid_module()
+
+
+def tearDownModule():
+    comm.cleanup()
+    if _MPI_COMM is not None:
+        # mpi_comm is an mpi4py Intracomm (returned by MPI.COMM_WORLD.Dup());
+        # its disposal API is Free(), called explicitly rather than relying on
+        # interpreter shutdown.
+        _MPI_COMM.Free()
 
 
 class TestDistributedModel(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        from mpi4py import MPI
-        cls.mpi_comm = MPI.COMM_WORLD.Dup()
-        cls.mpi_comm_rank = cls.mpi_comm.Get_rank()
-        cls.mpi_comm_size = cls.mpi_comm.Get_size()
+        # Shadow module-level state (MPI handle + grid state) onto the class
+        # so tests can keep using ``self.mpi_comm`` / ``self.h_group`` etc.
+        cls.mpi_comm = _MPI_COMM
+        cls.mpi_comm_rank = _MPI_COMM.Get_rank()
+        cls.mpi_comm_size = _MPI_COMM.Get_size()
+        _copy_grid_state(cls)
 
-        if torch.cuda.is_available():
-            if cls.mpi_comm_rank == 0:
-                print("Running test on GPU")
-            local_rank = cls.mpi_comm_rank % torch.cuda.device_count()
-            cls.device = torch.device(f"cuda:{local_rank}")
-            torch.cuda.set_device(cls.device)
-        else:
-            if cls.mpi_comm_rank == 0:
-                print("Running test on CPU")
-            cls.device = torch.device("cpu")
         set_seed(333)
 
         return
-
-    @classmethod
-    def tearDownClass(cls):
-        # Free the duplicated communicator. mpi_comm is an mpi4py Intracomm
-        # (returned by MPI.COMM_WORLD.Dup()), whose disposal API is Free()
-        # — release the duplicated comm explicitly rather than relying on
-        # interpreter shutdown to clean it up.
-        cls.mpi_comm.Free()
 
     def setUp(self):
 
@@ -83,45 +113,6 @@ class TestDistributedModel(unittest.TestCase):
         self.params.batch_size = 4
 
 
-    def _init_comms(self):
-
-        # set up distributed
-        self.grid_size_h = int(os.getenv("GRID_H", 1))
-        self.grid_size_w = int(os.getenv("GRID_W", 1))
-        self.grid_size_e = int(os.getenv("GRID_E", 1))
-        self.world_size = self.grid_size_h * self.grid_size_w * self.grid_size_e
-
-        # init groups
-        comm.init(
-            model_parallel_sizes=[self.grid_size_h, self.grid_size_w, 1, 1],
-            model_parallel_names=["h", "w", "fin", "fout"],
-            data_parallel_sizes=[self.grid_size_e, -1],
-            data_parallel_names=["ensemble", "batch"],
-        )
-        self.world_rank = comm.get_world_rank()
-
-        # store comm group parameters
-        self.wrank = comm.get_rank("w")
-        self.hrank = comm.get_rank("h")
-        self.erank = comm.get_rank("ensemble")
-        self.w_group = comm.get_group("w")
-        self.h_group = comm.get_group("h")
-        self.e_group = comm.get_group("ensemble")
-
-        # initializing sht process groups just to be sure
-        thd.init(self.h_group, self.w_group)
-
-        if self.world_rank == 0:
-            print(f"Running distributed tests on grid H x W x E = {self.grid_size_h} x {self.grid_size_w} x {self.grid_size_e}")
-
-        return
-
-
-    def _destroy_comms(self):
-        comm.cleanup()
-        return
-
-
     def _split_helper(self, tensor, hdim=None, wdim=None):
         tensor_local = _split_helper(tensor, dim=hdim, group=self.h_group)
         tensor_local = _split_helper(tensor_local, dim=wdim, group=self.w_group)
@@ -137,8 +128,9 @@ class TestDistributedModel(unittest.TestCase):
 
     @parameterized.expand(
         [
-            #"SNO",
-            #"FCN3",
+            "SFNO",
+            "SNO",
+            "FCN3",
         ],
         skip_on_empty=True,
     )
@@ -160,19 +152,21 @@ class TestDistributedModel(unittest.TestCase):
             tmp_path = tmpdir.name
         tmp_path = self.mpi_comm.bcast(tmp_path, root=0)
 
-        model = model_registry.get_model(self.params, multistep=False).to(self.device)
+        # Construct the serial reference model with every model-parallel comm
+        # group overridden to size 1 — the comm groups themselves keep their
+        # real sizes for the distributed model below.
+        with comm.override_sizes(**_SERIAL_OVERRIDE):
+            model = model_registry.get_model(self.params, multistep=False).to(self.device)
 
-        # get state dict
-        state_dict_full = checkpoint_helpers.gather_model_state_dict(model, grads=False)
+            # get state dict
+            state_dict_full = checkpoint_helpers.gather_model_state_dict(model, grads=False)
 
-        if self.mpi_comm_rank == 0:
-            driver.Driver.save_checkpoint(checkpoint_path=os.path.join(tmp_path, "checkpoint.pt"),
-                                          model=model,
-                                          checkpoint_mode="flexible")
+            if self.mpi_comm_rank == 0:
+                driver.Driver.save_checkpoint(checkpoint_path=os.path.join(tmp_path, "checkpoint.pt"),
+                                              model=model,
+                                              checkpoint_mode="flexible")
+
         self.mpi_comm.Barrier()
-
-        # now init comms
-        self._init_comms()
 
         model_dist = model_registry.get_model(self.params, multistep=False).to(self.device)
 
@@ -196,18 +190,21 @@ class TestDistributedModel(unittest.TestCase):
 
         self.mpi_comm.Barrier()
 
-        # cleanup
-        self._destroy_comms()
-
 
     @parameterized.expand(
         [
-            #("SNO", 1e-4),
+            # fp32 accumulation order differs between serial and distributed
+            # paths — observed worst-case relative drift around 4e-3 on a
+            # single small-magnitude weight-grad element for SFNO with h=w=2.
+            # Use a looser tol that still catches a real factor-of-N regression
+            # (factor-of-N errors would show up as ~25%-100% relative diff).
+            ("SFNO", 1e-2),
+            ("SNO", 1e-4),
             ("FCN3", 1e-4),
         ],
         skip_on_empty=True,
     )
-    def test_distributed_model_fwd_bwd(self, nettype, tol, verbose=False):
+    def test_distributed_model_fwd_bwd(self, nettype, tol, verbose=True):
         """
         Tests forward backward pass of distributed model vs serial model
         """
@@ -227,39 +224,40 @@ class TestDistributedModel(unittest.TestCase):
         tmp_path = self.mpi_comm.bcast(tmp_path, root=0)
 
         multistep = self.params.n_future > 0
-        model = model_registry.get_model(self.params, multistep=multistep).to(self.device)
+        # Construct + run the serial reference model under the size-1 override
+        # so its internal branches all pick the non-distributed path even
+        # though the comm groups are live for the distributed model below.
+        with comm.override_sizes(**_SERIAL_OVERRIDE):
+            model = model_registry.get_model(self.params, multistep=multistep).to(self.device)
 
-        inp_shape = (self.params.batch_size, self.params.N_in_channels, self.params.img_shape_x, self.params.img_shape_y)
+            inp_shape = (self.params.batch_size, self.params.N_in_channels, self.params.img_shape_x, self.params.img_shape_y)
 
-        # prepare some dummy data
-        inp_full = torch.randn(*inp_shape, dtype=torch.float32, device=self.device)
-        inp_full.requires_grad = True
+            # prepare some dummy data
+            inp_full = torch.randn(*inp_shape, dtype=torch.float32, device=self.device)
+            inp_full.requires_grad = True
 
-        # forward pass and save
-        out_full = model(inp_full).clone()
-        loss_full = torch.sum(out_full)
+            # forward pass and save
+            out_full = model(inp_full).clone()
+            loss_full = torch.sum(out_full)
 
-        # perform backward pass
-        loss_full.backward()
-        igrad_full = inp_full.grad.clone()
+            # perform backward pass
+            loss_full.backward()
+            igrad_full = inp_full.grad.clone()
 
-        # store output:
-        if self.mpi_comm_rank == 0:
-            torch.save(out_full, os.path.join(tmp_path, "out_full.pt"))
-            torch.save(igrad_full, os.path.join(tmp_path, "igrad_full.pt"))
-            driver.Driver.save_checkpoint(checkpoint_path=os.path.join(tmp_path, "checkpoint.pt"),
-                                          model=model,
-                                          checkpoint_mode="flexible")
-        self.mpi_comm.Barrier()
+            # store output:
+            if self.mpi_comm_rank == 0:
+                torch.save(out_full, os.path.join(tmp_path, "out_full.pt"))
+                torch.save(igrad_full, os.path.join(tmp_path, "igrad_full.pt"))
+                driver.Driver.save_checkpoint(checkpoint_path=os.path.join(tmp_path, "checkpoint.pt"),
+                                              model=model,
+                                              checkpoint_mode="flexible")
+            self.mpi_comm.Barrier()
 
-        # get also grad output
-        state_dict_full = checkpoint_helpers.gather_model_state_dict(model, grads=True)
+            # get also grad output
+            state_dict_full = checkpoint_helpers.gather_model_state_dict(model, grads=True)
 
-        # delete local model
-        del model
-
-        # now init comms
-        self._init_comms()
+            # delete local model
+            del model
 
         # create model, this times distributed
         model_dist = model_registry.get_model(self.params, multistep=multistep).to(self.device)
@@ -325,15 +323,12 @@ class TestDistributedModel(unittest.TestCase):
                     wgrad_gather_full = state_dict_gather_full["module." + key]
                     self.assertTrue(compare_tensors(f"weight gradient {key}", wgrad_gather_full, wgrad_full, tol, tol, verbose=verbose))
 
-        # cleanup
-        self._destroy_comms()
-
 
     @parameterized.expand(
         [
-            #("SFNO", 1e-6, 1e-6),
-            #("SNO", 1e-6, 1e-6),
-            #("FCN3", 1e-6, 1e-6),
+            ("SFNO", 1e-6, 1e-6),
+            ("SNO", 1e-6, 1e-6),
+            ("FCN3", 1e-6, 1e-6),
         ],
         skip_on_empty=True,
     )
@@ -348,9 +343,6 @@ class TestDistributedModel(unittest.TestCase):
 
         # fix seed
         set_seed(333)
-
-        # now init comms
-        self._init_comms()
 
         # create model, this times distributed
         model_dist = model_registry.get_model(self.params, multistep=False).to(self.device)

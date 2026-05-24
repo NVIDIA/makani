@@ -151,6 +151,11 @@ class NeuralOperatorBlock(nn.Module):
             self.inner_skip = nn.Conv2d(embed_dim, embed_dim, 1, 1, bias=False)
             gain_factor /= 2.0
             nn.init.normal_(self.inner_skip.weight, std=math.sqrt(gain_factor / embed_dim))
+            # 1x1 conv on spatially-sharded input: SUM across spatial
+            # (heuristic would otherwise default to MEAN via [\"model\"]).
+            self.inner_skip.weight.is_shared_mp = ["spatial"]
+            self.inner_skip.weight.sharded_dims_mp = [None, None, None, None]
+            self.inner_skip.weight.is_shared_mp_op = {"spatial": "sum"}
         elif inner_skip == "identity":
             self.inner_skip = nn.Identity()
             gain_factor /= 2.0
@@ -190,6 +195,10 @@ class NeuralOperatorBlock(nn.Module):
             self.outer_skip = nn.Conv2d(embed_dim, embed_dim, 1, 1, bias=False)
             gain_factor /= 2.0
             torch.nn.init.normal_(self.outer_skip.weight, std=math.sqrt(gain_factor / embed_dim))
+            # 1x1 conv on spatially-sharded input: SUM across spatial.
+            self.outer_skip.weight.is_shared_mp = ["spatial"]
+            self.outer_skip.weight.sharded_dims_mp = [None, None, None, None]
+            self.outer_skip.weight.is_shared_mp_op = {"spatial": "sum"}
         elif outer_skip == "identity":
             self.outer_skip = nn.Identity()
             gain_factor /= 2.0
@@ -463,11 +472,24 @@ class SphericalFourierNeuralOperatorNet(nn.Module):
                 input_format="nchw",
             )
 
+        # Cache comm-size-dependent forward branches so the forward path does
+        # not re-query comm at runtime. This lets a comm.override_sizes(...)
+        # context around __init__ fully determine whether the model takes the
+        # serial or distributed path, without forward observing the real comm
+        # sizes (cf. mappings.py:override_sizes).
+        self._input_needs_fin_scatter = comm.get_size("fin") > 1
+        self._decoder_needs_out_gather = (
+            hasattr(self.decoder, "comm_out_name")
+            and comm.get_size(self.decoder.comm_out_name) > 1
+        )
+
         # output transform
         if self.big_skip:
             self.residual_transform = nn.Conv2d(self.inp_chans, self.out_chans, 1, bias=False)
+            # 1x1 conv on spatially-sharded input: SUM across spatial.
             self.residual_transform.weight.is_shared_mp = ["spatial"]
             self.residual_transform.weight.sharded_dims_mp = [None, None, None, None]
+            self.residual_transform.weight.is_shared_mp_op = {"spatial": "sum"}
             scale = math.sqrt(0.5 / self.inp_chans)
             nn.init.normal_(self.residual_transform.weight, mean=0.0, std=scale)
 
@@ -603,7 +625,7 @@ class SphericalFourierNeuralOperatorNet(nn.Module):
                 # only take the predicted channels
                 residual = x
 
-        if comm.get_size("fin") > 1:
+        if self._input_needs_fin_scatter:
             x = scatter_to_parallel_region(x, 1, "fin")
 
         if self.checkpointing_level >= 1:
@@ -633,7 +655,7 @@ class SphericalFourierNeuralOperatorNet(nn.Module):
         else:
             x = self.decoder(x)
 
-        if hasattr(self.decoder, "comm_out_name") and (comm.get_size(self.decoder.comm_out_name) > 1):
+        if self._decoder_needs_out_gather:
             x = gather_from_parallel_region(x, 1, self.gather_shapes, self.decoder.comm_out_name)
 
         if self.big_skip:

@@ -17,7 +17,6 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.distributed as dist
 from torch.utils.checkpoint import checkpoint
 from makani.utils import comm
 
@@ -26,56 +25,6 @@ from torch_harmonics.distributed import compute_split_shapes
 from makani.mpu.mappings import reduce_from_parallel_region
 from makani.mpu.mappings import gather_from_parallel_region
 from makani.mpu.mappings import copy_to_parallel_region
-
-
-class _DistMatmulHelper(torch.autograd.Function):
-    @staticmethod
-    def forward(X, weight, bias, inp_group_name, out_group_name):
-        # matrix multiplication
-        xconv = F.conv2d(X, weight, bias=None)
-
-        # reduce
-        if comm.get_size(inp_group_name) > 1:
-            dist.all_reduce(xconv, group=comm.get_group(inp_group_name))
-
-        # add bias
-        if bias is not None:
-            xconvbias = xconv + bias
-        else:
-            xconvbias = xconv
-
-        return xconvbias
-
-    @staticmethod
-    def setup_context(ctx, inputs, output):
-        X, weight, bias, inp_group_name, out_group_name = inputs
-        ctx.save_for_backward(X, weight, bias)
-        ctx.out_group_name = out_group_name
-
-    @staticmethod
-    def backward(ctx, grad_out):
-        X, weight, bias = ctx.saved_tensors
-        gname = ctx.out_group_name
-
-        # do the bwd pass on dgrad
-        grad_input = F.conv_transpose2d(grad_out, weight, bias=None)
-
-        # reduce across nodes
-        if comm.get_size(gname) > 1:
-            dgrad_handle = dist.all_reduce(grad_input, group=comm.get_group(gname), async_op=True)
-
-        # weight grad
-        grad_weight = F.conv2d(X.transpose(0, 1), grad_out.transpose(0, 1), bias=None).transpose(0, 1)
-
-        if bias is not None:
-            grad_bias = torch.sum(grad_out, dim=(0, 2, 3), keepdim=True)
-        else:
-            grad_bias = None
-
-        if comm.get_size(gname) > 1:
-            dgrad_handle.wait()
-
-        return grad_input, grad_weight, grad_bias, None, None
 
 
 class DistributedMatmul(nn.Module):
@@ -417,9 +366,13 @@ class DistributedPatchEmbed(nn.Module):
         # the weights  of this layer is shared across spatial parallel ranks
         self.proj = nn.Conv2d(in_chans, out_chans_local, kernel_size=patch_size, stride=patch_size)
 
-        # make sure we reduce them across rank
+        # make sure we reduce them across rank — input is spatially sharded, so
+        # each spatial rank holds a partial gradient that must be SUM-reduced
+        # (heuristic defaults to MEAN when sharded_dims_mp is empty/all-None).
         self.proj.weight.is_shared_mp = ["spatial"]
+        self.proj.weight.is_shared_mp_op = {"spatial": "sum"}
         self.proj.bias.is_shared_mp = ["spatial"]
+        self.proj.bias.is_shared_mp_op = {"spatial": "sum"}
 
         # gather shapes
         self.gather_shapes = compute_split_shapes(in_chans, comm.get_size("matmul"))
@@ -577,18 +530,28 @@ class DistributedAFNO2Dv2(nn.Module):
         self.w2 = nn.Parameter(self.scale * torch.randn(self.num_blocks_local, self.block_size * self.hidden_size_factor, self.block_size, 2))
         self.b2 = nn.Parameter(self.scale * torch.randn(self.num_blocks_local, self.block_size, 1, 1, 2))
 
-        # setting correct sharding and sharing
+        # setting correct sharding and sharing. The matmul-sharded weights are
+        # also applied to a spatially-sharded input (the fft runs on spatial
+        # dims), so spatial-rank-local grads are partials that must be
+        # SUM-reduced. The heuristic would default spatial to MEAN because
+        # sharded_dims_mp has a non-None entry (matmul), so override it.
+        spatial_sum_op = {"spatial": "sum"}
+
         self.w1.is_shared_mp = ["spatial"]
         self.w1.sharded_dims_mp = ["matmul", None, None, None]
+        self.w1.is_shared_mp_op = spatial_sum_op
 
         self.b1.is_shared_mp = ["spatial"]
         self.b1.sharded_dims_mp = ["matmul", None, None, None, None]
+        self.b1.is_shared_mp_op = spatial_sum_op
 
         self.w2.is_shared_mp = ["spatial"]
         self.w2.sharded_dims_mp = ["matmul", None, None, None]
+        self.w2.is_shared_mp_op = spatial_sum_op
 
         self.b2.is_shared_mp = ["spatial"]
         self.b2.sharded_dims_mp = ["matmul", None, None, None, None]
+        self.b2.is_shared_mp_op = spatial_sum_op
 
     def forward(self, x):
         if not self.input_is_matmul_parallel:
