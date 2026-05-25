@@ -148,7 +148,7 @@ def convert(file_names_to_convert: List[str], output_file: str, batch_size: Opti
                                })
         datastore.to_zarr(store=output_file, mode='w', compute=False)
 
-        pbar = progressbar.ProgressBar(maxval=total_entries)
+        pbar = progressbar.ProgressBar(max_value=total_entries)
         pbar.update(0)
 
     # we need to wait here

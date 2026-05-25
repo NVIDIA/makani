@@ -87,7 +87,7 @@ def transfer_channels(input_file: str, output_file: str, channels: List[str],
             
     # set up progressbar
     if comm_rank == 0:
-        pbar = progressbar.ProgressBar(maxval=num_entries_total)
+        pbar = progressbar.ProgressBar(max_value=num_entries_total)
         pbar.update(0)
 
     # get offsets
