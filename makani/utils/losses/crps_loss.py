@@ -1021,7 +1021,7 @@ class KernelScoreLoss(GeometricBaseLoss):
         weight = torch.zeros_like(self.conv.weight.data)
         for i in range(self.n_channels):
             for k in range(self.kernel_basis_size):
-                weight[i*k, 0, k] = 1.0
+                weight[i * self.kernel_basis_size + k, 0, k] = 1.0
 
         # convert weight to buffer to avoid issues with distributed training
         delattr(self.conv, "weight")
