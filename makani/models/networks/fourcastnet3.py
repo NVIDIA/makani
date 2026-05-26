@@ -128,7 +128,13 @@ class DiscreteContinuousEncoder(nn.Module):
         theta_cutoff = _compute_cutoff_radius(lmax=lmax, kernel_shape=kernel_shape, basis_type=basis_type)
 
         # set up local convolution
-        conv_handle = thd.DistributedDiscreteContinuousConvS2 if comm.get_size("spatial") > 1 else th.DiscreteContinuousConvS2
+        conv_args = {}
+        if comm.get_size("spatial") > 1:
+            conv_handle = thd.DistributedDiscreteContinuousConvS2
+            conv_args["method"] = "ring"
+            conv_args["fused"] = True
+        else:
+            conv_handle = th.DiscreteContinuousConvS2
         self.conv = conv_handle(
             inp_chans,
             out_chans,
@@ -142,6 +148,7 @@ class DiscreteContinuousEncoder(nn.Module):
             groups=groups,
             bias=bias,
             theta_cutoff=theta_cutoff,
+            **conv_args,
         )
         if comm.get_size("spatial") > 1:
             self.conv.weight.is_shared_mp = ["spatial"]
@@ -203,7 +210,13 @@ class DiscreteContinuousDecoder(nn.Module):
         theta_cutoff = _compute_cutoff_radius(lmax=lmax, kernel_shape=kernel_shape, basis_type=basis_type)
 
         # set up DISCO convolution
-        conv_handle = thd.DistributedDiscreteContinuousConvS2 if comm.get_size("spatial") > 1 else th.DiscreteContinuousConvS2
+        conv_args = {}
+        if comm.get_size("spatial") > 1:
+            conv_handle = thd.DistributedDiscreteContinuousConvS2
+            conv_args["method"] = "ring"
+            conv_args["fused"] = True
+        else:
+            conv_handle = th.DiscreteContinuousConvS2
         self.conv = conv_handle(
             inp_chans,
             out_chans,
@@ -217,6 +230,7 @@ class DiscreteContinuousDecoder(nn.Module):
             groups=groups,
             bias=bias,
             theta_cutoff=theta_cutoff,
+            **conv_args,
         )
         if comm.get_size("spatial") > 1:
             self.conv.weight.is_shared_mp = ["spatial"]
@@ -276,7 +290,13 @@ class NeuralOperatorBlock(nn.Module):
             # heuristic for finding theta_cutoff
             theta_cutoff = _compute_cutoff_radius(lmax=lmax, kernel_shape=kernel_shape, basis_type=basis_type)
 
-            conv_handle = thd.DistributedDiscreteContinuousConvS2 if comm.get_size("spatial") > 1 else th.DiscreteContinuousConvS2
+            conv_args = {}
+            if comm.get_size("spatial") > 1:
+                conv_handle = thd.DistributedDiscreteContinuousConvS2
+                conv_args["method"] = "ring"
+                conv_args["fused"] = True
+            else:
+                conv_handle = th.DiscreteContinuousConvS2
             self.local_conv = conv_handle(
                 inp_chans,
                 inp_chans if use_mlp else out_chans,
@@ -290,6 +310,7 @@ class NeuralOperatorBlock(nn.Module):
                 grid_out=inverse_transform.grid,
                 bias=False,
                 theta_cutoff=theta_cutoff,
+                **conv_args,
             )
             if comm.get_size("spatial") > 1:
                 self.local_conv.weight.is_shared_mp = ["spatial"]
