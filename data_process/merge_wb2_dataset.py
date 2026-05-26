@@ -15,7 +15,7 @@
 
 from typing import Optional, List
 from itertools import batched
-import progressbar
+from tqdm import tqdm
 import time
 import h5py as h5
 import datetime as dt
@@ -87,8 +87,7 @@ def transfer_channels(input_file: str, output_file: str, channels: List[str],
             
     # set up progressbar
     if comm_rank == 0:
-        pbar = progressbar.ProgressBar(maxval=num_entries_total)
-        pbar.update(0)
+        pbar = tqdm(total=num_entries_total)
 
     # get offsets
     num_entries_local = (num_entries_total + comm_size - 1) // comm_size
@@ -122,7 +121,8 @@ def transfer_channels(input_file: str, output_file: str, channels: List[str],
             num_entries_current += len(entries) * comm_size
             if comm_rank == 0:
                 num_entries_current = min(num_entries_current, num_entries_total)
-                pbar.update(num_entries_current)
+                pbar.n = num_entries_current
+                pbar.refresh()
 
     # we need to wait here
     comm.Barrier()
@@ -136,7 +136,7 @@ def transfer_channels(input_file: str, output_file: str, channels: List[str],
     run_time = str(dt.timedelta(seconds=end_time-start_time))
 
     if comm_rank == 0:
-        pbar.finish()
+        pbar.close()
         print(f"All done. Run time {run_time}.")
 
     comm.Barrier()

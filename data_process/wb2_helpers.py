@@ -16,7 +16,7 @@
 import re
 import mpi4py
 from mpi4py.util import dtlib
-import progressbar
+from tqdm import tqdm
 import numpy as np
 
 from makani.utils.features import get_channel_groups
@@ -94,19 +94,19 @@ class DistributedProgressBar(object):
 
         if self.comm.Get_rank() == 0:
             # set up pbar
-            self.pbar = progressbar.ProgressBar(maxval=num_entries)
-            self.pbar.start()
+            self.pbar = tqdm(total=num_entries)
         self.reset()
 
     def __del__(self):
         self.comm.Barrier()
         self.win.Free()
         if self.comm.Get_rank() == 0:
-            self.pbar.finish()
+            self.pbar.close()
 
     def reset(self):
         if self.comm.Get_rank() == 0:
-            self.pbar.update(0)
+            self.pbar.n = 0
+            self.pbar.refresh()
 
     def update_counter(self, count: int):
         self.counts[0] = count
@@ -126,4 +126,5 @@ class DistributedProgressBar(object):
     def update_progress(self):
         if self.comm.Get_rank() == 0:
             count = self.get_counter()
-            self.pbar.update(min(count, self.pbar.maxval))
+            self.pbar.n = min(count, self.pbar.total)
+            self.pbar.refresh()

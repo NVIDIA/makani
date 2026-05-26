@@ -14,7 +14,7 @@
 # limitations under the License.
 
 from typing import Optional, List
-import progressbar
+from tqdm import tqdm
 import os
 import sys
 import time
@@ -148,8 +148,7 @@ def convert(file_names_to_convert: List[str], output_file: str, batch_size: Opti
                                })
         datastore.to_zarr(store=output_file, mode='w', compute=False)
 
-        pbar = progressbar.ProgressBar(maxval=total_entries)
-        pbar.update(0)
+        pbar = tqdm(total=total_entries)
 
     # we need to wait here
     comm.Barrier()
@@ -227,7 +226,8 @@ def convert(file_names_to_convert: List[str], output_file: str, batch_size: Opti
 
             # update progressbar
             if comm_rank == 0:
-                pbar.update(global_off)
+                pbar.n = global_off
+                pbar.refresh()
 
     # sync one last time
     comm.Barrier()
@@ -237,7 +237,7 @@ def convert(file_names_to_convert: List[str], output_file: str, batch_size: Opti
     run_time = str(dt.timedelta(seconds=end_time-start_time))
 
     if comm_rank == 0:
-        pbar.finish()
+        pbar.close()
         print(f"All done. Run time {run_time}.")
 
     comm.Barrier()
