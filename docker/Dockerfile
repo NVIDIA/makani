@@ -58,7 +58,7 @@ RUN pip install more_itertools zarr xarray gcsfs boto3
 RUN pip install moviepy
 
 # other python stuff
-RUN pip install --upgrade wandb ruamel.yaml tqdm progressbar2
+RUN pip install --upgrade wandb ruamel.yaml tqdm
 
 # scoring tools
 RUN pip install xskillscore properscoring
