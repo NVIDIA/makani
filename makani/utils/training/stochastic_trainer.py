@@ -207,12 +207,15 @@ class StochasticTrainer(Driver):
 
         self._compile_model(inp_shape)
 
-        # visualization wrapper:
-        out_bias, out_scale = self.train_dataloader.get_output_normalization()
-        self.visualizer = self.init_visualizer(self.params, self.lat_lon_global, out_bias, out_scale, self.device)
+        # visualization wrapper: only world-rank 0 renders/logs; other ranks get None.
+        if self.world_rank == 0:
+            out_bias, out_scale = self.train_dataloader.get_output_normalization()
+            self.visualizer = self.init_visualizer(self.params, self.lat_lon_global, out_bias, out_scale, self.device)
 
-        if self.visualizer is None:
-            self.logger.info("No channels to visualize, skipping visualization.")
+            if self.visualizer is None:
+                self.logger.info("No channels to visualize, skipping visualization.")
+        else:
+            self.visualizer = None
 
         # reload checkpoints
         counters = {"iters": 0, "start_epoch": 0}
@@ -564,7 +567,7 @@ class StochasticTrainer(Driver):
         # initialize metrics buffers
         self.metrics.zero_buffers()
 
-        visualize_data = self.params.log_video and (epoch % self.params.log_video == 0) and (self.visualizer is not None)
+        visualize_data = self.params.log_video and (epoch % self.params.log_video == 0)
 
         # start the timer
         valid_start = time.time()
@@ -637,19 +640,20 @@ class StochasticTrainer(Driver):
                             pred_gather = self.metrics._gather_input(pred_gather)
                             targ_gather = self.metrics._gather_input(targ_gather)
 
-                            if self.visualizer.stream is not None:
-                                self.visualizer.stream.wait_stream(torch.cuda.current_stream())
-                            with torch.cuda.stream(self.visualizer.stream):
-                                self.visualizer.prediction_cpu.copy_(pred_gather, non_blocking=True)
-                                self.visualizer.target_cpu.copy_(targ_gather, non_blocking=True)
-                            if self.viz_stream is not None:
-                                self.visualizer.stream.synchronize()
+                            if self.visualizer is not None:
+                                if self.visualizer.stream is not None:
+                                    self.visualizer.stream.wait_stream(torch.cuda.current_stream())
+                                with torch.cuda.stream(self.visualizer.stream):
+                                    self.visualizer.prediction_cpu.copy_(pred_gather, non_blocking=True)
+                                    self.visualizer.target_cpu.copy_(targ_gather, non_blocking=True)
+                                if self.viz_stream is not None:
+                                    self.visualizer.stream.synchronize()
 
-                            pred_cpu = self.visualizer.prediction_cpu.to(torch.float32).numpy()
-                            targ_cpu = self.visualizer.target_cpu.to(torch.float32).numpy()
+                                pred_cpu = self.visualizer.prediction_cpu.to(torch.float32).numpy()
+                                targ_cpu = self.visualizer.target_cpu.to(torch.float32).numpy()
 
-                            tag = f"step{eval_steps}_time{str(idt).zfill(3)}"
-                            self.visualizer.add(tag, pred_cpu, targ_cpu)
+                                tag = f"step{eval_steps}_time{str(idt).zfill(3)}"
+                                self.visualizer.add(tag, pred_cpu, targ_cpu)
 
                         # log the loss
                         progress_bar.set_postfix({"loss": loss.item()})
@@ -662,7 +666,7 @@ class StochasticTrainer(Driver):
 
         # finalize plotting
         viz_time = time.perf_counter_ns()
-        if visualize_data:
+        if visualize_data and self.visualizer is not None:
             self.visualizer.finalize()
         viz_time = (time.perf_counter_ns() - viz_time) * 10 ** (-9)
 
