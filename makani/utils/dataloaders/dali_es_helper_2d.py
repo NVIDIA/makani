@@ -738,10 +738,10 @@ class GeneralES(object):
         return self.n_samples_shard
 
     def __del__(self):
-        # close files
+        # close files — zarr groups have no close(), only HDF5 handles do
         if hasattr(self, "files"):
             for f in self.files:
-                if f is not None:
+                if f is not None and hasattr(f, "close"):
                     f.close()
 
     def _get_local_year_index_from_global_index(self, sample_idx):
