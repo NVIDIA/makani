@@ -578,9 +578,12 @@ class GeneralES(object):
         return cos_zenith_inp, cos_zenith_tar
 
     def __getstate__(self):
-        del self.aws_connector
-        self.aws_connector = None
-        return self.__dict__.copy()
+        state = self.__dict__.copy()
+        state["aws_connector"] = None
+        # drop file handles — they can't cross process boundaries
+        state["files"] = [None] * self.n_years
+        state["dsets"] = [None] * self.n_years
+        return state
 
     def __setstate__(self, state):
         self.__dict__.update(state)
@@ -598,6 +601,13 @@ class GeneralES(object):
 
         if self.is_parallel:
             self._init_buffers()
+
+        # pre-open all file handles eagerly so __call__ never retries mid-training.
+        # round-robin by shard_id so concurrent ranks hit different files first,
+        # reducing O_DIRECT thundering-herd collisions at worker startup.
+        start = self.shard_id % self.n_years
+        for i in range(self.n_years):
+            self.get_year_handle((start + i) % self.n_years)
 
     def __len__(self):
         return self.n_samples_shard
