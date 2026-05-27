@@ -718,16 +718,21 @@ class Driver(metaclass=abc.ABCMeta):
         Initialize the visualizer
         """
         from makani.utils import visualize
+        # channels used in visualization; pass this to the visualizer to avoid
+        # keeping around big prediction tensors with many unnecessary channels
+        # while plots are being renedered
+        channel_indices = []
 
         # windspeed
         cnames = params.channel_names
         u10m_channel_index = cnames.index("u10m") if "u10m" in cnames else None
         v10m_channel_index = cnames.index("v10m") if "v10m" in cnames else None
         if u10m_channel_index is not None and v10m_channel_index is not None:
+            channel_indices += [u10m_channel_index, v10m_channel_index]
             plot_list = [
                 {
                     "name": "windspeed_uv10",
-                    "functor": f"lambda x: np.sqrt(np.square(x[{u10m_channel_index}, ...]) + np.square(x[{v10m_channel_index}, ...]))",
+                    "functor": f"lambda x: np.sqrt(np.square(x[{len(channel_indices) - 2}, ...]) + np.square(x[{len(channel_indices) - 1}, ...]))",
                     "diverging": False
                 }
             ]
@@ -737,10 +742,11 @@ class Driver(metaclass=abc.ABCMeta):
         # z500
         channel_index = cnames.index("z500") if "z500" in cnames else None
         if channel_index is not None:
+            channel_indices += [channel_index]
             plot_list += [
                 {
-                    "name": "geopotential_z500", 
-                    "functor": f"lambda x: x[{channel_index}, ...]", 
+                    "name": "geopotential_z500",
+                    "functor": f"lambda x: x[{len(channel_indices) - 1}, ...]",
                     "diverging": False
                 }
             ]
@@ -748,10 +754,11 @@ class Driver(metaclass=abc.ABCMeta):
         # q100
         channel_index = cnames.index("q100") if "q100" in cnames else None
         if channel_index is not None:
+            channel_indices += [channel_index]
             plot_list += [
                 {
-                    "name": "specific_humidity_q100", 
-                    "functor": f"lambda x: x[{channel_index}, ...]", 
+                    "name": "specific_humidity_q100",
+                    "functor": f"lambda x: x[{len(channel_indices) - 1}, ...]",
                     "diverging": False
                 }
             ]
@@ -767,6 +774,7 @@ class Driver(metaclass=abc.ABCMeta):
                 scale=out_scale[0, ...],
                 bias=out_bias[0, ...],
                 num_workers=params.num_visualization_workers,
+                channel_indices=channel_indices,
             )
             # allocate pinned tensors for faster copy:
             if device.type == "cuda":
