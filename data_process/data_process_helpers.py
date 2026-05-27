@@ -13,9 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
+
+import mpi4py
+from mpi4py.util import dtlib
+from tqdm import tqdm
+import numpy as np
+
 import torch
 import torch.distributed as dist
-import math
 
 def mask_data(data):
     # check for NaNs and return a FP valued mask where
@@ -199,3 +205,51 @@ def get_wind_channels(channel_names):
     vchannels = [channel_names.index(v) for v in v_variables]
 
     return (uchannels, vchannels), (u_variables, v_variables)
+
+
+class DistributedProgressBar(object):
+
+    def __init__(self, num_entries: int, comm: mpi4py.MPI.Comm):
+        self.comm = comm
+
+        datatype = mpi4py.MPI.INT64_T
+        np_dtype = dtlib.to_numpy_dtype(datatype)
+        itemsize = datatype.Get_size()
+        self.win = mpi4py.MPI.Win.Allocate(itemsize, comm=comm)
+        self.counts = np.zeros([1], dtype=np_dtype)
+        self.comm.Barrier()
+
+        if self.comm.Get_rank() == 0:
+            self.pbar = tqdm(total=num_entries)
+        self.reset()
+
+    def __del__(self):
+        self.comm.Barrier()
+        self.win.Free()
+        if self.comm.Get_rank() == 0:
+            self.pbar.close()
+
+    def reset(self):
+        if self.comm.Get_rank() == 0:
+            self.pbar.n = 0
+            self.pbar.refresh()
+
+    def update_counter(self, count: int):
+        self.counts[0] = count
+        self.win.Lock(rank=0)
+        self.win.Accumulate(self.counts, target_rank=0)
+        self.win.Flush_local(rank=0)
+        self.win.Unlock(rank=0)
+
+    def get_counter(self) -> int:
+        self.win.Lock(rank=0, lock_type=mpi4py.MPI.LOCK_SHARED)
+        self.win.Get(self.counts, target_rank=0)
+        self.win.Flush(rank=0)
+        self.win.Unlock(rank=0)
+        return int(self.counts[0])
+
+    def update_progress(self):
+        if self.comm.Get_rank() == 0:
+            count = self.get_counter()
+            self.pbar.n = min(count, self.pbar.total)
+            self.pbar.refresh()

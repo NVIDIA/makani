@@ -27,7 +27,7 @@ from makani.utils.inference.rollout_buffer import MeanStdBuffer, RolloutBuffer, 
 from makani.utils.dataloaders.data_helpers import get_lat_lon_grid
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from .testutils import disable_tf32, set_seed, init_dataset, get_default_parameters, compare_arrays, compare_tensors, H5_PATH, IMG_SIZE_H, IMG_SIZE_W
+from .testutils import disable_tf32, set_seed, init_hdf5_dataset, get_default_parameters, compare_arrays, compare_tensors, H5_PATH, IMG_SIZE_H, IMG_SIZE_W
 
 
 def init_dataset_params(
@@ -100,7 +100,7 @@ class TestTemporalAverageBufferIntegration(unittest.TestCase):
         tmp_path = cls.tmpdir.name
 
         # init datasets and stats using the same approach as test_dataloader.py
-        cls.train_path, cls.num_train, cls.valid_path, cls.num_valid, cls.stats_path, cls.metadata_path, _ = init_dataset(tmp_path)
+        cls.train_path, cls.num_train, cls.valid_path, cls.num_valid, cls.stats_path, cls.metadata_path, _ = init_hdf5_dataset(tmp_path)
 
     @classmethod
     def tearDownClass(cls):

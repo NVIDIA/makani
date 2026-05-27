@@ -29,7 +29,7 @@ import torch
 from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from .testutils import disable_tf32, init_dataset, H5_PATH, IMG_SIZE_H, IMG_SIZE_W, compare_arrays
+from .testutils import disable_tf32, init_hdf5_dataset, H5_PATH, IMG_SIZE_H, IMG_SIZE_W, compare_arrays
 
 
 class TestAnnotateDataset(unittest.TestCase):
@@ -43,12 +43,12 @@ class TestAnnotateDataset(unittest.TestCase):
         # Create unannotated dataset
         path = os.path.join(tmp_path, "data")
         os.makedirs(path, exist_ok=True)
-        cls.train_path, cls.num_train, cls.test_path, cls.num_test, _, cls.metadata_path, _ = init_dataset(path, nan_fraction=0.0, annotate=False)
+        cls.train_path, cls.num_train, cls.test_path, cls.num_test, _, cls.metadata_path, _ = init_hdf5_dataset(path, nan_fraction=0.0, annotate=False)
 
         # Create reference dataset with annotations
         ref_path = os.path.join(tmp_path, "ref_data")
         os.makedirs(ref_path, exist_ok=True)
-        cls.ref_train_path, cls.ref_num_train, cls.ref_test_path, cls.ref_num_test, _, _, _ = init_dataset(ref_path, annotate=True)
+        cls.ref_train_path, cls.ref_num_train, cls.ref_test_path, cls.ref_num_test, _, _, _ = init_hdf5_dataset(ref_path, annotate=True)
 
     @classmethod
     def tearDownClass(cls):
@@ -126,7 +126,7 @@ class TestConcatenateDataset(unittest.TestCase):
         # Create dataset
         path = os.path.join(tmp_path, "data")
         os.makedirs(path, exist_ok=True)
-        cls.train_path, cls.num_train, cls.test_path, cls.num_test, _, cls.metadata_path, _ = init_dataset(path, annotate=True)
+        cls.train_path, cls.num_train, cls.test_path, cls.num_test, _, cls.metadata_path, _ = init_hdf5_dataset(path, annotate=True)
 
     @classmethod
     def tearDownClass(cls):
@@ -249,7 +249,7 @@ class TestConcatenateDataset(unittest.TestCase):
              tempfile.TemporaryDirectory() as out_dir:
 
             # Write source files manually so we control the per-year sample count.
-            # init_dataset's default is 365 across all files — we need 366 for one.
+            # init_hdf5_dataset's default is 365 across all files — we need 366 for one.
             data_per_year = {}
             ts_per_year = {}
             chanlen = max(len(c) for c in channel_names)
@@ -1070,12 +1070,12 @@ class TestGetStats(unittest.TestCase):
         # Create dataset
         path = os.path.join(tmp_path, "data")
         os.makedirs(path, exist_ok=True)
-        cls.train_path, cls.num_train, cls.test_path, cls.num_test, _, cls.metadata_path, _ = init_dataset(path, annotate=True)
+        cls.train_path, cls.num_train, cls.test_path, cls.num_test, _, cls.metadata_path, _ = init_hdf5_dataset(path, annotate=True)
 
         # Create dataset with annotations and NaNs:
         nan_path = os.path.join(tmp_path, "nan_data")
         os.makedirs(nan_path, exist_ok=True)
-        cls.nan_train_path, cls.nan_num_train, cls.nan_test_path, cls.nan_num_test, _, _, _ = init_dataset(nan_path, nan_fraction=0.1, annotate=True)
+        cls.nan_train_path, cls.nan_num_train, cls.nan_test_path, cls.nan_num_test, _, _, _ = init_hdf5_dataset(nan_path, nan_fraction=0.1, annotate=True)
 
     @classmethod
     def tearDownClass(cls):

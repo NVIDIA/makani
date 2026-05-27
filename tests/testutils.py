@@ -15,6 +15,7 @@
 
 from packaging import version
 import os
+import re
 import json
 import datetime as dt
 import random
@@ -22,6 +23,7 @@ from typing import List, Optional
 
 import numpy as np
 import h5py as h5
+import zarr
 
 import torch
 
@@ -33,7 +35,7 @@ IMG_SIZE_H = 64
 IMG_SIZE_W = 128
 CHANNEL_NAMES = ["u10m", "t2m", "u500", "z500", "t500"]
 
-# Dataset layout used by init_dataset
+# Dataset layout used by init_hdf5_dataset
 NUM_SAMPLES_PER_YEAR = 365
 TRAIN_YEARS = [2017, 2018]
 TEST_YEARS  = [2019]
@@ -141,7 +143,7 @@ def init_dataset_metadata(
     """Write a dataset metadata JSON to <path>/data.json and return the file path.
 
     This is the canonical way to create a metadata fixture for tests.  It is
-    also called internally by ``init_dataset`` so that both produce identical
+    also called internally by ``init_hdf5_dataset`` so that both produce identical
     JSON layouts (including the ``attrs`` key required by
     ``parse_dataset_metadata``).
     """
@@ -177,7 +179,7 @@ def init_dataset_metadata(
     return file_path
 
 
-def init_dataset(
+def init_hdf5_dataset(
     path: str,
     num_samples_per_year: Optional[int] = 365,
     num_channels: Optional[int] = NUM_CHANNELS,
@@ -353,6 +355,225 @@ def init_dataset(
     )
 
     return train_path, num_train, test_path, num_test, stats_path, metadata_path, concat_train_path
+
+
+def init_zarr_dataset(
+    path: str,
+    num_samples_per_year: Optional[int] = 365,
+    num_channels: Optional[int] = NUM_CHANNELS,
+    img_size_h: Optional[int] = IMG_SIZE_H,
+    img_size_w: Optional[int] = IMG_SIZE_W,
+    nan_fraction: Optional[float] = 0.0,
+    annotate: Optional[bool] = True,
+    consolidate: Optional[bool] = True,
+):
+    """Create a zarr-backed dummy dataset with the same layout as init_hdf5_dataset.
+
+    Files are written as ``<year>.zarr`` directories (matching the glob pattern
+    the dataloader uses).  When ``annotate=True`` a ``"time"`` coordinate array
+    is written at the group level so that ``_zarr_read_timestamps`` picks it up
+    via the primary lookup path.  ``consolidate=True`` calls
+    ``zarr.consolidate_metadata`` so the ``open_consolidated`` fast path is
+    exercised in the dataloader.
+
+    Returns the same tuple as ``init_hdf5_dataset`` (with ``concat_train_path=None``
+    since the concat path is HDF5-only).
+    """
+    test_path = os.path.join(path, "test_zarr")
+    os.makedirs(test_path)
+
+    train_path = os.path.join(path, "train_zarr")
+    os.makedirs(train_path)
+
+    stats_path = os.path.join(path, "stats_zarr")
+    os.makedirs(stats_path)
+
+    metadata_path = os.path.join(path, "metadata_zarr")
+    os.makedirs(metadata_path)
+
+    rng = np.random.default_rng(seed=333)
+
+    longitude = np.linspace(0, 360, img_size_w, endpoint=False)
+    latitude = np.linspace(90, -90, img_size_h, endpoint=True)
+    channel_names = [f"chan_{idx}" for idx in range(num_channels)]
+
+    hours_per_year = 365 * 24
+    dhours = hours_per_year // num_samples_per_year
+
+    def _write_year(store_path, year, data):
+        g = zarr.open_group(store_path, mode="w")
+        g.create_dataset(H5_PATH, data=data, chunks=(1, num_channels, img_size_h, img_size_w))
+        if annotate:
+            year_start = dt.datetime(year=year, month=1, day=1, hour=0, tzinfo=dt.timezone.utc).timestamp()
+            timestamps = year_start + np.arange(0, hours_per_year * 3600, dhours * 3600, dtype=np.float64)
+            g.create_dataset("time", data=timestamps)
+            g.create_dataset("channel", data=np.array(channel_names))
+            g.create_dataset("lat", data=latitude)
+            g.create_dataset("lon", data=longitude)
+        if consolidate:
+            zarr.consolidate_metadata(store_path)
+
+    num_train = 0
+    for y in [2017, 2018]:
+        num_dof = num_samples_per_year * num_channels * img_size_h * img_size_w
+        data = rng.random((num_dof,), dtype=np.float32).reshape(num_samples_per_year, num_channels, img_size_h, img_size_w)
+        if nan_fraction > 0.0:
+            n_nan = int(nan_fraction * num_dof)
+            idx = rng.choice(num_dof, size=n_nan, replace=False)
+            data.flat[idx] = np.nan
+        _write_year(os.path.join(train_path, f"{y}.zarr"), y, data)
+        num_train += num_samples_per_year
+
+    num_test = 0
+    for y in [2019]:
+        data = rng.random((num_samples_per_year, num_channels, img_size_h, img_size_w), dtype=np.float32)
+        _write_year(os.path.join(test_path, f"{y}.zarr"), y, data)
+        num_test += num_samples_per_year
+
+    # stats files are format-agnostic — reuse the same .npy layout
+    np.save(os.path.join(stats_path, "mins.npy"), np.zeros((1, num_channels, 1, 1), dtype=np.float64))
+    np.save(os.path.join(stats_path, "maxs.npy"), np.ones((1, num_channels, 1, 1), dtype=np.float64))
+    np.save(os.path.join(stats_path, "time_means.npy"), np.zeros((1, num_channels, img_size_h, img_size_w), dtype=np.float64))
+    np.save(os.path.join(stats_path, "global_means.npy"), np.zeros((1, num_channels, 1, 1), dtype=np.float64))
+    np.save(os.path.join(stats_path, "global_stds.npy"), np.ones((1, num_channels, 1, 1), dtype=np.float64))
+    np.save(os.path.join(stats_path, "time_diff_means.npy"), np.zeros((1, num_channels, 1, 1), dtype=np.float64))
+    np.save(os.path.join(stats_path, "time_diff_stds.npy"), np.ones((1, num_channels, 1, 1), dtype=np.float64))
+
+    init_dataset_metadata(
+        path=metadata_path,
+        dataset_name="testing_zarr",
+        h5_path=H5_PATH,
+        dhours=dhours,
+        channel_names=channel_names,
+        lat=latitude.tolist(),
+        lon=longitude.tolist(),
+    )
+
+    return train_path, num_train, test_path, num_test, stats_path, metadata_path, None
+
+
+def init_wb2_zarr_dataset(
+    path: str,
+    channel_names: Optional[List[str]] = None,
+    num_samples_per_year: Optional[int] = 365,
+    img_size_h: Optional[int] = IMG_SIZE_H,
+    img_size_w: Optional[int] = IMG_SIZE_W,
+    annotate: Optional[bool] = True,
+    consolidate: Optional[bool] = True,
+):
+    """Create a WB2-layout zarr dataset for testing.
+
+    Mirrors the structure of real WeatherBench2 zarr stores:
+      - one zarr array per variable (no single stacked ``fields`` array)
+      - surface variables: shape ``(time, latitude, longitude)``
+      - atmospheric variables: shape ``(time, level, latitude, longitude)``
+      - ``time`` coordinate stored as ``datetime64[ns]``
+      - ``latitude``, ``longitude``, ``level`` coordinates at group level
+
+    ``channel_names`` defaults to ``CHANNEL_NAMES`` which contains both surface
+    (u10m, t2m) and atmospheric (u500, z500, t500) variables so both code paths
+    are exercised.
+
+    Returns the same tuple as ``init_hdf5_dataset``/``init_zarr_dataset``
+    (with ``concat_path=None``).
+    """
+    from makani.utils.dataloaders.wb2_helpers import surface_variables, atmospheric_variables
+
+    if channel_names is None:
+        channel_names = list(CHANNEL_NAMES)
+
+    test_path = os.path.join(path, "test_zarr_wb2")
+    os.makedirs(test_path)
+    train_path = os.path.join(path, "train_zarr_wb2")
+    os.makedirs(train_path)
+    stats_path = os.path.join(path, "stats_zarr_wb2")
+    os.makedirs(stats_path)
+    metadata_path = os.path.join(path, "metadata_zarr_wb2")
+    os.makedirs(metadata_path)
+
+    rng = np.random.default_rng(seed=333)
+    longitude = np.linspace(0, 360, img_size_w, endpoint=False).astype(np.float32)
+    latitude = np.linspace(90, -90, img_size_h, endpoint=True).astype(np.float32)
+
+    hours_per_year = 365 * 24
+    dhours = hours_per_year // num_samples_per_year
+
+    # parse channel_names to determine which WB2 variables are needed and at what levels
+    atm_vars = {}    # wb2_name -> set of required pressure levels
+    surf_vars = set()
+
+    for ch_name in channel_names:
+        m = re.search(r"[0-9]{1,4}$", ch_name)
+        if m is not None and ch_name != "d2":
+            pressure = int(m.group())
+            prefix = ch_name[: m.start()]
+            wb2_name = atmospheric_variables[prefix]
+            atm_vars.setdefault(wb2_name, set()).add(pressure)
+        else:
+            surf_vars.add(surface_variables[ch_name])
+
+    # unified sorted level array covering all atmospheric variables in the fixture
+    all_levels = sorted(set().union(*atm_vars.values())) if atm_vars else []
+    levels = np.array(all_levels, dtype=np.int64)
+    n_levels = len(levels)
+
+    def _write_year(store_path, year):
+        g = zarr.open_group(store_path, mode="w")
+
+        if annotate:
+            year_start = dt.datetime(year, 1, 1, 0, 0, 0, tzinfo=dt.timezone.utc)
+            times = np.array(
+                [np.datetime64(int((year_start + dt.timedelta(hours=i * dhours)).timestamp() * 1e9), "ns")
+                 for i in range(num_samples_per_year)]
+            )
+            g.create_dataset("time", data=times)
+            g.create_dataset("latitude", data=latitude)
+            g.create_dataset("longitude", data=longitude)
+            if n_levels > 0:
+                g.create_dataset("level", data=levels)
+
+        for wb2_name in surf_vars:
+            data = rng.random((num_samples_per_year, img_size_h, img_size_w), dtype=np.float32)
+            g.create_dataset(wb2_name, data=data, chunks=(1, img_size_h, img_size_w))
+
+        for wb2_name in atm_vars:
+            data = rng.random((num_samples_per_year, n_levels, img_size_h, img_size_w), dtype=np.float32)
+            g.create_dataset(wb2_name, data=data, chunks=(1, n_levels, img_size_h, img_size_w))
+
+        if consolidate:
+            zarr.consolidate_metadata(store_path)
+
+    num_train = 0
+    for y in [2017, 2018]:
+        _write_year(os.path.join(train_path, f"{y}.zarr"), y)
+        num_train += num_samples_per_year
+
+    num_test = 0
+    for y in [2019]:
+        _write_year(os.path.join(test_path, f"{y}.zarr"), y)
+        num_test += num_samples_per_year
+
+    n_channels = len(channel_names)
+    np.save(os.path.join(stats_path, "mins.npy"), np.zeros((1, n_channels, 1, 1), dtype=np.float64))
+    np.save(os.path.join(stats_path, "maxs.npy"), np.ones((1, n_channels, 1, 1), dtype=np.float64))
+    np.save(os.path.join(stats_path, "time_means.npy"), np.zeros((1, n_channels, img_size_h, img_size_w), dtype=np.float64))
+    np.save(os.path.join(stats_path, "global_means.npy"), np.zeros((1, n_channels, 1, 1), dtype=np.float64))
+    np.save(os.path.join(stats_path, "global_stds.npy"), np.ones((1, n_channels, 1, 1), dtype=np.float64))
+    np.save(os.path.join(stats_path, "time_diff_means.npy"), np.zeros((1, n_channels, 1, 1), dtype=np.float64))
+    np.save(os.path.join(stats_path, "time_diff_stds.npy"), np.ones((1, n_channels, 1, 1), dtype=np.float64))
+
+    init_dataset_metadata(
+        path=metadata_path,
+        dataset_name="testing_wb2",
+        h5_path=H5_PATH,
+        dhours=dhours,
+        channel_names=channel_names,
+        lat=latitude.tolist(),
+        lon=longitude.tolist(),
+    )
+
+    return train_path, num_train, test_path, num_test, stats_path, metadata_path, None
+
 
 def compare_tensors(msg, tensor1, tensor2, atol=1e-8, rtol=1e-5, verbose=False):
 

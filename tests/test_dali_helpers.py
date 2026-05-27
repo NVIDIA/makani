@@ -25,7 +25,7 @@ namedtuple and call __call__ directly.
 
 Dataset fixture
 ---------------
-TestGeneralES reuses init_dataset() from testutils, which creates two training
+TestGeneralES reuses init_hdf5_dataset() from testutils, which creates two training
 years (2017, 2018) of 365 samples each (dhours=24) under a temp directory.
 
 TestGeneralConcatES uses the same dimensions but builds a single concatenated
@@ -52,9 +52,11 @@ import numpy as np
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from .testutils import (
     H5_PATH,
-    NUM_CHANNELS, IMG_SIZE_H, IMG_SIZE_W,
+    NUM_CHANNELS, IMG_SIZE_H, IMG_SIZE_W, CHANNEL_NAMES,
     NUM_SAMPLES_PER_YEAR, TRAIN_YEARS, DHOURS,
-    init_dataset,
+    init_hdf5_dataset,
+    init_zarr_dataset,
+    init_wb2_zarr_dataset,
     compare_arrays,
 )
 
@@ -114,6 +116,66 @@ def _make_distinctive_dir(root):
             ts = f.create_dataset("timestamp", data=timestamps)
             ts.make_scale("timestamp")
             ds.dims[0].attach_scale(ts)
+    return root
+
+
+def _make_distinctive_zarr_dir(root):
+    """Per-year zarr directory with distinctive-channel data (makani flat format)."""
+    import zarr
+    os.makedirs(root, exist_ok=True)
+    for year in _YEARS:
+        data, timestamps = _distinctive_year_arrays(year)
+        store_path = os.path.join(root, f"{year}.zarr")
+        g = zarr.open_group(store_path, mode="w")
+        g.create_dataset(H5_PATH, data=data, chunks=(1, _N_CH, _IMG_H, _IMG_W))
+        g.create_dataset("time", data=timestamps)
+        zarr.consolidate_metadata(store_path)
+    return root
+
+
+def _make_distinctive_zarr_wb2_dir(root):
+    """Per-year WB2-layout zarr directory with distinctive-channel data."""
+    import zarr, re
+    from makani.utils.dataloaders.wb2_helpers import surface_variables, atmospheric_variables
+    os.makedirs(root, exist_ok=True)
+
+    # parse CHANNEL_NAMES to determine variable layout
+    atm_vars, surf_vars = {}, {}
+    for ch_idx, ch_name in enumerate(CHANNEL_NAMES):
+        m = re.search(r"[0-9]{1,4}$", ch_name)
+        if m and ch_name != "d2":
+            wb2n = atmospheric_variables[ch_name[:m.start()]]
+            atm_vars.setdefault(wb2n, {})[int(m.group())] = ch_idx
+        else:
+            surf_vars[surface_variables[ch_name]] = ch_idx
+
+    all_levels = sorted({lv for lvs in atm_vars.values() for lv in lvs})
+    levels = np.array(all_levels, dtype=np.int64)
+    level_to_idx = {lv: i for i, lv in enumerate(levels)}
+
+    for year in _YEARS:
+        data, timestamps = _distinctive_year_arrays(year)
+        store_path = os.path.join(root, f"{year}.zarr")
+        g = zarr.open_group(store_path, mode="w")
+
+        times_ns = np.array(
+            [np.datetime64(int(ts * 1e9), "ns") for ts in timestamps]
+        )
+        g.create_dataset("time", data=times_ns)
+        g.create_dataset("latitude", data=np.linspace(90, -90, _IMG_H, endpoint=True, dtype=np.float32))
+        g.create_dataset("longitude", data=np.linspace(0, 360, _IMG_W, endpoint=False, dtype=np.float32))
+        g.create_dataset("level", data=levels)
+
+        for wb2n, ch_idx in surf_vars.items():
+            g.create_dataset(wb2n, data=data[:, ch_idx, :, :], chunks=(1, _IMG_H, _IMG_W))
+
+        for wb2n, level_map in atm_vars.items():
+            arr = np.zeros((_N_PER_YEAR, len(levels), _IMG_H, _IMG_W), dtype=np.float32)
+            for lv, ch_idx in level_map.items():
+                arr[:, level_to_idx[lv], :, :] = data[:, ch_idx, :, :]
+            g.create_dataset(wb2n, data=arr, chunks=(1, len(levels), _IMG_H, _IMG_W))
+
+        zarr.consolidate_metadata(store_path)
     return root
 
 
@@ -178,6 +240,9 @@ def _make_general_es(location, **overrides):
     if es.file_format == "h5":
         es.get_year_handle = es._get_year_h5
         es.get_data_handle = es._get_data_h5
+    elif getattr(es, "zarr_format", "makani") == "wb2":
+        es.get_year_handle = es._get_year_zarr_wb2
+        es.get_data_handle = es._get_data_zarr_wb2
     else:
         es.get_year_handle = es._get_year_zarr
         es.get_data_handle = es._get_data_zarr
@@ -192,7 +257,7 @@ def _make_concat_es(file_path, **overrides):
     es = GeneralConcatES(**kw)
     # replicate what __setstate__ does: open the file and install data handle
     es.vfile = h5py.File(es.file_path, "r", driver=es.file_driver)
-    es.dset  = es.vfile[es.dataset_path]
+    es.dset  = es.vfile[es.dataset_name]
     es.get_data_handle = es._get_data_h5
     return es
 
@@ -759,7 +824,7 @@ class _BaseESTests:
 class TestGeneralES(_BaseESTests, unittest.TestCase):
     """Tests for GeneralES (directory of per-year HDF5 files).
 
-    The main dataset is created by init_dataset() from testutils, which
+    The main dataset is created by init_hdf5_dataset() from testutils, which
     produces the same two-year training layout used by the other dataloader tests.
     """
 
@@ -770,7 +835,7 @@ class TestGeneralES(_BaseESTests, unittest.TestCase):
 
     def setUp(self):
         self._tmpdir = tempfile.TemporaryDirectory()
-        self._train_path, *_ = init_dataset(self._tmpdir.name)
+        self._train_path, *_ = init_hdf5_dataset(self._tmpdir.name)
         # small distinctive-channel dataset for the reordering test
         self._dc_path = _make_distinctive_dir(
             os.path.join(self._tmpdir.name, "dc"))
@@ -808,9 +873,9 @@ class TestGeneralConcatES(_BaseESTests, unittest.TestCase):
 
     def setUp(self):
         self._tmpdir = tempfile.TemporaryDirectory()
-        # init_dataset with create_concat=True writes train_concat.h5 alongside
+        # init_hdf5_dataset with create_concat=True writes train_concat.h5 alongside
         # the per-year files and returns its path as the 7th element.
-        *_, self._file = init_dataset(self._tmpdir.name, create_concat=True)
+        *_, self._file = init_hdf5_dataset(self._tmpdir.name, create_concat=True)
         # distinctive-channel concat file for the reordering test
         dc_root = os.path.join(self._tmpdir.name, "dc")
         self._file_dc = _make_distinctive_concat(dc_root)
@@ -842,6 +907,82 @@ class TestGeneralConcatES(_BaseESTests, unittest.TestCase):
         kw["enable_s3"] = True
         with self.assertRaises(NotImplementedError):
             GeneralConcatES(**kw)
+
+
+class TestGeneralZarrES(_BaseESTests, unittest.TestCase):
+    """Tests for GeneralES backed by zarr files in makani flat format.
+
+    Uses the same ``_BaseESTests`` suite as ``TestGeneralES``.  The zarr stores
+    mirror the HDF5 layout: a single ``fields`` array of shape
+    ``(time, channels, lat, lon)`` per year file.
+    """
+
+    def _expected_n_valid(self, dt, n_history, n_future):
+        window = dt * (n_history + n_future + 1)
+        return sum(max(0, _N_PER_YEAR - window) for _ in range(len(_YEARS)))
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self._train_path, *_ = init_zarr_dataset(self._tmpdir.name)
+        self._dc_path = _make_distinctive_zarr_dir(
+            os.path.join(self._tmpdir.name, "dc_zarr"))
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def _make(self, **overrides):
+        return _make_general_es(self._train_path, **overrides)
+
+    def _make_distinctive(self, **overrides):
+        return _make_general_es(self._dc_path, **overrides)
+
+    def _make_for_pickle(self, **overrides):
+        from makani.utils.dataloaders.dali_es_helper_2d import GeneralES
+        kw = _default_kwargs(self._train_path)
+        kw["is_parallel"] = True
+        kw.update(overrides)
+        return GeneralES(**kw)
+
+
+class TestGeneralZarrWB2ES(_BaseESTests, unittest.TestCase):
+    """Tests for GeneralES backed by zarr files in WB2 per-variable format.
+
+    Each variable is stored as a separate zarr array (surface: ``(time, lat, lon)``,
+    atmospheric: ``(time, level, lat, lon)``).  The ES auto-detects the WB2 format
+    at init time and builds the variable→level conversion table from
+    ``channel_names``.
+    """
+
+    def _expected_n_valid(self, dt, n_history, n_future):
+        window = dt * (n_history + n_future + 1)
+        return sum(max(0, _N_PER_YEAR - window) for _ in range(len(_YEARS)))
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self._train_path, *_ = init_wb2_zarr_dataset(self._tmpdir.name)
+        self._dc_path = _make_distinctive_zarr_wb2_dir(
+            os.path.join(self._tmpdir.name, "dc_zarr_wb2"))
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def _make(self, **overrides):
+        kw = dict(channel_names=list(CHANNEL_NAMES))
+        kw.update(overrides)
+        return _make_general_es(self._train_path, **kw)
+
+    def _make_distinctive(self, **overrides):
+        kw = dict(channel_names=list(CHANNEL_NAMES))
+        kw.update(overrides)
+        return _make_general_es(self._dc_path, **kw)
+
+    def _make_for_pickle(self, **overrides):
+        from makani.utils.dataloaders.dali_es_helper_2d import GeneralES
+        kw = _default_kwargs(self._train_path)
+        kw["is_parallel"] = True
+        kw["channel_names"] = list(CHANNEL_NAMES)
+        kw.update(overrides)
+        return GeneralES(**kw)
 
 
 if __name__ == "__main__":
