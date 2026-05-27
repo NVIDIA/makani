@@ -70,7 +70,7 @@ RUN pip install "git+https://github.com/google-research/weatherbench2.git"
 RUN pip install --ignore-installed "git+https://github.com/NVIDIA/mlperf-common.git"
 
 # physicsnemo
-RUN pip install git+https://github.com/NVIDIA/physicsnemo.git@v1.1.1
+RUN pip install git+https://github.com/NVIDIA/physicsnemo.git@v1.3.0
 
 # torch-harmonics
 RUN pip install setuptools_scm
