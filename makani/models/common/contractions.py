@@ -40,58 +40,22 @@ def _contract_sep_lwise(ac: torch.Tensor, bc: torch.Tensor) -> torch.Tensor:
     return resc
 
 
-@torch.compile
-def _contract_lmwise_real(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    res = torch.einsum("bgixys,gioxy->bgoxys", a, b).contiguous()
-    return res
-
-
-@torch.compile
-def _contract_lwise_real(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    res = torch.einsum("bgixys,giox->bgoxys", a, b).contiguous()
-    return res
-
-
-@torch.compile
-def _contract_sep_lmwise_real(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    res = torch.einsum("bgixys,gixy->bgixys", a, b).contiguous()
-    return res
-
-
-@torch.compile
-def _contract_sep_lwise_real(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    res = torch.einsum("bgixys,gix->bgixys", a, b).contiguous()
-    return res
-
-
-def _contract_dense_pytorch(x, weight, separable=False, operator_type="diagonal", complex=True):
+def _contract_dense_pytorch(x, weight, separable=False, operator_type="diagonal"):
     """Dense spectral convolution contraction dispatching to the appropriate compiled einsum kernel."""
     x = x.contiguous()
 
     if separable:
         if operator_type == "diagonal":
-            if complex:
-                x = _contract_sep_lmwise(x, weight)
-            else:
-                x = _contract_sep_lmwise_real(x, weight)
+            x = _contract_sep_lmwise(x, weight)
         elif operator_type == "dhconv":
-            if complex:
-                x = _contract_sep_lwise(x, weight)
-            else:
-                x = _contract_sep_lwise_real(x, weight)
+            x = _contract_sep_lwise(x, weight)
         else:
             raise ValueError(f"Unknown operator type {operator_type}")
     else:
         if operator_type == "diagonal":
-            if complex:
-                x = _contract_lmwise(x, weight)
-            else:
-                x = _contract_lmwise_real(x, weight)
+            x = _contract_lmwise(x, weight)
         elif operator_type == "dhconv":
-            if complex:
-                x = _contract_lwise(x, weight)
-            else:
-                x = _contract_lwise_real(x, weight)
+            x = _contract_lwise(x, weight)
         else:
             raise ValueError(f"Unknown operator type {operator_type}")
 
