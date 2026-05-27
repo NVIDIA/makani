@@ -68,7 +68,7 @@ class DummyLoader(object):
                  model_grid_type: Optional[str]="equiangular",
                  return_timestamp: Optional[bool]=False,
                  return_target: Optional[bool]=True,
-                 dataset_path: Optional[str]="fields",
+                 dataset_name: Optional[str]="fields",
                  crop_size: Optional[Tuple[int, int]]=(None, None),
                  crop_anchor: Optional[Tuple[int, int]]=(0, 0),
                  subsampling_factor: Optional[int]=1,

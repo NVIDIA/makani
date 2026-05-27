@@ -67,7 +67,8 @@ class GeneralConcatES(object):
         zenith_angle=True,
         return_timestamp=False,
         lat_lon=None,
-        dataset_path="fields",
+        dataset_name="fields",
+        timestamp_name="timestamp",
         enable_odirect=False,
         odirect_alignment=0,
         enable_s3=False,
@@ -99,7 +100,8 @@ class GeneralConcatES(object):
         self.is_parallel = is_parallel
         self.zenith_angle = zenith_angle
         self.return_timestamp = return_timestamp
-        self.dataset_path = dataset_path
+        self.dataset_name = dataset_name
+        self.timestamp_name = timestamp_name
         self.lat_lon = lat_lon
 
         # O_DIRECT specific stuff
@@ -277,10 +279,10 @@ class GeneralConcatES(object):
         # open file:
         self.vfile = None
         with h5py.File(self.file_path, "r") as f:
-            dset = f[self.dataset_path]
+            dset = f[self.dataset_name]
 
             # extract timestamps and convert them to datetime objects
-            self.timestamps = self.timezone_fn(f[self.dataset_path].dims[0]["timestamp"][...])
+            self.timestamps = self.timezone_fn(f[self.dataset_name].dims[0][self.timestamp_name][...])
 
             # extract number of years
             self.years = sorted(list(set([d.year for d in self.timestamps.tolist()])))
@@ -433,7 +435,7 @@ class GeneralConcatES(object):
             raise OSError(f"Unable to open file {self.file_path}, aborting.")
 
         # get dataset handle
-        self.dset = self.vfile[self.dataset_path]
+        self.dset = self.vfile[self.dataset_name]
 
         if self.is_parallel:
             self._init_buffers()

@@ -29,7 +29,8 @@ import xarray as xr
 from mpi4py import MPI
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from data_process.wb2_helpers import split_convert_channel_names, DistributedProgressBar, gcs_storage_options
+from makani.utils.dataloaders.wb2_helpers import split_convert_channel_names, gcs_storage_options
+from data_process.data_process_helpers import DistributedProgressBar
 
 
 def convert(input_file: str, output_dir: str, metadata_file: str, years: List[int],

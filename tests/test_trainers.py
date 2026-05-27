@@ -28,7 +28,7 @@ from makani import Trainer, EnsembleTrainer, StochasticTrainer, AutoencoderTrain
 from makani.utils import comm
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from .testutils import disable_tf32, set_seed, get_default_parameters, init_dataset
+from .testutils import disable_tf32, set_seed, get_default_parameters, init_hdf5_dataset
 from .testutils import H5_PATH, compare_tensors
 
 
@@ -127,7 +127,7 @@ class TestTrainer(unittest.TestCase):
         data_path = cls.datadir.name
 
         # init datasets and stats
-        cls.train_path, cls.n_train_samples, cls.valid_path, cls.n_eval_samples, cls.stats_path, cls.metadata_path, _ = init_dataset(data_path)
+        cls.train_path, cls.n_train_samples, cls.valid_path, cls.n_eval_samples, cls.stats_path, cls.metadata_path, _ = init_hdf5_dataset(data_path)
 
     def setUp(self, path: Optional[str] = "/tmp"):
 

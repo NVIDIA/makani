@@ -55,7 +55,10 @@ class MultifilesDataset(Dataset):
                  relative_timestamp: Optional[bool]=False,
                  return_target: Optional[bool]=True,
                  file_suffix: Optional[str]="h5",
-                 dataset_path: Optional[str]="fields",
+                 dataset_name: Optional[str]="fields",
+                 timestamp_name: Optional[str]="timestamp",
+                 latitude_name: Optional[str]="lat",
+                 longitude_name: Optional[str]="lon",
                  enable_s3: Optional[bool]=False,
                  crop_size: Optional[Tuple[int, int]]=(None, None),
                  crop_anchor: Optional[Tuple[int, int]]=(0, 0),
@@ -78,7 +81,10 @@ class MultifilesDataset(Dataset):
         self.relative_timestamp = relative_timestamp
         self.return_target = return_target
         self.file_suffix = file_suffix
-        self.dataset_path = dataset_path
+        self.dataset_name = dataset_name
+        self.timestamp_name = timestamp_name
+        self.latitude_name = latitude_name
+        self.longitude_name = longitude_name
         self.enable_s3 = enable_s3
 
         self.file_driver = None
@@ -179,21 +185,21 @@ class MultifilesDataset(Dataset):
             if enable_logging:
                 logging.info("Getting file stats from {}".format(self.files_paths[0]))
             # original image shape (before padding)
-            self.img_shape = _f[self.dataset_path].shape[2:4]
-            self.total_channels = _f[self.dataset_path].shape[1]
-            self.n_samples_file.append(_f[self.dataset_path].shape[0])
-            lat = _f[self.dataset_path].dims[2]["lat"][...]
-            lon = _f[self.dataset_path].dims[3]["lon"][...]
+            self.img_shape = _f[self.dataset_name].shape[2:4]
+            self.total_channels = _f[self.dataset_name].shape[1]
+            self.n_samples_file.append(_f[self.dataset_name].shape[0])
+            lat = _f[self.dataset_name].dims[2][self.latitude_name][...]
+            lon = _f[self.dataset_name].dims[3][self.longitude_name][...]
             self.lat_lon = (lat.tolist(), lon.tolist())
-            tstamps = _f[self.dataset_path].dims[0]["timestamp"][...]
+            tstamps = _f[self.dataset_name].dims[0][self.timestamp_name][...]
             self.date_ranges.append((fn_handle(tstamps[0]), fn_handle(tstamps[-1])))
             timestamps.append(tstamps)
 
         # get all remaining sample counts
         for filename in self.files_paths[1:]:
             with h5py.File(filename, "r", driver=self.file_driver, **self.file_driver_kwargs) as _f:
-                self.n_samples_file.append(_f[self.dataset_path].shape[0])
-                tstamps = _f[self.dataset_path].dims[0]["timestamp"][...]
+                self.n_samples_file.append(_f[self.dataset_name].shape[0])
+                tstamps = _f[self.dataset_name].dims[0][self.timestamp_name][...]
                 self.date_ranges.append((fn_handle(tstamps[0]), fn_handle(tstamps[-1])))
                 timestamps.append(tstamps)
 
@@ -357,7 +363,7 @@ class MultifilesDataset(Dataset):
 
     def _open_file(self, file_idx):
         _file = h5py.File(self.files_paths[file_idx], "r", driver=self.file_driver, **self.file_driver_kwargs)
-        self.files[file_idx] = _file[self.dataset_path]
+        self.files[file_idx] = _file[self.dataset_name]
 
     def _get_indices(self, global_idx):
         file_idx = bisect_right(self.file_offsets, global_idx) - 1

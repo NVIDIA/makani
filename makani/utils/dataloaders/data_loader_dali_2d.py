@@ -158,7 +158,7 @@ class ERA5DaliESDataloader(object):
             self.lat_lon = (params.lat, params.lon)
         else:
             self.lat_lon = None
-        self.dataset_path = params.h5_path
+        self.dataset_name = params.h5_path
         if train:
             self.n_samples = params.get("n_train_samples", None)
             self.n_samples_per_epoch = params.get("n_train_samples_per_epoch", None)
@@ -223,7 +223,9 @@ class ERA5DaliESDataloader(object):
             zenith_angle=self.add_zenith,
             return_timestamp=self.return_timestamp,
             lat_lon=self.lat_lon,
-            dataset_path=self.dataset_path,
+            dataset_name=self.dataset_name,
+            timestamp_name=params.get("timestamp_name", "timestamp"),
+            channel_names=params.get("channel_names", None),
             enable_odirect=params.enable_odirect,
             odirect_alignment=params.get("odirect_alignment", 0),
             enable_s3=params.enable_s3,

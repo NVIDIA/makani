@@ -35,7 +35,7 @@ import torch.distributed as dist
 from torch_harmonics import RealSHT
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from data_process.wb2_helpers import DistributedProgressBar
+from data_process.data_process_helpers import DistributedProgressBar
 from data_process.data_process_helpers import welford_combine, collective_reduce, binary_reduce
 
 

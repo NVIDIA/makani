@@ -28,12 +28,13 @@ import unittest
 import torch
 import numpy as np
 import h5py as h5
+import zarr
 
 from makani.utils.dataloader import get_dataloader
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from .testutils import disable_tf32, get_default_parameters, init_dataset, compare_tensors, compare_arrays
-from .testutils import H5_PATH, NUM_CHANNELS, IMG_SIZE_H, IMG_SIZE_W
+from .testutils import disable_tf32, get_default_parameters, init_hdf5_dataset, init_zarr_dataset, init_wb2_zarr_dataset, compare_tensors, compare_arrays
+from .testutils import H5_PATH, NUM_CHANNELS, IMG_SIZE_H, IMG_SIZE_W, CHANNEL_NAMES
 
 _multifiles_params = [True]
 _have_dali = importlib.util.find_spec("nvidia.dali") is not None
@@ -54,6 +55,44 @@ def get_sample(path: str, idx):
         data = f[H5_PATH][file_index, ...]
 
     return data
+
+
+def get_zarr_sample(path: str, idx):
+    files = sorted(glob.glob(os.path.join(path, "*.zarr")))
+    first = zarr.open_group(files[0], mode="r")
+    num_samples_per_file = first[H5_PATH].shape[0]
+    file_id = idx // num_samples_per_file
+    file_index = idx % num_samples_per_file
+    g = zarr.open_group(files[file_id], mode="r")
+    return np.array(g[H5_PATH][file_index, ...])
+
+
+def get_wb2_zarr_sample(path: str, idx: int, channel_names=None):
+    """Read one sample from a WB2-layout zarr store and return it as (C, H, W)."""
+    from makani.utils.dataloaders.wb2_helpers import build_wb2_channel_map
+
+    if channel_names is None:
+        channel_names = list(CHANNEL_NAMES)
+
+    files = sorted(glob.glob(os.path.join(path, "*.zarr")))
+    first = zarr.open_group(files[0], mode="r")
+    level_values = np.asarray(first["level"]) if "level" in first else None
+    channel_map = build_wb2_channel_map(channel_names, level_values)
+    probe_name = channel_map[0][0]
+    num_samples_per_file = first[probe_name].shape[0]
+
+    file_id = idx // num_samples_per_file
+    file_index = idx % num_samples_per_file
+    g = zarr.open_group(files[file_id], mode="r")
+
+    h, w = first[probe_name].shape[-2], first[probe_name].shape[-1]
+    result = np.zeros((len(channel_names), h, w), dtype=np.float32)
+    for ch_idx, (zarr_name, level_idx) in enumerate(channel_map):
+        if level_idx is None:
+            result[ch_idx] = g[zarr_name][file_index]
+        else:
+            result[ch_idx] = g[zarr_name][file_index, level_idx]
+    return result
 
 
 def init_dataset_params(
@@ -98,24 +137,17 @@ def init_dataset_params(
     return params
 
 
-class TestDataLoader(unittest.TestCase):
+class DataLoaderBase:
+    """Shared tests for all dataloader backends (HDF5, zarr-makani, zarr-wb2, …).
 
-    @classmethod
-    def setUpClass(cls, path: Optional[str] = "/tmp"):
+    Not a TestCase subclass so pytest does not collect it directly.
+    Concrete subclasses must inherit from both this class and
+    ``unittest.TestCase``, implement ``setUpClass`` / ``tearDownClass``, and
+    implement ``_get_sample``.
+    """
 
-        cls.device = torch.device("cpu")
-
-        # create temporary directory
-        cls.tmpdir = tempfile.TemporaryDirectory(dir=path)
-        tmp_path = cls.tmpdir.name
-
-        # init datasets and stats
-        cls.train_path, cls.num_train, cls.valid_path, cls.num_valid, cls.stats_path, cls.metadata_path, _ = init_dataset(tmp_path)
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.tmpdir.cleanup()
-
+    def _get_sample(self, path, idx):
+        raise NotImplementedError
 
     def setUp(self):
         disable_tf32()
@@ -133,8 +165,7 @@ class TestDataLoader(unittest.TestCase):
         self.num_steps = 5
 
 
-    @parameterized.expand(_multifiles_params, skip_on_empty=False)
-    def test_shapes_and_sample_counts(self, multifiles):
+    def _test_shapes_and_sample_counts(self, multifiles):
 
         # set mutltifiles
         self.params.multifiles = multifiles
@@ -154,8 +185,7 @@ class TestDataLoader(unittest.TestCase):
         self.assertEqual((idt + 1), num_valid_steps)
 
 
-    @parameterized.expand(_multifiles_params, skip_on_empty=False)
-    def test_content(self, multifiles):
+    def _test_content(self, multifiles):
 
         # set mutltifiles
         self.params.multifiles = multifiles
@@ -173,8 +203,8 @@ class TestDataLoader(unittest.TestCase):
             inp_res = []
             tar_res = []
             for b in range(self.params.batch_size):
-                inp_res.append(get_sample(self.params.valid_data_path, off + b))
-                tar_res.append(get_sample(self.params.valid_data_path, off + b + 1))
+                inp_res.append(self._get_sample(self.params.valid_data_path, off + b))
+                tar_res.append(self._get_sample(self.params.valid_data_path, off + b + 1))
             test_inp = np.squeeze(np.stack(inp_res, axis=0))
             test_tar = np.squeeze(np.stack(tar_res, axis=0))
 
@@ -187,8 +217,7 @@ class TestDataLoader(unittest.TestCase):
             if idt > self.num_steps:
                 break
 
-    @parameterized.expand(_multifiles_params, skip_on_empty=False)
-    def test_content_normalization_zscore(self, multifiles):
+    def _test_content_normalization_zscore(self, multifiles):
         """With non-trivial means/stds, zscore output equals (raw - mean) / std."""
         self.params.multifiles = multifiles
 
@@ -226,11 +255,11 @@ class TestDataLoader(unittest.TestCase):
 
                 off = params.batch_size * idt
                 inp_raw = np.stack(
-                    [get_sample(params.valid_data_path, off + b) for b in range(params.batch_size)],
+                    [self._get_sample(params.valid_data_path, off + b) for b in range(params.batch_size)],
                     axis=0,
                 ).astype(np.float32)
                 tar_raw = np.stack(
-                    [get_sample(params.valid_data_path, off + b + 1) for b in range(params.batch_size)],
+                    [self._get_sample(params.valid_data_path, off + b + 1) for b in range(params.batch_size)],
                     axis=0,
                 ).astype(np.float32)
 
@@ -251,8 +280,7 @@ class TestDataLoader(unittest.TestCase):
                 if idt > self.num_steps:
                     break
 
-    @parameterized.expand(_multifiles_params, skip_on_empty=False)
-    def test_channel_ordering(self, multifiles):
+    def _test_channel_ordering(self, multifiles):
 
         # set mutltifiles
         self.params.multifiles = multifiles
@@ -278,8 +306,7 @@ class TestDataLoader(unittest.TestCase):
             tar_flip_flip = torch.flip(tar_flip, dims=(2,))
             self.assertTrue(compare_tensors("tar vs double-flipped tar", tar, tar_flip_flip))
 
-    @parameterized.expand(_multifiles_params, skip_on_empty=False)
-    def test_history(self, multifiles):
+    def _test_history(self, multifiles):
 
         # set mutltifiles
         self.params.multifiles = multifiles
@@ -301,8 +328,7 @@ class TestDataLoader(unittest.TestCase):
             if idt > self.num_steps:
                 break
 
-    @parameterized.expand(_multifiles_params, skip_on_empty=False)
-    def test_future(self, multifiles):
+    def _test_future(self, multifiles):
 
         # set mutltifiles
         self.params.multifiles = multifiles
@@ -324,8 +350,7 @@ class TestDataLoader(unittest.TestCase):
             if idt > self.num_steps:
                 break
 
-    @parameterized.expand(_multifiles_params, skip_on_empty=False)
-    def test_autoreg(self, multifiles):
+    def _test_autoreg(self, multifiles):
 
         # set mutltifiles
         self.params.multifiles = multifiles
@@ -348,56 +373,7 @@ class TestDataLoader(unittest.TestCase):
                 break
 
 
-    def test_date_retrieval(self):
-
-        # this only works with the multifiles loader since we cannot access certain samples with the dali loader
-        self.params.multifiles = True
-
-        # create dataloaders
-        train_loader, train_dataset, _ = get_dataloader(self.params, self.params.train_data_path, mode="train", device=self.device)
-
-        # we know we have self.params.num_train per year, so we can perfectly estimate the date
-        # we do not use leap years in that test so we always have 365 days
-        dhours = 24
-
-        # this is just a date in the first file
-        time1 = train_loader.dataset.get_time_at_index(10)
-        # since the stuff is 0 indexed, idx = 10 actually corresponds to day 11 in january
-        time1_comp = dt.datetime(year=2017, month=1, day=1, hour=0, minute=0, second=0, tzinfo=dt.timezone.utc) + dt.timedelta(hours = dhours * 10)
-        self.assertEqual(time1, time1_comp)
-
-        # this date should be in the second file
-        time2 = train_loader.dataset.get_time_at_index(365)
-        time2_comp = dt.datetime(year=2018, month=1, day=1, hour=0, minute=0, second=0, tzinfo=dt.timezone.utc)
-        self.assertEqual(time2, time2_comp)
-
-
-    def test_index_retrieval(self):
-
-        # this only works with the multifiles loader since we cannot access certain samples with the dali loader
-        self.params.multifiles = True
-
-        # create dataloaders
-        train_loader, train_dataset, _ = get_dataloader(self.params, self.params.train_data_path, mode="train", device=self.device)
-
-        # we know we have self.params.num_train per year, so we can perfectly estimate the date
-        # we do not use leap years in that test so we always have 365 days
-        dhours = 24
-
-        # this is just a date in the first file
-        tstamp = dt.datetime(year=2017, month=1, day=1, hour=0, minute=0, second=0, tzinfo=dt.timezone.utc) + dt.timedelta(hours = dhours * 10)
-        time1_idx = train_loader.dataset.get_index_at_time(tstamp)
-        # since the stuff is 0 indexed, idx = 10 actually corresponds to day 11 in january
-        self.assertEqual(time1_idx, 10)
-
-        # this date should be in the second file
-        tstamp = dt.datetime(year=2018, month=1, day=1, hour=0, minute=0, second=0, tzinfo=dt.timezone.utc)
-        time2_idx = train_loader.dataset.get_index_at_time(tstamp)
-        self.assertEqual(time2_idx, 365)
-
-
-    @parameterized.expand(_multifiles_params, skip_on_empty=False)
-    def test_distributed(self, multifiles):
+    def _test_distributed(self, multifiles):
 
         # set multifiles
         self.params.multifiles = multifiles
@@ -427,9 +403,9 @@ class TestDataLoader(unittest.TestCase):
             inp_res = []
             tar_res = []
             for b in range(self.params.batch_size):
-                tmp = get_sample(self.params.valid_data_path, off + b)
+                tmp = self._get_sample(self.params.valid_data_path, off + b)
                 inp_res.append(tmp[:, off_x : off_x + range_x, off_y : off_y + range_y])
-                tmp = get_sample(self.params.valid_data_path, off + b + 1)
+                tmp = self._get_sample(self.params.valid_data_path, off + b + 1)
                 tar_res.append(tmp[:, off_x : off_x + range_x, off_y : off_y + range_y])
 
             # stack
@@ -445,8 +421,7 @@ class TestDataLoader(unittest.TestCase):
             if idt > self.num_steps:
                 break
 
-    @parameterized.expand(_multifiles_params, skip_on_empty=False)
-    def test_distributed_subsampling(self, multifiles):
+    def _test_distributed_subsampling(self, multifiles):
 
         # set multifiles
         self.params.multifiles = multifiles
@@ -480,9 +455,9 @@ class TestDataLoader(unittest.TestCase):
             inp_res = []
             tar_res = []
             for b in range(self.params.batch_size):
-                tmp = get_sample(self.params.valid_data_path, off + b)
+                tmp = self._get_sample(self.params.valid_data_path, off + b)
                 inp_res.append(tmp[:, off_x : off_x + range_x : subsample, off_y : off_y + range_y : subsample])
-                tmp = get_sample(self.params.valid_data_path, off + b + 1)
+                tmp = self._get_sample(self.params.valid_data_path, off + b + 1)
                 tar_res.append(tmp[:, off_x : off_x + range_x : subsample, off_y : off_y + range_y : subsample])
 
             # stack
@@ -541,7 +516,7 @@ class TestDataLoader(unittest.TestCase):
         )
 
         expected = {
-            get_sample(params.train_data_path, int(idx)).tobytes()
+            self._get_sample(params.train_data_path, int(idx)).tobytes()
             for idx in loader.extsource.indices_select
         }
         self.assertEqual(
@@ -608,7 +583,7 @@ class TestDataLoader(unittest.TestCase):
 
         # ground truth: read the same indices straight from the HDF5 file
         expected = {
-            get_sample(params.valid_data_path, int(idx)).tobytes()
+            self._get_sample(params.valid_data_path, int(idx)).tobytes()
             for idx in loader.extsource.indices_select
         }
         self.assertEqual(
@@ -667,6 +642,196 @@ class TestDataLoader(unittest.TestCase):
         # cannot produce identical orderings.
         with self.subTest(desc="auto_reset advances shuffle state"):
             self.assertNotEqual(fps_ep0, fps_ep1)
+
+
+class TestHDF5DataLoader(DataLoaderBase, unittest.TestCase):
+    """DataLoaderBase exercised against HDF5-backed files.
+
+    Both ``multifiles=True`` (MultifilesDataset) and ``multifiles=False``
+    (DALI) paths are tested.  Additionally tests the MultifilesDataset-specific
+    date/index retrieval API which is not available on the DALI path.
+    """
+
+    @classmethod
+    def setUpClass(cls, path: Optional[str] = "/tmp"):
+        cls.device = torch.device("cpu")
+        cls.tmpdir = tempfile.TemporaryDirectory(dir=path)
+        tmp_path = cls.tmpdir.name
+        cls.train_path, cls.num_train, cls.valid_path, cls.num_valid, cls.stats_path, cls.metadata_path, _ = init_hdf5_dataset(tmp_path)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmpdir.cleanup()
+
+    def _get_sample(self, path, idx):
+        return get_sample(path, idx)
+
+    # multifiles-parameterized tests: both True (MultifilesDataset) and False (DALI)
+    @parameterized.expand(_multifiles_params, skip_on_empty=False)
+    def test_shapes_and_sample_counts(self, multifiles):
+        self._test_shapes_and_sample_counts(multifiles)
+
+    @parameterized.expand(_multifiles_params, skip_on_empty=False)
+    def test_content(self, multifiles):
+        self._test_content(multifiles)
+
+    @parameterized.expand(_multifiles_params, skip_on_empty=False)
+    def test_content_normalization_zscore(self, multifiles):
+        self._test_content_normalization_zscore(multifiles)
+
+    @parameterized.expand(_multifiles_params, skip_on_empty=False)
+    def test_channel_ordering(self, multifiles):
+        self._test_channel_ordering(multifiles)
+
+    @parameterized.expand(_multifiles_params, skip_on_empty=False)
+    def test_history(self, multifiles):
+        self._test_history(multifiles)
+
+    @parameterized.expand(_multifiles_params, skip_on_empty=False)
+    def test_future(self, multifiles):
+        self._test_future(multifiles)
+
+    @parameterized.expand(_multifiles_params, skip_on_empty=False)
+    def test_autoreg(self, multifiles):
+        self._test_autoreg(multifiles)
+
+    @parameterized.expand(_multifiles_params, skip_on_empty=False)
+    def test_distributed(self, multifiles):
+        self._test_distributed(multifiles)
+
+    @parameterized.expand(_multifiles_params, skip_on_empty=False)
+    def test_distributed_subsampling(self, multifiles):
+        self._test_distributed_subsampling(multifiles)
+
+    # HDF5-only: MultifilesDataset date/index retrieval API
+    def test_date_retrieval(self):
+        self.params.multifiles = True
+        train_loader, _, _ = get_dataloader(self.params, self.params.train_data_path, mode="train", device=self.device)
+        dhours = 24
+        time1 = train_loader.dataset.get_time_at_index(10)
+        time1_comp = dt.datetime(year=2017, month=1, day=1, hour=0, minute=0, second=0, tzinfo=dt.timezone.utc) + dt.timedelta(hours=dhours * 10)
+        self.assertEqual(time1, time1_comp)
+        time2 = train_loader.dataset.get_time_at_index(365)
+        time2_comp = dt.datetime(year=2018, month=1, day=1, hour=0, minute=0, second=0, tzinfo=dt.timezone.utc)
+        self.assertEqual(time2, time2_comp)
+
+    def test_index_retrieval(self):
+        self.params.multifiles = True
+        train_loader, _, _ = get_dataloader(self.params, self.params.train_data_path, mode="train", device=self.device)
+        dhours = 24
+        tstamp = dt.datetime(year=2017, month=1, day=1, hour=0, minute=0, second=0, tzinfo=dt.timezone.utc) + dt.timedelta(hours=dhours * 10)
+        self.assertEqual(train_loader.dataset.get_index_at_time(tstamp), 10)
+        tstamp = dt.datetime(year=2018, month=1, day=1, hour=0, minute=0, second=0, tzinfo=dt.timezone.utc)
+        self.assertEqual(train_loader.dataset.get_index_at_time(tstamp), 365)
+
+
+@unittest.skipUnless(_have_dali, "nvidia.dali is not installed — zarr tests require DALI")
+class TestZarrDataLoader(DataLoaderBase, unittest.TestCase):
+    """DataLoaderBase exercised against zarr-backed files (makani flat format), DALI path only.
+
+    ``MultifilesDataset`` is HDF5-only so there are no ``multifiles=True``
+    variants here — the tests run exactly once, always with the DALI path.
+
+    ``zarr_format="wb2"`` testing is pending ``init_wb2_zarr_dataset``.  When
+    added, a ``TestZarrWB2DataLoader`` should exercise it.
+    """
+
+    @classmethod
+    def setUpClass(cls, path: Optional[str] = "/tmp"):
+        cls.device = torch.device("cpu")
+        cls.tmpdir = tempfile.TemporaryDirectory(dir=path)
+        tmp_path = cls.tmpdir.name
+        cls.train_path, cls.num_train, cls.valid_path, cls.num_valid, cls.stats_path, cls.metadata_path, _ = init_zarr_dataset(tmp_path)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmpdir.cleanup()
+
+    def _get_sample(self, path, idx):
+        return get_zarr_sample(path, idx)
+
+    # DALI-only (multifiles=False) — one test per behaviour, no parameterization
+    def test_shapes_and_sample_counts(self):
+        self._test_shapes_and_sample_counts(False)
+
+    def test_content(self):
+        self._test_content(False)
+
+    def test_content_normalization_zscore(self):
+        self._test_content_normalization_zscore(False)
+
+    def test_channel_ordering(self):
+        self._test_channel_ordering(False)
+
+    def test_history(self):
+        self._test_history(False)
+
+    def test_future(self):
+        self._test_future(False)
+
+    def test_autoreg(self):
+        self._test_autoreg(False)
+
+    def test_distributed(self):
+        self._test_distributed(False)
+
+    def test_distributed_subsampling(self):
+        self._test_distributed_subsampling(False)
+
+
+@unittest.skipUnless(_have_dali, "nvidia.dali is not installed — zarr WB2 tests require DALI")
+class TestZarrWB2DataLoader(DataLoaderBase, unittest.TestCase):
+    """DataLoaderBase exercised against WB2-layout zarr files, DALI path only.
+
+    The fixture (``init_wb2_zarr_dataset``) creates one zarr array per ERA5
+    variable (surface: ``(time, lat, lon)``, atmospheric: ``(time, level, lat, lon)``)
+    mirroring the real WeatherBench2 store layout.  The ES helper auto-detects
+    the WB2 format because ``dataset_name="fields"`` is absent from the group,
+    then builds the variable→level conversion table from ``params.channel_names``
+    (set to ``CHANNEL_NAMES`` by ``get_default_parameters()``).
+    """
+
+    @classmethod
+    def setUpClass(cls, path: Optional[str] = "/tmp"):
+        cls.device = torch.device("cpu")
+        cls.tmpdir = tempfile.TemporaryDirectory(dir=path)
+        tmp_path = cls.tmpdir.name
+        cls.train_path, cls.num_train, cls.valid_path, cls.num_valid, cls.stats_path, cls.metadata_path, _ = init_wb2_zarr_dataset(tmp_path)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmpdir.cleanup()
+
+    def _get_sample(self, path, idx):
+        return get_wb2_zarr_sample(path, idx)
+
+    # DALI-only (multifiles=False) — one test per behaviour, no parameterization
+    def test_shapes_and_sample_counts(self):
+        self._test_shapes_and_sample_counts(False)
+
+    def test_content(self):
+        self._test_content(False)
+
+    def test_content_normalization_zscore(self):
+        self._test_content_normalization_zscore(False)
+
+    def test_channel_ordering(self):
+        self._test_channel_ordering(False)
+
+    def test_history(self):
+        self._test_history(False)
+
+    def test_future(self):
+        self._test_future(False)
+
+    def test_autoreg(self):
+        self._test_autoreg(False)
+
+    def test_distributed(self):
+        self._test_distributed(False)
+
+    def test_distributed_subsampling(self):
+        self._test_distributed_subsampling(False)
 
 
 class TestDummyLoader(unittest.TestCase):

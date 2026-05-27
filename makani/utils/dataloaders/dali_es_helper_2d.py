@@ -34,6 +34,7 @@ from torch_harmonics.distributed import compute_split_shapes
 
 # data helpers
 from .data_helpers import get_lat_lon_grid, get_date_from_string, get_timestamp, get_date_from_timestamp, get_date_ranges, get_default_aws_connector
+from .wb2_helpers import build_wb2_channel_map
 
 
 class GeneralES(object):
@@ -69,7 +70,9 @@ class GeneralES(object):
         zenith_angle=True,
         return_timestamp=False,
         lat_lon=None,
-        dataset_path="fields",
+        dataset_name="fields",
+        timestamp_name="timestamp",
+        channel_names=None,
         enable_odirect=False,
         odirect_alignment=0,
         enable_s3=False,
@@ -101,7 +104,9 @@ class GeneralES(object):
         self.is_parallel = is_parallel
         self.zenith_angle = zenith_angle
         self.return_timestamp = return_timestamp
-        self.dataset_path = dataset_path
+        self.dataset_name = dataset_name
+        self.timestamp_name = timestamp_name
+        self.channel_names = channel_names
         self.lat_lon = lat_lon
 
         # also obtain an ordered channels list, required for h5py:
@@ -258,13 +263,13 @@ class GeneralES(object):
             if enable_logging:
                 logging.info("Getting file stats from {}".format(self.files_paths[0]))
             # original image shape (before padding)
-            dset = _f[self.dataset_path]
+            dset = _f[self.dataset_name]
             self.img_shape = dset.shape[2:4]
             self.total_channels = dset.shape[1]
             self.n_samples_year.append(dset.shape[0])
             # read timestamps
-            if "timestamp" in dset.dims[0]:
-                self.timestamps.append(self.timezone_fn(dset.dims[0]["timestamp"][...]))
+            if self.timestamp_name in dset.dims[0]:
+                self.timestamps.append(self.timezone_fn(dset.dims[0][self.timestamp_name][...]))
             else:
                 timestamps = np.asarray([get_timestamp(self.years[0], hour=(idx * self.dhours)).timestamp() for idx in range(0, dset.shape[0], self.dhours)])
                 self.timestamps.append(self.timezone_fn(timestamps))
@@ -272,11 +277,11 @@ class GeneralES(object):
         # get all sample counts
         for idf, filename in enumerate(self.files_paths[1:], start=1):
             with fopen_handle(filename) as _f:
-                dset = _f[self.dataset_path]
+                dset = _f[self.dataset_name]
                 self.n_samples_year.append(dset.shape[0])
                 # read timestamps
-                if "timestamp" in dset.dims[0]:
-                    self.timestamps.append(self.timezone_fn(dset.dims[0]["timestamp"][...]))
+                if self.timestamp_name in dset.dims[0]:
+                    self.timestamps.append(self.timezone_fn(dset.dims[0][self.timestamp_name][...]))
                 else:
                     timestamps = np.asarray([get_timestamp(self.years[idf], hour=(idx * self.dhours)).timestamp() for idx in range(0, dset.shape[0], self.dhours)])
                     self.timestamps.append(self.timezone_fn(timestamps))
@@ -288,7 +293,7 @@ class GeneralES(object):
     def _get_year_h5(self, year_idx):
         # here we want to use the specific file driver
         self.files[year_idx] = h5py.File(self.files_paths[year_idx], "r", driver=self.file_driver, **self.file_driver_kwargs)
-        self.dsets[year_idx] = self.files[year_idx][self.dataset_path]
+        self.dsets[year_idx] = self.files[year_idx][self.dataset_name]
         return
 
     def _get_data_h5(self, dset, local_idx, start_x, end_x, start_y, end_y):
@@ -357,44 +362,158 @@ class GeneralES(object):
         return inp, tar
 
     # zarr functions
+    @staticmethod
+    def _zarr_open(path, mode="r"):
+        # prefer consolidated metadata (one round trip for all array metadata) but
+        # fall back gracefully when the store hasn't been consolidated yet
+        try:
+            return zarr.open_consolidated(path, mode=mode)
+        except KeyError:
+            return zarr.open_group(path, mode=mode)
+
     def _get_stats_zarr(self, enable_logging):
-        with zarr.convenience.open(self.files_paths[0], "r") as _f:
+        self.n_samples_year = []
+        self.timestamps = []
+        self.zarr_format = "makani"
+
+        with self._zarr_open(self.files_paths[0]) as _f:
             if enable_logging:
                 logging.info("Getting file stats from {}".format(self.files_paths[0]))
-            # original image shape (before padding)
-            self.img_shape = _f[f"/{self.dataset_path}"].shape[2:4]
-            self.total_channels = _f[f"/{self.dataset_path}"].shape[1]
 
-        self.n_samples_year = []
-        for filename in self.files_paths:
-            with zarr.convenience.open(filename, "r") as _f:
-                self.n_samples_year.append(_f[f"/{self.dataset_path}"].shape[0])
+            if self.dataset_name in _f:
+                # makani format: single (time, channels, lat, lon) array
+                dset = _f[self.dataset_name]
+                self.img_shape = dset.shape[2:4]
+                self.total_channels = dset.shape[1]
+                self.n_samples_year.append(dset.shape[0])
+                self.timestamps.append(self._zarr_read_timestamps(_f, dset, self.years[0]))
+            else:
+                # WB2 format: one variable array per field, levels stored separately
+                if self.channel_names is None:
+                    raise ValueError(
+                        f"WB2 zarr format detected ('{self.dataset_name}' not found in store) "
+                        "but channel_names was not provided to the dataloader."
+                    )
+                self.zarr_format = "wb2"
+                level_values = np.asarray(_f["level"]) if "level" in _f else None
+                self.wb2_channel_map = build_wb2_channel_map(self.channel_names, level_values)
+                # derive shape from any variable in the store
+                probe_name = self.wb2_channel_map[0][0]
+                probe = _f[probe_name]
+                self.img_shape = (probe.shape[-2], probe.shape[-1])
+                self.total_channels = len(self.channel_names)
+                self.n_samples_year.append(probe.shape[0])
+                self.timestamps.append(self._zarr_read_timestamps(_f, probe, self.years[0]))
 
+        for idf, filename in enumerate(self.files_paths[1:], start=1):
+            with self._zarr_open(filename) as _f:
+                if self.zarr_format == "wb2":
+                    probe = _f[self.wb2_channel_map[0][0]]
+                    self.n_samples_year.append(probe.shape[0])
+                    self.timestamps.append(self._zarr_read_timestamps(_f, probe, self.years[idf]))
+                else:
+                    dset = _f[self.dataset_name]
+                    self.n_samples_year.append(dset.shape[0])
+                    self.timestamps.append(self._zarr_read_timestamps(_f, dset, self.years[idf]))
+
+        self.timestamps = np.concatenate(self.timestamps, axis=0)
         return
+
+    def _zarr_read_timestamps(self, group, dset, year):
+        # try timestamp_name first, then "time" as a fallback for the xarray convention
+        keys_to_try = [self.timestamp_name]
+        if "time" != self.timestamp_name:
+            keys_to_try.append("time")
+        for key in keys_to_try:
+            if key in group:
+                raw = np.asarray(group[key])
+                # WB2 stores use datetime64[ns]; convert to float Unix seconds
+                if np.issubdtype(raw.dtype, np.datetime64):
+                    raw = raw.astype("datetime64[s]").astype(np.float64)
+                return self.timezone_fn(raw)
+        # fall back to computing timestamps from year + dhours cadence
+        ts = np.asarray([get_timestamp(year, hour=(idx * self.dhours)).timestamp() for idx in range(0, dset.shape[0], self.dhours)])
+        return self.timezone_fn(ts)
 
     def _get_year_zarr(self, year_idx):
-        self.files[year_idx] = zarr.convenience.open(self.files_paths[year_idx], "r")
-        self.dsets[year_idx] = self.files[year_idx][f"/{self.dataset_path}"]
+        self.files[year_idx] = self._zarr_open(self.files_paths[year_idx])
+        self.dsets[year_idx] = self.files[year_idx][self.dataset_name]
         return
 
+    def _get_year_zarr_wb2(self, year_idx):
+        self.files[year_idx] = self._zarr_open(self.files_paths[year_idx])
+        # store the group itself — _get_data_zarr_wb2 reads individual variables
+        self.dsets[year_idx] = self.files[year_idx]
+        return
+
+    def _get_data_zarr_wb2(self, group, local_idx, start_x, end_x, start_y, end_y):
+        sf = self.subsampling_factor
+        t_inp = np.s_[(local_idx - self.dt * self.n_history):(local_idx + 1):self.dt]
+        t_tar = np.s_[(local_idx + self.dt):(local_idx + self.dt * (self.n_future + 1) + 1):self.dt]
+
+        for out_ch, src_ch in enumerate(self.in_channels_sorted):
+            zarr_name, level_idx = self.wb2_channel_map[src_ch]
+            if level_idx is None:
+                group[zarr_name].get_basic_selection(
+                    np.s_[t_inp, start_x:end_x:sf, start_y:end_y:sf],
+                    out=self.inp_buff[:, out_ch, ...],
+                )
+            else:
+                group[zarr_name].get_basic_selection(
+                    np.s_[t_inp, level_idx, start_x:end_x:sf, start_y:end_y:sf],
+                    out=self.inp_buff[:, out_ch, ...],
+                )
+
+        for out_ch, src_ch in enumerate(self.out_channels_sorted):
+            zarr_name, level_idx = self.wb2_channel_map[src_ch]
+            if level_idx is None:
+                group[zarr_name].get_basic_selection(
+                    np.s_[t_tar, start_x:end_x:sf, start_y:end_y:sf],
+                    out=self.tar_buff[:, out_ch, ...],
+                )
+            else:
+                group[zarr_name].get_basic_selection(
+                    np.s_[t_tar, level_idx, start_x:end_x:sf, start_y:end_y:sf],
+                    out=self.tar_buff[:, out_ch, ...],
+                )
+
+        inp, tar = self._reorder_channels(self.inp_buff, self.tar_buff)
+        return inp, tar
+
     def _get_data_zarr(self, dset, local_idx, start_x, end_x, start_y, end_y):
+        sf = self.subsampling_factor
+
         off = 0
         for slice_in in self.in_channels_slices:
             start = off
             end = start + (slice_in.stop - slice_in.start)
-            self.inp_buff[:, start:end, ...] = dset[(local_idx - self.dt * self.n_history) : (local_idx + 1) : self.dt, slice_in, start_x:end_x, start_y:end_y]
+            dset.get_basic_selection(
+                np.s_[
+                    (local_idx - self.dt * self.n_history) : (local_idx + 1) : self.dt,
+                    slice_in,
+                    start_x:end_x:sf,
+                    start_y:end_y:sf,
+                ],
+                out=self.inp_buff[:, start:end, ...],
+            )
             off = end
 
         off = 0
         for slice_out in self.out_channels_slices:
             start = off
             end = start + (slice_out.stop - slice_out.start)
-            self.tar_buff[:, start:end, ...] = dset[(local_idx + self.dt) : (local_idx + self.dt * (self.n_future + 1) + 1) : self.dt, slice_out, start_x:end_x, start_y:end_y]
+            dset.get_basic_selection(
+                np.s_[
+                    (local_idx + self.dt) : (local_idx + self.dt * (self.n_future + 1) + 1) : self.dt,
+                    slice_out,
+                    start_x:end_x:sf,
+                    start_y:end_y:sf,
+                ],
+                out=self.tar_buff[:, start:end, ...],
+            )
             off = end
 
-        # reorder data if requested:
         inp, tar = self._reorder_channels(self.inp_buff, self.tar_buff)
-
         return inp, tar
 
     def _get_files_stats(self, enable_logging):
@@ -594,6 +713,9 @@ class GeneralES(object):
         if self.file_format == "h5":
             self.get_year_handle = self._get_year_h5
             self.get_data_handle = self._get_data_h5
+        elif getattr(self, "zarr_format", "makani") == "wb2":
+            self.get_year_handle = self._get_year_zarr_wb2
+            self.get_data_handle = self._get_data_zarr_wb2
         else:
             self.get_year_handle = self._get_year_zarr
             self.get_data_handle = self._get_data_zarr
