@@ -104,7 +104,7 @@ class SpectralConv(nn.Module):
             self.weight.sharded_dims_mp[-2] = "h"
 
         # get the contraction handle. This should return a pyTorch contraction
-        self._contract = partial(_contract_dense_pytorch, separable=separable, complex=True, operator_type=operator_type)
+        self._contract = partial(_contract_dense_pytorch, separable=separable, operator_type=operator_type)
 
         if bias == True:
             self.bias = nn.Parameter(torch.zeros(1, self.out_channels, 1, 1))
