@@ -18,9 +18,20 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.fft
-from makani.utils.img_utils import PeriodicPad2d
-
 from makani.models.common import DropPath, PatchEmbed2D
+
+
+class PeriodicPad2d(nn.Module):
+    """Pad longitudinal (left-right) circular, pad latitude (top-bottom) with zeros."""
+
+    def __init__(self, pad_width):
+        super(PeriodicPad2d, self).__init__()
+        self.pad_width = pad_width
+
+    def forward(self, x):
+        out = F.pad(x, (self.pad_width, self.pad_width, 0, 0), mode="circular")
+        out = F.pad(out, (0, 0, self.pad_width, self.pad_width), mode="constant", value=0)
+        return out
 
 
 class Mlp(nn.Module):
