@@ -164,7 +164,7 @@ RUN cd /opt && git clone https://github.com/NVIDIA/torch-harmonics.git && \
     pip install --no-build-isolation -e .
 
 # physicsnemo
-RUN pip install git+https://github.com/NVIDIA/physicsnemo.git@v1.1.1
+RUN pip install git+https://github.com/NVIDIA/physicsnemo.git@v1.3.0
 
 # copy source code
 RUN mkdir -p /opt/makani
