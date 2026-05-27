@@ -408,7 +408,11 @@ class GeneralConcatES(object):
         return cos_zenith_inp, cos_zenith_tar, inp_time, tar_time
 
     def __getstate__(self):
-        return self.__dict__.copy()
+        state = self.__dict__.copy()
+        # drop file handles — they can't cross process boundaries
+        state["vfile"] = None
+        state["dset"] = None
+        return state
 
     def __setstate__(self, state):
         self.__dict__.update(state)
@@ -423,8 +427,8 @@ class GeneralConcatES(object):
             except Exception as err:
                 print(f"Cannot open file {self.file_path}. Reason {err}, retrying.", flush=True)
                 time.sleep(5)
-            else:
-                raise OSError(f"Unable to retrieve year handle {year_idx}, aborting.")
+        else:
+            raise OSError(f"Unable to open file {self.file_path}, aborting.")
 
         # get dataset handle
         self.dset = self.vfile[self.dataset_path]
