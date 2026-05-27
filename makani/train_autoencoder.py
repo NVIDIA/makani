@@ -28,6 +28,7 @@ from makani.utils import comm
 
 # import trainer
 from makani.utils import argument_parser
+from makani.utils.argument_parser import parse_odirect_config
 from makani.utils.parse_dataset_metada import parse_dataset_metadata
 from makani.utils import AutoencoderTrainer
 
@@ -106,7 +107,7 @@ if __name__ == "__main__":
     params["jit_mode"] = args.jit_mode
     params["skip_validation"] = args.skip_validation
     params["skip_training"] = args.skip_training
-    params["enable_odirect"] = args.enable_odirect
+    params["enable_odirect"], params["odirect_alignment"] = parse_odirect_config(args.odirect_config)
     params["checkpointing_level"] = args.checkpointing_level
     params["enable_synthetic_data"] = args.enable_synthetic_data
     params["split_data_channels"] = args.split_data_channels

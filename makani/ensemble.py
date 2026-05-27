@@ -26,6 +26,7 @@ from makani.utils.YParams import YParams
 # distributed computing stuff
 from makani.utils import comm
 from makani.utils import argument_parser
+from makani.utils.argument_parser import parse_odirect_config
 from makani.utils import profiling
 
 # import trainer
@@ -130,7 +131,7 @@ if __name__ == "__main__":
     params["jit_mode"] = args.jit_mode
     params["skip_validation"] = args.skip_validation
     params["skip_training"] = args.skip_training
-    params["enable_odirect"] = args.enable_odirect
+    params["enable_odirect"], params["odirect_alignment"] = parse_odirect_config(args.odirect_config)
     params["enable_s3"] = args.enable_s3
     params["checkpointing_level"] = args.checkpointing_level
     params["enable_synthetic_data"] = args.enable_synthetic_data

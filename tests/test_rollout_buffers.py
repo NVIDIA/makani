@@ -67,6 +67,7 @@ def init_dataset_params(
     # performance parameters
     params.num_data_workers = num_data_workers
     params.enable_odirect = False
+    params.odirect_alignment = 0
     params.enable_s3 = False
 
     return params
@@ -1301,6 +1302,7 @@ class TestRolloutBufferStreaming(unittest.TestCase):
         streaming_mode=False,
         buffer_device=torch.device("cpu"),
         enable_odirect=False,
+        odirect_alignment=0,
     ):
         if output_channels is None:
             output_channels = list(channel_names)
@@ -1329,6 +1331,7 @@ class TestRolloutBufferStreaming(unittest.TestCase):
             streaming_mode=streaming_mode,
             buffer_device=buffer_device,
             enable_odirect=enable_odirect,
+            odirect_alignment=odirect_alignment,
         )
 
     def _drive_full_rollout(self, buf, *, ic_data_per_batch, tstamps_per_batch):
@@ -1390,6 +1393,7 @@ class TestRolloutBufferStreaming(unittest.TestCase):
                 num_rollout_steps=R, ensemble_size=1,
                 img_shape=(H, W),
                 enable_odirect=True,
+                odirect_alignment=4096,
             )
         except (ValueError, OSError, RuntimeError) as e:
             self.skipTest(f"HDF5 build does not support the direct VFD: {e}")

@@ -69,6 +69,7 @@ class GeneralConcatES(object):
         lat_lon=None,
         dataset_path="fields",
         enable_odirect=False,
+        odirect_alignment=0,
         enable_s3=False,
         seed=333,
         is_parallel=True,
@@ -103,6 +104,7 @@ class GeneralConcatES(object):
 
         # O_DIRECT specific stuff
         self.file_driver = "direct" if enable_odirect else None
+        self.file_driver_kwargs = dict(alignment=odirect_alignment, block_size=odirect_alignment) if (enable_odirect and odirect_alignment > 0) else {}
         self.read_direct = True  # if enable_odirect else True
         self.num_retries = 5
 
@@ -422,7 +424,7 @@ class GeneralConcatES(object):
         # open file:
         for _ in range(self.num_retries):
             try:
-                self.vfile = h5py.File(self.file_path, "r", driver=self.file_driver)
+                self.vfile = h5py.File(self.file_path, "r", driver=self.file_driver, **self.file_driver_kwargs)
                 break
             except Exception as err:
                 print(f"Cannot open file {self.file_path}. Reason {err}, retrying.", flush=True)
