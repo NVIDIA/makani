@@ -225,6 +225,7 @@ class ERA5DaliESDataloader(object):
             lat_lon=self.lat_lon,
             dataset_path=self.dataset_path,
             enable_odirect=params.enable_odirect,
+            odirect_alignment=params.get("odirect_alignment", 0),
             enable_s3=params.enable_s3,
             enable_logging=params.log_to_screen,
             seed=self.global_seed,

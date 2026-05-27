@@ -47,7 +47,16 @@ def get_default_argument_parser(training=True):
 
     # data options
     parser.add_argument("--enable_synthetic_data", action="store_true", help="Enable to use synthetic data.")
-    parser.add_argument("--enable_odirect", action="store_true", help="Enable to use O_DIRECT for Data I/O.")
+    parser.add_argument(
+        "--odirect_config",
+        type=str,
+        default=None,
+        help=(
+            "Enable O_DIRECT for Data I/O and set the alignment size. "
+            "Accepts a byte count (e.g. '4096'), a kilobyte shorthand (e.g. '4K'), "
+            "or a megabyte shorthand (e.g. '1M'). Omit or pass nothing to use the POSIX driver."
+        ),
+    )
     parser.add_argument(
         "--enable_s3",
         action="store_true",
@@ -78,3 +87,30 @@ def get_default_argument_parser(training=True):
     parser.add_argument("--capture_type", default="torch", type=str, choices=["torch", "cupti"], help="Type for capturing, either torch internal profiler or cupti API.")
 
     return parser
+
+
+def parse_odirect_config(config_str):
+    """Parse --odirect_config into (enable_odirect: bool, alignment: int in bytes).
+
+    Accepted formats:
+      None / omitted  -> (False, 0)      POSIX driver, no O_DIRECT
+      "4096"          -> (True, 4096)    bare byte count
+      "4K" / "4k"     -> (True, 4096)   kibibytes
+      "1M" / "1m"     -> (True, 1048576) mebibytes
+    """
+    if config_str is None:
+        return False, 0
+    s = config_str.strip()
+    if s[-1].lower() == "k":
+        return True, int(s[:-1]) * 1024
+    elif s[-1].lower() == "m":
+        return True, int(s[:-1]) * 1024 * 1024
+    else:
+        try:
+            return True, int(s)
+        except ValueError:
+            raise ValueError(
+                f"Invalid --odirect_config value '{config_str}'. "
+                "Expected a byte count (e.g. '4096'), a kibibyte value (e.g. '4K'), "
+                "or a mebibyte value (e.g. '1M')."
+            )

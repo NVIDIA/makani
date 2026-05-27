@@ -26,6 +26,7 @@ from makani.utils.YParams import YParams
 from makani.utils import comm
 from makani.utils.parse_dataset_metada import parse_dataset_metadata
 from makani.utils import argument_parser
+from makani.utils.argument_parser import parse_odirect_config
 from makani.utils import profiling
 
 # import trainer
@@ -159,7 +160,7 @@ if __name__ == "__main__":
     params["resuming"] = False
     params["amp_mode"] = args.amp_mode
     params["jit_mode"] = args.jit_mode
-    params["enable_odirect"] = args.enable_odirect
+    params["enable_odirect"], params["odirect_alignment"] = parse_odirect_config(args.odirect_config)
     params["enable_s3"] = args.enable_s3
     params["disable_ddp"] = args.disable_ddp
     params["checkpointing_level"] = args.checkpointing_level
@@ -225,7 +226,8 @@ if __name__ == "__main__":
                     end_date=args.end_date,
                     date_step=args.date_step,
                     wb2_compatible=args.wb2_compatible,
-                    enable_odirect=args.enable_odirect,
+                    enable_odirect=params["enable_odirect"],
+                    odirect_alignment=params["odirect_alignment"],
                     profiler=profiler,
                 )
         elif args.capture_type == "cupti":
@@ -243,7 +245,8 @@ if __name__ == "__main__":
                         end_date=args.end_date,
                         date_step=args.date_step,
                         wb2_compatible=args.wb2_compatible,
-                        enable_odirect=args.enable_odirect,
+                        enable_odirect=params["enable_odirect"],
+                    odirect_alignment=params["odirect_alignment"],
                         profiler=profiler,
                     )
 

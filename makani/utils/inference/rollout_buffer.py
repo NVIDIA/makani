@@ -201,6 +201,7 @@ class RolloutBuffer(DataBuffer):
         streaming_mode: bool = False,
         buffer_device: Union[str, torch.device] = torch.device("cpu"),
         enable_odirect: bool = False,
+        odirect_alignment: int = 0,
     ):
         super().__init__(num_rollout_steps, rollout_dt, channel_names, device, scale, bias, output_channels, output_file)
 
@@ -211,6 +212,7 @@ class RolloutBuffer(DataBuffer):
         if enable_odirect and output_file is None:
             raise ValueError("enable_odirect=True requires output_file to be set.")
         self.enable_odirect = enable_odirect
+        self.odirect_alignment = odirect_alignment
 
         # streaming mode has no in-memory fallback — every update writes to disk.
         # Two ways to opt in:
@@ -330,7 +332,8 @@ class RolloutBuffer(DataBuffer):
             self.file_handle = h5.File(output_file, "w", driver="mpio", comm=self.mpi_comm)
         elif self.enable_odirect:
             # HDF5 ``direct`` VFD: writes go through O_DIRECT, bypassing the page cache.
-            self.file_handle = h5.File(output_file, "w", driver="direct")
+            driver_kwargs = dict(alignment=self.odirect_alignment, block_size=self.odirect_alignment) if self.odirect_alignment > 0 else {}
+            self.file_handle = h5.File(output_file, "w", driver="direct", **driver_kwargs)
         else:
             self.file_handle = h5.File(output_file, "w")
 

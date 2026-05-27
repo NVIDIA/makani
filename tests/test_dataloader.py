@@ -92,6 +92,7 @@ def init_dataset_params(
     # performance parameters
     params.num_data_workers = num_data_workers
     params.enable_odirect = False
+    params.odirect_alignment = 0
     params.enable_s3 = False
 
     return params

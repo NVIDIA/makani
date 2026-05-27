@@ -71,6 +71,7 @@ class GeneralES(object):
         lat_lon=None,
         dataset_path="fields",
         enable_odirect=False,
+        odirect_alignment=0,
         enable_s3=False,
         seed=333,
         is_parallel=True,
@@ -124,6 +125,8 @@ class GeneralES(object):
         self.aws_connector = None
         if enable_odirect:
             self.file_driver = "direct"
+            if odirect_alignment > 0:
+                self.file_driver_kwargs = dict(alignment=odirect_alignment, block_size=odirect_alignment)
 
         if enable_s3:
             self.file_driver = "ros3"
