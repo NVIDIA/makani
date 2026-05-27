@@ -28,89 +28,95 @@ def get_memory_usage(device):
 
 
 def normalize_weights(model, eps=1e-5):
-    for param in model.parameters():
-        # numel = torch.tensor(param.numel(), dtype=torch.long, device=param.device)
+    with torch.no_grad():
+        # Group params by their MP sharding signature — same pattern as clip_grads.
+        groups: dict[tuple, list] = {}
+        for param in model.parameters():
+            key = tuple(
+                g for g in getattr(param, "sharded_dims_mp", [])
+                if g is not None and comm.get_size(g) > 1
+            )
+            groups.setdefault(key, []).append(param)
 
-        # compute norm: compute abs first to support complex weights
-        norm = torch.sum(torch.square(torch.abs(param)))
+        for mp_groups, params in groups.items():
+            # _foreach_norm: one fused kernel for all local norms in the group
+            norms = torch._foreach_norm(params, ord=2)
 
-        # compute local norm
-        if hasattr(param, "sharded_dims_mp"):
+            if mp_groups:
+                # Sharded params: we must all_reduce the *squared* partial norms
+                # (sum-of-squares is additive across shards) then re-sqrt.
+                for norm, param in zip(norms, params):
+                    norm.pow_(2)
+                    for g in mp_groups:
+                        dist.all_reduce(norm, group=comm.get_group(g))
+                    norm.sqrt_()
 
-            for d, group in enumerate(param.sharded_dims_mp):
-                # continue if there is nothing to do
-                if (group is None) or (comm.get_size(group) == 1):
-                    continue
-
-                dist.all_reduce(norm, group=comm.get_group(group))
-                # dist.all_reduce(numel, group=comm.get_group(group))
-
-        norm = torch.sqrt(norm)
-
-        # update weights
-        param.mul_(1.0 / (norm + eps))
+            # per-param scale factors: 1/(norm + eps) — then one fused weight update
+            scale_factors = torch._foreach_reciprocal(torch._foreach_add(norms, eps))
+            torch._foreach_mul_(params, scale_factors)
 
     return
 
 
 def _compute_total_grad_norm(model, norm_type=2.0, verbose=False):
-    # iterate over parameters
-    gnorms = []
+    # Group parameters by their model-parallel sharding signature so we can
+    # issue one all_reduce per process group instead of one per parameter,
+    # and use _foreach_norm to collapse N small reduce kernels into one.
+    groups: dict[tuple, list] = {}
+    param_map: dict[tuple, list] = {}  # for verbose NaN reporting
     for name, param in model.named_parameters():
-
         if param.grad is None:
             continue
+        key = tuple(
+            g for g in getattr(param, "sharded_dims_mp", [])
+            if g is not None and comm.get_size(g) > 1
+        )
+        groups.setdefault(key, []).append(param.grad)
+        param_map.setdefault(key, []).append(name)
 
-        # compute local norm: compute abs first to support complex grads
+    ord = 2 if norm_type == 2.0 else 1
+    partials = []
+    for mp_groups, grads in groups.items():
+        # _foreach_norm: one fused kernel instead of one per tensor
+        per_tensor_norms = torch._foreach_norm(grads, ord=ord)
         if norm_type == 2.0:
-            gnorm = torch.sum(torch.square(torch.abs(param.grad)))
+            partial = torch.stack(per_tensor_norms).pow(2).sum()
         else:
-            gnorm = torch.sum(torch.abs(param.grad))
+            partial = torch.stack(per_tensor_norms).sum()
 
-        # compute global norm
-        if hasattr(param, "sharded_dims_mp"):
+        # one all_reduce per process group, not per parameter
+        for g in mp_groups:
+            dist.all_reduce(partial, group=comm.get_group(g))
 
-            for group in param.sharded_dims_mp:
-                # continue if there is nothing to do
-                if (group is None) or (comm.get_size(group) == 1):
-                    continue
+        if verbose and torch.any(torch.isnan(partial)):
+            for name, norm in zip(param_map[mp_groups], per_tensor_norms):
+                if torch.isnan(norm):
+                    print(f"Gradient norm is NaN for parameter {name}")
 
-                dist.all_reduce(gnorm, group=comm.get_group(group))
+        partials.append(partial)
 
-        gnorms.append(gnorm)
-
-    if verbose:
-        for gnorm in gnorms:
-            if torch.any(torch.isnan(gnorm)):
-                print(f"Gradient norm is NaN for parameter {name}")
-
-    # compute total norm
-    if gnorms:
-        total_gnorm = torch.sum(torch.stack(gnorms))
+    if partials:
+        total_gnorm = torch.stack(partials).sum()
     else:
-        total_gnorm = torch.tensor(0.0, device=model.device)
+        total_gnorm = torch.tensor(0.0)
 
-    # post-process norm
     if norm_type == 2.0:
-        total_gnorm = torch.sqrt(total_gnorm)
+        total_gnorm = total_gnorm.sqrt()
 
     return total_gnorm
 
 
 def clip_grads(model, max_grad_norm, norm_type=2.0, verbose=False):
-
-    # iterate over parameters
     with torch.no_grad():
         total_gnorm = _compute_total_grad_norm(model, norm_type=norm_type, verbose=verbose)
 
-        clip_factor = max_grad_norm / (total_gnorm + 1e-6)  # add small epsilon to avoid division by zero
-        clip_factor = torch.clamp(clip_factor, max=1.0)
+        clip_factor = torch.clamp(max_grad_norm / (total_gnorm + 1e-6), max=1.0)
 
-        for param in model.parameters():
-            if param.grad is None:
-                continue
-
-            param.grad.mul_(clip_factor)
+        # skip scaling entirely when the norm is already within bounds
+        if clip_factor < 1.0:
+            grads = [p.grad for p in model.parameters() if p.grad is not None]
+            # _foreach_mul_: one fused kernel instead of one per tensor
+            torch._foreach_mul_(grads, clip_factor)
 
     return total_gnorm
 
