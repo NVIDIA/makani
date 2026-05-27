@@ -727,13 +727,13 @@ class TestHDF5DataLoader(DataLoaderBase, unittest.TestCase):
 
 @unittest.skipUnless(_have_dali, "nvidia.dali is not installed — zarr tests require DALI")
 class TestZarrDataLoader(DataLoaderBase, unittest.TestCase):
-    """DataLoaderBase exercised against zarr-backed files (makani flat format), DALI path only.
+    """DataLoaderBase exercised against zarr-backed files (makani flat format).
 
-    ``MultifilesDataset`` is HDF5-only so there are no ``multifiles=True``
-    variants here — the tests run exactly once, always with the DALI path.
+    Both ``multifiles=True`` (MultifilesDataset, now zarr-aware) and
+    ``multifiles=False`` (DALI) paths are tested, mirroring TestHDF5DataLoader.
+    MultifilesDataset-specific date/index retrieval is also exercised.
 
-    ``zarr_format="wb2"`` testing is pending ``init_wb2_zarr_dataset``.  When
-    added, a ``TestZarrWB2DataLoader`` should exercise it.
+    ``zarr_format="wb2"`` testing lives in ``TestZarrWB2DataLoader``.
     """
 
     @classmethod
@@ -750,33 +750,61 @@ class TestZarrDataLoader(DataLoaderBase, unittest.TestCase):
     def _get_sample(self, path, idx):
         return get_zarr_sample(path, idx)
 
-    # DALI-only (multifiles=False) — one test per behaviour, no parameterization
-    def test_shapes_and_sample_counts(self):
-        self._test_shapes_and_sample_counts(False)
+    @parameterized.expand(_multifiles_params, skip_on_empty=False)
+    def test_shapes_and_sample_counts(self, multifiles):
+        self._test_shapes_and_sample_counts(multifiles)
 
-    def test_content(self):
-        self._test_content(False)
+    @parameterized.expand(_multifiles_params, skip_on_empty=False)
+    def test_content(self, multifiles):
+        self._test_content(multifiles)
 
-    def test_content_normalization_zscore(self):
-        self._test_content_normalization_zscore(False)
+    @parameterized.expand(_multifiles_params, skip_on_empty=False)
+    def test_content_normalization_zscore(self, multifiles):
+        self._test_content_normalization_zscore(multifiles)
 
-    def test_channel_ordering(self):
-        self._test_channel_ordering(False)
+    @parameterized.expand(_multifiles_params, skip_on_empty=False)
+    def test_channel_ordering(self, multifiles):
+        self._test_channel_ordering(multifiles)
 
-    def test_history(self):
-        self._test_history(False)
+    @parameterized.expand(_multifiles_params, skip_on_empty=False)
+    def test_history(self, multifiles):
+        self._test_history(multifiles)
 
-    def test_future(self):
-        self._test_future(False)
+    @parameterized.expand(_multifiles_params, skip_on_empty=False)
+    def test_future(self, multifiles):
+        self._test_future(multifiles)
 
-    def test_autoreg(self):
-        self._test_autoreg(False)
+    @parameterized.expand(_multifiles_params, skip_on_empty=False)
+    def test_autoreg(self, multifiles):
+        self._test_autoreg(multifiles)
 
-    def test_distributed(self):
-        self._test_distributed(False)
+    @parameterized.expand(_multifiles_params, skip_on_empty=False)
+    def test_distributed(self, multifiles):
+        self._test_distributed(multifiles)
 
-    def test_distributed_subsampling(self):
-        self._test_distributed_subsampling(False)
+    @parameterized.expand(_multifiles_params, skip_on_empty=False)
+    def test_distributed_subsampling(self, multifiles):
+        self._test_distributed_subsampling(multifiles)
+
+    def test_date_retrieval(self):
+        self.params.multifiles = True
+        train_loader, _, _ = get_dataloader(self.params, self.params.train_data_path, mode="train", device=self.device)
+        dhours = 24
+        time1 = train_loader.dataset.get_time_at_index(10)
+        time1_comp = dt.datetime(year=2017, month=1, day=1, hour=0, minute=0, second=0, tzinfo=dt.timezone.utc) + dt.timedelta(hours=dhours * 10)
+        self.assertEqual(time1, time1_comp)
+        time2 = train_loader.dataset.get_time_at_index(365)
+        time2_comp = dt.datetime(year=2018, month=1, day=1, hour=0, minute=0, second=0, tzinfo=dt.timezone.utc)
+        self.assertEqual(time2, time2_comp)
+
+    def test_index_retrieval(self):
+        self.params.multifiles = True
+        train_loader, _, _ = get_dataloader(self.params, self.params.train_data_path, mode="train", device=self.device)
+        dhours = 24
+        tstamp = dt.datetime(year=2017, month=1, day=1, hour=0, minute=0, second=0, tzinfo=dt.timezone.utc) + dt.timedelta(hours=dhours * 10)
+        self.assertEqual(train_loader.dataset.get_index_at_time(tstamp), 10)
+        tstamp = dt.datetime(year=2018, month=1, day=1, hour=0, minute=0, second=0, tzinfo=dt.timezone.utc)
+        self.assertEqual(train_loader.dataset.get_index_at_time(tstamp), 365)
 
 
 @unittest.skipUnless(_have_dali, "nvidia.dali is not installed — zarr WB2 tests require DALI")
