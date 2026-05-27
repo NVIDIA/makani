@@ -197,12 +197,15 @@ class AutoencoderTrainer(Driver):
 
         self._compile_model(inp_shape)
 
-        # get visualizer
-        out_bias, out_scale = self.train_dataloader.get_output_normalization()
-        self.visualizer = self.init_visualizer(self.params, self.lat_lon_global, out_bias, out_scale, self.device)
+        # get visualizer: only world-rank 0 renders/logs; other ranks get None.
+        if self.world_rank == 0:
+            out_bias, out_scale = self.train_dataloader.get_output_normalization()
+            self.visualizer = self.init_visualizer(self.params, self.lat_lon_global, out_bias, out_scale, self.device)
 
-        if self.visualizer is None:
-            self.logger.info("No channels to visualize, skipping visualization.")
+            if self.visualizer is None:
+                self.logger.info("No channels to visualize, skipping visualization.")
+        else:
+            self.visualizer = None
 
         # reload checkpoints
         counters = {"iters": 0, "start_epoch": 0}
@@ -577,7 +580,7 @@ class AutoencoderTrainer(Driver):
         # initialize metrics buffers
         self.metrics.zero_buffers()
 
-        visualize_data = self.params.log_video and (epoch % self.params.log_video == 0) and (self.visualizer is not None)
+        visualize_data = self.params.log_video and (epoch % self.params.log_video == 0)
 
         # we need to distinguish between DDP and no-DDP
         if isinstance(self.model_eval, torch.nn.parallel.DistributedDataParallel):
@@ -634,19 +637,20 @@ class AutoencoderTrainer(Driver):
                             else:
                                 pred_gather = pred[0, ...].clone()
                                 targ_gather = inpt[0, ...].clone()
-                            if self.visualizer.stream is not None:
-                                self.visualizer.stream.wait_stream(torch.cuda.current_stream())
-                            with torch.cuda.stream(self.viz_stream):
-                                self.visualizer.prediction_cpu.copy_(pred_gather, non_blocking=True)
-                                self.visualizer.target_cpu.copy_(targ_gather, non_blocking=True)
-                            if self.viz_stream is not None:
-                                self.visualizer.stream.synchronize()
+                            if self.visualizer is not None:
+                                if self.visualizer.stream is not None:
+                                    self.visualizer.stream.wait_stream(torch.cuda.current_stream())
+                                with torch.cuda.stream(self.viz_stream):
+                                    self.visualizer.prediction_cpu.copy_(pred_gather, non_blocking=True)
+                                    self.visualizer.target_cpu.copy_(targ_gather, non_blocking=True)
+                                if self.viz_stream is not None:
+                                    self.visualizer.stream.synchronize()
 
-                            pred_cpu = self.visualizer.prediction_cpu.to(torch.float32).numpy()
-                            targ_cpu = self.visualizer.target_cpu.to(torch.float32).numpy()
+                                pred_cpu = self.visualizer.prediction_cpu.to(torch.float32).numpy()
+                                targ_cpu = self.visualizer.target_cpu.to(torch.float32).numpy()
 
-                            tag = f"step{eval_steps}_time{str(idt).zfill(3)}"
-                            self.visualizer.add(tag, pred_cpu, targ_cpu)
+                                tag = f"step{eval_steps}_time{str(idt).zfill(3)}"
+                                self.visualizer.add(tag, pred_cpu, targ_cpu)
 
                     # log the loss
                     progress_bar.set_postfix({"loss": loss.item()})
@@ -666,7 +670,7 @@ class AutoencoderTrainer(Driver):
 
         # finalize plotting
         viz_time = time.perf_counter_ns()
-        if visualize_data:
+        if visualize_data and self.visualizer is not None:
             self.visualizer.finalize()
         viz_time = (time.perf_counter_ns() - viz_time) * 10 ** (-9)
 
