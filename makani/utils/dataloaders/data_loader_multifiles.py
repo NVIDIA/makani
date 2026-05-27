@@ -27,6 +27,7 @@ import torch
 import numpy as np
 from torch.utils.data import Dataset
 import h5py
+import zarr
 
 # for data normalization
 from makani.utils.dataloaders.data_helpers import get_date_from_timestamp, get_timedelta_from_timestamp, get_default_aws_connector
@@ -229,6 +230,78 @@ class MultifilesDataset(Dataset):
 
         return
 
+    # zarr routines
+    @staticmethod
+    def _zarr_open(path, mode="r"):
+        try:
+            return zarr.open_consolidated(path, mode=mode)
+        except KeyError:
+            return zarr.open_group(path, mode=mode)
+
+    def _get_stats_zarr(self, enable_logging):
+        fn_handle = get_timedelta_from_timestamp if self.relative_timestamp else get_date_from_timestamp
+
+        self.n_samples_file = []
+        self.date_ranges = []
+        timestamps = []
+
+        with self._zarr_open(self.files_paths[0]) as _f:
+            if enable_logging:
+                logging.info("Getting file stats from {}".format(self.files_paths[0]))
+            dset = _f[self.dataset_name]
+            self.img_shape = dset.shape[2:4]
+            self.total_channels = dset.shape[1]
+            self.n_samples_file.append(dset.shape[0])
+            self.lat_lon = (
+                np.asarray(_f[self.latitude_name]).tolist(),
+                np.asarray(_f[self.longitude_name]).tolist(),
+            )
+            tstamps = self._zarr_read_timestamps(_f, dset)
+            self.date_ranges.append((fn_handle(tstamps[0]), fn_handle(tstamps[-1])))
+            timestamps.append(tstamps)
+
+        for filename in self.files_paths[1:]:
+            with self._zarr_open(filename) as _f:
+                dset = _f[self.dataset_name]
+                self.n_samples_file.append(dset.shape[0])
+                tstamps = self._zarr_read_timestamps(_f, dset)
+                self.date_ranges.append((fn_handle(tstamps[0]), fn_handle(tstamps[-1])))
+                timestamps.append(tstamps)
+
+        lower_order = np.argsort([x[0] for x in self.date_ranges])
+        upper_order = np.argsort([x[1] for x in self.date_ranges])
+        if not np.all(lower_order == upper_order):
+            raise RuntimeError("The files might have overlapping date ranges. Please make sure the individual files have disjoint ranges")
+        lower_order = lower_order.tolist()
+
+        self.files_paths = [self.files_paths[idx] for idx in lower_order]
+        self.n_samples_file = [self.n_samples_file[idx] for idx in lower_order]
+        timestamps = [timestamps[idx] for idx in lower_order]
+        self.timestamps = np.concatenate(timestamps, axis=0)
+        self.datestamps = self.date_fn(self.timestamps)
+        self.date_ranges = [self.date_ranges[idx] for idx in lower_order]
+
+        dhours_list = [int(d.total_seconds() // 3600.) for d in (self.datestamps[1:] - self.datestamps[:-1]).tolist()]
+        if min(dhours_list) != max(dhours_list):
+            raise RuntimeError("The time difference between steps is not constant, provide a dataset where this is the case")
+        self.dhours = dhours_list[0]
+
+    def _zarr_read_timestamps(self, group, dset):
+        """Return timestamps as Unix float seconds, regardless of zarr store convention."""
+        keys_to_try = [self.timestamp_name]
+        if "time" != self.timestamp_name:
+            keys_to_try.append("time")
+        for key in keys_to_try:
+            if key in group:
+                raw = np.asarray(group[key])
+                if np.issubdtype(raw.dtype, np.datetime64):
+                    return raw.astype("datetime64[s]").astype(np.float64)
+                return raw.astype(np.float64)
+        raise KeyError(
+            f"No timestamp coordinate found in zarr store. "
+            f"Tried: {keys_to_try}. Available keys: {list(group.keys())}"
+        )
+
     def _get_files_stats(self, enable_logging):
 
         if isinstance(self.location, str):
@@ -258,11 +331,21 @@ class MultifilesDataset(Dataset):
         if self.files_paths:
             self.file_format = "h5"
         else:
-            raise IOError(f"Error, the specified file path {self.location} does not contain hdf5 files.")
+            # fall back to zarr (makani flat format: one ????.zarr directory per year)
+            for location in self.location:
+                if os.path.isdir(location):
+                    self.files_paths += glob.glob(os.path.join(location, "????.zarr"))
+            if self.files_paths:
+                self.file_format = "zarr"
+            else:
+                raise IOError(f"Error, the specified file path {self.location} does not contain h5 or zarr files.")
 
         # get stats from files
         self.files_paths.sort()
-        self._get_stats_h5(enable_logging)
+        if self.file_format == "h5":
+            self._get_stats_h5(enable_logging)
+        else:
+            self._get_stats_zarr(enable_logging)
 
         # extract the years from filenames
         if not self.relative_timestamp:
@@ -361,9 +444,19 @@ class MultifilesDataset(Dataset):
 
         return cos_zenith
 
-    def _open_file(self, file_idx):
+    def _open_file_h5(self, file_idx):
         _file = h5py.File(self.files_paths[file_idx], "r", driver=self.file_driver, **self.file_driver_kwargs)
         self.files[file_idx] = _file[self.dataset_name]
+
+    def _open_file_zarr(self, file_idx):
+        g = self._zarr_open(self.files_paths[file_idx])
+        self.files[file_idx] = g[self.dataset_name]
+
+    def _open_file(self, file_idx):
+        if self.file_format == "h5":
+            self._open_file_h5(file_idx)
+        else:
+            self._open_file_zarr(file_idx)
 
     def _get_indices(self, global_idx):
         file_idx = bisect_right(self.file_offsets, global_idx) - 1
