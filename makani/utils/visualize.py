@@ -181,20 +181,21 @@ def visualize_field(tag, func_string, prediction, target, lat, lon, scale, bias,
 class VisualizationWrapper(object):
     "Handles visualization during training"
 
-    def __init__(self, log_to_wandb, path, prefix, plot_list, lat=None, lon=None, scale=1.0, bias=0.0, num_workers=1):
+    def __init__(self, log_to_wandb, path, prefix, plot_list, lat=None, lon=None, scale=1.0, bias=0.0, num_workers=1, channel_indices=None):
         self.log_to_wandb = log_to_wandb
         self.generate_video = True
         self.path = path
         self.prefix = prefix
         self.plot_list = plot_list
+        self.channel_indices = channel_indices if channel_indices is not None else slice(None)
 
         # grid
         self.lat = lat
         self.lon = lon
 
         # normalization
-        self.scale = scale
-        self.bias = bias
+        self.scale = scale if isinstance(scale, (int, float)) else scale[self.channel_indices].copy()
+        self.bias = bias if isinstance(bias, (int, float)) else bias[self.channel_indices].copy()
 
         # this is for parallel processing
         ctx = mp.get_context("spawn")
@@ -210,8 +211,13 @@ class VisualizationWrapper(object):
             field_name = item["name"]
             func_string = item["functor"]
             plot_diverge = item["diverging"]
+
+            # copy only the channels we need for visualisation
+            # assume the functors have been correctly defined only over these
+            pred = prediction[self.channel_indices].copy()
+            tar = target[self.channel_indices].copy()
             self.requests.append(
-                self.executor.submit(visualize_field, (tag, field_name), func_string, np.copy(prediction), np.copy(target), self.lat, self.lon, self.scale, self.bias, plot_diverge)
+                self.executor.submit(visualize_field, (tag, field_name), func_string, pred, tar, self.lat, self.lon, self.scale, self.bias, plot_diverge)
             )
 
         return
