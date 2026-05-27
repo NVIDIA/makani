@@ -162,12 +162,13 @@ class TestBuildWb2ChannelMap(unittest.TestCase):
 class TestSplitConvertChannelNames(unittest.TestCase):
 
     def test_mixed_channels_split_correctly(self):
-        channels = ["u10m", "t2m", "z500", "u500", "t850"]
+        # balanced grid: same variables (z, u) at each level (500, 850)
+        channels = ["u10m", "t2m", "z500", "u500", "z850", "u850"]
         atm_names, atm_wb2, surf_names, surf_wb2, levels = split_convert_channel_names(channels)
         self.assertIn("z",   atm_names)
         self.assertIn("u",   atm_names)
         self.assertNotIn("t2m", atm_names)
-        self.assertIn("geopotential",       atm_wb2)
+        self.assertIn("geopotential",        atm_wb2)
         self.assertIn("u_component_of_wind", atm_wb2)
         self.assertIn("u10m", surf_names)
         self.assertIn("t2m",  surf_names)
