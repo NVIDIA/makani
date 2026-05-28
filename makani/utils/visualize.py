@@ -15,6 +15,7 @@
 
 import os
 import io
+import re
 import multiprocessing as mp
 import numpy as np
 import concurrent.futures as cf
@@ -23,6 +24,48 @@ from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
 import wandb
 
 import torch
+
+_PLACEHOLDER_RE = re.compile(r"\{(\w+)\}")
+
+
+def resolve_plot_list(plot_list, channel_names):
+    """
+    Resolve symbolic ``{name}`` channel references in functor strings.
+
+    Each functor string in ``plot_list`` may reference channels by name using
+    ``{name}`` placeholders (e.g. ``"lambda x: x[{z500}, ...]"``). This walks
+    the list, collects the union of referenced channels in first-seen order,
+    rewrites each functor to index into a stripped tensor of just those
+    channels, and returns the new plot list together with the indices into the
+    original ``channel_names`` layout.
+    """
+    ordered_refs = []
+    seen = set()
+    for item in plot_list:
+        for name in _PLACEHOLDER_RE.findall(item["functor"]):
+            if name not in seen:
+                seen.add(name)
+                ordered_refs.append(name)
+
+    stripped_index = {name: i for i, name in enumerate(ordered_refs)}
+
+    channel_indices = []
+    for name in ordered_refs:
+        if name not in channel_names:
+            raise ValueError(
+                f"functor references channel {name!r} which is not in channel_names"
+            )
+        channel_indices.append(channel_names.index(name))
+
+    new_plot_list = []
+    for item in plot_list:
+        new_item = dict(item)
+        new_item["functor"] = _PLACEHOLDER_RE.sub(
+            lambda m: str(stripped_index[m.group(1)]), item["functor"]
+        )
+        new_plot_list.append(new_item)
+
+    return new_plot_list, channel_indices
 
 # we can run matplotlib in Agg mode in the subprocesses to save some memory overhead
 def _worker_init():
@@ -143,7 +186,6 @@ def plot_rollout_metrics(metric_curves, var_names, score_path=None, file_prefix=
         y_locator = ticker.MaxNLocator(nbins=20)
         ax.yaxis.set_major_locator(y_locator)
         ax.grid(which="major", alpha=0.5)
-        ax.legend()
         ax.set_xlabel("Time [h]")
         ax.set_ylabel(file_prefix + " " + var_name)
         plt.setp(ax.get_xticklabels(), rotation=45, horizontalalignment="right")
@@ -151,9 +193,6 @@ def plot_rollout_metrics(metric_curves, var_names, score_path=None, file_prefix=
         # write out the plot
         if score_path is not None:
             fig.savefig(os.path.join(score_path, file_prefix + "_" + var_name + ".png"))
-        # # push to wandb
-        # if params.log_to_wandb:
-        #     wandb.log({metric + "_" + var_name: wandb.Image(fig)}, step=epoch)
 
 
 def visualize_field(tag, func_string, prediction, target, lat, lon, scale, bias, diverging):
@@ -181,21 +220,33 @@ def visualize_field(tag, func_string, prediction, target, lat, lon, scale, bias,
 class VisualizationWrapper(object):
     "Handles visualization during training"
 
-    def __init__(self, log_to_wandb, path, prefix, plot_list, lat=None, lon=None, scale=1.0, bias=0.0, num_workers=1, channel_indices=None):
+    def __init__(self, log_to_wandb, path, prefix, plot_list, channel_names=None, lat=None, lon=None, scale=1.0, bias=0.0, num_workers=1):
         self.log_to_wandb = log_to_wandb
         self.generate_video = True
         self.path = path
         self.prefix = prefix
-        self.plot_list = plot_list
-        self.channel_indices = channel_indices if channel_indices is not None else slice(None)
+
+        # If channel_names is provided, resolve {name} placeholders in functor
+        # strings to indices into a stripped tensor that contains only the
+        # referenced channels. This avoids shipping unused channels to the
+        # renderer subprocesses.
+        if channel_names is not None:
+            self.plot_list, self.channel_indices = resolve_plot_list(plot_list, channel_names)
+        else:
+            self.plot_list = plot_list
+            self.channel_indices = None
 
         # grid
         self.lat = lat
         self.lon = lon
 
-        # normalization
-        self.scale = scale if isinstance(scale, (int, float)) else scale[self.channel_indices].copy()
-        self.bias = bias if isinstance(bias, (int, float)) else bias[self.channel_indices].copy()
+        # normalization: slice along the channel axis if we have a stripped index list
+        if self.channel_indices is not None and not isinstance(scale, (int, float)):
+            scale = scale[self.channel_indices].copy()
+        if self.channel_indices is not None and not isinstance(bias, (int, float)):
+            bias = bias[self.channel_indices].copy()
+        self.scale = scale
+        self.bias = bias
 
         # this is for parallel processing
         ctx = mp.get_context("spawn")
@@ -206,16 +257,17 @@ class VisualizationWrapper(object):
         self.requests = []
 
     def add(self, tag, prediction, target):
-        # go through the plot list
+        if self.channel_indices is not None:
+            pred = prediction[self.channel_indices].copy()
+            tar = target[self.channel_indices].copy()
+        else:
+            pred = np.copy(prediction)
+            tar = np.copy(target)
+
         for item in self.plot_list:
             field_name = item["name"]
             func_string = item["functor"]
             plot_diverge = item["diverging"]
-
-            # copy only the channels we need for visualisation
-            # assume the functors have been correctly defined only over these
-            pred = prediction[self.channel_indices].copy()
-            tar = target[self.channel_indices].copy()
             self.requests.append(
                 self.executor.submit(visualize_field, (tag, field_name), func_string, pred, tar, self.lat, self.lon, self.scale, self.bias, plot_diverge)
             )
