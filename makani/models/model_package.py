@@ -24,7 +24,7 @@ import numpy as np
 import torch
 from makani.utils.YParams import ParamsBase
 from makani.utils.driver import Driver
-from makani.third_party.climt.zenith_angle import cos_zenith_angle
+from makani.third_party.climt.zenith_angle_v2 import cos_zenith_angle
 from makani.utils.dataloaders.data_helpers import get_data_normalization
 from makani.models import model_registry
 import datetime

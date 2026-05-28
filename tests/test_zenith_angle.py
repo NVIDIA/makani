@@ -318,5 +318,178 @@ class TestCosZenithAngleEdgeCases(unittest.TestCase):
         self.assertLess(float(np.max(np.abs(np.diff(cz_v2)))), 0.3)
 
 
+# NOAA Solar Position Calculator reference values:
+#   https://gml.noaa.gov/grad/solcalc/azel.html
+#
+# To populate an entry: enter the (date, time, lat, lon) in the calculator
+# using the matching UTC offset, record the reported "Solar Zenith" angle
+# in degrees, and set:
+#   expected_cos_z = math.cos(math.radians(solar_zenith_deg))
+#
+# Datetimes are stored with their local tzinfo so the literal value matches
+# the human-readable label; Python's datetime arithmetic operates on
+# instants, so v2 sees identical input regardless of timezone representation.
+#
+# Entries with expected_cos_z=None are skipped — populate at your leisure.
+# The tolerance below (2e-3) covers float32 rounding and SPA-variant noise.
+# v2 uses Spencer-style polynomial reductions; pvlib uses full NREL SPA with
+# more terms. The largest disagreements show up at low solar elevation,
+# where trig is most sensitive to tiny angular differences (~0.1° → ~1.5e-3
+# in cos_z). 2e-3 leaves headroom there while still catching any real bug:
+# v2 must agree with NREL SPA to within 0.2% of cos_z across the globe.
+_EDT = dt.timezone(dt.timedelta(hours=-4))   # US east coast, summer DST
+_JST = dt.timezone(dt.timedelta(hours=9))    # Japan, no DST
+_AEDT = dt.timezone(dt.timedelta(hours=11))  # Sydney, southern DST
+_NOAA_REFERENCE = [
+    # (datetime in local zone, lat, lon, expected_cos_z, label)
+    # Generated via tests/generate_zenith_reference.py (pvlib NREL SPA, no refraction).
+    (dt.datetime(2024, 6, 21, 12, 0, 0, tzinfo=dt.timezone.utc),  23.44,    0.0, 0.999970, "june solstice, subsolar lat, GMT"),
+    (dt.datetime(2024, 12, 21, 12, 0, 0, tzinfo=dt.timezone.utc), -23.44,   0.0, 0.999977, "dec solstice, subsolar lat, GMT"),
+    (dt.datetime(2024, 3, 20, 12, 0, 0, tzinfo=dt.timezone.utc),   0.0,     0.0, 0.999488, "march equinox, equator, GMT"),
+    (dt.datetime(2024, 9, 22, 12, 0, 0, tzinfo=dt.timezone.utc),   0.0,     0.0, 0.999468, "sept equinox, equator, GMT"),
+    (dt.datetime(2024, 7, 4, 14, 0, 0, tzinfo=_EDT),               40.0,   -75.0, 0.934621, "summer afternoon, eastern US"),
+    (dt.datetime(2024, 1, 15, 15, 0, 0, tzinfo=_JST),              35.0,   139.0, 0.316050, "winter afternoon, tokyo"),
+    (dt.datetime(2024, 11, 10, 11, 0, 0, tzinfo=_AEDT),           -33.9,   151.2, 0.884919, "spring morning, sydney"),
+]
+
+
+@unittest.skipUnless(
+    any(e[3] is not None for e in _NOAA_REFERENCE),
+    "no NOAA reference values populated yet; see _NOAA_REFERENCE",
+)
+class TestExternalReferenceAnchors(unittest.TestCase):
+    """Anchor v2 against an independent ephemeris source (NOAA Solar Position
+    Calculator). Defeats shared-bug invisibility in the v1/v2 cross-checks
+    elsewhere in this file — if both versions share the same astronomical
+    reduction, only an external reference can flag a wrong answer."""
+
+    def test_noaa_reference_values(self, atol=2e-3, rtol=0.0):
+        for t, lat, lon, expected, label in _NOAA_REFERENCE:
+            if expected is None:
+                continue
+            with self.subTest(label=label):
+                t_arr = np.asarray([t])
+                lon_arr = np.array([[float(lon)]])
+                lat_arr = np.array([[float(lat)]])
+                got = float(v2.cos_zenith_angle(t_arr, lon_arr, lat_arr).reshape(-1)[0])
+                self.assertTrue(
+                    abs(got - expected) <= atol + rtol * abs(expected),
+                    f"{label}: cos_z={got}, expected {expected} (|Δ|={abs(got-expected):.2e}, atol={atol})",
+                )
+
+
+class TestAnalyticalAnchors(unittest.TestCase):
+    """Physics-only anchors that hold by construction — no external ephemeris
+    needed. These catch bugs that would slip past both v1/v2 cross-checks and
+    NOAA-reference checks (e.g. a sign-flipping bug that happens to preserve
+    one specific reference value)."""
+
+    def test_antipodal_symmetry(self):
+        """For any (t, lon, lat): cos_z(t, lon+180, -lat) = -cos_z(t, lon, lat).
+
+        The antipode of any point sees the sun at the negated elevation — sin
+        is odd, so cos(zenith) flips sign exactly. This is a topological fact
+        about the sphere, independent of the sun's position."""
+        t = np.asarray([
+            dt.datetime(2024, 1, 15, 6, 0, 0, tzinfo=dt.timezone.utc),
+            dt.datetime(2024, 6, 21, 12, 0, 0, tzinfo=dt.timezone.utc),
+            dt.datetime(2024, 12, 21, 18, 0, 0, tzinfo=dt.timezone.utc),
+        ])
+        lat = np.array([[10.0, -30.0, 45.0, -60.0]])
+        lon = np.array([[0.0, 90.0, -45.0, 170.0]])
+        a = v2.cos_zenith_angle(t, lon, lat)
+        b = v2.cos_zenith_angle(t, lon + 180.0, -lat)
+        self.assertTrue(compare_arrays(
+            "antipodal symmetry", a, -b, atol=1e-5, rtol=0.0
+        ))
+
+    def test_subsolar_point_exists(self):
+        """At any instant, the sun is directly overhead at exactly one point
+        on Earth between lat ±23.44° (the subsolar point). A fine global scan
+        must contain a point with cos_z ≈ 1."""
+        for t_single in [
+            dt.datetime(2024, 1, 15, 6, 0, 0, tzinfo=dt.timezone.utc),
+            dt.datetime(2024, 4, 7, 14, 30, 0, tzinfo=dt.timezone.utc),
+            dt.datetime(2024, 8, 21, 21, 0, 0, tzinfo=dt.timezone.utc),
+            dt.datetime(2024, 11, 30, 3, 15, 0, tzinfo=dt.timezone.utc),
+        ]:
+            with self.subTest(t=t_single.isoformat()):
+                t = np.asarray([t_single])
+                # 0.25° resolution in the tropical band where the subsolar point lives
+                lon = np.linspace(-180.0, 180.0, 1441)[None, :]
+                lat = np.linspace(-25.0, 25.0, 201)[:, None]
+                lon_grid, lat_grid = np.broadcast_arrays(lon, lat)
+                cz = v2.cos_zenith_angle(t, lon_grid.copy(), lat_grid.copy())
+                self.assertGreater(float(cz.max()), 0.9995)
+
+    def test_terminator_crossing(self):
+        """A great-circle scan starting from the subsolar point must cross
+        cos_z = 0 (the terminator / day-night boundary). We don't need to
+        know where the subsolar point is — just that the max and min over
+        a global grid straddle zero with the boundary crossed somewhere."""
+        t = np.asarray([dt.datetime(2024, 5, 15, 12, 0, 0, tzinfo=dt.timezone.utc)])
+        lon = np.linspace(-180.0, 180.0, 361)[None, :]
+        lat = np.linspace(-90.0, 90.0, 181)[:, None]
+        lon_grid, lat_grid = np.broadcast_arrays(lon, lat)
+        cz = v2.cos_zenith_angle(t, lon_grid.copy(), lat_grid.copy())[0]
+        self.assertGreater(float(cz.max()), 0.99)   # subsolar nearby
+        self.assertLess(float(cz.min()), -0.99)     # antisolar nearby
+        # Continuity: at least one zero-crossing per latitude band away from poles
+        mid_band = cz[40:-40]  # exclude polar caps where day/night may be 24h
+        sign_changes = np.diff(np.sign(mid_band), axis=1)
+        self.assertTrue(np.all(np.any(sign_changes != 0, axis=1)),
+                        "every mid-latitude band should cross the terminator")
+
+
+class TestTimezoneContract(unittest.TestCase):
+    """Pin down how v2.cos_zenith_angle handles naive datetimes, alternate
+    timezones, and numpy.datetime64. v2 is the production path."""
+
+    def test_alternate_timezone_matches_utc(self):
+        """Same instant expressed in UTC vs +09:00 must give identical cos_z.
+        Python's datetime subtraction works on instants, not wall-clock time,
+        so a tz-aware comparison here is purely a smoke test on the semantics."""
+        utc = dt.datetime(2024, 6, 21, 12, 0, 0, tzinfo=dt.timezone.utc)
+        tokyo = utc.astimezone(dt.timezone(dt.timedelta(hours=9)))
+        self.assertEqual(utc, tokyo)
+        lon_grid, lat_grid = _sample_grid(step=20.0)
+        a = v2.cos_zenith_angle(np.asarray([utc]), lon_grid, lat_grid)
+        b = v2.cos_zenith_angle(np.asarray([tokyo]), lon_grid, lat_grid)
+        self.assertTrue(compare_arrays("tz-aware UTC vs +09:00", a, b, atol=0.0, rtol=0.0))
+
+    def test_naive_datetime_contract(self):
+        """A naive datetime input must either raise (preferred, explicit) or
+        be treated as UTC. We accept either contract; failing here means the
+        behavior is undefined and a silent timezone bug is possible."""
+        aware = np.asarray([dt.datetime(2024, 6, 21, 12, 0, 0, tzinfo=dt.timezone.utc)])
+        naive = np.asarray([dt.datetime(2024, 6, 21, 12, 0, 0)])
+        lon_grid, lat_grid = _sample_grid(step=20.0)
+        aware_result = v2.cos_zenith_angle(aware, lon_grid, lat_grid)
+        try:
+            naive_result = v2.cos_zenith_angle(naive, lon_grid, lat_grid)
+        except TypeError:
+            return  # clean rejection is acceptable
+        self.assertTrue(compare_arrays(
+            "naive == UTC", aware_result, naive_result, atol=1e-6, rtol=0.0
+        ))
+
+    def test_numpy_datetime64_treated_as_utc(self):
+        """np.datetime64 has no tzinfo and is conventionally UTC. Production
+        dataloaders may produce datetime64 arrays internally, so this needs
+        to either work or fail with a clear error."""
+        aware = np.asarray([dt.datetime(2024, 6, 21, 12, 0, 0, tzinfo=dt.timezone.utc)])
+        dt64 = np.array(["2024-06-21T12:00:00"], dtype="datetime64[s]")
+        lon_grid, lat_grid = _sample_grid(step=20.0)
+        a = v2.cos_zenith_angle(aware, lon_grid, lat_grid)
+        try:
+            b = v2.cos_zenith_angle(dt64, lon_grid, lat_grid)
+        except TypeError:
+            self.skipTest("datetime64 input not supported by v2")
+            return
+        self.assertTrue(compare_arrays(
+            "datetime64 == aware UTC", a, b, atol=1e-6, rtol=0.0
+        ))
+
+
 if __name__ == "__main__":
     unittest.main()

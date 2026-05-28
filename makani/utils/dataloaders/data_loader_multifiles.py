@@ -434,7 +434,7 @@ class MultifilesDataset(Dataset):
 
     def _compute_zenith_angle(self, times):
         # import
-        from makani.third_party.climt.zenith_angle import cos_zenith_angle
+        from makani.third_party.climt.zenith_angle_v2 import cos_zenith_angle
 
         # convert to datetimes:
         times_dt = self.date_fn(times)
