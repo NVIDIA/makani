@@ -121,18 +121,3 @@ def cos_zenith_angle(
 
     cos_h = np.cos(gmst_minus_ra + lon_rad)
     return sin_lat * sin_dec + cos_lat * cos_dec * cos_h
-
-
-if __name__ == "__main__":
-    lon = np.arange(0, 360, 20.0)
-    lat = np.arange(-90, 90.25, 10.0)[::-1]
-    lon_grid, lat_grid = np.meshgrid(lon, lat)
-
-    model_time = np.asarray([
-        dt.datetime(2002, 1, 1, 12, 0, 0, tzinfo=dt.timezone.utc),
-        dt.datetime(2002, 6, 1, 12, 0, 0, tzinfo=dt.timezone.utc),
-        dt.datetime(2003, 1, 1, 12, 0, 0, tzinfo=dt.timezone.utc),
-    ])
-    za = cos_zenith_angle(model_time, lon=lon_grid, lat=lat_grid)
-    print("zenith angle shape:", za.shape, "dtype:", za.dtype)
-    print(za)
