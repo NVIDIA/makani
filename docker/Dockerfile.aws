@@ -27,7 +27,7 @@ RUN apt remove cmake -y && \
     pip install cmake --upgrade
 
 # install mpi4py
-RUN SETUPTOOLS_USE_DISTUTILS=local pip install mpi4py
+RUN pip install mpi4py
 
 # install onnx
 RUN pip install onnxruntime onnxruntime-gpu
@@ -131,7 +131,7 @@ RUN cd /tmp && wget https://support.hdfgroup.org/releases/hdf5/v2_0/v2_0_0/downl
     .. && \
     make -j 8 && make install && \
     mkdir -p /opt/hdf5/lib/plugin
-RUN CC="mpicc" HDF5_MPI=ON H5PY_ROS3=1 H5PY_DIRECT_VFD=1 HDF5_DIR=/opt/hdf5 pip install --no-build-isolation --no-binary=h5py h5py==3.15.1
+RUN CC="mpicc" HDF5_MPI=ON H5PY_ROS3=1 H5PY_DIRECT_VFD=1 HDF5_DIR=/opt/hdf5 pip install --no-build-isolation --no-binary=h5py h5py==3.16.0
 ENV PATH=/opt/hdf5/bin:${PATH}
 
 # install cdsapi for downloading the dataset
