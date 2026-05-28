@@ -199,7 +199,7 @@ This collection of scripts provides a complete pipeline for data preprocessing, 
 
 ## Optimizations
 
-If you run into CUDA OOM errors when running some modern models such as FourCastNet3, then it is likely attributed to buffer fragmentation in torch anaged memory pool. In order to mitigate this, you can define the environment variable
+If you run into CUDA OOM errors when running some modern models such as FourCastNet3, then it is likely attributed to buffer fragmentation in the memory pool managed by torch. In order to mitigate this, you can define the environment variable
 
 ```bash
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
