@@ -39,6 +39,7 @@ if _have_visualize_deps:
         _worker_init,
         plot_comparison,
         plot_rollout_metrics,
+        resolve_plot_list,
         visualize_field,
     )
 
@@ -148,6 +149,76 @@ class TestWorkerInit(unittest.TestCase):
                 os.environ["MPLBACKEND"] = original
 
 
+@unittest.skipUnless(_have_visualize_deps, "matplotlib and/or PIL are not installed")
+class TestResolvePlotList(unittest.TestCase):
+    """Unit tests for the symbolic {name}-placeholder resolver."""
+
+    def test_single_channel_substituted(self):
+        plot_list = [{"name": "z500", "functor": "lambda x: x[{z500}, ...]", "diverging": False}]
+        new_list, indices = resolve_plot_list(plot_list, ["u10m", "v10m", "z500", "q100"])
+        self.assertEqual(indices, [2])
+        # only one referenced channel => it lands at stripped index 0
+        self.assertEqual(new_list[0]["functor"], "lambda x: x[0, ...]")
+        # non-functor fields are preserved
+        self.assertEqual(new_list[0]["name"], "z500")
+        self.assertEqual(new_list[0]["diverging"], False)
+
+    def test_multiple_placeholders_in_single_functor(self):
+        plot_list = [{
+            "name": "wind",
+            "functor": "lambda x: np.sqrt(np.square(x[{u10m}, ...]) + np.square(x[{v10m}, ...]))",
+            "diverging": False,
+        }]
+        new_list, indices = resolve_plot_list(plot_list, ["u10m", "v10m", "z500"])
+        self.assertEqual(indices, [0, 1])
+        self.assertEqual(
+            new_list[0]["functor"],
+            "lambda x: np.sqrt(np.square(x[0, ...]) + np.square(x[1, ...]))",
+        )
+
+    def test_first_seen_ordering(self):
+        # channels referenced in a non-source order: stripped indices follow
+        # first-appearance order in the plot_list, not the original layout.
+        plot_list = [
+            {"name": "a", "functor": "lambda x: x[{q100}, ...]", "diverging": False},
+            {"name": "b", "functor": "lambda x: x[{u10m}, ...]", "diverging": False},
+        ]
+        new_list, indices = resolve_plot_list(plot_list, ["u10m", "v10m", "z500", "q100"])
+        # q100 seen first -> stripped index 0 -> original index 3
+        # u10m seen second -> stripped index 1 -> original index 0
+        self.assertEqual(indices, [3, 0])
+        self.assertEqual(new_list[0]["functor"], "lambda x: x[0, ...]")
+        self.assertEqual(new_list[1]["functor"], "lambda x: x[1, ...]")
+
+    def test_duplicate_references_dedup(self):
+        plot_list = [
+            {"name": "a", "functor": "lambda x: x[{z500}, ...]", "diverging": False},
+            {"name": "b", "functor": "lambda x: x[{z500}, ...] * 2", "diverging": False},
+        ]
+        new_list, indices = resolve_plot_list(plot_list, ["u10m", "z500"])
+        self.assertEqual(indices, [1])
+        self.assertEqual(new_list[0]["functor"], "lambda x: x[0, ...]")
+        self.assertEqual(new_list[1]["functor"], "lambda x: x[0, ...] * 2")
+
+    def test_no_placeholders_returns_empty_indices(self):
+        plot_list = [{"name": "raw", "functor": "lambda x: x", "diverging": False}]
+        new_list, indices = resolve_plot_list(plot_list, ["u10m", "v10m"])
+        self.assertEqual(indices, [])
+        self.assertEqual(new_list[0]["functor"], "lambda x: x")
+
+    def test_unknown_channel_raises(self):
+        plot_list = [{"name": "bad", "functor": "lambda x: x[{nonexistent}, ...]", "diverging": False}]
+        with self.assertRaises(ValueError):
+            resolve_plot_list(plot_list, ["u10m", "v10m"])
+
+    def test_does_not_mutate_input(self):
+        original = "lambda x: x[{z500}, ...]"
+        plot_list = [{"name": "z500", "functor": original, "diverging": False}]
+        resolve_plot_list(plot_list, ["z500"])
+        # input dict's functor string should be unchanged
+        self.assertEqual(plot_list[0]["functor"], original)
+
+
 @unittest.skipUnless(_have_visualize_deps and _have_moviepy, "matplotlib, PIL, or moviepy is not installed")
 class TestVisualizationWrapper(unittest.TestCase):
     """End-to-end smoke test for the multiprocess visualization pipeline."""
@@ -230,6 +301,63 @@ class TestVisualizationWrapper(unittest.TestCase):
             self.assertEqual(len(wrapper.requests), 2)
         finally:
             wrapper.executor.shutdown(wait=True)
+
+    def test_channel_names_rewrites_plot_list_and_slices_scale_bias(self):
+        channel_names = ["u10m", "v10m", "z500", "q100", "t2m"]
+        plot_list = [
+            {"name": "wind",
+             "functor": "lambda x: np.sqrt(np.square(x[{u10m}, ...]) + np.square(x[{v10m}, ...]))",
+             "diverging": False},
+            {"name": "z500", "functor": "lambda x: x[{z500}, ...]", "diverging": False},
+        ]
+        scale = np.arange(len(channel_names), dtype=np.float32) + 1.0  # [1, 2, 3, 4, 5]
+        bias = np.arange(len(channel_names), dtype=np.float32) * 10.0  # [0, 10, 20, 30, 40]
+        wrapper = VisualizationWrapper(
+            log_to_wandb=False, path=".", prefix="test",
+            plot_list=plot_list, channel_names=channel_names,
+            scale=scale, bias=bias, num_workers=1,
+        )
+        try:
+            self.assertEqual(wrapper.channel_indices, [0, 1, 2])
+            self.assertEqual(
+                wrapper.plot_list[0]["functor"],
+                "lambda x: np.sqrt(np.square(x[0, ...]) + np.square(x[1, ...]))",
+            )
+            self.assertEqual(wrapper.plot_list[1]["functor"], "lambda x: x[2, ...]")
+            np.testing.assert_array_equal(wrapper.scale, np.array([1.0, 2.0, 3.0]))
+            np.testing.assert_array_equal(wrapper.bias, np.array([0.0, 10.0, 20.0]))
+        finally:
+            wrapper.executor.shutdown(wait=True)
+
+    def test_channel_names_path_runs_end_to_end(self):
+        channel_names = ["u10m", "v10m", "z500", "q100", "t2m"]
+        plot_list = [
+            {"name": "z500", "functor": "lambda x: x[{z500}, ...]", "diverging": False},
+            {"name": "q100", "functor": "lambda x: x[{q100}, ...]", "diverging": True},
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            cwd = os.getcwd()
+            os.chdir(tmp)
+            wrapper = VisualizationWrapper(
+                log_to_wandb=False, path=".", prefix="test",
+                plot_list=plot_list, channel_names=channel_names,
+                scale=1.0, bias=0.0, num_workers=1,
+            )
+            try:
+                rng = np.random.default_rng(4)
+                # full-channel tensors; wrapper must slice down to z500/q100
+                pred = rng.standard_normal((len(channel_names), 16, 32)).astype(np.float32)
+                target = rng.standard_normal((len(channel_names), 16, 32)).astype(np.float32)
+                wrapper.add(tag="0", prediction=pred, target=target)
+                self.assertEqual(len(wrapper.requests), 2)
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                    wrapper.finalize()
+                self.assertTrue(os.path.exists("video_output.gif"))
+                self.assertGreater(os.path.getsize("video_output.gif"), 0)
+            finally:
+                wrapper.executor.shutdown(wait=True)
+                os.chdir(cwd)
 
 
 if __name__ == "__main__":
