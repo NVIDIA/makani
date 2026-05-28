@@ -197,6 +197,20 @@ Statistics and Analysis
 
 This collection of scripts provides a complete pipeline for data preprocessing, statistical analysis, and WeatherBench2 compatibility for weather forecasting models.
 
+## Optimizations
+
+If you run into CUDA OOM errors when running some modern models such as FourCastNet3, then it is likely attributed to buffer fragmentation in torch anaged memory pool. In order to mitigate this, you can define the environment variable
+
+```bash
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+```
+
+This will create a large virtual memory pool into which PyTorch can index. If you want to retain the behaviour of the conventional CUDA allocator, you can also try setting
+
+```bash
+PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512
+```
+
 ## Contributing
 
 Thanks for your interest in contributing. There are many ways to contribute to this project.
