@@ -16,28 +16,20 @@
 import torch
 
 
-@torch.compile
 def _contract_lmwise(ac: torch.Tensor, bc: torch.Tensor) -> torch.Tensor:
-    resc = torch.einsum("bgixy,gioxy->bgoxy", ac, bc)
-    return resc
+    return torch.einsum("bgixy,gioxy->bgoxy", ac, bc)
 
 
-@torch.compile
 def _contract_lwise(ac: torch.Tensor, bc: torch.Tensor) -> torch.Tensor:
-    resc = torch.einsum("bgixy,giox->bgoxy", ac, bc)
-    return resc
+    return torch.einsum("bgixy,giox->bgoxy", ac, bc)
 
 
-@torch.compile
 def _contract_sep_lmwise(ac: torch.Tensor, bc: torch.Tensor) -> torch.Tensor:
-    resc = torch.einsum("bgixy,gixy->bgixy", ac, bc)
-    return resc
+    return torch.einsum("bgixy,gixy->bgixy", ac, bc)
 
 
-@torch.compile
 def _contract_sep_lwise(ac: torch.Tensor, bc: torch.Tensor) -> torch.Tensor:
-    resc = torch.einsum("bgixy,gix->bgixy", ac, bc)
-    return resc
+    return torch.einsum("bgixy,gix->bgixy", ac, bc)
 
 
 def _contract_dense_pytorch(x, weight, separable=False, operator_type="diagonal"):
