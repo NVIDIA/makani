@@ -682,7 +682,7 @@ class GeneralES(object):
         torch.cuda.nvtx.range_push("GeneralES:_compute_zenith_angle")
 
         # import
-        from makani.third_party.climt.zenith_angle import cos_zenith_angle
+        from makani.third_party.climt.zenith_angle_v2 import cos_zenith_angle
 
         # convert to datetimes:
         inp_times_dt = self.date_fn(inp_times)

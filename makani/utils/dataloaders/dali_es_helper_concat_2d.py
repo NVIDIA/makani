@@ -31,7 +31,7 @@ from .data_helpers import get_lat_lon_grid, get_date_from_string, get_date_from_
 from torch_harmonics.distributed import compute_split_shapes
 
 # coszen
-from makani.third_party.climt.zenith_angle import cos_zenith_angle
+from makani.third_party.climt.zenith_angle_v2 import cos_zenith_angle
 
 
 class GeneralConcatES(object):
