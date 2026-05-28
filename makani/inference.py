@@ -263,7 +263,8 @@ if __name__ == "__main__":
             end_date=args.end_date,
             date_step=args.date_step,
             wb2_compatible=args.wb2_compatible,
-            enable_odirect=args.enable_odirect,
+            enable_odirect=params["enable_odirect"],
+            odirect_alignment=params["odirect_alignment"],
         )
 
     # cleanup

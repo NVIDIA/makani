@@ -732,7 +732,16 @@ class GeneralES(object):
         # reducing O_DIRECT thundering-herd collisions at worker startup.
         start = self.shard_id % self.n_years
         for i in range(self.n_years):
-            self.get_year_handle((start + i) % self.n_years)
+            year_idx = (start + i) % self.n_years
+            for _ in range(self.num_retries):
+                try:
+                    self.get_year_handle(year_idx)
+                    break
+                except Exception as err:
+                    print(f"Cannot get year handle {year_idx}. Reason {err}, retrying.", flush=True)
+                    time.sleep(5)
+            else:
+                raise OSError(f"Unable to retrieve year handle {year_idx} after {self.num_retries} attempts, aborting.")
 
     def __len__(self):
         return self.n_samples_shard
