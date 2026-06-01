@@ -65,6 +65,11 @@ class SeededDropout2d(nn.Module):
             self.rng_gpu = torch.Generator(device=torch.cuda.current_device())
             self.rng_gpu.manual_seed(seed)
 
+    # rng_context swaps the global RNG state via (cuda.)get_rng_state/set_rng_state and
+    # stateful torch.Generator objects, none of which Dynamo can trace. Mark the whole
+    # forward as a compile boundary so it runs eagerly instead of erroring/graph-breaking
+    # mid-trace; the surrounding graph still compiles around it.
+    @torch.compiler.disable
     def forward(self, x):
         with rng_context(self.rng_cpu, self.rng_gpu):
             xdrop = self.drop(x)
