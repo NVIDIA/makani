@@ -844,25 +844,27 @@ class VortDivCRPSLoss(VortDivBaseLoss):
         # we assume the following shapes:
         # forecasts: batch, ensemble, channels, lat, lon
         # observations: batch, channels, lat, lon
-        B, E, _, H, W = forecasts.shape
-        C = self.wind_chans.shape[0]
+        B, E, C, H, W = forecasts.shape
+        Cw = self.wind_chans.shape[0]
 
-        # extract wind channels
-        forecasts = forecasts[..., self.wind_chans, :, :].reshape(B, E, C//2, 2, H, W)
-        observations = observations[..., self.wind_chans, :, :].reshape(B, C//2, 2, H, W)
-
-        # get the data type before stripping amp types
-        dtype = forecasts.dtype
-
-        # before anything else compute the transform
-        # as the CDF definition doesn't generalize well to more than one-dimensional variables, we treat complex and imaginary part as the same
+        # Transform the wind channels (u, v pairs) into vorticity/divergence space via
+        # the vector-SHT round-trip and scatter them back in place. Every other (scalar)
+        # channel is passed through unchanged so it still contributes to the score
+        # instead of being silently dropped (see GitHub issue #94).
+        # The CDF definition doesn't generalize well to multi-dimensional variables, so
+        # the two vector components are treated independently.
         with amp.autocast(device_type="cuda", enabled=False):
-            forecasts = self.isht(self.vsht(forecasts.float()))
-            observations = self.isht(self.vsht(observations.float()))
+            forecasts = forecasts.float()
+            observations = observations.float()
 
-        # extract wind channels
-        forecasts = forecasts.reshape(B, E, C, H, W)
-        observations = observations.reshape(B, C, H, W)
+            fc_wind = forecasts[..., self.wind_chans, :, :].reshape(B, E, Cw // 2, 2, H, W)
+            ob_wind = observations[..., self.wind_chans, :, :].reshape(B, Cw // 2, 2, H, W)
+            fc_wind = self.isht(self.vsht(fc_wind)).reshape(B, E, Cw, H, W)
+            ob_wind = self.isht(self.vsht(ob_wind)).reshape(B, Cw, H, W)
+
+            # out-of-place scatter back into the full channel set (original order)
+            forecasts = forecasts.index_copy(-3, self.wind_chans, fc_wind)
+            observations = observations.index_copy(-3, self.wind_chans, ob_wind)
 
         # if ensemble dim is one dimensional then computing the score is quick:
         if (not self.ensemble_distributed) and (E == 1):

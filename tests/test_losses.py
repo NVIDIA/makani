@@ -2539,8 +2539,8 @@ class TestVortDivCRPSLoss(unittest.TestCase):
         fc = _rand_ensemble(self._E, channels=_NUM_WIND_CH)
         obs = _rand(channels=_NUM_WIND_CH)
         out = fn(fc, obs)
-        n_wind = fn.wind_chans.shape[0]
-        self.assertEqual(tuple(out.shape), (_BATCH, n_wind))
+        # the loss now scores all channels (wind in vort/div space + scalars passed through)
+        self.assertEqual(tuple(out.shape), (_BATCH, fn.n_channels))
 
     @parameterized.expand([("skillspread",), ("cdf",)])
     def test_nonneg(self, crps_type):
@@ -2589,6 +2589,31 @@ class TestVortDivCRPSLoss(unittest.TestCase):
         obs = _rand(channels=_NUM_WIND_CH)
         with self.assertRaises(ValueError):
             fn(fc, obs)
+
+    def test_scores_all_channels(self):
+        """Regression for issue #94: non-wind (scalar) channels must contribute to the
+        loss instead of being silently dropped."""
+        fn = self._fn("skillspread")
+
+        # the loss now covers the whole state, not just the wind channels
+        self.assertEqual(fn.n_channels, len(_WIND_CHANNEL_NAMES))
+        nonwind = [i for i in range(_NUM_WIND_CH) if i not in fn.wind_chans.tolist()]
+        self.assertGreaterEqual(len(nonwind), 1, "test config must contain a non-wind channel")
+
+        obs = _rand(channels=_NUM_WIND_CH)
+        fc = obs.unsqueeze(1).expand(_BATCH, self._E, _NUM_WIND_CH, _IMG_H, _IMG_W).clone()
+        loss_perfect = fn(fc, obs).sum().item()
+
+        # perturbing ONLY a non-wind channel must change the loss
+        fc_pert = fc.clone()
+        fc_pert[:, :, nonwind[0], ...] += 1.0
+        loss_pert = fn(fc_pert, obs).sum().item()
+
+        self.assertGreater(
+            loss_pert, loss_perfect + 1e-3,
+            f"non-wind channel perturbation did not affect the loss "
+            f"(perfect={loss_perfect}, perturbed={loss_pert})",
+        )
 
 
 # ===========================================================================
