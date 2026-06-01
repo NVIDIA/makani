@@ -899,6 +899,30 @@ class Pangu(nn.Module):
         self.n_surf_chans = self.surf_channels.shape[0]
         self.n_aux_chans = self.aux_channels.shape[0]
 
+        # Precompute the per-pressure-level channel layout used by prepare_input /
+        # prepare_output. This depends only on channel_names (static config), so we
+        # build it once here as index buffers instead of recomputing numpy ops
+        # (np.unique / sorted) on every forward -- those would graph-break under
+        # torch.compile.
+        levels = np.unique([value[1:] for value in channel_names[self.num_surface:]]).tolist()
+        levels = sorted(levels, key=lambda x: int(x))
+        if len(levels) != self.num_levels:
+            raise ValueError(
+                f"Expected {self.num_levels} pressure levels from channel_names but parsed "
+                f"{len(levels)}: {levels}"
+            )
+        level_dict = {level: [idx for idx, value in enumerate(channel_names) if value[1:] == level] for level in levels}
+
+        # [vars_per_level, num_levels]: input[:, atmo_level_index, :, :] yields
+        # [B, vars_per_level, num_levels, H, W], matching the original stack(dim=2).
+        atmo_level_index = torch.tensor([level_dict[level] for level in levels], dtype=torch.long).t().contiguous()
+        self.register_buffer("atmo_level_index", atmo_level_index, persistent=False)
+
+        # flat permutation mapping each restructured atmospheric channel back to its
+        # original global channel position (used to scatter the output back).
+        reordered_ids = [idx for level in levels for idx in level_dict[level]]
+        self.register_buffer("reordered_ids", torch.tensor(reordered_ids, dtype=torch.long), persistent=False)
+
         return
 
     def prepare_input(self, input):
@@ -912,12 +936,9 @@ class Pangu(nn.Module):
         aux_inp = input[:, self.aux_channels, :, :]
         surface_aux_inp = torch.cat([surface_inp, aux_inp], dim=1)
 
-        # extract atmospheric variables
-        levels = np.unique([value[1:] for value in self.channel_names[self.num_surface:]]).tolist()
-        levels = sorted(levels, key=lambda x: int(x))
-        assert (len(levels) == self.num_levels)
-        level_dict = {level: [idx for idx, value in enumerate(self.channel_names) if value[1:] == level] for level in levels}
-        atmospheric_inp = torch.stack([input[:, level_dict[level], :, :] for level in levels], dim=2)
+        # extract atmospheric variables and restructure into [B, vars, levels, H, W]
+        # using the precomputed level-index buffer (no numpy in the forward path).
+        atmospheric_inp = input[:, self.atmo_level_index, :, :]
 
         return surface_aux_inp, atmospheric_inp
 
@@ -927,24 +948,16 @@ class Pangu(nn.Module):
         Also the atmospheric variables are restructured before fed to the network --> see self.prepare_input()
         This functions reverts the restructuring and concatenates the output to a single tensor.
         """
-        # Channel_dict contains the information about surface and atmospheric variables
-        levels = np.unique([value[1:] for value in self.channel_names[self.num_surface:]]).tolist()
-        levels = sorted(levels, key=lambda x: int(x))
-        assert (len(levels) == self.num_levels)
-        level_dict = {level: [idx for idx, value in enumerate(self.channel_names) if value[1:] == level] for level in levels}
-        reordered_ids = [idx for level in levels for idx in level_dict[level]]
-        check_reorder = [f'{level}_{idx}' for level in levels for idx in level_dict[level]]
-
-        # Flatten & reorder the output atmospheric to original order (doublechecked that this is working correctly!)
+        # Flatten & reorder the output atmospheric back to the original channel order
+        # using the precomputed permutation buffer (vectorized scatter; no numpy and
+        # no Python loop in the forward path).
         flattened_atmospheric = output_atmospheric.reshape(output_atmospheric.shape[0], -1, output_atmospheric.shape[3], output_atmospheric.shape[4])
         reordered_atmospheric = torch.cat([torch.zeros_like(output_surface), torch.zeros_like(flattened_atmospheric)], dim=1)
-        for i in range(len(reordered_ids)):
-            reordered_atmospheric[:, reordered_ids[i], :, :] = flattened_atmospheric[:, i, :, :]
+        reordered_atmospheric[:, self.reordered_ids, :, :] = flattened_atmospheric
 
         # Append the surface output, this has not been reordered.
         if output_surface is not None:
-            _, surf_chans, _, _, _ = features.get_channel_groups(self.channel_names, self.aux_channel_names)
-            reordered_atmospheric[:, surf_chans, :, :] = output_surface
+            reordered_atmospheric[:, self.surf_channels, :, :] = output_surface
             output = reordered_atmospheric
         else:
             output = reordered_atmospheric
