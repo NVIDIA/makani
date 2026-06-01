@@ -417,7 +417,9 @@ class SpectralBaseLoss(nn.Module, metaclass=ABCMeta):
 
 class VortDivBaseLoss(nn.Module, metaclass=ABCMeta):
     """
-    Geometric base loss class used by all geometric losses
+    Base loss class for losses that score the wind channels in vorticity/divergence
+    space (via a vector-SHT round-trip on each u/v pair). All non-wind channels are
+    passed through unchanged so they still contribute to the loss.
     """
 
     def __init__(
@@ -470,17 +472,24 @@ class VortDivBaseLoss(nn.Module, metaclass=ABCMeta):
 
     @property
     def n_channels(self):
-        return self.wind_chans.shape[0]
+        # the loss is scored over all channels: wind pairs in vort/div space plus every
+        # other channel passed through unchanged
+        return len(self.channel_names)
 
     @torch.compiler.disable(recursive=False)
     def compute_channel_weighting(self, channel_weight_type: str, time_diff_scale: torch.Tensor = None) -> torch.Tensor:
 
+        # weighting for ALL channels (in the original channel order); non-wind channels
+        # keep their normal weight
         chw = _compute_channel_weighting_helper(self.channel_names, channel_weight_type, time_diff_scale=time_diff_scale)
-        chw = chw[self.wind_chans.to(chw.device)]
 
-        # average u and v component weightings to weight vort and div equally
-        chw[1::2] = (chw[1::2] + chw[0::2]) / 2
-        chw[0::2] = chw[1::2]
+        # average the u and v component weightings so the vorticity and divergence
+        # derived from each wind pair are weighted equally
+        wind = self.wind_chans.to(chw.device)
+        u_idx, v_idx = wind[0::2], wind[1::2]
+        avg = (chw[u_idx] + chw[v_idx]) / 2
+        chw[u_idx] = avg
+        chw[v_idx] = avg
 
         return chw
 
