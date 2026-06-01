@@ -147,7 +147,8 @@ class GeneralES(object):
 
         # set the read slices
         # we do not support channel parallelism yet
-        assert io_grid[0] == 1
+        if io_grid[0] != 1:
+            raise ValueError(f"channel parallelism is not supported, expected io_grid[0] == 1 but got {io_grid[0]}")
         self.io_grid = io_grid[1:]
         self.io_rank = io_rank[1:]
 
@@ -573,8 +574,10 @@ class GeneralES(object):
             self.crop_size[0] = self.img_shape[0]
         if self.crop_size[1] is None:
             self.crop_size[1] = self.img_shape[1]
-        assert self.crop_anchor[0] + self.crop_size[0] <= self.img_shape[0]
-        assert self.crop_anchor[1] + self.crop_size[1] <= self.img_shape[1]
+        if self.crop_anchor[0] + self.crop_size[0] > self.img_shape[0]:
+            raise ValueError(f"crop in dimension 0 (anchor {self.crop_anchor[0]} + size {self.crop_size[0]}) exceeds image shape {self.img_shape[0]}")
+        if self.crop_anchor[1] + self.crop_size[1] > self.img_shape[1]:
+            raise ValueError(f"crop in dimension 1 (anchor {self.crop_anchor[1]} + size {self.crop_size[1]}) exceeds image shape {self.img_shape[1]}")
         # for x
         split_shapes_x = compute_split_shapes(self.crop_size[0], self.io_grid[0])
         read_shape_x = split_shapes_x[self.io_rank[0]]

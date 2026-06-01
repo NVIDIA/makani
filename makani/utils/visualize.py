@@ -128,9 +128,12 @@ def plot_comparison(
     cmap: colormap
     projection: "mollweide", "hammer", "aitoff" or None
     """
-    assert len(pred.shape) == 2
-    assert len(truth.shape) == 2
-    assert pred.shape == truth.shape
+    if len(pred.shape) != 2:
+        raise ValueError(f"expected pred to be a 2D array, got shape {tuple(pred.shape)}")
+    if len(truth.shape) != 2:
+        raise ValueError(f"expected truth to be a 2D array, got shape {tuple(truth.shape)}")
+    if pred.shape != truth.shape:
+        raise ValueError(f"expected pred and truth to have the same shape, got {tuple(pred.shape)} and {tuple(truth.shape)}")
 
     H, W = pred.shape
     if (lat is None) or (lon is None):

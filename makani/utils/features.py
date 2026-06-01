@@ -124,7 +124,8 @@ def get_channel_groups(channel_names, aux_channel_names=[]):
         if n_atmo_chans is None:
             n_atmo_chans = len(idx)
         else:
-            assert n_atmo_chans == len(idx)
+            if n_atmo_chans != len(idx):
+                raise ValueError(f"expected all atmospheric pressure level groups to have the same number of channels ({n_atmo_chans}), but got {len(idx)}")
 
         atmo_chans += idx
 

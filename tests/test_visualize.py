@@ -62,11 +62,11 @@ class TestPlotComparison(unittest.TestCase):
         self.assertIn(img.mode, ("RGB", "RGBA", "P"))
 
     def test_shape_mismatch_raises(self):
-        with self.assertRaises(AssertionError):
+        with self.assertRaises(ValueError):
             plot_comparison(self.pred, self.truth[:, :16])
 
     def test_non_2d_input_raises(self):
-        with self.assertRaises(AssertionError):
+        with self.assertRaises(ValueError):
             plot_comparison(self.pred.flatten(), self.truth.flatten())
 
     def test_diverging_branch(self):

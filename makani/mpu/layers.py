@@ -89,8 +89,10 @@ class DistributedMatmul(nn.Module):
         comm_out_size = comm.get_size(self.comm_out_name)
 
         # split:
-        assert inp_dim % comm_inp_size == 0, f"Error, the size of input feature dim ({inp_dim}) has to be evenly divisible by the input feature comm dim ({comm_inp_size})"
-        assert out_dim % comm_out_size == 0, f"Error, the size of output feature dim ({out_dim}) has to be evenly divisible by the output feature comm dim ({comm_out_size})"
+        if inp_dim % comm_inp_size != 0:
+            raise ValueError(f"the size of input feature dim ({inp_dim}) has to be evenly divisible by the input feature comm dim ({comm_inp_size})")
+        if out_dim % comm_out_size != 0:
+            raise ValueError(f"the size of output feature dim ({out_dim}) has to be evenly divisible by the output feature comm dim ({comm_out_size})")
 
         # compute reduced dims
         inp_dim_local = inp_dim // comm_inp_size
@@ -401,7 +403,8 @@ class DistributedPatchEmbed(nn.Module):
         spatial_comm_size = comm.get_size("spatial")
 
         # compute parameters
-        assert (img_size[1] // patch_size[1]) % spatial_comm_size == 0, "Error, make sure that the spatial comm size evenly divides patched W"
+        if (img_size[1] // patch_size[1]) % spatial_comm_size != 0:
+            raise ValueError(f"the spatial comm size ({spatial_comm_size}) must evenly divide patched W ({img_size[1] // patch_size[1]})")
         num_patches = ((img_size[1] // patch_size[1]) // spatial_comm_size) * (img_size[0] // patch_size[0])
         self.img_size = (img_size[0], img_size[1] // spatial_comm_size)
         self.patch_size = patch_size
@@ -409,7 +412,8 @@ class DistributedPatchEmbed(nn.Module):
 
         # get effective embedding size:
         if self.output_parallel:
-            assert embed_dim % matmul_comm_size == 0, "Error, the embed_dim needs to be divisible by matmul_parallel_size"
+            if embed_dim % matmul_comm_size != 0:
+                raise ValueError(f"the embed_dim ({embed_dim}) needs to be divisible by matmul_parallel_size ({matmul_comm_size})")
             out_chans_local = embed_dim // matmul_comm_size
         else:
             out_chans_local = embed_dim
@@ -457,10 +461,12 @@ class DistributedAttention(nn.Module):
     ):
         super().__init__()
 
-        assert dim % num_heads == 0, "dim should be divisible by num_heads"
+        if dim % num_heads != 0:
+            raise ValueError(f"dim {dim} should be divisible by num_heads {num_heads}")
         self.num_heads = num_heads
 
-        assert num_heads % comm.get_size(comm_hidden_name) == 0, "heads are not evenly split across model ranks"
+        if num_heads % comm.get_size(comm_hidden_name) != 0:
+            raise ValueError(f"heads ({num_heads}) are not evenly split across model ranks ({comm.get_size(comm_hidden_name)})")
         self.num_heads_local = num_heads // comm.get_size(comm_hidden_name)
         self.head_dim = dim // self.num_heads
 
@@ -542,7 +548,8 @@ class DistributedAFNO2Dv2(nn.Module):
         use_complex_kernels=False,
     ):
         super().__init__()
-        assert hidden_size % num_blocks == 0, f"hidden_size {hidden_size} should be divisble by num_blocks {num_blocks}"
+        if hidden_size % num_blocks != 0:
+            raise ValueError(f"hidden_size {hidden_size} should be divisble by num_blocks {num_blocks}")
 
         # get comm sizes:
         matmul_comm_size = comm.get_size("matmul")

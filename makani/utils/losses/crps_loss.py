@@ -489,7 +489,8 @@ class SpectralCRPSLoss(SpectralBaseLoss):
             observations = torch.abs(observations).to(dtype)
         else:
             # since the other kernels require sorting, this approach only works with the naive CRPS kernel
-            assert self.crps_type == "skillspread"
+            if self.crps_type != "skillspread":
+                raise ValueError(f"the non-absolute path only works with the naive 'skillspread' CRPS kernel, but got crps_type {self.crps_type}")
 
         # we assume the following shapes:
         # forecasts: batch, ensemble, channels, mmax, lmax

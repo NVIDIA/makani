@@ -65,7 +65,8 @@ if __name__ == "__main__":
     if args.batch_size > 0:
         params.batch_size = args.batch_size
     params["global_batch_size"] = params.batch_size
-    assert params["global_batch_size"] % comm.get_size("data") == 0, f"Error, cannot evenly distribute {params['global_batch_size']} across {comm.get_size('data')} GPU."
+    if params["global_batch_size"] % comm.get_size("data") != 0:
+        raise ValueError(f"cannot evenly distribute {params['global_batch_size']} across {comm.get_size('data')} GPU.")
     params["batch_size"] = int(params["global_batch_size"] // comm.get_size("data"))
 
     # optimizer params

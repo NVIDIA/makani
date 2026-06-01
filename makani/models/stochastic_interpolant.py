@@ -121,8 +121,10 @@ class StochasticInterpolantWrapper(nn.Module):
     def __init__(self, params, model_handle, noise_epsilon=1.0, use_foellmer=False, antithetic_sampling=False, seed=333, **kwargs):
         super().__init__()
 
-        assert params.n_history == 0
-        assert params.n_future == 0
+        if params.n_history != 0:
+            raise ValueError(f"this model currently does not support history, expected n_history == 0 but got {params.n_history}")
+        if params.n_future != 0:
+            raise ValueError(f"this model currently does not support future steps, expected n_future == 0 but got {params.n_future}")
 
         # get the preprocessor
         self.preprocessor = Preprocessor2D(params)
@@ -132,7 +134,8 @@ class StochasticInterpolantWrapper(nn.Module):
         n_static_channels = params.N_static_channels
         n_dynamic_channels = params.N_dynamic_channels
 
-        assert n_pred_chans == params.N_out_channels
+        if n_pred_chans != params.N_out_channels:
+            raise ValueError(f"expected N_in_predicted_channels ({n_pred_chans}) to match N_out_channels ({params.N_out_channels})")
 
         # TODO: check if the model is actually deterministic first before wrapping it
         if params.get("time_aware", False):

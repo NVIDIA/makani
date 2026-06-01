@@ -48,9 +48,12 @@ def init_distributed_io(params):
 
     # to simplify, the number of total IO ranks has to be 1 or equal to the model parallel size
     num_io_ranks = math.prod(params.io_grid)
-    assert (num_io_ranks == 1) or (num_io_ranks == comm.get_size("spatial"))
-    assert (params.io_grid[1] == comm.get_size("h")) or (params.io_grid[1] == 1)
-    assert (params.io_grid[2] == comm.get_size("w")) or (params.io_grid[2] == 1)
+    if not ((num_io_ranks == 1) or (num_io_ranks == comm.get_size("spatial"))):
+        raise ValueError(f"the total number of IO ranks ({num_io_ranks}) has to be either 1 or equal to the spatial comm size ({comm.get_size('spatial')})")
+    if not ((params.io_grid[1] == comm.get_size("h")) or (params.io_grid[1] == 1)):
+        raise ValueError(f"io_grid[1] ({params.io_grid[1]}) has to be either 1 or equal to the h comm size ({comm.get_size('h')})")
+    if not ((params.io_grid[2] == comm.get_size("w")) or (params.io_grid[2] == 1)):
+        raise ValueError(f"io_grid[2] ({params.io_grid[2]}) has to be either 1 or equal to the w comm size ({comm.get_size('w')})")
 
     # get io ranks: mp_rank = x_coord + params.io_grid[0] * (ycoord + params.io_grid[1] * zcoord)
     mp_rank = comm.get_rank("model")

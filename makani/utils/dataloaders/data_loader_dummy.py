@@ -172,8 +172,10 @@ class DummyLoader(object):
             self.crop_shape_y =	self.crop_shape[1]
         self.crop_shape = (self.crop_shape_x, self.crop_shape_y)
             
-        assert self.crop_anchor[0] + self.crop_shape[0] <= self.img_shape[0]
-        assert self.crop_anchor[1] + self.crop_shape[1] <= self.img_shape[1]
+        if self.crop_anchor[0] + self.crop_shape[0] > self.img_shape[0]:
+            raise ValueError(f"crop in dimension 0 (anchor {self.crop_anchor[0]} + shape {self.crop_shape[0]}) exceeds image shape {self.img_shape[0]}")
+        if self.crop_anchor[1] + self.crop_shape[1] > self.img_shape[1]:
+            raise ValueError(f"crop in dimension 1 (anchor {self.crop_anchor[1]} + shape {self.crop_shape[1]}) exceeds image shape {self.img_shape[1]}")
 
         # for x
         split_shapes_x = compute_split_shapes(self.crop_shape[0], self.io_grid[0])

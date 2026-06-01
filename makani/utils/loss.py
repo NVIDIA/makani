@@ -161,7 +161,8 @@ class LossHandler(nn.Module):
                 chw = torch.tensor(channel_weight_type, dtype=torch.float32)
                 if time_diff_scale is not None:
                     chw = chw * time_diff_scale
-                assert chw.shape[1] == loss_fn.n_channels
+                if chw.shape[1] != loss_fn.n_channels:
+                    raise ValueError(f"expected channel weights to have {loss_fn.n_channels} channels, but got {chw.shape[1]}")
             else:
                 chw = loss_fn.compute_channel_weighting(channel_weight_type, time_diff_scale=time_diff_scale)
 
@@ -232,7 +233,8 @@ class LossHandler(nn.Module):
         elif weight_type == "custom":
             # custom weighting factor for the case of multistep training
             multistep_weight = torch.as_tensor(kwargs["weights"], dtype=torch.float32)
-            assert multistep_weight.shape[0] == self.n_future + 1, "Number of multistep weights must match n_future+1"
+            if multistep_weight.shape[0] != self.n_future + 1:
+                raise ValueError(f"Number of multistep weights ({multistep_weight.shape[0]}) must match n_future+1 ({self.n_future + 1})")
         else:
             raise ValueError(f"Unknown multistep loss weight type: {weight_type}")
 
@@ -365,8 +367,8 @@ class LossHandler(nn.Module):
             if self.n_future == 0:
                 n_pred_channels = prdm.shape[1]
                 n_inp_channels = inp_state.shape[1]
-                assert n_pred_channels == n_inp_channels, \
-                    f"Channel mismatch: prediction has {n_pred_channels} channels but input has {n_inp_channels} channels"
+                if n_pred_channels != n_inp_channels:
+                    raise ValueError(f"Channel mismatch: prediction has {n_pred_channels} channels but input has {n_inp_channels} channels")
 
             # transform predictions and targets to tendency space
             # this allows ANY loss function to compute tendency-based metrics
