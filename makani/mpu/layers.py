@@ -23,6 +23,7 @@ from makani.utils import comm
 
 # parallel helpers
 from torch_harmonics.distributed import compute_split_shapes
+from makani.mpu._amp_utils import _custom_setup_context
 from makani.mpu.mappings import reduce_from_parallel_region
 from makani.mpu.mappings import gather_from_parallel_region
 from makani.mpu.mappings import copy_to_parallel_region
@@ -30,6 +31,7 @@ from makani.mpu.mappings import copy_to_parallel_region
 
 class _DistMatmulHelper(torch.autograd.Function):
     @staticmethod
+    @torch.amp.custom_fwd(device_type="cuda")
     def forward(X, weight, bias, inp_group_name, out_group_name):
         # matrix multiplication
         xconv = F.conv2d(X, weight, bias=None)
@@ -47,12 +49,14 @@ class _DistMatmulHelper(torch.autograd.Function):
         return xconvbias
 
     @staticmethod
+    @_custom_setup_context(device_type="cuda")
     def setup_context(ctx, inputs, output):
         X, weight, bias, inp_group_name, out_group_name = inputs
         ctx.save_for_backward(X, weight, bias)
         ctx.out_group_name = out_group_name
 
     @staticmethod
+    @torch.amp.custom_bwd(device_type="cuda")
     def backward(ctx, grad_out):
         X, weight, bias = ctx.saved_tensors
         gname = ctx.out_group_name

@@ -78,18 +78,18 @@ class GeometricInstanceNormS2(nn.Module):
             mean = self.quadrature(xf)
             var = self.quadrature(torch.square(xf - mean.reshape(B, C, 1, 1)))
 
-        # reshape
-        var = var.reshape(B, C, 1, 1)
-        mean = mean.reshape(B, C, 1, 1)
+            # reshape
+            var = var.reshape(B, C, 1, 1)
+            mean = mean.reshape(B, C, 1, 1)
 
-        # convert types
-        mean = mean.to(xtype)
-        var = var.to(xtype)
+            # normalize (and affine) in fp32 for numerical stability, matching the
+            # behaviour of PyTorch's native (autocast-fp32) norm ops
+            if self.affine:
+                xf = _normalize_transform_kernel(xf, mean, var, self.weight.reshape(-1, 1, 1), self.bias.reshape(-1, 1, 1), self.eps)
+            else:
+                xf = _normalize_kernel(xf, mean, var, self.eps)
 
-        # apply the normalization
-        if self.affine:
-            x = _normalize_transform_kernel(x, mean, var, self.weight.reshape(-1, 1, 1), self.bias.reshape(-1, 1, 1), self.eps)
-        else:
-            x = _normalize_kernel(x, mean, var, self.eps)
+        # cast back to the input dtype so the layer is faithful to its input
+        x = xf.to(xtype)
 
         return x
