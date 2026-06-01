@@ -42,7 +42,8 @@ def compl_mul_add_fwd_c(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 class AFNO2D(nn.Module):
     def __init__(self, hidden_size, num_blocks=8, sparsity_threshold=0.0, hard_thresholding_fraction=1, hidden_size_factor=1, use_complex_kernels=False):
         super(AFNO2D, self).__init__()
-        assert hidden_size % num_blocks == 0, f"hidden_size {hidden_size} should be divisble by num_blocks {num_blocks}"
+        if hidden_size % num_blocks != 0:
+            raise ValueError(f"hidden_size {hidden_size} should be divisble by num_blocks {num_blocks}")
 
         self.hidden_size = hidden_size
         self.sparsity_threshold = sparsity_threshold
@@ -210,10 +211,10 @@ class AdaptiveFourierNeuralOperatorNet(nn.Module):
         self.embed_dim = embed_dim
 
         # some sanity checks
-        assert len(patch_size) == 2, f"Expected patch_size to have two entries but got {patch_size} instead"
-        assert (self.img_size[0] % self.patch_size[0] == 0) and (
-            self.img_size[1] % self.patch_size[1] == 0
-        ), f"Error, the patch size {self.patch_size} does not divide the image dimensions {self.img_size} evenly."
+        if len(patch_size) != 2:
+            raise ValueError(f"Expected patch_size to have two entries but got {patch_size} instead")
+        if not ((self.img_size[0] % self.patch_size[0] == 0) and (self.img_size[1] % self.patch_size[1] == 0)):
+            raise ValueError(f"the patch size {self.patch_size} does not divide the image dimensions {self.img_size} evenly.")
 
         self.patch_embed = PatchEmbed2D(img_size=self.img_size, patch_size=self.patch_size, in_chans=self.inp_chans, embed_dim=self.embed_dim)
         num_patches = self.patch_embed.num_patches

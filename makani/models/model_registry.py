@@ -66,7 +66,8 @@ def _register_from_file(model_string: str, name: Union[str, None] = None) -> Non
     parses a string and attempts to get the module from the specified location
     """
 
-    assert len(model_string.split(":")) == 2
+    if len(model_string.split(":")) != 2:
+        raise ValueError(f"Expected model string of format 'path/to/model_file.py:ModuleName' but got {model_string}")
     model_path, model_handle = model_string.split(":")
 
     if not os.path.exists(model_path):

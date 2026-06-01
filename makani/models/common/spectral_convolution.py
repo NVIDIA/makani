@@ -38,8 +38,10 @@ class SpectralConv(nn.Module):
     def __init__(self, forward_transform, inverse_transform, in_channels, out_channels, num_groups=1, operator_type="dhconv", separable=False, bias=False, gain=1.0):
         super().__init__()
 
-        assert in_channels % num_groups == 0
-        assert out_channels % num_groups == 0
+        if in_channels % num_groups != 0:
+            raise ValueError(f"in_channels ({in_channels}) must be divisible by num_groups ({num_groups})")
+        if out_channels % num_groups != 0:
+            raise ValueError(f"out_channels ({out_channels}) must be divisible by num_groups ({num_groups})")
 
         self.forward_transform = forward_transform
         self.inverse_transform = inverse_transform
@@ -59,8 +61,10 @@ class SpectralConv(nn.Module):
         self.operator_type = operator_type
         self.separable = separable
 
-        assert self.inverse_transform.lmax == self.modes_lat
-        assert self.inverse_transform.mmax == self.modes_lon
+        if self.inverse_transform.lmax != self.modes_lat:
+            raise ValueError(f"inverse transform lmax ({self.inverse_transform.lmax}) must match modes_lat ({self.modes_lat})")
+        if self.inverse_transform.mmax != self.modes_lon:
+            raise ValueError(f"inverse transform mmax ({self.inverse_transform.mmax}) must match modes_lon ({self.modes_lon})")
 
         weight_shape = [num_groups, in_channels // num_groups]
 
@@ -181,8 +185,10 @@ class SpectralAttention(nn.Module):
             or (self.forward_transform.grid != self.inverse_transform.grid)
         )
 
-        assert inverse_transform.lmax == self.modes_lat
-        assert inverse_transform.mmax == self.modes_lon
+        if inverse_transform.lmax != self.modes_lat:
+            raise ValueError(f"inverse transform lmax ({inverse_transform.lmax}) must match modes_lat ({self.modes_lat})")
+        if inverse_transform.mmax != self.modes_lon:
+            raise ValueError(f"inverse transform mmax ({inverse_transform.mmax}) must match modes_lon ({self.modes_lon})")
 
         hidden_size = int(hidden_size_factor * self.in_channels)
 

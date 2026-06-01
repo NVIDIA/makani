@@ -1206,11 +1206,11 @@ class TestLossHandler(unittest.TestCase):
         )
 
     def test_multistep_weight_custom_wrong_length_raises(self):
-        """custom weights must match n_future + 1 — assertion in _compute_multistep_weight."""
+        """custom weights must match n_future + 1 — validated in _compute_multistep_weight."""
         self.params.n_future = 2
         self.params.losses = [{"type": "l2"}]
         self.params.multistep = {"weight_type": "custom", "weights": [0.1, 0.9]}  # too short
-        with self.assertRaises(AssertionError):
+        with self.assertRaises(ValueError):
             LossHandler(self.params)
 
     def test_multistep_weight_unknown_raises(self):

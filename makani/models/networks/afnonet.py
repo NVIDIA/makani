@@ -56,7 +56,8 @@ class Mlp(nn.Module):
 class AFNO2D(nn.Module):
     def __init__(self, hidden_size, num_blocks=8, sparsity_threshold=0.01, hard_thresholding_fraction=1, hidden_size_factor=1):
         super().__init__()
-        assert hidden_size % num_blocks == 0, f"hidden_size {hidden_size} should be divisble by num_blocks {num_blocks}"
+        if hidden_size % num_blocks != 0:
+            raise ValueError(f"hidden_size {hidden_size} should be divisble by num_blocks {num_blocks}")
 
         self.hidden_size = hidden_size
         self.sparsity_threshold = sparsity_threshold

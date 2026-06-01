@@ -250,7 +250,8 @@ class DistributedLayerNorm(nn.Module):
     def __init__(self, normalized_shape, eps=1e-05, elementwise_affine=True, bias=True, device=None, dtype=None):
         super().__init__()
 
-        assert comm.get_size("matmul") == 1
+        if comm.get_size("matmul") != 1:
+            raise ValueError(f"this layer norm does not support matmul parallelism, but got matmul comm size {comm.get_size('matmul')}")
 
         self.norm = nn.LayerNorm(normalized_shape, eps=eps, elementwise_affine=elementwise_affine, bias=bias, device=device, dtype=dtype)
 

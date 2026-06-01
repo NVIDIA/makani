@@ -383,8 +383,10 @@ class DiffusionNoiseS2(BaseNoiseS2):
         # make sure kT is a torch.Tensor
         if isinstance(kT, list):
             kT = torch.as_tensor(kT)
-            assert len(kT.shape) == 1
-            assert kT.shape[0] == num_channels
+            if len(kT.shape) != 1:
+                raise ValueError(f"expected kT to be a 1D tensor, got shape {tuple(kT.shape)}")
+            if kT.shape[0] != num_channels:
+                raise ValueError(f"expected kT to have {num_channels} entries (one per channel), got {kT.shape[0]}")
         else:
             kT = torch.as_tensor([kT]).repeat(num_channels)
         kT = kT.reshape(self.num_channels, 1)
@@ -392,8 +394,10 @@ class DiffusionNoiseS2(BaseNoiseS2):
         # same for lambd
         if isinstance(lambd, list):
             lambd = torch.as_tensor(lambd)
-            assert len(lambd.shape) == 1
-            assert lambd.shape[0] == num_channels
+            if len(lambd.shape) != 1:
+                raise ValueError(f"expected lambd to be a 1D tensor, got shape {tuple(lambd.shape)}")
+            if lambd.shape[0] != num_channels:
+                raise ValueError(f"expected lambd to have {num_channels} entries (one per channel), got {lambd.shape[0]}")
         else:
             lambd = torch.as_tensor([lambd]).repeat(num_channels)
         lambd = lambd.reshape(self.num_channels, 1)
