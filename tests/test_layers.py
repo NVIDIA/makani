@@ -241,7 +241,7 @@ class TestLayers(unittest.TestCase):
         in_res, out_res = (4, 6), (6, 10)
         layer = UpSample2D(in_dim, out_dim, in_res, out_res).to(self.device)
         bad = torch.randn(2, 5, 6, in_dim, device=self.device)
-        with self.assertRaises(AssertionError):
+        with self.assertRaises(RuntimeError):
             layer(bad)
 
     def test_upsample2d_gradients_flow(self):
@@ -283,7 +283,7 @@ class TestLayers(unittest.TestCase):
         in_res, out_res = (6, 10), (4, 8)
         layer = DownSample2D(in_dim, in_res, out_res).to(self.device)
         bad = torch.randn(2, 7, 10, in_dim, device=self.device)
-        with self.assertRaises(AssertionError):
+        with self.assertRaises(RuntimeError):
             layer(bad)
 
     def test_downsample2d_gradients_flow(self):

@@ -1100,18 +1100,24 @@ class TestPreprocessor2DBasic(unittest.TestCase):
     # -----------------------------------------------------------------------
 
     def test_expand_history_raises_on_non_divisible_channels(self):
-        """expand_history raises ValueError when the channel dim isn't divisible by nhist."""
+        """expand_history raises when the channel dim isn't divisible by nhist.
+
+        The check is a torch._check (compile-safe), so it surfaces as RuntimeError.
+        """
         params = get_default_parameters()
         params.n_history = 2  # nhist = 3
         pp = Preprocessor2D(params)
         # channels = 5, not divisible by 3
         x_bad = torch.randn(self.B, 5, self.H, self.W)
-        with self.assertRaises(ValueError) as cm:
+        with self.assertRaises(RuntimeError) as cm:
             pp.expand_history(x_bad, nhist=pp.n_history + 1)
         self.assertIn("not divisible", str(cm.exception))
 
     def test_append_channels_raises_on_input_cache_batch_mismatch(self):
-        """_append_channels raises ValueError when input and cached xz have different batch sizes."""
+        """_append_channels raises when input and cached xz have different batch sizes.
+
+        The check is a torch._check (compile-safe), so it surfaces as RuntimeError.
+        """
         self.pp.train()
         # cache xz/yz at the preprocessor's configured batch
         x_cache = self._rand(self.B, self.C, self.H, self.W)
@@ -1120,13 +1126,16 @@ class TestPreprocessor2DBasic(unittest.TestCase):
         self.pp.cache_unpredicted_features(x_cache, x_cache, xz=xz, yz=yz)
         # now pass an input with a DIFFERENT batch size
         x_mismatch = self._rand(self.B + 1, self.C, self.H, self.W)
-        with self.assertRaises(ValueError) as cm:
+        with self.assertRaises(RuntimeError) as cm:
             self.pp.append_unpredicted_features(x_mismatch, target=False)
         self.assertIn("batch mismatch", str(cm.exception))
         self.assertIn("cached unpredicted features", str(cm.exception))
 
     def test_append_channels_raises_on_noise_state_batch_mismatch(self):
-        """_append_channels raises ValueError when input_noise state and input batch disagree."""
+        """_append_channels raises when input_noise state and input batch disagree.
+
+        The check is a torch._check (compile-safe), so it surfaces as RuntimeError.
+        """
         params = get_default_parameters()
         params.input_noise = {"type": "dummy", "mode": "concatenate", "n_channels": 1}
         pp = Preprocessor2D(params)
@@ -1139,7 +1148,7 @@ class TestPreprocessor2DBasic(unittest.TestCase):
         pp.cache_unpredicted_features(x, x, xz=xz, yz=yz)
         pp.update_internal_state(replace_state=True, batch_size=self.B + 2)
 
-        with self.assertRaises(ValueError) as cm:
+        with self.assertRaises(RuntimeError) as cm:
             pp.append_unpredicted_features(x, target=False)
         msg = str(cm.exception)
         self.assertIn("batch mismatch", msg)

@@ -287,7 +287,7 @@ class DistributedRealFFT3(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
 
         # make sure input is 5D
-        assert x.dim() == 5
+        torch._check(x.dim() == 5, lambda: f"expected a 5D input, got {x.dim()}D")
 
         # store number of chans
         num_chans = x.shape[1]
@@ -364,7 +364,7 @@ class DistributedInverseRealFFT3(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
 
         # make sure input is 5D
-        assert x.dim() == 5
+        torch._check(x.dim() == 5, lambda: f"expected a 5D input, got {x.dim()}D")
 
         # store number of chans
         num_chans = x.shape[1]
