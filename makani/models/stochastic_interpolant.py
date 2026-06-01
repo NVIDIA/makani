@@ -298,7 +298,7 @@ class StochasticInterpolantWrapper(nn.Module):
 
     def _forward_eval(self, inp, n_steps=1):
 
-        assert len(inp.shape) == 4
+        torch._check(len(inp.shape) == 4, lambda: f"expected a 4D input, got {len(inp.shape)}D")
 
         with torch.no_grad():
             # get unpredicted in shape [B, T, C, H, W]

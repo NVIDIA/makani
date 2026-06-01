@@ -181,12 +181,17 @@ class Preprocessor2D(nn.Module):
     def expand_history(self, x, nhist):
         if x.dim() == 4:
             b_, ct_, h_, w_ = x.shape
-            if ct_ % nhist != 0:
-                raise ValueError(
+            # torch._check (rather than `if ...: raise`) so this stays a runtime
+            # assertion under torch.compile instead of becoming a data-dependent
+            # branch that breaks the graph.
+            torch._check(
+                ct_ % nhist == 0,
+                lambda: (
                     f"expand_history: channel dim {ct_} is not divisible by nhist={nhist}. "
                     f"The flattened-history input may not match the preprocessor's expected "
                     f"n_history={self.n_history} (so ct_ should be a multiple of n_history+1={nhist})."
-                )
+                ),
+            )
             x = torch.reshape(x, (b_, nhist, ct_ // nhist, h_, w_))
         return x
 
@@ -251,13 +256,16 @@ class Preprocessor2D(nn.Module):
 
         # Batch alignment between input and cached unpredicted features.
         # If these diverge, the `cat` below would fail with a cryptic message —
-        # raise up-front with context about the likely cause.
-        if x.shape[0] != xc.shape[0]:
-            raise ValueError(
+        # fail up-front with context about the likely cause. torch._check keeps
+        # this a runtime assertion under torch.compile instead of a graph break.
+        torch._check(
+            x.shape[0] == xc.shape[0],
+            lambda: (
                 f"_append_channels: batch mismatch between input ({x.shape[0]}) and "
                 f"cached unpredicted features ({xc.shape[0]}). "
                 f"Did you cache xz/yz at a different batch size than the current forward?"
-            )
+            ),
+        )
 
         # expand history
         x = self.expand_history(x, self.n_history + 1)
@@ -266,13 +274,15 @@ class Preprocessor2D(nn.Module):
         # this routine also adds noise every time a channel gets appended
         if hasattr(self, "input_noise"):
             n = self.input_noise()
-            if n.shape[0] != x.shape[0]:
-                raise ValueError(
+            torch._check(
+                n.shape[0] == x.shape[0],
+                lambda: (
                     f"_append_channels: batch mismatch between input_noise state "
                     f"({n.shape[0]}) and input ({x.shape[0]}). "
                     f"Did you call update_internal_state(batch_size=...) at a different "
                     f"batch than the current forward pass?"
-                )
+                ),
+            )
             if self.input_noise_mode == "concatenate":
                 xc = torch.cat([xc, n], dim=2)
             elif self.input_noise_mode == "perturb":
@@ -361,12 +371,14 @@ class Preprocessor2D(nn.Module):
                 f"Call history_compute_stats(x) before {caller} (mode='{self.history_normalization_mode}')."
             )
         stats_batch = self.history_mean.shape[0]
-        if stats_batch != x.shape[0]:
-            raise ValueError(
+        torch._check(
+            stats_batch == x.shape[0],
+            lambda: (
                 f"{caller}: batch mismatch between input ({x.shape[0]}) and cached "
                 f"history stats ({stats_batch}). Did you forget to call "
                 f"history_compute_stats on the current input before {caller}?"
-            )
+            ),
+        )
 
     def history_normalize(self, x, target=False):
         if self.history_normalization_mode in ["none", "timediff"]:

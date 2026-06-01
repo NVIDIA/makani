@@ -121,7 +121,8 @@ class PatchEmbed2D(nn.Module):
         B, C, H, W = x.shape
         if self.padding:
             x = self.pad(x)
-        assert H == self.img_size[0] and W == self.img_size[1], f"Input image size ({H}*{W}) doesn't match model ({self.img_size[0]}*{self.img_size[1]})."
+        torch._check(H == self.img_size[0], lambda: f"Input image height {H} doesn't match model {self.img_size[0]}.")
+        torch._check(W == self.img_size[1], lambda: f"Input image width {W} doesn't match model {self.img_size[1]}.")
         # forward pass
         x = self.proj(x)
         if self.norm is not None:
@@ -453,7 +454,8 @@ class UpSample2D(nn.Module):
             B, N, C = x.shape
         else:
             B, N_lat, N_lon, C = x.shape
-            assert (N_lat, N_lon) == self.input_resolution, f"Input shape {x.shape} does not match expected input resolution {self.input_resolution}."
+            torch._check(N_lat == self.input_resolution[0], lambda: f"Input shape {x.shape} does not match expected input resolution {self.input_resolution}.")
+            torch._check(N_lon == self.input_resolution[1], lambda: f"Input shape {x.shape} does not match expected input resolution {self.input_resolution}.")
         in_lat, in_lon = self.input_resolution
         out_lat, out_lon = self.output_resolution
 
@@ -520,7 +522,8 @@ class DownSample2D(nn.Module):
             x = x.reshape(B, in_lat, in_lon, C)
         else:
             B, N_lat, N_lon, C = x.shape
-            assert((N_lat, N_lon)==(in_lat, in_lon)), f"Input shape {x.shape} does not match expected input resolution {self.input_resolution}."
+            torch._check(N_lat == in_lat, lambda: f"Input shape {x.shape} does not match expected input resolution {self.input_resolution}.")
+            torch._check(N_lon == in_lon, lambda: f"Input shape {x.shape} does not match expected input resolution {self.input_resolution}.")
 
         # Padding the input to facilitate downsampling
         x = self.pad(x.permute(0, -1, 1, 2)).permute(0, 2, 3, 1)
