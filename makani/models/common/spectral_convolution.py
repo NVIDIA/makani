@@ -141,7 +141,10 @@ class SpectralConv(nn.Module):
         x = x.to(dtype=dtype)
 
         if hasattr(self, "bias"):
-            x = x + self.bias
+            # cast the fp32 bias to the activation dtype before the (non-autocast-managed)
+            # add, mirroring how autocast folds bias into conv/linear -- keeps the output
+            # in the input dtype instead of promoting to fp32.
+            x = x + self.bias.to(dtype=x.dtype)
 
         return x, residual
 

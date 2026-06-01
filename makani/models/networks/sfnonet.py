@@ -619,8 +619,8 @@ class SphericalFourierNeuralOperatorNet(nn.Module):
             else:
                 pos_embed = self.pos_embed
 
-            # add pos embed
-            x = x + pos_embed
+            # add pos embed (cast to activation dtype so we don't promote x to fp32)
+            x = x + pos_embed.to(dtype=x.dtype)
 
         # maybe clean the padding just in case
         x = self.pos_drop(x)

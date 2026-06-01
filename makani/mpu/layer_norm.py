@@ -149,15 +149,15 @@ class DistributedInstanceNorm2d(nn.Module):
             mean = copy_to_parallel_region(mean, "spatial")
             var = copy_to_parallel_region(var, "spatial")
 
-        # convert back
-        mean = mean.to(xtype)
-        var = var.to(xtype)
+            # normalize (and affine) in fp32 for numerical stability, matching the
+            # behaviour of PyTorch's native (autocast-fp32) norm ops
+            if self.affine:
+                xf = _normalize_transform_kernel(xf, mean, var, self.weight.reshape(-1, 1, 1), self.bias.reshape(-1, 1, 1), self.eps)
+            else:
+                xf = _normalize_kernel(xf, mean, var, self.eps)
 
-        # apply the normalization
-        if self.affine:
-            x = _normalize_transform_kernel(x, mean, var, self.weight.reshape(-1, 1, 1), self.bias.reshape(-1, 1, 1), self.eps)
-        else:
-            x = _normalize_kernel(x, mean, var, self.eps)
+        # cast back to the input dtype so the layer is faithful to its input
+        x = xf.to(xtype)
 
         return x
 
@@ -227,15 +227,15 @@ class DistributedGeometricInstanceNormS2(DistributedInstanceNorm2d):
             mean = copy_to_parallel_region(mean, "spatial")
             var = copy_to_parallel_region(var, "spatial")
 
-        # convert back
-        mean = mean.to(xtype)
-        var = var.to(xtype)
+            # normalize (and affine) in fp32 for numerical stability, matching the
+            # behaviour of PyTorch's native (autocast-fp32) norm ops
+            if self.affine:
+                xf = _normalize_transform_kernel(xf, mean, var, self.weight.reshape(-1, 1, 1), self.bias.reshape(-1, 1, 1), self.eps)
+            else:
+                xf = _normalize_kernel(xf, mean, var, self.eps)
 
-        # apply the normalization
-        if self.affine:
-            x = _normalize_transform_kernel(x, mean, var, self.weight.reshape(-1, 1, 1), self.bias.reshape(-1, 1, 1), self.eps)
-        else:
-            x = _normalize_kernel(x, mean, var, self.eps)
+        # cast back to the input dtype so the layer is faithful to its input
+        x = xf.to(xtype)
 
         return x
 

@@ -23,6 +23,9 @@ from torch_harmonics.distributed.primitives import (
     _reduce,
     _transpose,
 )
+# bridge so new-style autograd.Function (separate setup_context) works with
+# torch.amp.custom_fwd/custom_bwd; see makani/mpu/_amp_utils.py (pytorch#132388).
+from makani.mpu._amp_utils import _custom_setup_context
 
 # torch utils
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
@@ -34,6 +37,7 @@ from makani.mpu.config import config
 class _DistributedTranspose(torch.autograd.Function):
 
     @staticmethod
+    @torch.amp.custom_fwd(device_type="cuda")
     def forward(x, dims, dim1_split_sizes, comm_id):
         # WAR for a potential contig check torch bug for channels last contig tensors
         x = x.contiguous()
@@ -42,6 +46,7 @@ class _DistributedTranspose(torch.autograd.Function):
         return x
 
     @staticmethod
+    @_custom_setup_context(device_type="cuda")
     def setup_context(ctx, inputs, output):
         x, dims, dim1_split_sizes, comm_id = inputs
         ctx.dims = dims
@@ -50,6 +55,7 @@ class _DistributedTranspose(torch.autograd.Function):
         ctx.dim0_split_sizes = compute_split_shapes(x.shape[dims[0]], comm.get_size(comm_id))
 
     @staticmethod
+    @torch.amp.custom_bwd(device_type="cuda")
     def backward(ctx, go):
         dims = ctx.dims
         dim0_split_sizes = ctx.dim0_split_sizes
@@ -68,15 +74,18 @@ class _CopyToParallelRegion(torch.autograd.Function):
         return input_
 
     @staticmethod
+    @torch.amp.custom_fwd(device_type="cuda")
     def forward(input_, comm_id_):
         return input_
 
     @staticmethod
+    @_custom_setup_context(device_type="cuda")
     def setup_context(ctx, inputs, output):
         _, comm_id_ = inputs
         ctx.comm_id = comm_id_
 
     @staticmethod
+    @torch.amp.custom_bwd(device_type="cuda")
     def backward(ctx, grad_output):
         return _reduce(grad_output, group=comm.get_group(ctx.comm_id)), None
 
@@ -89,14 +98,17 @@ class _ReduceFromParallelRegion(torch.autograd.Function):
         return _reduce(input_, group=comm.get_group(comm_id_))
 
     @staticmethod
+    @torch.amp.custom_fwd(device_type="cuda")
     def forward(input_, comm_id_):
         return _reduce(input_, group=comm.get_group(comm_id_))
 
     @staticmethod
+    @_custom_setup_context(device_type="cuda")
     def setup_context(ctx, inputs, output):
         pass  # nothing needed for backward
 
     @staticmethod
+    @torch.amp.custom_bwd(device_type="cuda")
     def backward(ctx, grad_output):
         return grad_output, None
 
@@ -109,10 +121,12 @@ class _ScatterToParallelRegion(torch.autograd.Function):
         return _split(input_, dim_, group=comm.get_group(comm_id_))
 
     @staticmethod
+    @torch.amp.custom_fwd(device_type="cuda")
     def forward(input_, dim_, comm_id_):
         return _split(input_, dim_, group=comm.get_group(comm_id_))
 
     @staticmethod
+    @_custom_setup_context(device_type="cuda")
     def setup_context(ctx, inputs, output):
         input_, dim_, comm_id_ = inputs
         ctx.dim = dim_
@@ -120,6 +134,7 @@ class _ScatterToParallelRegion(torch.autograd.Function):
         ctx.split_shapes = compute_split_shapes(input_.shape[dim_], comm.get_size(comm_id_))
 
     @staticmethod
+    @torch.amp.custom_bwd(device_type="cuda")
     def backward(ctx, grad_output):
         return (
             _gather(
@@ -143,16 +158,19 @@ class _GatherFromParallelRegion(torch.autograd.Function):
         )
 
     @staticmethod
+    @torch.amp.custom_fwd(device_type="cuda")
     def forward(input_, dim_, shapes_, comm_id_):
         return _gather(input_, dim_, shapes_, group=comm.get_group(comm_id_))
 
     @staticmethod
+    @_custom_setup_context(device_type="cuda")
     def setup_context(ctx, inputs, output):
         input_, dim_, shapes_, comm_id_ = inputs
         ctx.dim = dim_
         ctx.comm_id = comm_id_
 
     @staticmethod
+    @torch.amp.custom_bwd(device_type="cuda")
     def backward(ctx, grad_output):
         return (
             _split(grad_output, ctx.dim, group=comm.get_group(ctx.comm_id)),
