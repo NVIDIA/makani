@@ -16,6 +16,7 @@
 from typing import Tuple, List, Optional
 
 import torch
+from torch import amp
 
 from makani.utils.losses.base_loss import GeometricBaseLoss
 import makani.utils.constants as const
@@ -71,7 +72,7 @@ class HydrostaticBalanceLoss(GeometricBaseLoss):
         self.prefact = 1.0 / const.R_DRY_AIR
 
         if self.use_moist_air_formula:
-            # the factor 1000. arises from converting q-units from kg / kg to g / kg
+            # virtual-temperature correction coefficient; q is specific humidity in kg/kg
             self.q_prefact = const.Q_CORRECTION_MOIST_AIR
 
         # we need to interpolate in p:
@@ -134,23 +135,31 @@ class HydrostaticBalanceLoss(GeometricBaseLoss):
 
     def forward(self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor:
 
-        # undo normalization
-        prdun = prd * self.scale + self.bias
+        ptype = prd.dtype
 
-        if self.use_moist_air_formula:
-            prdun[:, self.t_idx, ...] = prdun[:, self.t_idx, ...] * (1.0 + self.q_prefact * prdun[:, self.q_idx, ...])
+        # The residual is a catastrophic cancellation of large geopotential terms
+        # (Z / R_d), so it must be evaluated in fp32. matmul is autocast-eligible and
+        # would otherwise run in low precision under AMP, destroying the residual.
+        with amp.autocast(device_type=prd.device.type, enabled=False):
+            # undo normalization
+            prdun = prd.to(torch.float32) * self.scale + self.bias
 
-        # use sparse matmul
-        prdf = prdun.permute([1, 0, 2, 3])
-        C, B, H, W = prdf.shape
-        prdf = prdf.reshape(C, B * H * W)
+            if self.use_moist_air_formula:
+                prdun[:, self.t_idx, ...] = prdun[:, self.t_idx, ...] * (1.0 + self.q_prefact * prdun[:, self.q_idx, ...])
 
-        # we need to disable autocast here
-        res = torch.square(torch.matmul(self.cmat, prdf).reshape(-1, B, H, W).permute([1, 0, 2, 3])).contiguous()
+            # use sparse matmul
+            prdf = prdun.permute([1, 0, 2, 3])
+            C, B, H, W = prdf.shape
+            prdf = prdf.reshape(C, B * H * W)
 
-        if wgt is not None:
-            res = res * wgt
+            res = torch.square(torch.matmul(self.cmat, prdf).reshape(-1, B, H, W).permute([1, 0, 2, 3])).contiguous()
 
-        loss = self.quadrature(res)
+            if wgt is not None:
+                res = res * wgt
+
+            loss = self.quadrature(res)
+
+        # cast back to the input dtype, consistent with the other losses
+        loss = loss.to(ptype)
 
         return loss

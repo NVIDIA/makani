@@ -165,7 +165,7 @@ class _HydrostaticBalanceWrapper(nn.Module):
         inp_bias[0, 1 : len(self.z_idx) + 1, 0, 0] = z_bias[0, :, 0, 0]
         # moist air
         if self.use_moist_air_formula:
-            # assume the next entries are relative humidities:
+            # assume the next entries are specific humidities:
             inp_bias[0, len(self.z_idx) + 1 : len(self.z_idx) + len(self.q_idx) + 1, 0, 0] = q_bias[0, :, 0, 0]
             inp_scale[0, len(self.z_idx) + 1 : len(self.z_idx) + len(self.q_idx) + 1, 0, 0] = q_scale[0, :, 0, 0]
         self.register_buffer("inp_scale", inp_scale, persistent=True)
