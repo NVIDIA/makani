@@ -293,20 +293,22 @@ class StochasticMLP(nn.Module):
 
         # First fully connected layer
         if input_format == "nchw":
-            self.fc1_weight_std = nn.Parameter(torch.zeros(hidden_features, in_features, 1, 1))
+            self.fc1_weight_log_std = nn.Parameter(torch.zeros(hidden_features, in_features, 1, 1))
             self.fc1_weight_mean = nn.Parameter(torch.zeros(hidden_features, in_features, 1, 1))
             self.fc1_bias = nn.Parameter(torch.zeros(hidden_features))
         else:
             raise NotImplementedError(f"Error, input format {input_format} not supported.")
 
         # sharing settings
-        self.fc1_weight_std.is_shared_mp = ["spatial"]
+        self.fc1_weight_log_std.is_shared_mp = ["spatial"]
         self.fc1_weight_mean.is_shared_mp = ["spatial"]
         self.fc1_bias.is_shared_mp = ["spatial"]
 
-        # initialize the weights correctly
+        # The stochastic weight is  weight = scale * exp(log_std) * eps + mean  with
+        # eps ~ N(0, 1). log_std keeps its zero init (so the effective std == scale and
+        # is always positive thanks to exp), and the fan-in scale is a constant factor.
         scale = math.sqrt(1.0 / in_features)
-        nn.init.normal_(self.fc1_weight_std, mean=0.0, std=scale)
+        self.fc1_weight_std_scale = scale
         nn.init.normal_(self.fc1_weight_mean, mean=0.0, std=scale)
 
         # activation
@@ -318,21 +320,22 @@ class StochasticMLP(nn.Module):
 
         # output layer
         if input_format == "nchw":
-            self.fc2_weight_std = nn.Parameter(torch.zeros(out_features, hidden_features, 1, 1))
+            self.fc2_weight_log_std = nn.Parameter(torch.zeros(out_features, hidden_features, 1, 1))
             self.fc2_weight_mean = nn.Parameter(torch.zeros(out_features, hidden_features, 1, 1))
             self.fc2_bias = nn.Parameter(torch.zeros(out_features)) if output_bias else None
         else:
             raise NotImplementedError(f"Error, input format {input_format} not supported.")
 
         # sharing settings
-        self.fc2_weight_std.is_shared_mp = ["spatial"]
+        self.fc2_weight_log_std.is_shared_mp = ["spatial"]
         self.fc2_weight_mean.is_shared_mp = ["spatial"]
         if self.fc2_bias is not None:
             self.fc2_bias.is_shared_mp = ["spatial"]
 
         # gain factor for the output determines the scaling of the output init
+        # (same scheme as fc1: log_std stays at its zero init, scale is a constant factor)
         scale = math.sqrt(gain / hidden_features / 2)
-        nn.init.normal_(self.fc2_weight_std, mean=0.0, std=scale)
+        self.fc2_weight_std_scale = scale
         nn.init.normal_(self.fc2_weight_mean, mean=0.0, std=scale)
         if self.fc2_bias is not None:
             nn.init.constant_(self.fc2_bias, 0.0)
@@ -361,10 +364,11 @@ class StochasticMLP(nn.Module):
 
     def fwd(self, x):
 
-        # generate weight1
+        # generate weight1: weight = scale * exp(log_std) * eps + mean
         weight1 = torch.empty_like(self.fc1_weight_mean)
         weight1.normal_(mean=0.0, std=1.0, generator=self.rng_gpu if weight1.is_cuda else self.rng_cpu)
-        weight1 = self.fc1_weight_std * weight1 + self.fc1_weight_mean
+        std1 = self.fc1_weight_std_scale * torch.exp(self.fc1_weight_log_std)
+        weight1 = std1 * weight1 + self.fc1_weight_mean
 
         # fully connected 1
         x = nn.functional.conv2d(x, weight1, bias=self.fc1_bias)
@@ -375,10 +379,11 @@ class StochasticMLP(nn.Module):
         # dropout
         x = self.drop(x)
 
-        # generate weight1
+        # generate weight2: weight = scale * exp(log_std) * eps + mean
         weight2 = torch.empty_like(self.fc2_weight_mean)
         weight2.normal_(mean=0.0, std=1.0, generator=self.rng_gpu if weight2.is_cuda else self.rng_cpu)
-        weight2 = self.fc2_weight_std * weight2 + self.fc2_weight_mean
+        std2 = self.fc2_weight_std_scale * torch.exp(self.fc2_weight_log_std)
+        weight2 = std2 * weight2 + self.fc2_weight_mean
 
         # fully connected 2
         x = nn.functional.conv2d(x, weight2, bias=self.fc2_bias)
