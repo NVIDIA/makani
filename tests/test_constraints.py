@@ -25,7 +25,7 @@ from makani.utils.losses.hydrostatic_loss import HydrostaticBalanceLoss
 from makani.models.parametrizations import ConstraintsWrapper
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from .testutils import disable_tf32, set_seed
+from .testutils import disable_tf32, set_seed, compare_tensors
 
 class TestConstraints(unittest.TestCase):
 
@@ -171,6 +171,151 @@ class TestConstraints(unittest.TestCase):
                 aux_loss_val = torch.nn.functional.mse_loss(data_map[:, cwrap.constraint_list[0].aux_idx, ...],
                                                             data_short[:, off_idx:, ...]).item()
                 self.assertTrue(aux_loss_val <= 1e-6)
+    def test_hydrostatic_balance_matches_independent_integration(self):
+        """Independent validation of the hydrostatic-balance formula.
+
+        Instead of checking the wrapper output against HydrostaticBalanceLoss (which
+        derives from the same formula -> circular), we build a *known* temperature
+        profile, integrate the hypsometric equation forward to obtain geopotentials,
+        feed [T0, Z...] through the wrapper, and confirm it reconstructs the original
+        temperatures (and passes geopotential / humidity / aux channels through).
+
+            Phi_i - Phi_{i-1} = R_d * 0.5 * (Tv_i + Tv_{i-1}) * ln(p_{i-1}/p_i)
+        """
+        import makani.utils.constants as const
+
+        R = const.R_DRY_AIR
+        qc = const.Q_CORRECTION_MOIST_AIR
+
+        for use_moist_air_formula in [False, True]:
+            with self.subTest(f"moist air formula: {use_moist_air_formula}"):
+                # synthetic channel set: matching t/z (and q) pressure levels + aux channels
+                levels = [925, 850, 700, 500, 300, 100, 50]
+                channel_names = [f"t{p}" for p in levels] + [f"z{p}" for p in levels]
+                if use_moist_air_formula:
+                    channel_names += [f"q{p}" for p in levels]
+                channel_names += ["u10m", "v10m", "t2m"]  # aux passthrough channels
+
+                constraint_dict = {"type": "hydrostatic_balance",
+                                   "options": dict(p_min=0, p_max=2000,
+                                                   use_moist_air_formula=use_moist_air_formula)}
+                cwrap = ConstraintsWrapper(constraints=[constraint_dict],
+                                           channel_names=channel_names,
+                                           bias=None, scale=None,
+                                           model_handle=None).to(self.device)
+                con = cwrap.constraint_list[0]
+
+                # the wrapper orders pressures descending (bottom -> top)
+                pressures = con.pressures
+                n = len(pressures)
+                self.assertEqual(n, len(levels))
+                self.assertEqual(len(con.t_idx), n)
+
+                B, H, W = 2, 3, 4
+                # known temperature profile (physical units, varying over space)
+                T = 200.0 + 60.0 * torch.rand(B, n, H, W, device=self.device, dtype=torch.float32)
+                if use_moist_air_formula:
+                    q = 0.02 * torch.rand(B, n, H, W, device=self.device, dtype=torch.float32)
+                    Tv = T * (1.0 + qc * q)
+                else:
+                    Tv = T
+
+                # integrate the hypsometric equation forward to get geopotential per level
+                Z = torch.zeros(B, n, H, W, device=self.device, dtype=torch.float32)
+                Z[:, 0, ...] = 1000.0  # arbitrary reference geopotential at the bottom level
+                for i in range(1, n):
+                    plog = float(np.log(pressures[i - 1] / pressures[i]))
+                    Z[:, i, ...] = Z[:, i - 1, ...] + R * 0.5 * (Tv[:, i, ...] + Tv[:, i - 1, ...]) * plog
+
+                # assemble the reduced input in the wrapper's layout: [T0, Z0..Z_{n-1}, (q...), aux...]
+                inp = torch.zeros(B, cwrap.N_in_channels, H, W, device=self.device, dtype=torch.float32)
+                inp[:, 0, ...] = T[:, 0, ...]
+                inp[:, 1:n + 1, ...] = Z
+                off = n + 1
+                if use_moist_air_formula:
+                    inp[:, off:off + n, ...] = q
+                    off += n
+                n_aux = len(con.aux_idx)
+                aux_vals = torch.randn(B, n_aux, H, W, device=self.device, dtype=torch.float32)
+                inp[:, off:off + n_aux, ...] = aux_vals
+
+                out = cwrap(inp)
+
+                # the reconstructed temperatures must match the known profile
+                self.assertTrue(compare_tensors("reconstructed temperature", out[:, con.t_idx, ...], T,
+                                                atol=1e-1, rtol=1e-3, verbose=True))
+                # geopotentials, aux (and humidity) pass through unchanged
+                self.assertTrue(compare_tensors("geopotential passthrough", out[:, con.z_idx, ...], Z,
+                                                atol=1e-2, rtol=1e-5, verbose=True))
+                self.assertTrue(compare_tensors("aux passthrough", out[:, con.aux_idx, ...], aux_vals,
+                                                atol=1e-4, rtol=1e-5, verbose=True))
+                if use_moist_air_formula:
+                    self.assertTrue(compare_tensors("humidity passthrough", out[:, con.q_idx, ...], q,
+                                                    atol=1e-4, rtol=1e-5, verbose=True))
+    def test_hydrostatic_balance_loss_on_balanced_profile(self):
+        """Independent check of the soft-constraint loss: a profile built to satisfy
+        hydrostatic balance exactly yields ~0 loss, and perturbing a single geopotential
+        level makes the loss clearly positive. Uses identity normalization so a synthetic
+        physical-unit field is fed straight through (no dependence on the data sample)."""
+        import makani.utils.constants as const
+
+        R = const.R_DRY_AIR
+        qc = const.Q_CORRECTION_MOIST_AIR
+
+        C = len(self.channel_names)
+        # Use a full (uncropped) equiangular grid. The data sample is a 2-row band at
+        # the pole (crop_offset=[719,0], crop_shape=[2,720]); the area-weighted spherical
+        # quadrature gives that crop a normalized weight ~1e-5 (cos(lat) -> 0 at the pole),
+        # which scales the *integrated* loss down by ~1e-5 and makes absolute thresholds
+        # meaningless. On a full grid the quadrature is O(1).
+        nlat, nlon = 32, 64
+        img_shape = crop_shape = (nlat, nlon)
+        crop_offset = (0, 0)
+        H, W = nlat, nlon
+        ident_bias = torch.zeros(1, C, 1, 1, dtype=torch.float32)
+        ident_scale = torch.ones(1, C, 1, 1, dtype=torch.float32)
+
+        for use_moist_air_formula in [False, True]:
+            with self.subTest(f"moist air formula: {use_moist_air_formula}"):
+                hbloss = HydrostaticBalanceLoss(img_shape=img_shape, crop_shape=crop_shape,
+                                                crop_offset=crop_offset, channel_names=self.channel_names,
+                                                grid_type="equiangular", bias=ident_bias, scale=ident_scale,
+                                                p_min=50, p_max=900,
+                                                use_moist_air_formula=use_moist_air_formula).to(self.device)
+                pressures = hbloss.pressures
+                n = len(pressures)
+                B = 2
+
+                # known temperature profile (physical units); aux channels arbitrary
+                field = torch.randn(B, C, H, W, device=self.device)
+                T = 200.0 + 60.0 * torch.rand(B, n, H, W, device=self.device)
+                if use_moist_air_formula:
+                    q = 0.02 * torch.rand(B, n, H, W, device=self.device)
+                    Tv = T * (1.0 + qc * q)
+                    field[:, hbloss.q_idx, ...] = q
+                else:
+                    Tv = T
+
+                # integrate the hypsometric equation to get balanced geopotentials
+                Z = torch.zeros(B, n, H, W, device=self.device)
+                Z[:, 0, ...] = 1000.0
+                for i in range(1, n):
+                    plog = float(np.log(pressures[i - 1] / pressures[i]))
+                    Z[:, i, ...] = Z[:, i - 1, ...] + R * 0.5 * (Tv[:, i, ...] + Tv[:, i - 1, ...]) * plog
+                field[:, hbloss.t_idx, ...] = T
+                field[:, hbloss.z_idx, ...] = Z
+
+                # a balanced profile must give (numerically) zero loss
+                loss_bal = torch.mean(torch.sum(hbloss(field, None), dim=1)).item()
+                self.assertTrue(loss_bal <= 1e-4, f"balanced HB loss too large: {loss_bal}")
+
+                # perturbing one geopotential level breaks balance -> loss clearly positive
+                field_pert = field.clone()
+                field_pert[:, hbloss.z_idx[1], ...] += 50.0
+                loss_pert = torch.mean(torch.sum(hbloss(field_pert, None), dim=1)).item()
+                self.assertTrue(loss_pert >= 1e-2, f"perturbed HB loss unexpectedly small: {loss_pert}")
+                # and it must be vastly larger than the balanced residual
+                self.assertGreater(loss_pert, 1e3 * loss_bal)
 
 
 if __name__ == '__main__':
