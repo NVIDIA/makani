@@ -34,7 +34,7 @@ from makani.utils import MetricsHandler
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
-from .distributed_helpers import _init_grid, _split_helper, get_default_parameters, set_image_shape
+from .distributed_helpers import _init_grid, _split_helper, get_default_parameters, set_image_shape, reduce_success, sync_and_barrier
 from ..testutils import disable_tf32, set_seed, compare_arrays
 
 # because of physicsnemo/NCCL tear down issues, we can only run one test at a time
@@ -67,10 +67,13 @@ class TestDistributedMetricHandler(unittest.TestCase):
         # create temporary directory
         cls.tmpdir = tempfile.TemporaryDirectory(dir=path)
 
+        sync_and_barrier()
+
         return
 
     @classmethod
     def tearDownClass(cls):
+        sync_and_barrier()
         cls.tmpdir.cleanup()
         # Free the duplicated communicator. mpi_comm is an mpi4py Intracomm
         # (returned by MPI.COMM_WORLD.Dup()), whose disposal API is Free(),
@@ -258,7 +261,7 @@ class TestDistributedMetricHandler(unittest.TestCase):
             val_dist = metrics_dist[key]
             if verbose:
                 print(f"log metric {key}: local={val_local}, dist={val_dist}")
-            self.assertTrue(compare_arrays(f"log metric {key}", np.asarray(val_local), np.asarray(val_dist), verbose=verbose))
+            self.assertTrue(reduce_success(compare_arrays(f"log metric {key}", np.asarray(val_local), np.asarray(val_dist), verbose=verbose), self.device))
 
         # compare rollouts
         rollouts_local = logs_local["metrics"]["rollouts"]
@@ -276,7 +279,7 @@ class TestDistributedMetricHandler(unittest.TestCase):
         data_dist = np.array(data_dist)
 
         with self.subTest(desc="rollouts"):
-            self.assertTrue(compare_arrays("rollouts", data_dist, data_local, verbose=verbose))
+            self.assertTrue(reduce_success(compare_arrays("rollouts", data_dist, data_local, verbose=verbose), self.device))
 
         # save output files and compare
         if comm.get_world_rank() == 0:
@@ -290,7 +293,7 @@ class TestDistributedMetricHandler(unittest.TestCase):
                 data_local = file_local[key]["metric_data"][...]
                 data_dist = file_dist[key]["metric_data"][...]
                 with self.subTest(desc=f"file metric {key}"):
-                    self.assertTrue(compare_arrays(f"file metric {key}", data_dist, data_local, verbose=verbose))
+                    self.assertTrue(reduce_success(compare_arrays(f"file metric {key}", data_dist, data_local, verbose=verbose), self.device))
 
             # close files
             file_local.close()

@@ -25,7 +25,7 @@ import torch.distributed as dist
 from makani.utils import comm
 from makani.utils.driver import Driver
 
-from .distributed_helpers import _init_grid
+from .distributed_helpers import _init_grid, reduce_success, sync_and_barrier
 
 
 class _ShardedTestModel(nn.Module):
@@ -94,9 +94,8 @@ class TestDistributedCheckpoint(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        # Only rank 0 cleans up, all ranks barrier first to ensure no in-flight reads.
-        if dist.is_initialized():
-            dist.barrier()
+        # Only rank 0 cleans up; sync + barrier first to ensure no in-flight reads.
+        sync_and_barrier()
         if cls.world_rank == 0 and cls.tmpdir is not None and os.path.isdir(cls.tmpdir):
             shutil.rmtree(cls.tmpdir, ignore_errors=True)
 
@@ -137,7 +136,7 @@ class TestDistributedCheckpoint(unittest.TestCase):
         for name, param in model.named_parameters():
             ref = snapshot[name]
             self.assertTrue(
-                torch.equal(param.detach().cpu(), ref.detach().cpu()),
+                reduce_success(torch.equal(param.detach().cpu(), ref.detach().cpu()), self.device),
                 msg=f"[{label}] rank {self.world_rank} param '{name}' mismatch after restore",
             )
 
@@ -328,7 +327,7 @@ class TestDistributedCheckpoint(unittest.TestCase):
             for k in ("exp_avg", "exp_avg_sq"):
                 with self.subTest(desc=f"opt state[{i}][{k}] rank {self.world_rank}"):
                     self.assertTrue(
-                        torch.equal(restored[i][k].cpu(), ref[k].cpu()),
+                        reduce_success(torch.equal(restored[i][k].cpu(), ref[k].cpu()), self.device),
                         msg=f"rank {self.world_rank}: optimizer state[{i}][{k}] mismatch after multigroup restore",
                     )
 

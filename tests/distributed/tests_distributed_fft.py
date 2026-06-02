@@ -24,7 +24,7 @@ from makani.mpu.fft import DistributedRealFFT1, DistributedInverseRealFFT1, Dist
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
-from .distributed_helpers import _init_grid, _split_helper, _gather_helper
+from .distributed_helpers import _init_grid, _split_helper, _gather_helper, reduce_success, sync_and_barrier
 from ..testutils import disable_tf32, set_seed, compare_tensors
 
 
@@ -33,6 +33,10 @@ class TestDistributedRealFFT(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         _init_grid(cls)
+
+    @classmethod
+    def tearDownClass(cls):
+        sync_and_barrier()
 
     def setUp(self):
         disable_tf32()
@@ -103,14 +107,14 @@ class TestDistributedRealFFT(unittest.TestCase):
         #############################################################
         with self.subTest(desc="output"):
             out_gather_full = self._gather_helper(out_local)
-            self.assertTrue(compare_tensors("output", out_gather_full, out_full, tol, tol, verbose=verbose))
+            self.assertTrue(reduce_success(compare_tensors("output", out_gather_full, out_full, tol, tol, verbose=verbose), self.device))
 
         #############################################################
         # evaluate BWD pass
         #############################################################
         with self.subTest(desc="input gradients"):
             igrad_gather_full = self._gather_helper(igrad_local)
-            self.assertTrue(compare_tensors("input gradients", igrad_gather_full, igrad_full, tol, tol, verbose=verbose))
+            self.assertTrue(reduce_success(compare_tensors("input gradients", igrad_gather_full, igrad_full, tol, tol, verbose=verbose), self.device))
 
     @parameterized.expand(
         [
@@ -170,14 +174,14 @@ class TestDistributedRealFFT(unittest.TestCase):
         #############################################################
         with self.subTest(desc="output"):
             out_gather_full = self._gather_helper(out_local)
-            self.assertTrue(compare_tensors("output", out_gather_full, out_full, tol, tol, verbose=verbose))
+            self.assertTrue(reduce_success(compare_tensors("output", out_gather_full, out_full, tol, tol, verbose=verbose), self.device))
 
         #############################################################
         # evaluate BWD pass
         #############################################################
         with self.subTest(desc="input gradients"):
             igrad_gather_full = self._gather_helper(igrad_local)
-            self.assertTrue(compare_tensors("input gradients", igrad_gather_full, igrad_full, tol, tol, verbose=verbose))
+            self.assertTrue(reduce_success(compare_tensors("input gradients", igrad_gather_full, igrad_full, tol, tol, verbose=verbose), self.device))
 
 
     @parameterized.expand(
@@ -241,14 +245,14 @@ class TestDistributedRealFFT(unittest.TestCase):
         #############################################################
         with self.subTest(desc="output"):
             out_gather_full = self._gather_helper(out_local)
-            self.assertTrue(compare_tensors("output", out_gather_full, out_full, tol, tol, verbose=verbose))
+            self.assertTrue(reduce_success(compare_tensors("output", out_gather_full, out_full, tol, tol, verbose=verbose), self.device))
 
         #############################################################
         # evaluate BWD pass
         #############################################################
         with self.subTest(desc="input gradients"):
             igrad_gather_full = self._gather_helper(igrad_local)
-            self.assertTrue(compare_tensors("input gradients", igrad_gather_full, igrad_full, tol, tol, verbose=verbose))
+            self.assertTrue(reduce_success(compare_tensors("input gradients", igrad_gather_full, igrad_full, tol, tol, verbose=verbose), self.device))
 
 
     @parameterized.expand(
@@ -319,14 +323,14 @@ class TestDistributedRealFFT(unittest.TestCase):
         #############################################################
         with self.subTest(desc="output"):
             out_gather_full = self._gather_helper(out_local)
-            self.assertTrue(compare_tensors("output", out_gather_full, out_full, tol, tol, verbose=verbose))
+            self.assertTrue(reduce_success(compare_tensors("output", out_gather_full, out_full, tol, tol, verbose=verbose), self.device))
 
         #############################################################
         # evaluate BWD pass
         #############################################################
         with self.subTest(desc="input gradients"):
             igrad_gather_full = self._gather_helper(igrad_local)
-            self.assertTrue(compare_tensors("input gradients", igrad_gather_full, igrad_full, tol, tol, verbose=verbose))
+            self.assertTrue(reduce_success(compare_tensors("input gradients", igrad_gather_full, igrad_full, tol, tol, verbose=verbose), self.device))
 
 if __name__ == '__main__':
     unittest.main()
