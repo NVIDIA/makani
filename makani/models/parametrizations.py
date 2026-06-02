@@ -18,6 +18,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch import amp
 
 import makani.utils.constants as const
 
@@ -188,25 +189,38 @@ class _HydrostaticBalanceWrapper(nn.Module):
         self.register_buffer("out_bias", out_bias, persistent=True)
 
     def forward(self, inp: torch.Tensor) -> torch.Tensor:
-        # undo normalization
-        inp_un = inp * self.inp_scale + self.inp_bias
+        itype = inp.dtype
 
-        # convert temperature to virtual temperature
-        if self.use_moist_air_formula:
-            inp_un_scale = inp_un.clone()
-            inp_un_scale[:, 0, ...] = inp_un[:, 0, ...] * (1.0 + self.q_prefact * inp_un[:, len(self.z_idx) + 1, ...])
-        else:
-            inp_un_scale = inp_un
+        # The hydrostatic recursion sums over ~11 pressure levels of large, un-normalized
+        # geopotentials (O(1e5) m^2/s^2) with alternating signs. F.conv2d is autocast-eligible,
+        # so under AMP it would quantize those geopotentials to bf16/fp16 and corrupt the
+        # recovered temperatures by tens of K. Run the whole physical-units computation in
+        # fp32, from the un-normalization onward.
+        with amp.autocast(device_type=inp.device.type, enabled=False):
+            inp = inp.to(torch.float32)
 
-        # expand:
-        out_un = F.conv2d(inp_un_scale, self.mapping.unsqueeze(-1).unsqueeze(-1))
+            # undo normalization
+            inp_un = inp * self.inp_scale + self.inp_bias
 
-        # unscale temperatures if specific humidity is used
-        if self.use_moist_air_formula:
-            out_un[:, self.t_idx, ...] = out_un[:, self.t_idx, ...] / (1.0 + self.q_prefact * out_un[:, self.q_idx, ...])
+            # convert temperature to virtual temperature
+            if self.use_moist_air_formula:
+                inp_un_scale = inp_un.clone()
+                inp_un_scale[:, 0, ...] = inp_un[:, 0, ...] * (1.0 + self.q_prefact * inp_un[:, len(self.z_idx) + 1, ...])
+            else:
+                inp_un_scale = inp_un
 
-        # undo normalization
-        out = (out_un - self.out_bias) / self.out_scale
+            # expand:
+            out_un = F.conv2d(inp_un_scale, self.mapping.unsqueeze(-1).unsqueeze(-1))
+
+            # unscale temperatures if specific humidity is used
+            if self.use_moist_air_formula:
+                out_un[:, self.t_idx, ...] = out_un[:, self.t_idx, ...] / (1.0 + self.q_prefact * out_un[:, self.q_idx, ...])
+
+            # undo normalization
+            out = (out_un - self.out_bias) / self.out_scale
+
+        # cast back to the input dtype so the layer is faithful to its input
+        out = out.to(itype)
 
         return out
 
