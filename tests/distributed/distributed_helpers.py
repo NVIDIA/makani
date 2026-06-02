@@ -150,6 +150,9 @@ def _init_grid(cls):
     if cls.world_rank == 0:
         print(f"Running distributed tests on grid H x W x E = {cls.grid_size_h} x {cls.grid_size_w} x {cls.grid_size_e}")
 
+    # make sure every rank finishes setup together
+    sync_and_barrier()
+
     return
 
 
@@ -189,3 +192,39 @@ def _gather_helper(tensor, dim=None, group=None):
         tensor_gather = tensor.clone()
 
     return tensor_gather
+
+
+def reduce_success(success, device, group=None):
+    """All-reduce a per-rank boolean check result with logical AND (via MIN).
+
+    Returns the *global* verdict on every rank so all ranks assert consistently: a
+    failure on any single rank fails the test on all ranks. This avoids one rank
+    raising (and bailing out of the test) while the others are still blocked on a
+    subsequent collective -- which would otherwise hang the job at the next
+    all-gather / teardown barrier. Combined with the rank-0-only reporting in
+    conftest, it also ensures a silenced rank can never hide a failure.
+
+    Usage (assert the reduced verdict on every rank)::
+
+        ok = compare_tensors("output", out_full, out_gather, verbose=verbose)
+        self.assertTrue(reduce_success(ok, self.device), "output")
+    """
+    if (not dist.is_initialized()) or (dist.get_world_size(group) == 1):
+        return bool(success)
+    flag = torch.tensor([1 if success else 0], dtype=torch.int32, device=device)
+    dist.all_reduce(flag, op=dist.ReduceOp.MIN, group=group)
+    return bool(flag.item())
+
+
+def sync_and_barrier():
+    """Synchronize the device and barrier across all ranks.
+
+    Called at class setup/teardown boundaries so every rank reaches the boundary
+    together -- no rank races ahead into the next test class (or out of one) while
+    another is still running its kernels / collectives. No-ops when CUDA or
+    torch.distributed are unavailable.
+    """
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    if dist.is_initialized():
+        dist.barrier()

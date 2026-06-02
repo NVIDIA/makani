@@ -36,7 +36,7 @@ from makani.utils.losses import (
 
 # Add parent directory to path for testutils import
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-from .distributed_helpers import _init_grid, _split_helper, _gather_helper
+from .distributed_helpers import _init_grid, _split_helper, _gather_helper, reduce_success, sync_and_barrier
 from ..testutils import disable_tf32, set_seed, compare_tensors
 
 class TestDistributedLoss(unittest.TestCase):
@@ -44,6 +44,10 @@ class TestDistributedLoss(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         _init_grid(cls)
+
+    @classmethod
+    def tearDownClass(cls):
+        sync_and_barrier()
 
     def setUp(self):
         disable_tf32()
@@ -128,14 +132,14 @@ class TestDistributedLoss(unittest.TestCase):
         # evaluate FWD pass
         #############################################################
         with self.subTest(desc="outputs"):
-            self.assertTrue(compare_tensors("outputs", out_local, out_full, tol, tol, verbose=verbose))
+            self.assertTrue(reduce_success(compare_tensors("outputs", out_local, out_full, tol, tol, verbose=verbose), self.device))
 
         #############################################################
         # evaluate BWD pass
         #############################################################
         with self.subTest(desc="input gradients"):
             igrad_gather_full = self._gather_helper_bwd(igrad_local, False)
-            self.assertTrue(compare_tensors("input gradients", igrad_gather_full, igrad_full, tol, tol, verbose=verbose))
+            self.assertTrue(reduce_success(compare_tensors("input gradients", igrad_gather_full, igrad_full, tol, tol, verbose=verbose), self.device))
 
 
     @parameterized.expand(
@@ -255,7 +259,7 @@ class TestDistributedLoss(unittest.TestCase):
         # evaluate FWD pass
         #############################################################
         with self.subTest(desc="outputs"):
-            self.assertTrue(compare_tensors("outputs", loss_local, loss_full, tol, tol, verbose=verbose))
+            self.assertTrue(reduce_success(compare_tensors("outputs", loss_local, loss_full, tol, tol, verbose=verbose), self.device))
 
         #############################################################
         # evaluate BWD pass
@@ -263,12 +267,12 @@ class TestDistributedLoss(unittest.TestCase):
         # foreacst grads
         with self.subTest(desc="forecast gradients"):
             igrad_gather_full = self._gather_helper_bwd(igrad_local, True)
-            self.assertTrue(compare_tensors("forecast gradients", igrad_gather_full, igrad_full, tol, tol, verbose=verbose))
+            self.assertTrue(reduce_success(compare_tensors("forecast gradients", igrad_gather_full, igrad_full, tol, tol, verbose=verbose), self.device))
 
         # observation grads
         with self.subTest(desc="observation gradients"):
             obsgrad_gather_full = self._gather_helper_bwd(obsgrad_local, False)
-            self.assertTrue(compare_tensors("observation gradients", obsgrad_gather_full, obsgrad_full, tol, tol, verbose=verbose))
+            self.assertTrue(reduce_success(compare_tensors("observation gradients", obsgrad_gather_full, obsgrad_full, tol, tol, verbose=verbose), self.device))
 
 
     @parameterized.expand(
@@ -362,7 +366,7 @@ class TestDistributedLoss(unittest.TestCase):
         # evaluate FWD pass
         #############################################################
         with self.subTest(desc="outputs"):
-            self.assertTrue(compare_tensors("outputs", loss_local, loss_full, tol, tol, verbose=verbose))
+            self.assertTrue(reduce_success(compare_tensors("outputs", loss_local, loss_full, tol, tol, verbose=verbose), self.device))
 
         #############################################################
         # evaluate BWD pass
@@ -370,14 +374,14 @@ class TestDistributedLoss(unittest.TestCase):
         # foreacst grads
         with self.subTest(desc="forecast gradients"):
             igrad_gather_full = self._gather_helper_bwd(igrad_local, True)
-            self.assertTrue(compare_tensors("forecast gradients", igrad_gather_full, igrad_full, tol, tol, verbose=verbose))
+            self.assertTrue(reduce_success(compare_tensors("forecast gradients", igrad_gather_full, igrad_full, tol, tol, verbose=verbose), self.device))
 
         # observation grads
         with self.subTest(desc="observation gradients"):
             obsgrad_gather_full = self._gather_helper_bwd(obsgrad_local, False)
             if self.world_rank == 0:
                 print("obsgrad_gather_full", obsgrad_gather_full[0, 0, ...], "obsgrad_full", obsgrad_full[0, 0, ...])
-            self.assertTrue(compare_tensors("observation gradients", obsgrad_gather_full, obsgrad_full, tol, tol, verbose=verbose))
+            self.assertTrue(reduce_success(compare_tensors("observation gradients", obsgrad_gather_full, obsgrad_full, tol, tol, verbose=verbose), self.device))
 
 
     @parameterized.expand(
@@ -462,18 +466,18 @@ class TestDistributedLoss(unittest.TestCase):
         # evaluate FWD pass
         #############################################################
         with self.subTest(desc="outputs"):
-            self.assertTrue(compare_tensors("outputs", loss_local, loss_full, tol, tol, verbose=verbose))
+            self.assertTrue(reduce_success(compare_tensors("outputs", loss_local, loss_full, tol, tol, verbose=verbose), self.device))
 
         #############################################################
         # evaluate BWD pass
         #############################################################
         with self.subTest(desc="forecast gradients"):
             fgrad_gather_full = self._gather_helper_bwd(fgrad_local, True)
-            self.assertTrue(compare_tensors("forecast gradients", fgrad_gather_full, fgrad_full, tol, tol, verbose=verbose))
+            self.assertTrue(reduce_success(compare_tensors("forecast gradients", fgrad_gather_full, fgrad_full, tol, tol, verbose=verbose), self.device))
 
         with self.subTest(desc="observation gradients"):
             obsgrad_gather_full = self._gather_helper_bwd(obsgrad_local, False)
-            self.assertTrue(compare_tensors("observation gradients", obsgrad_gather_full, obsgrad_full, tol, tol, verbose=verbose))
+            self.assertTrue(reduce_success(compare_tensors("observation gradients", obsgrad_gather_full, obsgrad_full, tol, tol, verbose=verbose), self.device))
 
 
     @parameterized.expand(
@@ -554,18 +558,18 @@ class TestDistributedLoss(unittest.TestCase):
         # evaluate FWD pass
         #############################################################
         with self.subTest(desc="outputs"):
-            self.assertTrue(compare_tensors("outputs", loss_local, loss_full, tol, tol, verbose=verbose))
+            self.assertTrue(reduce_success(compare_tensors("outputs", loss_local, loss_full, tol, tol, verbose=verbose), self.device))
 
         #############################################################
         # evaluate BWD pass
         #############################################################
         with self.subTest(desc="forecast gradients"):
             fgrad_gather_full = self._gather_helper_bwd(fgrad_local, True)
-            self.assertTrue(compare_tensors("forecast gradients", fgrad_gather_full, fgrad_full, tol, tol, verbose=verbose))
+            self.assertTrue(reduce_success(compare_tensors("forecast gradients", fgrad_gather_full, fgrad_full, tol, tol, verbose=verbose), self.device))
 
         with self.subTest(desc="observation gradients"):
             obsgrad_gather_full = self._gather_helper_bwd(obsgrad_local, False)
-            self.assertTrue(compare_tensors("observation gradients", obsgrad_gather_full, obsgrad_full, tol, tol, verbose=verbose))
+            self.assertTrue(reduce_success(compare_tensors("observation gradients", obsgrad_gather_full, obsgrad_full, tol, tol, verbose=verbose), self.device))
 
 
     @parameterized.expand(
@@ -650,18 +654,18 @@ class TestDistributedLoss(unittest.TestCase):
         # evaluate FWD pass
         #############################################################
         with self.subTest(desc="outputs"):
-            self.assertTrue(compare_tensors("outputs", loss_local, loss_full, tol, tol, verbose=verbose))
+            self.assertTrue(reduce_success(compare_tensors("outputs", loss_local, loss_full, tol, tol, verbose=verbose), self.device))
 
         #############################################################
         # evaluate BWD pass
         #############################################################
         with self.subTest(desc="forecast gradients"):
             fgrad_gather_full = self._gather_helper_bwd(fgrad_local, True)
-            self.assertTrue(compare_tensors("forecast gradients", fgrad_gather_full, fgrad_full, tol, tol, verbose=verbose))
+            self.assertTrue(reduce_success(compare_tensors("forecast gradients", fgrad_gather_full, fgrad_full, tol, tol, verbose=verbose), self.device))
 
         with self.subTest(desc="observation gradients"):
             obsgrad_gather_full = self._gather_helper_bwd(obsgrad_local, False)
-            self.assertTrue(compare_tensors("observation gradients", obsgrad_gather_full, obsgrad_full, tol, tol, verbose=verbose))
+            self.assertTrue(reduce_success(compare_tensors("observation gradients", obsgrad_gather_full, obsgrad_full, tol, tol, verbose=verbose), self.device))
 
 
 if __name__ == "__main__":

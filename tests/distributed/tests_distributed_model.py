@@ -32,7 +32,7 @@ from makani.mpu.mappings import init_gradient_reduction_hooks
 from makani.mpu.mappings import reduce_from_parallel_region
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-from .distributed_helpers import get_default_parameters, set_image_shape, _split_helper, _gather_helper
+from .distributed_helpers import get_default_parameters, set_image_shape, _split_helper, _gather_helper, reduce_success, sync_and_barrier
 from ..testutils import disable_tf32, set_seed, compare_tensors
 
 
@@ -57,10 +57,13 @@ class TestDistributedModel(unittest.TestCase):
             cls.device = torch.device("cpu")
         set_seed(333)
 
+        sync_and_barrier()
+
         return
 
     @classmethod
     def tearDownClass(cls):
+        sync_and_barrier()
         # Free the duplicated communicator. mpi_comm is an mpi4py Intracomm
         # (returned by MPI.COMM_WORLD.Dup()), whose disposal API is Free()
         # — release the duplicated comm explicitly rather than relying on
@@ -192,7 +195,7 @@ class TestDistributedModel(unittest.TestCase):
             with self.subTest(desc=f"parameter {key}"):
                 param_full = state_dict_full[key].cpu()
                 param_gather_full = state_dict_gather_full[key]
-                self.assertTrue(compare_tensors(f"parameter {key}", param_full, param_gather_full, verbose=verbose))
+                self.assertTrue(reduce_success(compare_tensors(f"parameter {key}", param_full, param_gather_full, verbose=verbose), self.device))
 
         self.mpi_comm.Barrier()
 
@@ -303,11 +306,11 @@ class TestDistributedModel(unittest.TestCase):
         # output
         with self.subTest(desc="output"):
             out_gather_full = self._gather_helper(out_local, hdim=-2, wdim=-1)
-            self.assertTrue(compare_tensors("output", out_gather_full, out_full, tol, tol, verbose=verbose))
+            self.assertTrue(reduce_success(compare_tensors("output", out_gather_full, out_full, tol, tol, verbose=verbose), self.device))
 
         # loss
         with self.subTest(desc="loss"):
-            self.assertTrue(compare_tensors("loss", loss_dist, loss_full, tol, tol, verbose=verbose))
+            self.assertTrue(reduce_success(compare_tensors("loss", loss_dist, loss_full, tol, tol, verbose=verbose), self.device))
 
         #############################################################
         # evaluate BWD pass
@@ -315,7 +318,7 @@ class TestDistributedModel(unittest.TestCase):
         # dgrad
         with self.subTest(desc="input gradients"):
             igrad_gather_full = self._gather_helper(igrad_local, hdim=-2, wdim=-1)
-            self.assertTrue(compare_tensors("input gradients", igrad_gather_full, igrad_full, tol, tol, verbose=verbose))
+            self.assertTrue(reduce_success(compare_tensors("input gradients", igrad_gather_full, igrad_full, tol, tol, verbose=verbose), self.device))
 
         # wgrads
         for key in state_dict_full.keys():
@@ -323,7 +326,7 @@ class TestDistributedModel(unittest.TestCase):
                 with self.subTest(desc=f"weight gradient {key}"):
                     wgrad_full = state_dict_full[key]
                     wgrad_gather_full = state_dict_gather_full["module." + key]
-                    self.assertTrue(compare_tensors(f"weight gradient {key}", wgrad_gather_full, wgrad_full, tol, tol, verbose=verbose))
+                    self.assertTrue(reduce_success(compare_tensors(f"weight gradient {key}", wgrad_gather_full, wgrad_full, tol, tol, verbose=verbose), self.device))
 
         # cleanup
         self._destroy_comms()
@@ -429,7 +432,7 @@ class TestDistributedModel(unittest.TestCase):
         with self.subTest(desc="output"):
             out_single_gather = self._gather_helper(out_single_local, hdim=-2, wdim=-1)
             out_double_gather = self._gather_helper(out_double_local, hdim=-2, wdim=-1)
-            self.assertTrue(compare_tensors("output", out_double_gather, out_single_gather, atol, rtol, verbose=verbose))
+            self.assertTrue(reduce_success(compare_tensors("output", out_double_gather, out_single_gather, atol, rtol, verbose=verbose), self.device))
 
         #############################################################
         # evaluate BWD pass
@@ -440,7 +443,7 @@ class TestDistributedModel(unittest.TestCase):
                 with self.subTest(desc=f"weight gradient {key}"):
                     wgrad_single = state_dict_single_step[key]
                     wgrad_double = state_dict_double_step[key]
-                    self.assertTrue(compare_tensors(f"weight gradient {key}", wgrad_double, wgrad_single, atol, rtol, verbose=verbose))
+                    self.assertTrue(reduce_success(compare_tensors(f"weight gradient {key}", wgrad_double, wgrad_single, atol, rtol, verbose=verbose), self.device))
 
 
 
