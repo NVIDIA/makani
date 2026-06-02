@@ -35,6 +35,7 @@ from makani.utils.YParams import YParams
 from makani.utils.features import get_auxiliary_channels
 from makani.utils import comm
 from makani.utils.dataloaders.data_helpers import get_data_normalization
+from makani.utils.training.training_helpers import get_parameter_groups
 from makani.utils.checkpoint_helpers import (
     gather_model_state_dict,
     scatter_model_state_dict,
@@ -650,19 +651,24 @@ class Driver(metaclass=abc.ABCMeta):
 
         # optimizer setup
         betas = (params.optimizer_beta1, params.optimizer_beta2)
-        all_parameters = model.parameters()
+        # build parameter groups according to the weight-decay mode ("full" decays
+        # everything; "transformer" excludes biases and norm affine params). Each group
+        # carries its own weight_decay, so it is no longer passed at the optimizer level.
+        weight_decay = params.get("weight_decay", 0)
+        weight_decay_mode = params.get("weight_decay_mode", "full")
+        all_parameters = get_parameter_groups(model, weight_decay, weight_decay_mode)
         if params.optimizer_type == "Adam":
             if self.log_to_screen:
-                self.logger.info("using Adam optimizer")
-            optimizer = optim.Adam(all_parameters, lr=params.get("lr", 1e-3), betas=betas, eps=params.get("optimizer_eps", 1e-8), weight_decay=params.get("weight_decay", 0), foreach=True)
+                self.logger.info(f"using Adam optimizer (weight_decay_mode={weight_decay_mode})")
+            optimizer = optim.Adam(all_parameters, lr=params.get("lr", 1e-3), betas=betas, eps=params.get("optimizer_eps", 1e-8), foreach=True)
         elif params.optimizer_type == "AdamW":
             if self.log_to_screen:
-                self.logger.info("using AdamW optimizer")
-            optimizer = optim.AdamW(all_parameters, lr=params.get("lr", 1e-3), betas=betas, eps=params.get("optimizer_eps", 1e-8), weight_decay=params.get("weight_decay", 0), foreach=True)
+                self.logger.info(f"using AdamW optimizer (weight_decay_mode={weight_decay_mode})")
+            optimizer = optim.AdamW(all_parameters, lr=params.get("lr", 1e-3), betas=betas, eps=params.get("optimizer_eps", 1e-8), foreach=True)
         elif params.optimizer_type == "SGD":
             if self.log_to_screen:
-                self.logger.info("using SGD optimizer")
-            optimizer = optim.SGD(all_parameters, lr=params.get("lr", 1e-3), weight_decay=params.get("weight_decay", 0), momentum=params.get("momentum", 0), nesterov=params.get("nesterov", False), foreach=True)
+                self.logger.info(f"using SGD optimizer (weight_decay_mode={weight_decay_mode})")
+            optimizer = optim.SGD(all_parameters, lr=params.get("lr", 1e-3), momentum=params.get("momentum", 0), nesterov=params.get("nesterov", False), foreach=True)
         elif params.optimizer_type == "SIRFShampoo":
             if self.log_to_screen:
                 self.logger.info("using SIRFShampoo optimizer")
