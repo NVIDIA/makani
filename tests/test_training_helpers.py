@@ -17,7 +17,7 @@ import unittest
 import torch
 import torch.nn as nn
 
-from makani.utils.training.training_helpers import clip_grads, _compute_total_grad_norm, normalize_weights
+from makani.utils.training.training_helpers import clip_grads, _compute_total_grad_norm, normalize_weights, get_parameter_groups
 
 import sys, os
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
@@ -206,6 +206,81 @@ class TestNormalizeWeights(unittest.TestCase):
         normalize_weights(model)
         norm = model.p.data.abs().norm().item()
         self.assertAlmostEqual(norm, 1.0, places=4)
+
+
+class _WeirdNorm(nn.Module):
+    """A norm-like module whose gain is 2-D and named 'weight'. Only module-type
+    detection (not the name or ndim rules) can classify its gain as no-decay -- this
+    proves the norm detection works beyond the simple heuristics."""
+
+    def __init__(self, n=4):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(n, n))
+        self.bias = nn.Parameter(torch.zeros(n))
+
+    def forward(self, x):
+        return x
+
+
+class _ParamGroupNet(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.lin = nn.Linear(8, 8)                                   # weight(2D)->decay, bias(1D)->no_decay
+        self.conv = nn.Conv2d(4, 4, 1)                               # weight(4D)->decay, bias(1D)->no_decay
+        self.ln = nn.LayerNorm(8)                                    # weight/bias -> no_decay (module type)
+        self.wnorm = _WeirdNorm(4)                                   # 2D gain -> no_decay only via module type
+        self.expanded_bias = nn.Parameter(torch.zeros(1, 4, 1, 1))   # 4D bias -> no_decay BY NAME
+        self.plain_weight = nn.Parameter(torch.randn(8, 8))          # 2D weight -> decay
+
+    def forward(self, x):
+        return x
+
+
+class TestParameterGroups(unittest.TestCase):
+    def setUp(self):
+        set_seed(0)
+        self.model = _ParamGroupNet()
+        self.wd = 0.1
+
+    def _named(self):
+        return dict(self.model.named_parameters())
+
+    def test_full_mode_is_single_group(self):
+        groups = get_parameter_groups(self.model, self.wd, "full")
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0]["weight_decay"], self.wd)
+        self.assertEqual(len(groups[0]["params"]), sum(1 for _ in self.model.parameters()))
+
+    def test_transformer_mode_splits_norms_and_biases(self):
+        groups = get_parameter_groups(self.model, self.wd, "transformer")
+        self.assertEqual(len(groups), 2)
+
+        decay = next(g for g in groups if g["weight_decay"] == self.wd)
+        no_decay = next(g for g in groups if g["weight_decay"] == 0.0)
+        decay_ids = {id(p) for p in decay["params"]}
+        no_decay_ids = {id(p) for p in no_decay["params"]}
+
+        named = self._named()
+
+        # weight matrices keep weight decay
+        for nm in ("lin.weight", "conv.weight", "plain_weight"):
+            self.assertIn(id(named[nm]), decay_ids, f"{nm} should be in the decay group")
+
+        # biases (incl. the 4-D expanded one) and all norm affine params (incl. the
+        # 2-D weird-norm gain) are excluded from weight decay
+        for nm in ("lin.bias", "conv.bias", "expanded_bias",
+                   "ln.weight", "ln.bias", "wnorm.weight", "wnorm.bias"):
+            self.assertIn(id(named[nm]), no_decay_ids, f"{nm} should be in the no-decay group")
+
+        # partition is exact: every param classified once, no overlap
+        total = sum(1 for _ in self.model.parameters())
+        self.assertEqual(len(decay_ids) + len(no_decay_ids), total)
+        self.assertEqual(decay_ids & no_decay_ids, set())
+
+    def test_unknown_mode_raises(self):
+        for bad in ("selective", "Transformer", "none", ""):
+            with self.assertRaises(ValueError):
+                get_parameter_groups(self.model, self.wd, bad)
 
 
 if __name__ == "__main__":
