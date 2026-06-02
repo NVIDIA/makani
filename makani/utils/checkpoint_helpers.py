@@ -125,26 +125,44 @@ def gather_optimizer_state_dict(model: nn.Module, optimizer: Optimizer) -> Order
         pdict = {key: value for key, value in pgroup.items()}
         optimizer_dict["param_groups"].append(pdict)
 
-    # check whether the corresponding model paramter is distributed.
-    # if yes, we need to gather it
+    # The integer keys in state_dict["state"] follow torch.optim's own packing order:
+    # parameters are numbered group-by-group, in optimizer.param_groups order (deduplicated).
+    # We reconstruct the index -> param map from optimizer.param_groups so each state entry is
+    # paired with the parameter that actually owns it. This is correct for any number of param
+    # groups, unlike indexing by enumerate(model.parameters()), which only matches when there is
+    # a single group built directly from model.parameters().
     optimizer_dict["state"] = {}
-    for index, param in enumerate(model.parameters()):
-        optimizer_dict["state"][index] = {"step": state_dict["state"][index]["step"].clone()}
-        if hasattr(param, "sharded_dims_mp"):
-            exp_avg = state_dict["state"][index]["exp_avg"].clone()
-            exp_avg_sq = state_dict["state"][index]["exp_avg_sq"].clone()
+    seen = set()
+    index = 0
+    for pgroup in optimizer.param_groups:
+        for param in pgroup["params"]:
+            if id(param) in seen:
+                continue
+            seen.add(id(param))
 
-            # gather the optimizer state across all sharded dimensions
-            for d, group in enumerate(param.sharded_dims_mp):
-                if group is not None:
-                    exp_avg = gather_uneven(exp_avg, d, group)
-                    exp_avg_sq = gather_uneven(exp_avg_sq, d, group)
+            # params without optimizer state (e.g. never received a gradient) carry no state,
+            # but still consume an index so we stay aligned with the packing
+            if index not in state_dict["state"]:
+                index += 1
+                continue
 
-            optimizer_dict["state"][index]["exp_avg"] = exp_avg
-            optimizer_dict["state"][index]["exp_avg_sq"] = exp_avg_sq
-        else:
-            optimizer_dict["state"][index]["exp_avg"] = state_dict["state"][index]["exp_avg"].clone()
-            optimizer_dict["state"][index]["exp_avg_sq"] = state_dict["state"][index]["exp_avg_sq"].clone()
+            pstate = state_dict["state"][index]
+            exp_avg = pstate["exp_avg"].clone()
+            exp_avg_sq = pstate["exp_avg_sq"].clone()
+
+            # if the parameter is sharded, gather its optimizer moments across all sharded dims
+            if hasattr(param, "sharded_dims_mp"):
+                for d, group in enumerate(param.sharded_dims_mp):
+                    if group is not None:
+                        exp_avg = gather_uneven(exp_avg, d, group)
+                        exp_avg_sq = gather_uneven(exp_avg_sq, d, group)
+
+            optimizer_dict["state"][index] = {
+                "step": pstate["step"].clone(),
+                "exp_avg": exp_avg,
+                "exp_avg_sq": exp_avg_sq,
+            }
+            index += 1
 
     return optimizer_dict
 
@@ -159,27 +177,37 @@ def scatter_optimizer_state_dict(model: nn.Module, optimizer: Optimizer, optimiz
     if not (isinstance(optimizer, torch.optim.Adam) or isinstance(optimizer, torch.optim.AdamW)):
         raise NotImplementedError("Error, only Adam and AdamW state can be restored from flexible format at the moment.")
 
-    # iterate over model parameters and split accordingly
-    for idp, param in enumerate(model.parameters()):
+    # Reconstruct the index -> param map from optimizer.param_groups (matching torch.optim's
+    # packing order) so each saved state entry is split with the sharding of its true owner,
+    # for any number of parameter groups. See gather_optimizer_state_dict for details.
+    seen = set()
+    index = 0
+    for pgroup in optimizer.param_groups:
+        for param in pgroup["params"]:
+            if id(param) in seen:
+                continue
+            seen.add(id(param))
 
-        # in this case, we need to distribute the weight
-        if hasattr(param, "sharded_dims_mp"):
+            # in this case, we need to distribute the state
+            if (index in optimizer_state_dict["state"]) and hasattr(param, "sharded_dims_mp"):
 
-            # clone the state
-            exp_avg = optimizer_state_dict["state"][idp]["exp_avg"].clone()
-            exp_avg_sq = optimizer_state_dict["state"][idp]["exp_avg_sq"].clone()
+                # clone the state
+                exp_avg = optimizer_state_dict["state"][index]["exp_avg"].clone()
+                exp_avg_sq = optimizer_state_dict["state"][index]["exp_avg_sq"].clone()
 
-            for d, group in enumerate(param.sharded_dims_mp):
-                # continue if there is nothing to do
-                if (group is None) or (comm.get_size(group) == 1):
-                    continue
+                for d, group in enumerate(param.sharded_dims_mp):
+                    # continue if there is nothing to do
+                    if (group is None) or (comm.get_size(group) == 1):
+                        continue
 
-                exp_avg = split_tensor_along_dim(exp_avg, dim=d, num_chunks=comm.get_size(group))[comm.get_rank(group)]
-                exp_avg_sq = split_tensor_along_dim(exp_avg_sq, dim=d, num_chunks=comm.get_size(group))[comm.get_rank(group)]
+                    exp_avg = split_tensor_along_dim(exp_avg, dim=d, num_chunks=comm.get_size(group))[comm.get_rank(group)]
+                    exp_avg_sq = split_tensor_along_dim(exp_avg_sq, dim=d, num_chunks=comm.get_size(group))[comm.get_rank(group)]
 
-            # update the state dict
-            optimizer_state_dict["state"][idp]["exp_avg"] = exp_avg
-            optimizer_state_dict["state"][idp]["exp_avg_sq"] = exp_avg_sq
+                # update the state dict
+                optimizer_state_dict["state"][index]["exp_avg"] = exp_avg
+                optimizer_state_dict["state"][index]["exp_avg_sq"] = exp_avg_sq
+
+            index += 1
 
     return optimizer_state_dict
 

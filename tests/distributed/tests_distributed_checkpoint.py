@@ -262,5 +262,76 @@ class TestDistributedCheckpoint(unittest.TestCase):
             self._verify_match(fresh, snapshot, label="flexible-fresh", verbose=verbose)
 
 
+    # ----------------------------------------------------------------------
+    # Optimizer state, flexible format, with MULTIPLE parameter groups.
+    #
+    # torch.optim packs optimizer-state indices group-by-group (in
+    # optimizer.param_groups order), which does NOT match model.parameters()
+    # order once parameters are split across >1 group. gather/scatter of the
+    # optimizer state must therefore pair each state entry with the parameter
+    # that actually owns it. We build the groups in REVERSE order (no-decay/bias
+    # first, then decay/weight) so the packing order differs from model order --
+    # the configuration that exposed the original index-vs-param mismatch. With
+    # the old enumerate(model.parameters()) indexing this even crashes, because
+    # the (h,w)-sharded weight's gather is applied to the 1-D bias state.
+    # ----------------------------------------------------------------------
+    def _build_reordered_param_groups(self, model):
+        decay, no_decay = [], []
+        for p in model.parameters():
+            (decay if p.ndim >= 2 else no_decay).append(p)
+        # no-decay group FIRST -> optimizer packing order != model.parameters() order
+        return [
+            {"params": no_decay, "weight_decay": 0.0},
+            {"params": decay, "weight_decay": 0.1},
+        ]
+
+    def _make_stepped_optimizer(self, model):
+        optimizer = torch.optim.AdamW(self._build_reordered_param_groups(model), lr=1e-3)
+        # populate exp_avg / exp_avg_sq with one deterministic step
+        for p in model.parameters():
+            p.grad = torch.ones_like(p)
+        optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
+        return optimizer
+
+    def _snapshot_opt_state(self, optimizer):
+        state = optimizer.state_dict()["state"]
+        return {i: {k: v.detach().clone() for k, v in s.items() if torch.is_tensor(v)} for i, s in state.items()}
+
+    def test_flexible_optimizer_state_roundtrip_multigroup(self, verbose=False):
+        ckpt_path = os.path.join(self.tmpdir, "flexible_optstate_mp{mp_rank}_v0.tar")
+
+        model = self._build_model()
+        optimizer = self._make_stepped_optimizer(model)
+        opt_snapshot = self._snapshot_opt_state(optimizer)
+
+        # 1. Save flexible: rank 0 gathers the (sharded) optimizer moments into a global dict.
+        Driver.save_checkpoint(
+            ckpt_path, model, optimizer=optimizer, checkpoint_mode="flexible",
+        )
+        if dist.is_initialized():
+            dist.barrier()
+
+        # 2. Corrupt the live optimizer moments so a no-op restore would be detected.
+        with torch.no_grad():
+            for s in optimizer.state.values():
+                if "exp_avg" in s:
+                    s["exp_avg"].zero_()
+                    s["exp_avg_sq"].zero_()
+
+        # 3. Restore flexible: each rank reads the global file and scatters back to its shard.
+        Driver._restore_checkpoint_flexible(ckpt_path, model, optimizer=optimizer)
+
+        # 4. Per-rank optimizer moments must match the pre-save snapshot bit-for-bit.
+        restored = optimizer.state_dict()["state"]
+        for i, ref in opt_snapshot.items():
+            for k in ("exp_avg", "exp_avg_sq"):
+                with self.subTest(desc=f"opt state[{i}][{k}] rank {self.world_rank}"):
+                    self.assertTrue(
+                        torch.equal(restored[i][k].cpu(), ref[k].cpu()),
+                        msg=f"rank {self.world_rank}: optimizer state[{i}][{k}] mismatch after multigroup restore",
+                    )
+
+
 if __name__ == "__main__":
     unittest.main()
