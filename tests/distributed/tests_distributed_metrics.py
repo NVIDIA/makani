@@ -293,7 +293,9 @@ class TestDistributedMetricHandler(unittest.TestCase):
                 data_local = file_local[key]["metric_data"][...]
                 data_dist = file_dist[key]["metric_data"][...]
                 with self.subTest(desc=f"file metric {key}"):
-                    self.assertTrue(reduce_success(compare_arrays(f"file metric {key}", data_dist, data_local, verbose=verbose), self.device))
+                    # rank-0-only block (only rank 0 saved/reads the files): must NOT use
+                    # reduce_success here -- a collective inside `if rank == 0` deadlocks.
+                    self.assertTrue(compare_arrays(f"file metric {key}", data_dist, data_local, verbose=verbose))
 
             # close files
             file_local.close()
