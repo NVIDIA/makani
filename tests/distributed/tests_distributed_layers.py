@@ -35,7 +35,7 @@ from makani.models.common.layer_norm import GeometricInstanceNormS2
 from makani.mpu.layer_norm import DistributedGeometricInstanceNormS2, DistributedInstanceNorm2d
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-from .distributed_helpers import _init_grid, _split_helper, _gather_helper, reduce_success, sync_and_barrier
+from .distributed_helpers import _init_grid, _split_helper, _gather_helper, sync_and_barrier
 from ..testutils import disable_tf32, set_seed, compare_tensors
 
 class TestDistributedLayers(unittest.TestCase):
@@ -76,7 +76,7 @@ class TestDistributedLayers(unittest.TestCase):
         ],
         skip_on_empty=True,
     )
-    def test_distributed_spectral_conv(self, nlat_in, nlon_in, nlat_out, nlon_out, batch_size, num_chan, tol, verbose=False):
+    def test_distributed_spectral_conv(self, nlat_in, nlon_in, nlat_out, nlon_out, batch_size, num_chan, tol, verbose=True):
         B, C, Hi, Wi, Ho, Wo = batch_size, num_chan, nlat_in, nlon_in, nlat_out, nlon_out
 
         from makani.models.common import SpectralConv
@@ -171,28 +171,28 @@ class TestDistributedLayers(unittest.TestCase):
         #############################################################
         with self.subTest(desc="output"):
             out_gather_full = self._gather_helper(out_local, hdim=-2, wdim=-1)
-            self.assertTrue(reduce_success(compare_tensors("output", out_gather_full, out_full, tol, tol, verbose=verbose), self.device))
+            self.assertTrue(compare_tensors("output", out_gather_full, out_full, tol, tol, verbose=verbose))
 
         #############################################################
         # evaluate input grads
         #############################################################
         with self.subTest(desc="input gradients"):
             igrad_gather_full = self._gather_helper(igrad_local, hdim=-2, wdim=-1)
-            self.assertTrue(reduce_success(compare_tensors("input gradients", igrad_gather_full, igrad_full, tol, tol, verbose=verbose), self.device))
+            self.assertTrue(compare_tensors("input gradients", igrad_gather_full, igrad_full, tol, tol, verbose=verbose))
 
         #############################################################
         # evaluate Weight grads
         #############################################################
         with self.subTest(desc="weight gradients"):
             wgrad_gather_full = self._gather_helper(wgrad_local, hdim=-1, wdim=None)
-            self.assertTrue(reduce_success(compare_tensors("weight gradients", wgrad_gather_full, wgrad_full, tol, tol, verbose=verbose), self.device))
+            self.assertTrue(compare_tensors("weight gradients", wgrad_gather_full, wgrad_full, tol, tol, verbose=verbose))
 
         with self.subTest(desc="bias gradients"):
             bgrad_gather_list = [torch.empty_like(bgrad_local) for _ in range(self.world_size)]
             bgrad_gather_list[self.world_rank] = bgrad_local
             dist.all_gather(bgrad_gather_list, bgrad_local, group=None)
             for idb, bgrad_gather_full in enumerate(bgrad_gather_list):
-                self.assertTrue(reduce_success(compare_tensors(f"bias gradient {idb}", bgrad_gather_full, bgrad_full, tol, tol, verbose=verbose), self.device))
+                self.assertTrue(compare_tensors(f"bias gradient {idb}", bgrad_gather_full, bgrad_full, tol, tol, verbose=verbose))
 
     @parameterized.expand(
         [
@@ -290,14 +290,14 @@ class TestDistributedLayers(unittest.TestCase):
         #############################################################
         with self.subTest(desc="output"):
             out_gather_full = self._gather_helper(out_local, hdim=-2, wdim=-1)
-            self.assertTrue(reduce_success(compare_tensors("output", out_gather_full, out_full, tol, tol, verbose=verbose), self.device))
+            self.assertTrue(compare_tensors("output", out_gather_full, out_full, tol, tol, verbose=verbose))
 
         #############################################################
         # evaluate input grads
         #############################################################
         with self.subTest(desc="input gradients"):
             igrad_gather_full = self._gather_helper(igrad_local, hdim=-2, wdim=-1)
-            self.assertTrue(reduce_success(compare_tensors("input gradients", igrad_gather_full, igrad_full, tol, tol, verbose=verbose), self.device))
+            self.assertTrue(compare_tensors("input gradients", igrad_gather_full, igrad_full, tol, tol, verbose=verbose))
 
         #############################################################
         # evaluate weight and bias grads
@@ -309,7 +309,7 @@ class TestDistributedLayers(unittest.TestCase):
                 wgrad_gather_list[self.world_rank] = wgrad_local
                 dist.all_gather(wgrad_gather_list, wgrad_local, group=None)
                 for idw, wgrad_gather_full in enumerate(wgrad_gather_list):
-                    self.assertTrue(reduce_success(compare_tensors(f"weight gradient {idw}", wgrad_gather_full, wgrad_full, tol, tol, verbose=verbose), self.device))
+                    self.assertTrue(compare_tensors(f"weight gradient {idw}", wgrad_gather_full, wgrad_full, tol, tol, verbose=verbose))
 
 
         # bias gradients should be the same across all processes
@@ -319,7 +319,7 @@ class TestDistributedLayers(unittest.TestCase):
                 bgrad_gather_list[self.world_rank] = bgrad_local
                 dist.all_gather(bgrad_gather_list, bgrad_local, group=None)
                 for idb, bgrad_gather_full in enumerate(bgrad_gather_list):
-                    self.assertTrue(reduce_success(compare_tensors(f"bias gradient {idb}", bgrad_gather_full, bgrad_full, tol, tol, verbose=verbose), self.device))
+                    self.assertTrue(compare_tensors(f"bias gradient {idb}", bgrad_gather_full, bgrad_full, tol, tol, verbose=verbose))
 
 
     @parameterized.expand(
@@ -428,14 +428,14 @@ class TestDistributedLayers(unittest.TestCase):
         #############################################################
         with self.subTest(desc="output"):
             out_gather_full = self._gather_helper(out_local, hdim=-2, wdim=-1)
-            self.assertTrue(reduce_success(compare_tensors("output", out_gather_full, out_full, tol, tol, verbose=verbose), self.device))
+            self.assertTrue(compare_tensors("output", out_gather_full, out_full, tol, tol, verbose=verbose))
 
         #############################################################
         # evaluate input grads
         #############################################################
         with self.subTest(desc="input gradients"):
             igrad_gather_full = self._gather_helper(igrad_local, hdim=-2, wdim=-1)
-            self.assertTrue(reduce_success(compare_tensors("input gradients", igrad_gather_full, igrad_full, tol, tol, verbose=verbose), self.device))
+            self.assertTrue(compare_tensors("input gradients", igrad_gather_full, igrad_full, tol, tol, verbose=verbose))
 
         #############################################################
         # evaluate weight and bias grads
@@ -447,7 +447,7 @@ class TestDistributedLayers(unittest.TestCase):
                 wgrad_gather_list[self.world_rank] = wgrad_local
                 dist.all_gather(wgrad_gather_list, wgrad_local, group=None)
                 for idw, wgrad_gather_full in enumerate(wgrad_gather_list):
-                    self.assertTrue(reduce_success(compare_tensors(f"weight gradient {idw}", wgrad_gather_full, wgrad_full, tol, tol, verbose=verbose), self.device))
+                    self.assertTrue(compare_tensors(f"weight gradient {idw}", wgrad_gather_full, wgrad_full, tol, tol, verbose=verbose))
 
         # bias gradients should be the same across all processes
         if affine:
@@ -456,7 +456,7 @@ class TestDistributedLayers(unittest.TestCase):
                 bgrad_gather_list[self.world_rank] = bgrad_local
                 dist.all_gather(bgrad_gather_list, bgrad_local, group=None)
                 for idb, bgrad_gather_full in enumerate(bgrad_gather_list):
-                    self.assertTrue(reduce_success(compare_tensors(f"bias gradient {idb}", bgrad_gather_full, bgrad_full, tol, tol, verbose=verbose), self.device))
+                    self.assertTrue(compare_tensors(f"bias gradient {idb}", bgrad_gather_full, bgrad_full, tol, tol, verbose=verbose))
 
 
 if __name__ == '__main__':
