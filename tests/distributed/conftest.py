@@ -16,67 +16,68 @@
 """
 Distributed-test pytest config.
 
-Suppresses pytest terminal output on non-zero ranks so that the combined
-mpirun/srun stdout shows a single coherent test summary instead of N
-interleaved copies. The hook fires before each test (after ``setUpClass``
-has run, so ``comm`` is already initialized via ``_init_grid``), with a
-guard flag so the silencing happens at most once per session.
+Suppresses pytest's console output on every rank except rank 0, so the combined
+mpirun/srun stdout shows a single coherent test summary instead of N interleaved
+copies. The silencing unregisters the terminal reporter in ``pytest_configure``
+with ``@pytest.hookimpl(trylast=True)`` -- see that hook for why ``trylast`` is
+required and why it must happen at configure time.
 
-Hooking at ``pytest_runtest_setup`` (rather than ``pytest_configure``) is
-intentional: it leaves the terminal reporter active during ``setUpClass``,
-so any error in distributed bootstrap (e.g. a comm-init failure) surfaces
-on every rank where it happens, not just rank 0.
+It also surfaces the GRID_H x GRID_W x GRID_E decomposition: ``pytest_report_header``
+prints it once at the top of the session and ``pytest_collection_modifyitems``
+appends ``[h=H,w=W]`` to each distributed test's node id.
 
-Escape hatch: setting ``MAKANI_TEST_NO_SILENCE=1`` in the environment
-disables the silencing entirely — useful when debugging a per-rank
-failure that rank 0 doesn't reproduce.
+Escape hatch: setting ``MAKANI_TEST_NO_SILENCE=1`` in the environment disables the
+silencing on every rank -- useful when debugging a per-rank failure (e.g. a
+distributed-bootstrap error in ``setUpClass``) that rank 0 doesn't reproduce.
 """
 
 import os
 
-# Module-level flag: ensures we only attempt the silencing once.
-_silenced = False
+import pytest
 
 
 def _get_world_rank():
-    """Return the world rank, preferring ``comm`` if initialized, else env vars."""
-    try:
-        from makani.utils import comm
-        return comm.get_world_rank()
-    except Exception:
-        # Fallback: read from the launcher's env vars before any Python
-        # comm setup has happened. This branch should rarely fire in
-        # practice (distributed tests use _init_grid in setUpClass).
-        for key in ("OMPI_COMM_WORLD_RANK", "RANK", "SLURM_PROCID", "PMI_RANK"):
-            val = os.environ.get(key)
-            if val is not None:
-                return int(val)
-        return 0
+    """Return the world rank from the env: ``WORLD_RANK`` if set, else ``RANK``.
 
-
-def pytest_runtest_setup(item):
-    """Silence pytest output on non-rank-0 processes.
-
-    Runs once per session: the first test's setup triggers this hook, by
-    which point ``setUpClass`` has already initialized ``comm``. Subsequent
-    tests are no-ops thanks to the ``_silenced`` flag.
+    Read directly from the env, not via ``comm``: ``pytest_configure`` runs before
+    ``comm.init()`` (which happens in ``setUpClass`` / ``setUpModule``), and
+    ``comm.get_world_rank()`` returns 0 until then -- so trusting comm here would make
+    every rank look like rank 0 and nothing would get silenced. ``WORLD_RANK`` is
+    checked first as the explicit convention; ``RANK`` is the torch.distributed /
+    torchrun (and mpirun) variable that is actually set in our launches.
     """
-    global _silenced
-    if _silenced:
-        return
+    for key in ("WORLD_RANK", "RANK"):
+        val = os.environ.get(key)
+        if val is not None:
+            return int(val)
+    return 0
 
+
+@pytest.hookimpl(trylast=True)
+def pytest_configure(config):
+    """Silence pytest's console output on every rank except rank 0.
+
+    ``trylast=True`` is REQUIRED: conftest ``pytest_configure`` hooks otherwise run
+    *before* pytest's builtin terminal plugin registers the ``terminalreporter``
+    (LIFO plugin order), so ``get_plugin("terminalreporter")`` returns ``None`` and
+    the unregister silently no-ops -- the duplicate-output bug. Running last ensures
+    the reporter exists by the time we unregister it.
+
+    Silencing at configure time (rather than in ``pytest_runtest_setup``) is also what
+    suppresses the session header, the collected-items line and the summary on non-zero
+    ranks: a per-test hook fires too late, after those have already been printed.
+    """
     # Honor an env-var escape hatch: forces full output on every rank.
     if os.environ.get("MAKANI_TEST_NO_SILENCE"):
-        _silenced = True   # mark so we don't re-check on every test
         return
 
-    rank = _get_world_rank()
-    if rank != 0:
-        terminal_reporter = item.config.pluginmanager.get_plugin("terminalreporter")
-        if terminal_reporter is not None:
-            item.config.pluginmanager.unregister(terminal_reporter)
+    # rank comes from the env (comm isn't initialized at configure time)
+    if _get_world_rank() == 0:
+        return
 
-    _silenced = True
+    reporter = config.pluginmanager.get_plugin("terminalreporter")
+    if reporter is not None:
+        config.pluginmanager.unregister(reporter)
 
 
 def _grid():
@@ -91,14 +92,12 @@ def _grid():
 def pytest_report_header(config):
     """Surface the GRID_H x GRID_W x GRID_E decomposition at the top of the session.
 
-    Gated on rank 0: unlike a configure-time silencing, the reporter on non-zero
-    ranks is only unregistered later (in ``pytest_runtest_setup``), so without this
-    gate every rank would print the header. Returns ``None`` for a plain 1x1x1 run.
+    Non-zero ranks have already had their terminal reporter unregistered in
+    ``pytest_configure``, so this prints on rank 0 only. Returns ``None`` for a plain
+    1x1x1 run.
     """
     h, w, e = _grid()
     if h == 1 and w == 1 and e == 1:
-        return None
-    if _get_world_rank() != 0:
         return None
     return f"distributed grid: GRID_H x GRID_W x GRID_E = {h} x {w} x {e}"
 
