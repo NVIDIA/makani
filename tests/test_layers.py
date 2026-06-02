@@ -31,6 +31,7 @@ from makani.models.common.layers import (
 )
 from makani.models.common.imputation import MLPImputation, ConstantImputation
 from makani.models.common.pos_embedding import LearnablePositionEmbedding
+from makani.mpu.layers import StochasticMLP
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from .testutils import disable_tf32, set_seed, get_default_parameters, compare_tensors
@@ -836,6 +837,89 @@ class TestLearnablePositionEmbedding(unittest.TestCase):
         )
         self.assertEqual(emb.position_embeddings.is_shared_mp, [])
         self.assertEqual(emb.position_embeddings.sharded_dims_mp, [None, None, "h", "w"])
+
+
+class TestStochasticMLP(unittest.TestCase):
+    """Tests for the variational StochasticMLP (mpu/layers.py).
+
+    The stochastic weight is  weight = scale * exp(log_std) * eps + mean,  eps ~ N(0, 1),
+    so the std is parametrized in log space (see issue #98): log_std is initialized to 0
+    (effective std == scale, stable init) and is always positive via exp.
+    """
+
+    def setUp(self):
+        disable_tf32()
+        set_seed(333)
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    def _make(self, in_features=16, hidden_features=32, out_features=16, **kw):
+        return StochasticMLP(
+            in_features=in_features,
+            hidden_features=hidden_features,
+            out_features=out_features,
+            **kw,
+        ).to(self.device)
+
+    def test_output_shape(self):
+        mlp = self._make()
+        x = torch.randn(2, 16, 8, 8, device=self.device)
+        out = mlp(x)
+        self.assertEqual(tuple(out.shape), (2, 16, 8, 8))
+
+    def test_log_std_initialized_to_zero(self):
+        """#98: std is stored in log space and initialized to 0 (so effective std == scale)."""
+        mlp = self._make()
+        self.assertTrue(torch.count_nonzero(mlp.fc1_weight_log_std) == 0)
+        self.assertTrue(torch.count_nonzero(mlp.fc2_weight_log_std) == 0)
+
+    def test_effective_std_positive(self):
+        """exp(log_std) is strictly positive for any log_std value (incl. negative)."""
+        mlp = self._make()
+        with torch.no_grad():
+            mlp.fc1_weight_log_std.uniform_(-5.0, 5.0)
+            mlp.fc2_weight_log_std.uniform_(-5.0, 5.0)
+        std1 = mlp.fc1_weight_std_scale * torch.exp(mlp.fc1_weight_log_std)
+        std2 = mlp.fc2_weight_std_scale * torch.exp(mlp.fc2_weight_log_std)
+        self.assertTrue((std1 > 0).all())
+        self.assertTrue((std2 > 0).all())
+
+    def test_init_does_not_blow_up(self):
+        """Regression for #98: at init the output std must stay O(input std), not be
+        amplified by ~sqrt(fan_in) (which a literal std=1 init would produce)."""
+        in_features = 64
+        mlp = self._make(in_features=in_features, hidden_features=64, out_features=in_features, gain=1.0)
+        x = torch.randn(8, in_features, 16, 16, device=self.device)
+        out = mlp(x)
+        self.assertTrue(torch.isfinite(out).all())
+        self.assertLess(out.std().item(), 5.0, f"init output std too large: {out.std().item()}")
+
+    def test_stochastic_and_reproducible(self):
+        """Successive forwards differ (weights are resampled), and resetting the seeded
+        generators reproduces the exact output."""
+        mlp = self._make(seed=1234)
+        x = torch.randn(2, 16, 8, 8, device=self.device)
+        out1 = mlp(x)
+        out2 = mlp(x)
+        self.assertFalse(torch.allclose(out1, out2), "two forwards were identical (no stochasticity)")
+
+        mlp.set_rng(seed=1234)
+        out1b = mlp(x)
+        self.assertTrue(compare_tensors("stochastic reproducible", out1, out1b, atol=1e-5, rtol=1e-5))
+
+    def test_backward_finite(self):
+        mlp = self._make()
+        x = torch.randn(2, 16, 8, 8, device=self.device, requires_grad=True)
+        mlp(x).sum().backward()
+        for name, p in [
+            ("fc1_weight_mean", mlp.fc1_weight_mean),
+            ("fc1_weight_log_std", mlp.fc1_weight_log_std),
+            ("fc2_weight_mean", mlp.fc2_weight_mean),
+            ("fc2_weight_log_std", mlp.fc2_weight_log_std),
+        ]:
+            self.assertIsNotNone(p.grad, f"{name} has no grad")
+            self.assertTrue(torch.isfinite(p.grad).all(), f"{name} grad not finite")
+        self.assertIsNotNone(x.grad)
+        self.assertTrue(torch.isfinite(x.grad).all())
 
 
 if __name__ == "__main__":
