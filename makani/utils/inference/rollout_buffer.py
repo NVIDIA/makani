@@ -80,7 +80,7 @@ class DataBuffer(object, metaclass=ABCMeta):
         if not self.num_channels > 0:
             raise ValueError(f"Empty channel lists aren't suported. Got {self.output_channels}.")
 
-        # set device and create a stream for writing out data
+        # set device
         self.device = device
         if isinstance(self.device, str):
             self.device = torch.device(self.device)
