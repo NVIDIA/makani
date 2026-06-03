@@ -176,7 +176,7 @@ class RolloutBuffer(DataBuffer):
         writes bypass the host page cache (O_DIRECT). Requires an HDF5 build
         with the direct VFD compiled in (``--enable-direct-vfd``) and
         ``output_file`` to be set. Incompatible with the MPI-IO driver used
-        for distributed writes; use only on single-rank or per-rank file
+        for distributed writes; use only on single-rank file
         layouts. Default is ``False``.
     """
 
