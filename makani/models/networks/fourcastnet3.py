@@ -121,6 +121,8 @@ class DiscreteContinuousEncoder(nn.Module):
         lmax=240,
         groups=1,
         bias=False,
+        distributed_disco_algorithm="ring",
+        distributed_disco_fused=True,
     ):
         super().__init__()
 
@@ -131,8 +133,8 @@ class DiscreteContinuousEncoder(nn.Module):
         conv_args = {}
         if comm.get_size("spatial") > 1:
             conv_handle = thd.DistributedDiscreteContinuousConvS2
-            conv_args["method"] = "ring"
-            conv_args["fused"] = True
+            conv_args["method"] = distributed_disco_algorithm
+            conv_args["fused"] = distributed_disco_fused
         else:
             conv_handle = th.DiscreteContinuousConvS2
         self.conv = conv_handle(
@@ -181,6 +183,8 @@ class DiscreteContinuousDecoder(nn.Module):
         resample_sht=False,
         groups=1,
         bias=False,
+        distributed_disco_algorithm="ring",
+        distributed_disco_fused=True,
     ):
         super().__init__()
 
@@ -213,8 +217,8 @@ class DiscreteContinuousDecoder(nn.Module):
         conv_args = {}
         if comm.get_size("spatial") > 1:
             conv_handle = thd.DistributedDiscreteContinuousConvS2
-            conv_args["method"] = "ring"
-            conv_args["fused"] = True
+            conv_args["method"] = distributed_disco_algorithm
+            conv_args["fused"] = distributed_disco_fused
         else:
             conv_handle = th.DiscreteContinuousConvS2
         self.conv = conv_handle(
@@ -273,6 +277,8 @@ class NeuralOperatorBlock(nn.Module):
         lmax=240,
         checkpointing_level=0,
         bias=False,
+        distributed_disco_algorithm="ring",
+        distributed_disco_fused=True,
     ):
         super().__init__()
 
@@ -293,8 +299,8 @@ class NeuralOperatorBlock(nn.Module):
             conv_args = {}
             if comm.get_size("spatial") > 1:
                 conv_handle = thd.DistributedDiscreteContinuousConvS2
-                conv_args["method"] = "ring"
-                conv_args["fused"] = True
+                conv_args["method"] = distributed_disco_algorithm
+                conv_args["fused"] = distributed_disco_fused
             else:
                 conv_handle = th.DiscreteContinuousConvS2
             self.local_conv = conv_handle(
@@ -475,6 +481,8 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         freeze_processor=False,
         normalization_means=None,
         normalization_stds=None,
+        distributed_disco_algorithm="a2a",
+        distributed_disco_fused=False,
         **kwargs,
     ):
         super().__init__()
@@ -546,6 +554,8 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
             lmax=self.lmax,
             groups=math.gcd(self.n_in_chans, self.embed_dim),
             bias=encoder_bias,
+            distributed_disco_algorithm=distributed_disco_algorithm,
+            distributed_disco_fused=distributed_disco_fused,
         )
 
         # encoder for the auxiliary channels
@@ -563,6 +573,8 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
                 lmax=self.lmax,
                 groups=math.gcd(self.n_aux_chans, self.aux_embed_dim),
                 bias=encoder_bias,
+                distributed_disco_algorithm=distributed_disco_algorithm,
+                distributed_disco_fused=distributed_disco_fused,
             )
 
 
@@ -581,6 +593,8 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
             groups=math.gcd(self.n_out_chans, self.embed_dim),
             bias=encoder_bias,
             resample_sht=resample_sht,
+            distributed_disco_algorithm=distributed_disco_algorithm,
+            distributed_disco_fused=distributed_disco_fused,
         )
 
         # position embedding
@@ -622,6 +636,8 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
                 lmax=self.lmax,
                 checkpointing_level=checkpointing_level,
                 bias=bias,
+                distributed_disco_algorithm=distributed_disco_algorithm,
+                distributed_disco_fused=distributed_disco_fused,
             )
 
             self.blocks.append(block)
