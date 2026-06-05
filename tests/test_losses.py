@@ -2279,6 +2279,63 @@ class TestLpEnergyScoreLoss(unittest.TestCase):
             compare_tensors("lp_es batch", loss_single[0], loss_batch[0], verbose=verbose),
         )
 
+    @parameterized.expand([(2,), (3,), (5,)])
+    def test_combinations_matches_reference(self, ensemble_size, verbose=True):
+        """New upper-triangular combinations path must match the O(E^2) reference."""
+        fn = self._fn(p=2.0)
+        fc = _rand_ensemble(ensemble_size)
+        obs = _rand()
+
+        # --- reference: inline O(E^2) outer product (original implementation) ---
+        def _reference_loss(forecasts, observations):
+            B, E, C, H, W = forecasts.shape
+            fc_e = torch.moveaxis(forecasts, 1, 0).reshape(E, B, C, H * W)  # (E, B, C, H*W)
+            ob = observations.reshape(1, B, C, H * W)
+
+            espread = (fc_e.unsqueeze(1) - fc_e.unsqueeze(0)).abs().pow(fn.p)  # (E, E, B, C, H*W)
+            eskill = (ob - fc_e).abs().pow(fn.p)
+
+            espread = torch.sum(espread * fn.quad_weight_split, dim=-1)  # (E, E, B, C)
+            eskill = torch.sum(eskill * fn.quad_weight_split, dim=-1)    # (E, B, C)
+
+            # channel reduction happens before mask/pow — same order as the production code
+            if fn.channel_reduction:
+                espread = espread.sum(dim=-1, keepdim=True)  # (E, E, B, 1)
+                eskill = eskill.sum(dim=-1, keepdim=True)    # (E, B, 1)
+
+            espread_mask = espread < fn.eps
+            eskill_mask = eskill < fn.eps
+            espread = torch.where(espread_mask, fn.eps, espread)
+            eskill = torch.where(eskill_mask, fn.eps, eskill)
+
+            espread = espread.float().pow(1.0 / fn.p).pow(fn.beta)
+            eskill = eskill.float().pow(1.0 / fn.p).pow(fn.beta)
+
+            espread = torch.where(espread_mask, 0.0, espread)
+            eskill = torch.where(eskill_mask, 0.0, eskill)
+
+            espread = espread.sum(dim=(0, 1)) * (float(E) - 1.0 + fn.alpha) / float(E * E * (E - 1))
+            eskill = eskill.sum(dim=0) / float(E)
+
+            return eskill - 0.5 * espread
+
+        with torch.no_grad():
+            loss_ref = _reference_loss(fc, obs)
+            loss_new = fn(fc, obs)
+
+        self.assertTrue(
+            compare_tensors(f"lp_es combinations E={ensemble_size}", loss_ref, loss_new, verbose=verbose),
+        )
+
+        # also check that gradients agree
+        fc_ref = fc.clone().requires_grad_(True)
+        fc_new = fc.clone().requires_grad_(True)
+        _reference_loss(fc_ref, obs).sum().backward()
+        fn(fc_new, obs).sum().backward()
+        self.assertTrue(
+            compare_tensors(f"lp_es combinations grad E={ensemble_size}", fc_ref.grad, fc_new.grad, verbose=verbose),
+        )
+
 
 # ===========================================================================
 class TestSpectralL2EnergyScoreLoss(unittest.TestCase):
