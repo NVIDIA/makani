@@ -154,60 +154,62 @@ class LpEnergyScoreLoss(GeometricBaseLoss):
         observations = torch.where(torch.isnan(observations), 0.0, observations)
         forecasts = torch.where(torch.isnan(forecasts), 0.0, forecasts)
 
-        # use broadcasting semantics: Lp norm components (sum |diff|^p, then ^(1/p) later)
-        espread = (forecasts.unsqueeze(1) - forecasts.unsqueeze(0)).abs().pow(self.p)
-        eskill = (observations - forecasts).abs().pow(self.p)
+        # espread: index all upper-triangular pairs via combinations — avoids the O(E^2 * B * C * H*W)
+        # full outer-product; peak allocation is O(P * B * C * H*W) where P = E*(E-1)/2.
+        idx = torch.combinations(torch.arange(num_ensemble, device=forecasts.device), r=2)  # (P, 2)
+        diff = (forecasts[idx[:, 0]] - forecasts[idx[:, 1]]).abs().pow(self.p)  # (P, B, C, H*W)
 
         # zero out masked positions
-        espread = torch.where(nanmask_bool, 0.0, espread)
+        diff = torch.where(nanmask_bool.unsqueeze(0), 0.0, diff)
+        eskill = (observations - forecasts).abs().pow(self.p)
         eskill = torch.where(nanmask_bool, 0.0, eskill)
 
         # do the spatial reduction
         if spatial_weights is not None:
-            espread = torch.sum(espread * self.quad_weight_split * spatial_weights_split, dim=-1)
+            diff = torch.sum(diff * self.quad_weight_split * spatial_weights_split, dim=-1)
             eskill = torch.sum(eskill * self.quad_weight_split * spatial_weights_split, dim=-1)
         else:
-            espread = torch.sum(espread * self.quad_weight_split, dim=-1)
+            diff = torch.sum(diff * self.quad_weight_split, dim=-1)  # (P, B, C)
             eskill = torch.sum(eskill * self.quad_weight_split, dim=-1)
 
         # since we split spatial dim into ensemble dim, we need to do an ensemble sum as well
         if self.ensemble_distributed:
-            espread = reduce_from_parallel_region(espread, "ensemble")
+            diff = reduce_from_parallel_region(diff, "ensemble")
             eskill = reduce_from_parallel_region(eskill, "ensemble")
 
         # we need to do the spatial averaging manually since
         # we are not calling the quadrature forward function
         if self.spatial_distributed:
-            espread = reduce_from_parallel_region(espread, "spatial")
+            diff = reduce_from_parallel_region(diff, "spatial")
             eskill = reduce_from_parallel_region(eskill, "spatial")
 
         # do the channel reduction while ignoring NaNs
         # if channel weights are required they should be added here to the reduction
         if self.channel_reduction:
-            espread = espread.sum(dim=-1, keepdim=True)
+            diff = diff.sum(dim=-1, keepdim=True)  # (P, B, 1)
             eskill = eskill.sum(dim=-1, keepdim=True)
 
         # get the masks
-        espread_mask = torch.where(espread < self.eps, True, False)
-        eskill_mask = torch.where(eskill < self.eps, True, False)
+        diff_mask = diff < self.eps
+        eskill_mask = eskill < self.eps
 
         # mask the data
-        espread = torch.where(espread_mask, self.eps, espread)
+        diff = torch.where(diff_mask, self.eps, diff)
         eskill = torch.where(eskill_mask, self.eps, eskill)
 
         with amp.autocast(device_type="cuda", enabled=False):
 
-            espread = espread.float()
+            diff = diff.float()
             eskill = eskill.float()
 
             # Lp norm = (sum |x|^p)^(1/p); then optional beta exponent (Gneiting et al. 2005)
-            espread = espread.pow(1.0 / self.p).pow(self.beta)
+            diff = diff.pow(1.0 / self.p).pow(self.beta)
             eskill = eskill.pow(1.0 / self.p).pow(self.beta)
 
-        # mask espread and sum
-        espread = torch.where(espread_mask, 0.0, espread)
+        # mask and sum; factor of 2 accounts for symmetric (j,i) counterparts
+        diff = torch.where(diff_mask, 0.0, diff)
         eskill = torch.where(eskill_mask, 0.0, eskill)
-        espread = espread.sum(dim=(0,1)) * (float(num_ensemble) - 1.0 + self.alpha) / float(num_ensemble * num_ensemble * (num_ensemble - 1))
+        espread = diff.sum(dim=0) * 2.0 * (float(num_ensemble) - 1.0 + self.alpha) / float(num_ensemble * num_ensemble * (num_ensemble - 1))
 
         # sum over ensemble
         eskill = eskill.sum(dim=0) / float(num_ensemble)
