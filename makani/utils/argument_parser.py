@@ -72,6 +72,7 @@ def get_default_argument_parser(training=True):
     # multistep stuff
     if training:
         parser.add_argument("--multistep_count", default=1, type=int, help="Number of autoregressive training steps. A value of 1 denotes conventional training")
+        parser.add_argument("--multistep_checkpoint", action="store_true", help="Activation-checkpoint each autoregressive step's model forward to cut the O(n_future) activation memory of backprop-through-time at the cost of one extra forward per step.")
     
     # debug parameters
     if training:

@@ -119,6 +119,7 @@ if __name__ == "__main__":
     params["print_timings_frequency"] = args.print_timings_frequency
     params["multistep_count"] = args.multistep_count
     params["n_future"] = args.multistep_count - 1  # note that n_future counts only the additional samples
+    params["multistep_checkpoint"] = args.multistep_checkpoint
 
     # debug:
     params["disable_ddp"] = args.disable_ddp
