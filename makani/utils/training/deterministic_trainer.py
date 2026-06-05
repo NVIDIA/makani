@@ -309,6 +309,7 @@ class Trainer(Driver):
 
         if self.params.jit_mode == "inductor":
             self.model = torch.compile(self.model)
+            self.loss_obj = torch.compile(self.loss_obj)
             self.model_train = self.model
             self.model_eval = self.model
 
