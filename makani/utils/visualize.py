@@ -199,14 +199,24 @@ def plot_rollout_metrics(metric_curves, var_names, score_path=None, file_prefix=
             fig.savefig(os.path.join(score_path, file_prefix + "_" + var_name + ".png"))
 
 
-def _draw_progress_bar(image, progress: float):
+def _draw_progress_bar(image, progress: float, y_pos: float = 0.5, margin: int = 20, thickness: int = 6):
     """Overlay a horizontal progress bar on the seam between the pred/truth subplots."""
     w, h = image.size
-    margin = 20
+
+    y_pos = min(max(y_pos, 0.0), 1.0)
+    progress = min(max(progress, 0.0), 1.0)
+    margin = min(max(margin, 0), w // 2 - 1)
+    thickness = max(thickness, 1)
+
+    dy_neg = thickness // 2
+    dy_pos = thickness - dy_neg
+
+    y_mid = min(max(int(y_pos * h), dy_neg), h - dy_pos)
+
     x0, x1 = margin, w - margin
-    y_mid = h // 2
-    y0, y1 = y_mid - 3, y_mid + 3
+    y0, y1 = y_mid - dy_neg, y_mid + dy_pos
     fill_x = int(x0 + progress * (x1 - x0))
+
     draw = ImageDraw.Draw(image)
     draw.rectangle([x0, y0, x1, y1], fill=(225, 225, 225))
     if fill_x > x0:
