@@ -19,7 +19,7 @@ import re
 import multiprocessing as mp
 import numpy as np
 import concurrent.futures as cf
-from PIL import Image
+from PIL import Image, ImageDraw
 from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
 import wandb
 
@@ -198,7 +198,22 @@ def plot_rollout_metrics(metric_curves, var_names, score_path=None, file_prefix=
             fig.savefig(os.path.join(score_path, file_prefix + "_" + var_name + ".png"))
 
 
-def visualize_field(tag, func_string, prediction, target, lat, lon, scale, bias, diverging):
+def _draw_progress_bar(image, progress: float):
+    """Overlay a horizontal progress bar on the seam between the pred/truth subplots."""
+    w, h = image.size
+    margin = 20
+    x0, x1 = margin, w - margin
+    y_mid = h // 2
+    y0, y1 = y_mid - 3, y_mid + 3
+    fill_x = int(x0 + progress * (x1 - x0))
+    draw = ImageDraw.Draw(image)
+    draw.rectangle([x0, y0, x1, y1], fill=(225, 225, 225))
+    if fill_x > x0:
+        draw.rectangle([x0, y0, fill_x, y1], fill=(40, 40, 40))
+    return image
+
+
+def visualize_field(tag, func_string, prediction, target, lat, lon, scale, bias, diverging, progress: float | None = None):
     torch.cuda.nvtx.range_push("visualize_field")
 
     # get func handle:
@@ -214,6 +229,9 @@ def visualize_field(tag, func_string, prediction, target, lat, lon, scale, bias,
 
     # generate image
     image = plot_comparison(pred, targ, lat, lon, pred_title="Prediction", truth_title="Ground truth", projection="mollweide", diverging=diverging)
+
+    if progress is not None:
+        image = _draw_progress_bar(image, progress)
 
     torch.cuda.nvtx.range_pop()
 
@@ -259,7 +277,7 @@ class VisualizationWrapper(object):
     def reset(self):
         self.requests = []
 
-    def add(self, tag, prediction, target):
+    def add(self, tag, prediction, target, progress: float | None = None):
         if self.channel_indices is not None:
             pred = prediction[self.channel_indices].copy()
             tar = target[self.channel_indices].copy()
@@ -272,7 +290,7 @@ class VisualizationWrapper(object):
             func_string = item["functor"]
             plot_diverge = item["diverging"]
             self.requests.append(
-                self.executor.submit(visualize_field, (tag, field_name), func_string, pred, tar, self.lat, self.lon, self.scale, self.bias, plot_diverge)
+                self.executor.submit(visualize_field, (tag, field_name), func_string, pred, tar, self.lat, self.lon, self.scale, self.bias, plot_diverge, progress=progress)
             )
 
         return

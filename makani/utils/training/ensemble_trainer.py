@@ -720,7 +720,7 @@ class EnsembleTrainer(Trainer):
                             targ_cpu = self.visualizer.target_cpu.to(torch.float32).numpy()
 
                             tag = f"step{eval_steps}_time{str(idt).zfill(3)}"
-                            self.visualizer.add(tag, pred_cpu, targ_cpu)
+                            self.visualizer.add(tag, pred_cpu, targ_cpu, progress=idt / max(len(tarlist) - 1, 1))
 
                         # update metrics
                         self.metrics.update(pred, targ, loss, idt)
