@@ -646,7 +646,7 @@ class StochasticTrainer(Driver):
                                 with torch.cuda.stream(self.visualizer.stream):
                                     self.visualizer.prediction_cpu.copy_(pred_gather, non_blocking=True)
                                     self.visualizer.target_cpu.copy_(targ_gather, non_blocking=True)
-                                if self.viz_stream is not None:
+                                if self.visualizer.stream is not None:
                                     self.visualizer.stream.synchronize()
 
                                 pred_cpu = self.visualizer.prediction_cpu.to(torch.float32).numpy()
