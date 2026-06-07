@@ -16,6 +16,7 @@
 import os
 import io
 import re
+from typing import Optional
 import multiprocessing as mp
 import numpy as np
 import concurrent.futures as cf
@@ -213,7 +214,7 @@ def _draw_progress_bar(image, progress: float):
     return image
 
 
-def visualize_field(tag, func_string, prediction, target, lat, lon, scale, bias, diverging, progress: float | None = None):
+def visualize_field(tag, func_string, prediction, target, lat, lon, scale, bias, diverging, progress: Optional[float] = None):
     torch.cuda.nvtx.range_push("visualize_field")
 
     # get func handle:
@@ -277,7 +278,7 @@ class VisualizationWrapper(object):
     def reset(self):
         self.requests = []
 
-    def add(self, tag, prediction, target, progress: float | None = None):
+    def add(self, tag, prediction, target, progress: Optional[float] = None):
         if self.channel_indices is not None:
             pred = prediction[self.channel_indices].copy()
             tar = target[self.channel_indices].copy()
