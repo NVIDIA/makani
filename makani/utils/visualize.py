@@ -165,7 +165,9 @@ def plot_comparison(
     fig.savefig(buf)
     buf.seek(0)
 
-    return Image.open(buf)
+    img = Image.open(buf)
+    img.load()
+    return img
 
 
 def plot_rollout_metrics(metric_curves, var_names, score_path=None, file_prefix="curve", dtxdh=6):
