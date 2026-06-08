@@ -482,7 +482,6 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         normalization_means=None,
         normalization_stds=None,
         distributed_disco_algorithm="a2a",
-        #distributed_disco_fused=None,
         **kwargs,
     ):
         super().__init__()
