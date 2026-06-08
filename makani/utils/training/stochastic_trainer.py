@@ -643,11 +643,13 @@ class StochasticTrainer(Driver):
                             if self.visualizer is not None:
                                 if self.visualizer.stream is not None:
                                     self.visualizer.stream.wait_stream(torch.cuda.current_stream())
-                                with torch.cuda.stream(self.visualizer.stream):
-                                    self.visualizer.prediction_cpu.copy_(pred_gather, non_blocking=True)
-                                    self.visualizer.target_cpu.copy_(targ_gather, non_blocking=True)
-                                if self.visualizer.stream is not None:
+                                    with torch.cuda.stream(self.visualizer.stream):
+                                        self.visualizer.prediction_cpu.copy_(pred_gather, non_blocking=True)
+                                        self.visualizer.target_cpu.copy_(targ_gather, non_blocking=True)
                                     self.visualizer.stream.synchronize()
+                                else:
+                                    self.visualizer.prediction_cpu.copy_(pred_gather)
+                                    self.visualizer.target_cpu.copy_(targ_gather)
 
                                 pred_cpu = self.visualizer.prediction_cpu.to(torch.float32).numpy()
                                 targ_cpu = self.visualizer.target_cpu.to(torch.float32).numpy()
