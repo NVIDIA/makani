@@ -482,7 +482,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         normalization_means=None,
         normalization_stds=None,
         distributed_disco_algorithm="a2a",
-        distributed_disco_fused=False,
+        #distributed_disco_fused=None,
         **kwargs,
     ):
         super().__init__()
@@ -539,6 +539,17 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
                 mlp_ratio=mlp_ratio,
                 activation_function=activation_function,
             )
+
+        # sanitize parameters
+        if comm.get_size("spatial") > 1:
+            if distributed_disco_algorithm == "a2a":
+                distributed_disco_fused = False
+            elif distributed_disco_algorithm == "ring":
+                distributed_disco_fused = True
+            else:
+                raise ValueError(f"Unknown distributed disco algorithm {distributed_disco_algorithm}")
+        elif comm.get_size("spatial") == 1:
+            distributed_disco_fused = True
 
         # encoder for the atmospheric and surface channels
         self.encoder = DiscreteContinuousEncoder(
