@@ -291,7 +291,11 @@ class IsotropicGaussianRandomFieldS2(BaseNoiseS2):
     def forward(self, update_internal_state=False):
 
         # combine channels and time:
-        cstate = torch.view_as_complex(self.state / math.sqrt(2)) * self.sigma_l
+        # torch.view_as_complex on a registered buffer hits a torch.compile/Inductor
+        # bug (set_() size mismatch when itemsize changes float32→complex64); construct
+        # the complex tensor explicitly instead.
+        _s = self.state / math.sqrt(2)
+        cstate = torch.complex(_s[..., 0], _s[..., 1]) * self.sigma_l
         batch_size = cstate.shape[0]
 
         # flatten history
@@ -522,7 +526,8 @@ class DiffusionNoiseS2(BaseNoiseS2):
     def forward(self, update_internal_state=False):
 
         # combine channels and time:
-        cstate = torch.view_as_complex(self.state)
+        # see IsotropicGaussianRandomFieldS2.forward for why we avoid view_as_complex
+        cstate = torch.complex(self.state[..., 0], self.state[..., 1])
         batch_size = cstate.shape[0]
 
         # flatten history
