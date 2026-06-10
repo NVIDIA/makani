@@ -15,7 +15,6 @@
 
 import math
 from functools import partial
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -121,8 +120,7 @@ class DiscreteContinuousEncoder(nn.Module):
         lmax=240,
         groups=1,
         bias=False,
-        distributed_disco_algorithm="ring",
-        distributed_disco_fused=True,
+        fused_disco=True,
     ):
         super().__init__()
 
@@ -130,13 +128,11 @@ class DiscreteContinuousEncoder(nn.Module):
         theta_cutoff = _compute_cutoff_radius(lmax=lmax, kernel_shape=kernel_shape, basis_type=basis_type)
 
         # set up local convolution
-        conv_args = {}
         if comm.get_size("spatial") > 1:
             conv_handle = thd.DistributedDiscreteContinuousConvS2
-            conv_args["method"] = distributed_disco_algorithm
-            conv_args["fused"] = distributed_disco_fused
         else:
             conv_handle = th.DiscreteContinuousConvS2
+
         self.conv = conv_handle(
             inp_chans,
             out_chans,
@@ -150,7 +146,7 @@ class DiscreteContinuousEncoder(nn.Module):
             groups=groups,
             bias=bias,
             theta_cutoff=theta_cutoff,
-            **conv_args,
+            fused=fused_disco,
         )
         if comm.get_size("spatial") > 1:
             self.conv.weight.is_shared_mp = ["spatial"]
@@ -183,8 +179,7 @@ class DiscreteContinuousDecoder(nn.Module):
         resample_sht=False,
         groups=1,
         bias=False,
-        distributed_disco_algorithm="ring",
-        distributed_disco_fused=True,
+        fused_disco=True,
     ):
         super().__init__()
 
@@ -214,13 +209,11 @@ class DiscreteContinuousDecoder(nn.Module):
         theta_cutoff = _compute_cutoff_radius(lmax=lmax, kernel_shape=kernel_shape, basis_type=basis_type)
 
         # set up DISCO convolution
-        conv_args = {}
         if comm.get_size("spatial") > 1:
             conv_handle = thd.DistributedDiscreteContinuousConvS2
-            conv_args["method"] = distributed_disco_algorithm
-            conv_args["fused"] = distributed_disco_fused
         else:
             conv_handle = th.DiscreteContinuousConvS2
+
         self.conv = conv_handle(
             inp_chans,
             out_chans,
@@ -234,7 +227,7 @@ class DiscreteContinuousDecoder(nn.Module):
             groups=groups,
             bias=bias,
             theta_cutoff=theta_cutoff,
-            **conv_args,
+            fused=fused_disco,
         )
         if comm.get_size("spatial") > 1:
             self.conv.weight.is_shared_mp = ["spatial"]
@@ -277,8 +270,7 @@ class NeuralOperatorBlock(nn.Module):
         lmax=240,
         checkpointing_level=0,
         bias=False,
-        distributed_disco_algorithm="ring",
-        distributed_disco_fused=True,
+        fused_disco=True,
     ):
         super().__init__()
 
@@ -296,13 +288,11 @@ class NeuralOperatorBlock(nn.Module):
             # heuristic for finding theta_cutoff
             theta_cutoff = _compute_cutoff_radius(lmax=lmax, kernel_shape=kernel_shape, basis_type=basis_type)
 
-            conv_args = {}
             if comm.get_size("spatial") > 1:
                 conv_handle = thd.DistributedDiscreteContinuousConvS2
-                conv_args["method"] = distributed_disco_algorithm
-                conv_args["fused"] = distributed_disco_fused
             else:
                 conv_handle = th.DiscreteContinuousConvS2
+
             self.local_conv = conv_handle(
                 inp_chans,
                 inp_chans if use_mlp else out_chans,
@@ -316,7 +306,7 @@ class NeuralOperatorBlock(nn.Module):
                 grid_out=inverse_transform.grid,
                 bias=False,
                 theta_cutoff=theta_cutoff,
-                **conv_args,
+                fused=fused_disco,
             )
             if comm.get_size("spatial") > 1:
                 self.local_conv.weight.is_shared_mp = ["spatial"]
@@ -481,7 +471,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         freeze_processor=False,
         normalization_means=None,
         normalization_stds=None,
-        distributed_disco_algorithm="a2a",
+        fused_disco=True,
         **kwargs,
     ):
         super().__init__()
@@ -539,17 +529,6 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
                 activation_function=activation_function,
             )
 
-        # sanitize parameters
-        if comm.get_size("spatial") > 1:
-            if distributed_disco_algorithm == "a2a":
-                distributed_disco_fused = False
-            elif distributed_disco_algorithm == "ring":
-                distributed_disco_fused = True
-            else:
-                raise ValueError(f"Unknown distributed disco algorithm {distributed_disco_algorithm}")
-        elif comm.get_size("spatial") == 1:
-            distributed_disco_fused = True
-
         # encoder for the atmospheric and surface channels
         self.encoder = DiscreteContinuousEncoder(
             inp_shape=inp_shape,
@@ -564,8 +543,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
             lmax=self.lmax,
             groups=math.gcd(self.n_in_chans, self.embed_dim),
             bias=encoder_bias,
-            distributed_disco_algorithm=distributed_disco_algorithm,
-            distributed_disco_fused=distributed_disco_fused,
+            fused_disco=fused_disco,
         )
 
         # encoder for the auxiliary channels
@@ -583,8 +561,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
                 lmax=self.lmax,
                 groups=math.gcd(self.n_aux_chans, self.aux_embed_dim),
                 bias=encoder_bias,
-                distributed_disco_algorithm=distributed_disco_algorithm,
-                distributed_disco_fused=distributed_disco_fused,
+                fused_disco=fused_disco,
             )
 
 
@@ -603,8 +580,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
             groups=math.gcd(self.n_out_chans, self.embed_dim),
             bias=encoder_bias,
             resample_sht=resample_sht,
-            distributed_disco_algorithm=distributed_disco_algorithm,
-            distributed_disco_fused=distributed_disco_fused,
+            fused_disco=fused_disco,
         )
 
         # position embedding
@@ -646,8 +622,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
                 lmax=self.lmax,
                 checkpointing_level=checkpointing_level,
                 bias=bias,
-                distributed_disco_algorithm=distributed_disco_algorithm,
-                distributed_disco_fused=distributed_disco_fused,
+                fused_disco=fused_disco,
             )
 
             self.blocks.append(block)
