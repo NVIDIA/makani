@@ -131,10 +131,16 @@ class DistributedMatmul(nn.Module):
     @property
     def weight(self):
         # te.Linear owns the weight in the TE path; expose it through the same
-        # attribute so external init / annotation / the gradient hook are uniform
+        # attribute so external init / annotation / the gradient hook are uniform.
+        # raise AttributeError (not KeyError) when the native weight is not yet
+        # registered: register_parameter() probes hasattr(self, "weight") while
+        # registering, and hasattr only swallows AttributeError.
         if self.use_te:
             return self.te_linear.weight
-        return self._parameters["weight"]
+        weight = self._parameters.get("weight")
+        if weight is None:
+            raise AttributeError("weight")
+        return weight
 
     def _local_matmul(self, x):
         if self.use_te:
