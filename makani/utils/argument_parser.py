@@ -30,8 +30,7 @@ def get_default_argument_parser(training=True):
     parser.add_argument("--batch_size", default=-1, type=int, help="Switch for overriding batch size in the configuration file.")
 
     # model parallelization options
-    parser.add_argument("--fin_parallel_size", default=1, type=int, help="Input feature parallelization")
-    parser.add_argument("--fout_parallel_size", default=1, type=int, help="Output feature parallelization")
+    parser.add_argument("--matmul_parallel_size", default=1, type=int, help="Feature (tensor) parallelism dimension")
     parser.add_argument("--h_parallel_size", default=1, type=int, help="Spatial parallelism dimension in h")
     parser.add_argument("--w_parallel_size", default=1, type=int, help="Spatial parallelism dimension in w")
 

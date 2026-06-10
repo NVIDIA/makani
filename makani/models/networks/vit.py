@@ -82,17 +82,15 @@ class Block(nn.Module):
         path_drop_rate=0.0,
         act_layer=nn.GELU,
         norm_layer=nn.LayerNorm,
-        comm_inp_name="fin",
-        comm_hidden_name="fout",
+        comm_name="matmul",
     ):
         super().__init__()
 
-        if (comm.get_size(comm_inp_name) * comm.get_size(comm_hidden_name)) > 1:
+        if comm.get_size(comm_name) > 1:
             self.attn = DistributedAttention(
                 dim,
                 input_format="traditional",
-                comm_inp_name=comm_inp_name,
-                comm_hidden_name=comm_hidden_name,
+                comm_name=comm_name,
                 num_heads=num_heads,
                 qkv_bias=qkv_bias,
                 attn_drop_rate=attn_drop_rate,
@@ -111,7 +109,7 @@ class Block(nn.Module):
         mlp_hidden_dim = int(dim * mlp_ratio)
 
         # distribute MLP for model parallelism
-        if (comm.get_size(comm_inp_name) * comm.get_size(comm_hidden_name)) > 1:
+        if comm.get_size(comm_name) > 1:
             self.mlp = DistributedMLP(
                 in_features=dim,
                 hidden_features=mlp_hidden_dim,
@@ -119,8 +117,7 @@ class Block(nn.Module):
                 act_layer=act_layer,
                 drop_rate=mlp_drop_rate,
                 input_format="traditional",
-                comm_inp_name=comm_inp_name,
-                comm_hidden_name=comm_hidden_name,
+                comm_name=comm_name,
             )
         else:
             self.mlp = MLP(in_features=dim, hidden_features=mlp_hidden_dim, out_features=dim, act_layer=act_layer, drop_rate=mlp_drop_rate, input_format="traditional")
@@ -149,8 +146,7 @@ class VisionTransformer(nn.Module):
         attn_drop_rate=0.0,
         path_drop_rate=0.0,
         norm_layer="layer_norm",
-        comm_inp_name="fin",
-        comm_hidden_name="fout",
+        comm_name="matmul",
         **kwargs,
     ):
         super().__init__()
@@ -158,8 +154,7 @@ class VisionTransformer(nn.Module):
         self.patch_size = patch_size
         self.img_size = inp_shape
         self.out_ch = out_chans
-        self.comm_inp_name = comm_inp_name
-        self.comm_hidden_name = comm_hidden_name
+        self.comm_name = comm_name
 
         self.patch_embed = PatchEmbed2D(img_size=self.img_size, patch_size=patch_size, in_chans=inp_chans, embed_dim=self.embed_dim)
         num_patches = self.patch_embed.num_patches
@@ -188,8 +183,7 @@ class VisionTransformer(nn.Module):
                     attn_drop_rate=attn_drop_rate,
                     path_drop_rate=dpr[i],
                     norm_layer=norm_layer_handle,
-                    comm_inp_name=comm_inp_name,
-                    comm_hidden_name=comm_hidden_name,
+                    comm_name=comm_name,
                 )
                 for i in range(depth)
             ]
