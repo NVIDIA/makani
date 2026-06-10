@@ -22,14 +22,9 @@ import warnings
 from makani.utils.context import rng_context
 
 # transformer engine is an optional dependency: it is only used for the
-# (optional) FP8/FP4 MLP path and must not be required for import.
-try:
-    import transformer_engine.pytorch as te
-
-    _TE_AVAILABLE = True
-except ImportError:
-    te = None
-    _TE_AVAILABLE = False
+# (optional) FP8/FP4 MLP path and must not be required for import. availability is
+# checked without importing it; the module is imported lazily where used.
+from makani.utils.te_helpers import TE_AVAILABLE as _TE_AVAILABLE, get_te
 
 
 @torch.compile(fullgraph=False)
@@ -389,6 +384,7 @@ class MLP(nn.Module):
         # transformer engine linears operate on the last (channel) dimension; for
         # nchw inputs we transpose to channels-last around the GEMMs (see forward).
         if self.use_te:
+            te = get_te()
             fc1 = te.Linear(in_features, hidden_features, bias=True)
             fc2 = te.Linear(hidden_features, out_features, bias=output_bias)
         elif input_format == "nchw":
