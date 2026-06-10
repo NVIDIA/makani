@@ -111,13 +111,14 @@ def _init_grid(cls):
     # set up distributed
     cls.grid_size_h = int(os.getenv("GRID_H", 1))
     cls.grid_size_w = int(os.getenv("GRID_W", 1))
+    cls.grid_size_m = int(os.getenv("GRID_M", 1))
     cls.grid_size_e = int(os.getenv("GRID_E", 1))
-    cls.world_size = cls.grid_size_h * cls.grid_size_w * cls.grid_size_e
+    cls.world_size = cls.grid_size_h * cls.grid_size_w * cls.grid_size_m * cls.grid_size_e
 
     # init groups
     comm.init(
-        model_parallel_sizes=[cls.grid_size_h, cls.grid_size_w, 1, 1],
-        model_parallel_names=["h", "w", "fin", "fout"],
+        model_parallel_sizes=[cls.grid_size_h, cls.grid_size_w, cls.grid_size_m],
+        model_parallel_names=["h", "w", "matmul"],
         data_parallel_sizes=[cls.grid_size_e, -1],
         data_parallel_names=["ensemble", "batch"],
     )
@@ -139,9 +140,11 @@ def _init_grid(cls):
     # store comm group parameters
     cls.wrank = comm.get_rank("w")
     cls.hrank = comm.get_rank("h")
+    cls.mrank = comm.get_rank("matmul")
     cls.erank = comm.get_rank("ensemble")
     cls.w_group = comm.get_group("w")
     cls.h_group = comm.get_group("h")
+    cls.matmul_group = comm.get_group("matmul")
     cls.e_group = comm.get_group("ensemble")
 
     # initializing sht process groups just to be sure
