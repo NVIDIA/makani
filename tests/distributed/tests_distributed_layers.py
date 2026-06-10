@@ -512,15 +512,16 @@ class TestDistributedLayers(unittest.TestCase):
 
         # copy the native weights/biases into the te module so the only difference is the
         # GEMM implementation. params stay fp32; autocast casts them on the fly. the te
-        # weight is always 2D (out_local, in_local); the native nchw weight has trailing
-        # singleton dims.
+        # path runs channels-last ("traditional"), so its weight is 2D (out_local, in_local)
+        # and its bias is 1D (out_local,); the native nchw weight/bias carry trailing
+        # singleton dims -- reshape into the target shape on copy.
         with torch.no_grad():
             mlp_te.fc1.weight.copy_(mlp_native.fc1.weight.reshape(mlp_te.fc1.weight.shape))
             mlp_te.fc2.weight.copy_(mlp_native.fc2.weight.reshape(mlp_te.fc2.weight.shape))
             if mlp_native.fc1.bias is not None:
-                mlp_te.fc1.bias.copy_(mlp_native.fc1.bias)
+                mlp_te.fc1.bias.copy_(mlp_native.fc1.bias.reshape(mlp_te.fc1.bias.shape))
             if mlp_native.fc2.bias is not None:
-                mlp_te.fc2.bias.copy_(mlp_native.fc2.bias)
+                mlp_te.fc2.bias.copy_(mlp_native.fc2.bias.reshape(mlp_te.fc2.bias.shape))
 
         # identical input to both modules
         if input_format == "nchw":
@@ -559,7 +560,8 @@ class TestDistributedLayers(unittest.TestCase):
 
         if bias:
             with self.subTest(desc="te fc2 bias gradients"):
-                self.assertTrue(reduce_success(compare_tensors("te fc2 bias gradients", mlp_te.fc2.bias.grad, mlp_native.fc2.bias.grad, atol, rtol, verbose=verbose), self.device))
+                te_bgrad = mlp_te.fc2.bias.grad.reshape(mlp_native.fc2.bias.grad.shape)
+                self.assertTrue(reduce_success(compare_tensors("te fc2 bias gradients", te_bgrad, mlp_native.fc2.bias.grad, atol, rtol, verbose=verbose), self.device))
 
 
 if __name__ == '__main__':
