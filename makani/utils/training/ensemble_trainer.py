@@ -44,6 +44,7 @@ from makani.models import model_registry
 
 # distributed computing stuff
 from makani.utils import comm
+from makani.utils.precision import AutocastManager
 from makani.utils import visualize
 
 from makani.mpu.mappings import init_gradient_reduction_hooks
@@ -83,21 +84,14 @@ class EnsembleTrainer(Trainer):
                 dist.all_reduce(tens, group=comm.get_group("data"))
         self.timers["nccl init"] = timer.time
 
-        # set amp_parameters
-        if hasattr(self.params, "amp_mode") and (self.params.amp_mode != "none"):
-            self.amp_enabled = True
-            if self.params.amp_mode == "fp16":
-                self.amp_dtype = torch.float16
-            elif self.params.amp_mode == "bf16":
-                self.amp_dtype = torch.bfloat16
-            else:
-                raise ValueError(f"Unknown amp mode {self.params.amp_mode}")
-
-            if self.log_to_screen:
-                self.logger.info(f"Enabling automatic mixed precision in {self.params.amp_mode}.")
-        else:
-            self.amp_enabled = False
-            self.amp_dtype = torch.float32
+        # set up mixed precision (amp dtype + optional transformer-engine fp8 recipe).
+        # the manager parses the mode once and hands out a single nested autocast cm.
+        amp_mode = self.params.amp_mode if hasattr(self.params, "amp_mode") else "none"
+        self.autocast = AutocastManager(amp_mode, device_type="cuda", fp8_group=comm.get_group("data"))
+        self.amp_dtype = self.autocast.amp_dtype
+        self.amp_enabled = self.autocast.amp_enabled
+        if self.amp_enabled and self.log_to_screen:
+            self.logger.info(f"Enabling automatic mixed precision in '{amp_mode}'.")
 
         # initialize data loader
         with Timer() as	timer:
@@ -185,7 +179,7 @@ class EnsembleTrainer(Trainer):
         self.timers["optimizer and scheduler init"] = timer.time
 
         # gradient scaler
-        self.gscaler = amp.GradScaler("cuda", enabled=(self.amp_dtype == torch.float16))
+        self.gscaler = amp.GradScaler("cuda", enabled=self.autocast.grad_scaler_enabled)
 
         # gradient clipping
         self.max_grad_norm = self.params.get("optimizer_max_grad_norm", -1.0)
@@ -526,7 +520,7 @@ class EnsembleTrainer(Trainer):
                 loss_scaling_fact = 1.0 / np.float32(self.params["gradient_accumulation_steps"])
 
             # accumulate loss into this tensor
-            with amp.autocast(device_type="cuda", enabled=self.amp_enabled, dtype=self.amp_dtype):
+            with self.autocast():
 
                 if do_update:
                     pred, loss = self._ensemble_step(inp, tar)
@@ -678,7 +672,7 @@ class EnsembleTrainer(Trainer):
                         # flatten history of the target
                         targ = self.preprocessor.flatten_history(targ)
 
-                        with amp.autocast(device_type="cuda", enabled=self.amp_enabled, dtype=self.amp_dtype):
+                        with self.autocast():
                             # single forward on the folded batch: at idt==0 the noise state was
                             # just drawn fresh, so skip the stepper's internal update; for
                             # subsequent steps run the standard AR update.

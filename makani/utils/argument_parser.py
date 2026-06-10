@@ -35,7 +35,7 @@ def get_default_argument_parser(training=True):
     parser.add_argument("--w_parallel_size", default=1, type=int, help="Spatial parallelism dimension in w")
 
     # performance options
-    parser.add_argument("--amp_mode", default="none", type=str, choices=["none", "fp16", "bf16"], help="Specify the mixed precision mode which should be used.")
+    parser.add_argument("--amp_mode", default="none", type=str, help="Mixed precision mode: 'none', 'fp16', 'bf16', or a combined '<amp>-<fp8recipe>' such as 'bf16-fp8_delayed' (requires transformer_engine). See makani.utils.precision.")
     parser.add_argument("--jit_mode", default="none", type=str, choices=["none", "inductor"], help="Specify if and how to use torch compile.")
     parser.add_argument("--checkpointing_level", default=0, type=int, help="How aggressively checkpointing is used")
     parser.add_argument("--print_timings_frequency", default=-1, type=int, help="Frequency at which to print timing information")

@@ -36,6 +36,7 @@ from makani.models import model_registry
 
 # distributed computing stuff
 from makani.utils import comm
+from makani.utils.precision import AutocastManager
 from makani.utils.dataloaders.data_helpers import get_date_from_string
 
 # inference specific stuff
@@ -68,21 +69,14 @@ class Inferencer(Driver):
         if self.log_to_wandb:
             self._init_wandb(self.params, job_type="inference")
 
-        # set amp_parameters
-        if hasattr(self.params, "amp_mode") and (self.params.amp_mode != "none"):
-            self.amp_enabled = True
-            if self.params.amp_mode == "fp16":
-                self.amp_dtype = torch.float16
-            elif self.params.amp_mode == "bf16":
-                self.amp_dtype = torch.bfloat16
-            else:
-                raise ValueError(f"Unknown amp mode {self.params.amp_mode}")
-
-            if self.log_to_screen:
-                self.logger.info(f"Enabling automatic mixed precision in {self.params.amp_mode}.")
-        else:
-            self.amp_enabled = False
-            self.amp_dtype = torch.float32
+        # set up mixed precision (amp dtype + optional transformer-engine fp8 recipe).
+        # the manager parses the mode once and hands out a single nested autocast cm.
+        amp_mode = self.params.amp_mode if hasattr(self.params, "amp_mode") else "none"
+        self.autocast = AutocastManager(amp_mode, device_type="cuda", fp8_group=comm.get_group("data"))
+        self.amp_dtype = self.autocast.amp_dtype
+        self.amp_enabled = self.autocast.amp_enabled
+        if self.amp_enabled and self.log_to_screen:
+            self.logger.info(f"Enabling automatic mixed precision in '{amp_mode}'.")
 
         # resuming needs is set to False so loading checkpoints does not attempt to set the optimizer state
         self.params["resuming"] = False
@@ -600,7 +594,7 @@ class Inferencer(Driver):
                         # set unpredicted features at (B*E, ...) shape to match the folded-batch inp
                         self.preprocessor.cache_unpredicted_features(None, None, inpz, tarz)
 
-                        with amp.autocast(device_type="cuda", enabled=self.amp_enabled, dtype=self.amp_dtype):
+                        with self.autocast():
                             # single forward on the folded batch; noise does an AR update
                             # (replace_state=False) before being consumed this step
                             pred_flat = self.model(inp, update_state=True, replace_state=False)
