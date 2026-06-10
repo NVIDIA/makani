@@ -45,13 +45,7 @@ import contextlib
 import torch
 from torch import amp
 
-try:
-    import transformer_engine.pytorch as te
-
-    _TE_AVAILABLE = True
-except ImportError:
-    te = None
-    _TE_AVAILABLE = False
+from makani.utils.te_helpers import TE_AVAILABLE, get_te
 
 
 _AMP_DTYPES = {
@@ -68,7 +62,7 @@ def _make_fp8_recipe(key: str):
     error is raised if the key (or the recipe class) is unavailable. This dict is the
     extension point for new recipes.
     """
-    if not _TE_AVAILABLE:
+    if not TE_AVAILABLE:
         raise RuntimeError(f"precision mode requests fp8 recipe '{key}' but transformer_engine is not installed")
 
     from transformer_engine.common import recipe as te_recipe
@@ -145,7 +139,7 @@ class AutocastManager:
 
         # an fp8 mode must fail loudly when transformer_engine is missing rather than
         # silently degrade to the plain amp dtype
-        if self.fp8_enabled and not _TE_AVAILABLE:
+        if self.fp8_enabled and not TE_AVAILABLE:
             raise RuntimeError(
                 f"precision mode '{mode}' requests an fp8 recipe but transformer_engine is not installed; "
                 f"install transformer_engine or choose a non-fp8 mode (none/fp16/bf16)"
@@ -164,5 +158,6 @@ class AutocastManager:
         with contextlib.ExitStack() as stack:
             stack.enter_context(amp.autocast(device_type=self.device_type, enabled=self.amp_enabled, dtype=self.amp_dtype))
             if self.fp8_enabled:
+                te = get_te()
                 stack.enter_context(te.fp8_autocast(enabled=True, fp8_recipe=self._fp8_recipe, fp8_group=self.fp8_group))
             yield

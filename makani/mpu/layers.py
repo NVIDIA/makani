@@ -27,14 +27,9 @@ from makani.mpu.mappings import gather_from_parallel_region
 from makani.mpu.mappings import copy_to_parallel_region
 
 # transformer engine is an optional dependency: it is only used for the
-# (optional) FP8/FP4 path and must not be required for import.
-try:
-    import transformer_engine.pytorch as te
-
-    _TE_AVAILABLE = True
-except ImportError:
-    te = None
-    _TE_AVAILABLE = False
+# (optional) FP8/FP4 path and must not be required for import. availability is
+# checked without importing it; the module is imported lazily where used.
+from makani.utils.te_helpers import TE_AVAILABLE as _TE_AVAILABLE, get_te
 
 
 class DistributedMatmul(nn.Module):
@@ -101,6 +96,7 @@ class DistributedMatmul(nn.Module):
         # always owned here (te.Linear bias=False) so the row-parallel bias can be
         # added AFTER the all-reduce, matching the native path.
         if self.use_te:
+            te = get_te()
             self.te_linear = te.Linear(inp_dim_local, out_dim_local, bias=False)
             # te weight is always 2D (out_local, in_local) regardless of input_format
             self.weight.is_shared_mp = ["spatial"]
