@@ -55,8 +55,7 @@ def init_distributed_io(params):
     if not ((params.io_grid[2] == comm.get_size("w")) or (params.io_grid[2] == 1)):
         raise ValueError(f"io_grid[2] ({params.io_grid[2]}) has to be either 1 or equal to the w comm size ({comm.get_size('w')})")
 
-    # get io ranks: mp_rank = x_coord + params.io_grid[0] * (ycoord + params.io_grid[1] * zcoord)
-    mp_rank = comm.get_rank("model")
+    # get io ranks (channel dim is always 1, so only h/w are sharded)
     params.io_rank = [0, 0, 0]
     if params.io_grid[1] > 1:
         params.io_rank[1] = comm.get_rank("h")

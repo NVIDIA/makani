@@ -91,13 +91,14 @@ class TestDistributedModel(unittest.TestCase):
         # set up distributed
         self.grid_size_h = int(os.getenv("GRID_H", 1))
         self.grid_size_w = int(os.getenv("GRID_W", 1))
+        self.grid_size_m = int(os.getenv("GRID_M", 1))
         self.grid_size_e = int(os.getenv("GRID_E", 1))
-        self.world_size = self.grid_size_h * self.grid_size_w * self.grid_size_e
+        self.world_size = self.grid_size_h * self.grid_size_w * self.grid_size_m * self.grid_size_e
 
         # init groups
         comm.init(
-            model_parallel_sizes=[self.grid_size_h, self.grid_size_w, 1, 1],
-            model_parallel_names=["h", "w", "fin", "fout"],
+            model_parallel_sizes=[self.grid_size_h, self.grid_size_w, self.grid_size_m],
+            model_parallel_names=["h", "w", "matmul"],
             data_parallel_sizes=[self.grid_size_e, -1],
             data_parallel_names=["ensemble", "batch"],
         )

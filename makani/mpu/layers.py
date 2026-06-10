@@ -17,142 +17,180 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.distributed as dist
 from torch.utils.checkpoint import checkpoint
 from makani.utils import comm
 
 # parallel helpers
 from torch_harmonics.distributed import compute_split_shapes
-from makani.mpu._amp_utils import _custom_setup_context
 from makani.mpu.mappings import reduce_from_parallel_region
 from makani.mpu.mappings import gather_from_parallel_region
 from makani.mpu.mappings import copy_to_parallel_region
 
+# transformer engine is an optional dependency: it is only used for the
+# (optional) FP8/FP4 path and must not be required for import.
+try:
+    import transformer_engine.pytorch as te
 
-class _DistMatmulHelper(torch.autograd.Function):
-    @staticmethod
-    @torch.amp.custom_fwd(device_type="cuda")
-    def forward(X, weight, bias, inp_group_name, out_group_name):
-        # matrix multiplication
-        xconv = F.conv2d(X, weight, bias=None)
-
-        # reduce
-        if comm.get_size(inp_group_name) > 1:
-            dist.all_reduce(xconv, group=comm.get_group(inp_group_name))
-
-        # add bias
-        if bias is not None:
-            xconvbias = xconv + bias
-        else:
-            xconvbias = xconv
-
-        return xconvbias
-
-    @staticmethod
-    @_custom_setup_context(device_type="cuda")
-    def setup_context(ctx, inputs, output):
-        X, weight, bias, inp_group_name, out_group_name = inputs
-        ctx.save_for_backward(X, weight, bias)
-        ctx.out_group_name = out_group_name
-
-    @staticmethod
-    @torch.amp.custom_bwd(device_type="cuda")
-    def backward(ctx, grad_out):
-        X, weight, bias = ctx.saved_tensors
-        gname = ctx.out_group_name
-
-        # do the bwd pass on dgrad
-        grad_input = F.conv_transpose2d(grad_out, weight, bias=None)
-
-        # reduce across nodes
-        if comm.get_size(gname) > 1:
-            dgrad_handle = dist.all_reduce(grad_input, group=comm.get_group(gname), async_op=True)
-
-        # weight grad
-        grad_weight = F.conv2d(X.transpose(0, 1), grad_out.transpose(0, 1), bias=None).transpose(0, 1)
-
-        if bias is not None:
-            grad_bias = torch.sum(grad_out, dim=(0, 2, 3), keepdim=True)
-        else:
-            grad_bias = None
-
-        if comm.get_size(gname) > 1:
-            dgrad_handle.wait()
-
-        return grad_input, grad_weight, grad_bias, None, None
+    _TE_AVAILABLE = True
+except ImportError:
+    te = None
+    _TE_AVAILABLE = False
 
 
 class DistributedMatmul(nn.Module):
-    def __init__(self, inp_dim, out_dim, input_format="nchw", comm_inp_name="fin", comm_out_name="fout", bias=True):
+    """Megatron-style tensor-parallel matmul over a single feature-parallel group.
+
+    The legacy 2D (fin x fout) decomposition has been retired in favor of a 1D
+    column/row fork-join over a single comm group (``comm_name``, "matmul" by
+    default):
+
+    - ``parallel_mode="column"`` shards the OUTPUT dimension. The input is
+      replicated across the group (``copy_to_parallel_region``: identity in the
+      forward, all-reduce in the backward) and there is NO output reduction, so
+      the result is sharded along the output dimension.
+    - ``parallel_mode="row"`` shards the INPUT dimension. The input is assumed to
+      be sharded (e.g. the sharded hidden produced by a preceding column layer),
+      and the partial outputs are all-reduced (``reduce_from_parallel_region``)
+      into a replicated full output. For a row layer the bias is replicated and
+      added AFTER the reduction.
+    """
+
+    def __init__(self, inp_dim, out_dim, input_format="nchw", comm_name="matmul", parallel_mode="column", bias=True, use_te=False):
         super(DistributedMatmul, self).__init__()
 
-        # get sizes
-        self.comm_inp_name = comm_inp_name
-        self.comm_out_name = comm_out_name
-        comm_inp_size = comm.get_size(self.comm_inp_name)
-        comm_out_size = comm.get_size(self.comm_out_name)
+        if parallel_mode not in ["column", "row"]:
+            raise ValueError(f"Error, parallel_mode {parallel_mode} not supported (use 'column' or 'row').")
 
-        # split:
-        if inp_dim % comm_inp_size != 0:
-            raise ValueError(f"the size of input feature dim ({inp_dim}) has to be evenly divisible by the input feature comm dim ({comm_inp_size})")
-        if out_dim % comm_out_size != 0:
-            raise ValueError(f"the size of output feature dim ({out_dim}) has to be evenly divisible by the output feature comm dim ({comm_out_size})")
+        if input_format not in ["nchw", "traditional"]:
+            raise NotImplementedError(f"Error, input format {input_format} not supported.")
 
-        # compute reduced dims
-        inp_dim_local = inp_dim // comm_inp_size
-        out_dim_local = out_dim // comm_out_size
+        self.comm_name = comm_name
+        self.parallel_mode = parallel_mode
+        self.input_format = input_format
 
-        # parameters
-        if input_format == "nchw":
+        # only use transformer engine if it was requested and is actually available
+        self.use_te = use_te and _TE_AVAILABLE
+        if use_te and not _TE_AVAILABLE:
+            import warnings
+
+            warnings.warn("use_te=True was requested but transformer_engine is not installed; falling back to the standard matmul.")
+
+        comm_size = comm.get_size(comm_name)
+
+        # column shards the output dim, row shards the input dim
+        if parallel_mode == "column":
+            if out_dim % comm_size != 0:
+                raise ValueError(f"the output feature dim ({out_dim}) has to be evenly divisible by the matmul comm dim ({comm_size})")
+            out_dim_local = out_dim // comm_size
+            inp_dim_local = inp_dim
+        else:
+            if inp_dim % comm_size != 0:
+                raise ValueError(f"the input feature dim ({inp_dim}) has to be evenly divisible by the matmul comm dim ({comm_size})")
+            out_dim_local = out_dim
+            inp_dim_local = inp_dim // comm_size
+
+        # the dimension that is sharded over the matmul group (None for the
+        # replicated dimension) - used for checkpoint gather/scatter only
+        weight_inp_shard = None if parallel_mode == "column" else comm_name
+        weight_out_shard = comm_name if parallel_mode == "column" else None
+
+        # weight. transformer engine keeps the (2D) weight inside a te.Linear and
+        # performs the local matmul in FP8/FP4; the tensor-parallel communication
+        # (copy/reduce, see forward) and the gradient reduction stay in makani, so
+        # te.Linear is used purely as a local GEMM (no tp_group). The bias is
+        # always owned here (te.Linear bias=False) so the row-parallel bias can be
+        # added AFTER the all-reduce, matching the native path.
+        if self.use_te:
+            self.te_linear = te.Linear(inp_dim_local, out_dim_local, bias=False)
+            # te weight is always 2D (out_local, in_local) regardless of input_format
+            self.weight.is_shared_mp = ["spatial"]
+            self.weight.sharded_dims_mp = [weight_out_shard, weight_inp_shard]
+        elif input_format == "nchw":
             self.weight = nn.Parameter(torch.ones(out_dim_local, inp_dim_local, 1, 1))
             self.weight.is_shared_mp = ["spatial"]
-            self.weight.sharded_dims_mp = [self.comm_out_name, self.comm_inp_name, None, None]
+            self.weight.sharded_dims_mp = [weight_out_shard, weight_inp_shard, None, None]
             self.matmul_handle = F.conv2d
-        elif input_format == "traditional":
+        else:  # traditional
             self.weight = nn.Parameter(torch.ones(out_dim_local, inp_dim_local))
-            self.weight.sharded_dims_mp = [self.comm_out_name, self.comm_inp_name]
+            self.weight.is_shared_mp = ["spatial"]
+            self.weight.sharded_dims_mp = [weight_out_shard, weight_inp_shard]
             self.matmul_handle = F.linear
-        else:
-            raise NotImplementedError(f"Error, input format {input_format} not supported.")
 
         # bias
         self.bias = None
         if bias:
+            # a column bias is sharded over the (sharded) output dim, a row bias
+            # is replicated over the matmul group (added after the all-reduce) and
+            # must therefore NOT be summed over matmul in the gradient hook
+            bias_shard = comm_name if parallel_mode == "column" else None
             if input_format == "nchw":
                 self.bias = nn.Parameter(torch.zeros(1, out_dim_local, 1, 1))
                 self.bias.is_shared_mp = ["spatial"]
-                self.bias.sharded_dims_mp = [None, self.comm_out_name, None, None]
+                self.bias.sharded_dims_mp = [None, bias_shard, None, None]
             elif input_format == "traditional":
                 self.bias = nn.Parameter(torch.zeros(out_dim_local))
-                self.bias.sharded_dims_mp = [self.comm_out_name]
+                self.bias.is_shared_mp = ["spatial"]
+                self.bias.sharded_dims_mp = [bias_shard]
+
+    @property
+    def weight(self):
+        # te.Linear owns the weight in the TE path; expose it through the same
+        # attribute so external init / annotation / the gradient hook are uniform
+        if self.use_te:
+            return self.te_linear.weight
+        return self._parameters["weight"]
+
+    def _local_matmul(self, x):
+        if self.use_te:
+            # te.Linear operates on the last (channel) dim; for nchw we transpose
+            # to channels-last around the GEMM
+            if self.input_format == "nchw":
+                x = self.te_linear(x.permute(0, 2, 3, 1).contiguous())
+                return x.permute(0, 3, 1, 2).contiguous()
+            return self.te_linear(x)
+        return self.matmul_handle(x, self.weight, bias=None)
 
     def forward(self, x):
-        x_cp = copy_to_parallel_region(x, self.comm_out_name)
-        x_loc = self.matmul_handle(x_cp, self.weight, bias=None)
-        x_out = reduce_from_parallel_region(x_loc, self.comm_inp_name)
-        if self.bias is not None:
-            x_out = x_out + self.bias
+        if self.parallel_mode == "column":
+            # replicated input -> sharded output, no output reduction
+            x = copy_to_parallel_region(x, self.comm_name)
+            x = self._local_matmul(x)
+        else:
+            # sharded input -> reduced (replicated) output
+            x = self._local_matmul(x)
+            x = reduce_from_parallel_region(x, self.comm_name)
 
-        return x_out
+        if self.bias is not None:
+            x = x + self.bias
+
+        return x
 
 
 # distributed encoder/decoder
 class DistributedEncoderDecoder(nn.Module):
-    def __init__(self, num_layers, input_dim, output_dim, hidden_dim, act_layer, gain=1.0, input_format="nchw", comm_inp_name="fin", comm_out_name="fout"):
+    def __init__(self, num_layers, input_dim, output_dim, hidden_dim, act_layer, gain=1.0, input_format="nchw", comm_name="matmul", use_te=False):
         super(DistributedEncoderDecoder, self).__init__()
 
-        # get comms
-        comm_inp_size = comm.get_size(comm_inp_name)
-        comm_out_size = comm.get_size(comm_out_name)
+        self.comm_name = comm_name
+
+        # the chain takes a replicated input and must produce a replicated output.
+        # we therefore drive the column/row fork-join from the END: the last layer
+        # is row-parallel (reduces to a replicated output) and we alternate
+        # backwards. for the first layer to be column-parallel (consuming the
+        # replicated input) the number of layers must be even when we are actually
+        # feature-parallel.
+        if (comm.get_size(comm_name) > 1) and (num_layers % 2 != 0):
+            raise ValueError(
+                f"DistributedEncoderDecoder requires an even number of layers under matmul parallelism, got {num_layers}."
+            )
+        modes = ["row" if ((num_layers - 1 - i) % 2 == 0) else "column" for i in range(num_layers)]
 
         # get list of modules
         encoder_modules = []
         current_dim = input_dim
-        comm_inp_name_tmp = comm_inp_name
-        comm_out_name_tmp = comm_out_name
         for i in range(num_layers - 1):
             encoder_modules.append(
-                DistributedMatmul(current_dim, hidden_dim, input_format=input_format, comm_inp_name=comm_inp_name_tmp, comm_out_name=comm_out_name_tmp, bias=True)
+                DistributedMatmul(current_dim, hidden_dim, input_format=input_format, comm_name=comm_name, parallel_mode=modes[i], bias=True, use_te=use_te)
             )
 
             # proper initialization
@@ -163,10 +201,9 @@ class DistributedEncoderDecoder(nn.Module):
 
             encoder_modules.append(act_layer())
             current_dim = hidden_dim
-            comm_inp_name_tmp, comm_out_name_tmp = (comm_out_name_tmp, comm_inp_name_tmp)
 
-        # final layer
-        encoder_modules.append(DistributedMatmul(current_dim, output_dim, input_format=input_format, comm_inp_name=comm_inp_name_tmp, comm_out_name=comm_out_name_tmp, bias=False))
+        # final layer (row-parallel, replicated output, no bias)
+        encoder_modules.append(DistributedMatmul(current_dim, output_dim, input_format=input_format, comm_name=comm_name, parallel_mode=modes[-1], bias=False, use_te=use_te))
 
         # proper initialization of final layer
         scale = math.sqrt(gain / current_dim)
@@ -176,10 +213,6 @@ class DistributedEncoderDecoder(nn.Module):
 
         # create fwd sequence
         self.fwd = nn.Sequential(*encoder_modules)
-
-        # store the comm names for in and out so that they can be queried
-        self.comm_inp_name = comm_inp_name
-        self.comm_out_name = comm_out_name_tmp
 
     def forward(self, x):
         return self.fwd(x)
@@ -194,13 +227,13 @@ class DistributedMLP(nn.Module):
         out_features=None,
         output_bias=True,
         input_format="nchw",
-        comm_inp_name="fin",
-        comm_hidden_name="fout",
+        comm_name="matmul",
         act_layer=nn.GELU,
         drop_rate=0.0,
         drop_type="iid",
         checkpointing=False,
         gain=1.0,
+        use_te=False,
     ):
         super().__init__()
         self.checkpointing = checkpointing
@@ -211,18 +244,16 @@ class DistributedMLP(nn.Module):
         if (input_format == "traditional") and (drop_type == "features"):
             raise NotImplementedError(f"Error, traditional input format and feature dropout cannot be selected simultaneously")
 
-        # get effective embedding size:
-        comm_inp_size = comm.get_size(comm_inp_name)
-        comm_hid_size = comm.get_size(comm_hidden_name)
-
-        self.fc1 = DistributedMatmul(in_features, hidden_features, input_format=input_format, comm_inp_name=comm_inp_name, comm_out_name=comm_hidden_name, bias=True)
+        # column-parallel: replicated input -> hidden sharded over the matmul group
+        self.fc1 = DistributedMatmul(in_features, hidden_features, input_format=input_format, comm_name=comm_name, parallel_mode="column", bias=True, use_te=use_te)
 
         # initialize the weights correctly
         scale = math.sqrt(2.0 / in_features)
         nn.init.normal_(self.fc1.weight, mean=0.0, std=scale)
         nn.init.constant_(self.fc1.bias, 0.0)
 
-        self.fc2 = DistributedMatmul(hidden_features, out_features, input_format=input_format, comm_inp_name=comm_hidden_name, comm_out_name=comm_inp_name, bias=output_bias)
+        # row-parallel: sharded hidden -> all-reduced (replicated) output
+        self.fc2 = DistributedMatmul(hidden_features, out_features, input_format=input_format, comm_name=comm_name, parallel_mode="row", bias=output_bias, use_te=use_te)
 
         # gain factor for the output determines the scaling of the output init
         scale = math.sqrt(gain / hidden_features)
@@ -459,14 +490,14 @@ class DistributedAttention(nn.Module):
         self,
         dim,
         input_format="traditional",
-        comm_inp_name="fin",
-        comm_hidden_name="fout",
+        comm_name="matmul",
         num_heads=8,
         qkv_bias=False,
         qk_norm=False,
         attn_drop_rate=0.0,
         proj_drop_rate=0.0,
         norm_layer=nn.LayerNorm,
+        use_te=False,
     ):
         super().__init__()
 
@@ -474,19 +505,19 @@ class DistributedAttention(nn.Module):
             raise ValueError(f"dim {dim} should be divisible by num_heads {num_heads}")
         self.num_heads = num_heads
 
-        if num_heads % comm.get_size(comm_hidden_name) != 0:
-            raise ValueError(f"heads ({num_heads}) are not evenly split across model ranks ({comm.get_size(comm_hidden_name)})")
-        self.num_heads_local = num_heads // comm.get_size(comm_hidden_name)
+        if num_heads % comm.get_size(comm_name) != 0:
+            raise ValueError(f"heads ({num_heads}) are not evenly split across model ranks ({comm.get_size(comm_name)})")
+        self.num_heads_local = num_heads // comm.get_size(comm_name)
         self.head_dim = dim // self.num_heads
 
-        self.comm_inp_name = comm_inp_name
-        self.comm_hidden_name = comm_hidden_name
+        self.comm_name = comm_name
 
-        self.qkv = DistributedMatmul(dim, dim * 3, input_format, comm_inp_name=comm_inp_name, comm_out_name=comm_hidden_name, bias=qkv_bias)
+        # column-parallel qkv (heads sharded over the matmul group) -> row-parallel proj
+        self.qkv = DistributedMatmul(dim, dim * 3, input_format, comm_name=comm_name, parallel_mode="column", bias=qkv_bias, use_te=use_te)
         self.q_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
         self.k_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
         self.attn_drop_rate = attn_drop_rate
-        self.proj = DistributedMatmul(dim, dim, input_format, comm_inp_name=comm_hidden_name, comm_out_name=comm_inp_name, bias=False)
+        self.proj = DistributedMatmul(dim, dim, input_format, comm_name=comm_name, parallel_mode="row", bias=False, use_te=use_te)
         if proj_drop_rate > 0.0:
             self.proj_drop = nn.Dropout(proj_drop_rate)
         else:
