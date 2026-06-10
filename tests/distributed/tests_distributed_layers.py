@@ -464,29 +464,35 @@ class TestDistributedLayers(unittest.TestCase):
     @unittest.skipUnless(_TE_AVAILABLE and torch.cuda.is_available(), "transformer_engine (with CUDA) is not available")
     @parameterized.expand(
         [
-            # nlat, nlon, batch, channels, hidden, input_format, bias, tol
-            [32, 64, 2, 16, 64, "nchw", True, 1e-3],
-            [32, 64, 2, 16, 64, "nchw", False, 1e-3],
-            [1, 64, 2, 16, 64, "traditional", True, 1e-3],
+            # nlat, nlon, batch, channels, hidden, input_format, bias, amp_mode, atol, rtol
+            [32, 64, 2, 16, 64, "nchw", True, "bf16", 4e-2, 4e-2],
+            [32, 64, 2, 16, 64, "nchw", True, "fp16", 2e-2, 2e-2],
+            [32, 64, 2, 16, 64, "nchw", False, "bf16", 4e-2, 4e-2],
+            [1, 64, 2, 16, 64, "traditional", True, "bf16", 4e-2, 4e-2],
+            [1, 64, 2, 16, 64, "traditional", True, "fp16", 2e-2, 2e-2],
         ],
         skip_on_empty=True,
     )
-    def test_distributed_mlp_te(self, nlat, nlon, batch_size, num_chan, hidden_dim, input_format, bias, tol, verbose=True):
-        """The transformer-engine MLP path must match the native distributed MLP.
+    def test_distributed_mlp_te(self, nlat, nlon, batch_size, num_chan, hidden_dim, input_format, bias, amp_mode, atol, rtol, verbose=True):
+        """The transformer-engine MLP path must match the native distributed MLP under
+        the same (reduced) precision.
 
-        ``use_te`` only swaps the local GEMM for a ``te.Linear`` (FP8 disabled here,
-        so it runs in fp32) while the column/row tensor-parallel communication and
-        the bias-after-reduce semantics stay in makani. We therefore compare the TE
-        and native ``DistributedMLP`` rank-locally (same comm setup, same weights):
-        output, input grad and per-layer weight grad must agree. This exercises the
-        nchw channels-last transpose, the row-parallel bias placement and the
-        ``weight`` property wiring under whatever h x w x matmul grid is launched.
+        ``use_te`` only swaps the local GEMM for a ``te.Linear`` while the column/row
+        tensor-parallel communication and the bias-after-reduce semantics stay in
+        makani. We build the TE and native ``DistributedMLP`` with identical weights and
+        run both forward passes inside the SAME ``autocast(bf16/fp16)`` context, then
+        compare rank-locally: output, input grad and per-layer weight grad must agree.
+        Running both sides at the same precision is the fair comparison (te.Linear has no
+        fp32 compute path); the residual gap is the te.Linear-vs-conv2d/linear kernel
+        difference at bf16/fp16, hence the loose, precision-appropriate tolerances. A
+        wiring bug (bad transpose/bias/reduction) would produce O(1) errors instead.
         """
         # column-parallel fc1 shards the hidden dim over the matmul group
         if hidden_dim % comm.get_size("matmul") != 0:
             self.skipTest(f"hidden_dim {hidden_dim} not divisible by matmul size {comm.get_size('matmul')}")
 
         B, C, H, W = batch_size, num_chan, nlat, nlon
+        amp_dtype = torch.bfloat16 if amp_mode == "bf16" else torch.float16
 
         set_seed(333)
 
@@ -504,9 +510,10 @@ class TestDistributedLayers(unittest.TestCase):
         mlp_native = DistributedMLP(**common, use_te=False).to(self.device)
         mlp_te = DistributedMLP(**common, use_te=True).to(self.device)
 
-        # copy the native weights/biases into the te module so the only difference
-        # is the GEMM implementation. the te weight is always 2D (out_local, in_local);
-        # the native nchw weight is the same values with trailing singleton dims.
+        # copy the native weights/biases into the te module so the only difference is the
+        # GEMM implementation. params stay fp32; autocast casts them on the fly. the te
+        # weight is always 2D (out_local, in_local); the native nchw weight has trailing
+        # singleton dims.
         with torch.no_grad():
             mlp_te.fc1.weight.copy_(mlp_native.fc1.weight.reshape(mlp_te.fc1.weight.shape))
             mlp_te.fc2.weight.copy_(mlp_native.fc2.weight.reshape(mlp_te.fc2.weight.shape))
@@ -524,32 +531,35 @@ class TestDistributedLayers(unittest.TestCase):
         inp_native = inp.clone().requires_grad_(True)
         inp_te = inp.clone().requires_grad_(True)
 
-        # FWD
-        out_native = mlp_native(inp_native)
-        out_te = mlp_te(inp_te)
+        # FWD under a shared bf16/fp16 autocast so both GEMMs run at the same precision
+        with torch.autocast(device_type="cuda", dtype=amp_dtype):
+            out_native = mlp_native(inp_native)
+        with torch.autocast(device_type="cuda", dtype=amp_dtype):
+            out_te = mlp_te(inp_te)
 
-        # BWD with identical upstream grad
+        # BWD with identical upstream grad (backward runs outside autocast)
         ograd = torch.randn_like(out_native)
         out_native.backward(ograd)
         out_te.backward(ograd.clone())
 
+        # cast to fp32 for the comparison (grads are fp32 already; outputs are low precision)
         with self.subTest(desc="te output"):
-            self.assertTrue(reduce_success(compare_tensors("te output", out_te, out_native, tol, tol, verbose=verbose), self.device))
+            self.assertTrue(reduce_success(compare_tensors("te output", out_te.float(), out_native.float(), atol, rtol, verbose=verbose), self.device))
 
         with self.subTest(desc="te input gradients"):
-            self.assertTrue(reduce_success(compare_tensors("te input gradients", inp_te.grad, inp_native.grad, tol, tol, verbose=verbose), self.device))
+            self.assertTrue(reduce_success(compare_tensors("te input gradients", inp_te.grad, inp_native.grad, atol, rtol, verbose=verbose), self.device))
 
         with self.subTest(desc="te fc1 weight gradients"):
             te_wgrad = mlp_te.fc1.weight.grad.reshape(mlp_native.fc1.weight.grad.shape)
-            self.assertTrue(reduce_success(compare_tensors("te fc1 weight gradients", te_wgrad, mlp_native.fc1.weight.grad, tol, tol, verbose=verbose), self.device))
+            self.assertTrue(reduce_success(compare_tensors("te fc1 weight gradients", te_wgrad, mlp_native.fc1.weight.grad, atol, rtol, verbose=verbose), self.device))
 
         with self.subTest(desc="te fc2 weight gradients"):
             te_wgrad = mlp_te.fc2.weight.grad.reshape(mlp_native.fc2.weight.grad.shape)
-            self.assertTrue(reduce_success(compare_tensors("te fc2 weight gradients", te_wgrad, mlp_native.fc2.weight.grad, tol, tol, verbose=verbose), self.device))
+            self.assertTrue(reduce_success(compare_tensors("te fc2 weight gradients", te_wgrad, mlp_native.fc2.weight.grad, atol, rtol, verbose=verbose), self.device))
 
         if bias:
             with self.subTest(desc="te fc2 bias gradients"):
-                self.assertTrue(reduce_success(compare_tensors("te fc2 bias gradients", mlp_te.fc2.bias.grad, mlp_native.fc2.bias.grad, tol, tol, verbose=verbose), self.device))
+                self.assertTrue(reduce_success(compare_tensors("te fc2 bias gradients", mlp_te.fc2.bias.grad, mlp_native.fc2.bias.grad, atol, rtol, verbose=verbose), self.device))
 
 
 if __name__ == '__main__':
