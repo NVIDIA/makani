@@ -40,6 +40,7 @@ from makani.models import model_registry
 
 # distributed computing stuff
 from makani.utils import comm
+from makani.utils.precision import AutocastManager
 from makani.utils import visualize
 
 from makani.mpu.mappings import init_gradient_reduction_hooks
@@ -80,21 +81,14 @@ class StochasticTrainer(Driver):
             tens = torch.ones(1, device=self.device)
             dist.all_reduce(tens, group=comm.get_group("data"))
 
-        # set amp_parameters
-        if hasattr(self.params, "amp_mode") and (self.params.amp_mode != "none"):
-            self.amp_enabled = True
-            if self.params.amp_mode == "fp16":
-                self.amp_dtype = torch.float16
-            elif self.params.amp_mode == "bf16":
-                self.amp_dtype = torch.bfloat16
-            else:
-                raise ValueError(f"Unknown amp mode {self.params.amp_mode}")
-
-            if self.log_to_screen:
-                self.logger.info(f"Enabling automatic mixed precision in {self.params.amp_mode}.")
-        else:
-            self.amp_enabled = False
-            self.amp_dtype = torch.float32
+        # set up mixed precision (amp dtype + optional transformer-engine fp8 recipe).
+        # the manager parses the mode once and hands out a single nested autocast cm.
+        amp_mode = self.params.amp_mode if hasattr(self.params, "amp_mode") else "none"
+        self.autocast = AutocastManager(amp_mode, device_type="cuda", fp8_group=comm.get_group("data"))
+        self.amp_dtype = self.autocast.amp_dtype
+        self.amp_enabled = self.autocast.amp_enabled
+        if self.amp_enabled and self.log_to_screen:
+            self.logger.info(f"Enabling automatic mixed precision in '{amp_mode}'.")
 
         # initialize data loader
         if self.log_to_screen:
@@ -168,7 +162,7 @@ class StochasticTrainer(Driver):
         self.scheduler = self.get_scheduler(self.optimizer, self.params)
 
         # gradient scaler
-        self.gscaler = amp.GradScaler(enabled=(self.amp_dtype == torch.float16))
+        self.gscaler = amp.GradScaler("cuda", enabled=self.autocast.grad_scaler_enabled)
 
         # weight normalization
         self.normalize_weights = self.params.get("normalize_weights", False)
@@ -460,7 +454,7 @@ class StochasticTrainer(Driver):
             if self.params["gradient_accumulation_steps"] > 1:
                 loss_scaling_fact = 1.0 / np.float32(self.params["gradient_accumulation_steps"])
 
-            with amp.autocast(device_type="cuda", enabled=self.amp_enabled, dtype=self.amp_dtype):
+            with self.autocast():
                 if do_update:
                     pred, tar = self.model_train(inp, tar, n_samples=self.params.stochastic_size)
                     loss = self.loss_obj(pred, tar, inp=inp)
@@ -607,7 +601,7 @@ class StochasticTrainer(Driver):
                         # flatten history of the target
                         targ = self.preprocessor.flatten_history(targ)
 
-                        with amp.autocast(device_type="cuda", enabled=self.amp_enabled, dtype=self.amp_dtype):
+                        with self.autocast():
                             # single forward on the folded batch; StochasticInterpolant.forward
                             # handles the batch-resize of both the preprocessor's input_noise
                             # and its own noise_module internally.
