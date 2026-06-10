@@ -503,7 +503,7 @@ class TestDistributedLayers(unittest.TestCase):
             output_bias=bias,
             input_format=input_format,
             act_layer=nn.GELU,
-            drop_rate=0.0,
+            drop_rate=0.0, # this is important, otherwise RNG differences will spoil the test
             drop_type="iid",
             comm_name="matmul",
         )

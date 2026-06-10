@@ -246,8 +246,17 @@ class DistributedMLP(nn.Module):
         if (input_format == "traditional") and (drop_type == "features"):
             raise NotImplementedError(f"Error, traditional input format and feature dropout cannot be selected simultaneously")
 
+        # TE GEMMs operate on the last (channel) dim. Rather than permuting
+        # nchw<->nhwc around *each* matmul, when the TE path is active we build the
+        # matmuls in "traditional" (channels-last) mode and permute once at the MLP
+        # boundaries (see fwd) -- two permutes for the whole MLP instead of one pair
+        # per matmul. Feature dropout (Dropout2d) drops channels at dim=1 and so
+        # needs the nchw layout, so keep the standard nchw path in that case.
+        self.channels_last = use_te and _TE_AVAILABLE and (input_format == "nchw") and (drop_type != "features")
+        matmul_format = "traditional" if self.channels_last else input_format
+
         # column-parallel: replicated input -> hidden sharded over the matmul group
-        self.fc1 = DistributedMatmul(in_features, hidden_features, input_format=input_format, comm_name=comm_name, parallel_mode="column", bias=True, use_te=use_te)
+        self.fc1 = DistributedMatmul(in_features, hidden_features, input_format=matmul_format, comm_name=comm_name, parallel_mode="column", bias=True, use_te=use_te)
 
         # initialize the weights correctly
         scale = math.sqrt(2.0 / in_features)
@@ -255,7 +264,7 @@ class DistributedMLP(nn.Module):
         nn.init.constant_(self.fc1.bias, 0.0)
 
         # row-parallel: sharded hidden -> all-reduced (replicated) output
-        self.fc2 = DistributedMatmul(hidden_features, out_features, input_format=input_format, comm_name=comm_name, parallel_mode="row", bias=output_bias, use_te=use_te)
+        self.fc2 = DistributedMatmul(hidden_features, out_features, input_format=matmul_format, comm_name=comm_name, parallel_mode="row", bias=output_bias, use_te=use_te)
 
         # gain factor for the output determines the scaling of the output init
         scale = math.sqrt(gain / hidden_features)
@@ -276,6 +285,12 @@ class DistributedMLP(nn.Module):
             self.drop = nn.Identity()
 
     def fwd(self, x):
+        # on the TE path the matmuls are channels-last ("traditional"): permute
+        # nchw -> nhwc once here and back at the end, keeping act/iid-dropout
+        # channels-last in between.
+        if self.channels_last:
+            x = x.permute(0, 2, 3, 1).contiguous()
+
         # do the mlp
         # first layer
         x = self.fc1(x)
@@ -285,6 +300,9 @@ class DistributedMLP(nn.Module):
         # second layer
         x = self.fc2(x)
         x = self.drop(x)
+
+        if self.channels_last:
+            x = x.permute(0, 3, 1, 2).contiguous()
 
         return x
 

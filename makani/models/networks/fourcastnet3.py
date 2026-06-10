@@ -22,7 +22,7 @@ import torch.amp as amp
 from torch.utils.checkpoint import checkpoint
 
 # helpers
-from makani.models.common import DropPath, LayerScale, MLP, SpectralConv, LearnablePositionEmbedding, ConstantImputation, MLPImputation, EncoderDecoder
+from makani.models.common import DropPath, LayerScale, MLP, SpectralConv, LearnablePositionEmbedding, MLPImputation
 from makani.utils.features import get_water_channels, get_channel_groups
 from makani.utils.grids import compute_spherical_bandlimit
 
@@ -271,6 +271,7 @@ class NeuralOperatorBlock(nn.Module):
         checkpointing_level=0,
         bias=False,
         fused_disco=True,
+        use_te=False,
     ):
         super().__init__()
 
@@ -357,6 +358,7 @@ class NeuralOperatorBlock(nn.Module):
                 drop_type="features",
                 checkpointing=(checkpointing_level >= 2),
                 gain=gain_factor,
+                use_te=use_te,
             )
 
         # dropout
@@ -472,6 +474,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         normalization_means=None,
         normalization_stds=None,
         fused_disco=True,
+        use_te=True,
         **kwargs,
     ):
         super().__init__()
@@ -623,6 +626,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
                 checkpointing_level=checkpointing_level,
                 bias=bias,
                 fused_disco=fused_disco,
+                use_te=use_te,
             )
 
             self.blocks.append(block)
