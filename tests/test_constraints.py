@@ -21,9 +21,10 @@ import numpy as np
 
 import torch
 
+import makani.utils.constants as const
 from makani.utils.losses.hydrostatic_loss import HydrostaticBalanceLoss
 from makani.models.parametrizations import ConstraintsWrapper
-from makani.utils.constraints import NonNegativeConstraint
+from makani.utils.constraints import NonNegativeConstraint, HydrostaticBalanceProjection, get_matching_channels_pl
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from .testutils import disable_tf32, set_seed, compare_tensors
@@ -172,6 +173,7 @@ class TestConstraints(unittest.TestCase):
                 aux_loss_val = torch.nn.functional.mse_loss(data_map[:, cwrap.constraint_list[0].aux_idx, ...],
                                                             data_short[:, off_idx:, ...]).item()
                 self.assertTrue(aux_loss_val <= 1e-6)
+
     def test_hydrostatic_balance_matches_independent_integration(self):
         """Independent validation of the hydrostatic-balance formula.
 
@@ -253,6 +255,7 @@ class TestConstraints(unittest.TestCase):
                 if use_moist_air_formula:
                     self.assertTrue(compare_tensors("humidity passthrough", out[:, con.q_idx, ...], q,
                                                     atol=1e-4, rtol=1e-5, verbose=True))
+
     def test_hydrostatic_balance_loss_on_balanced_profile(self):
         """Independent check of the soft-constraint loss: a profile built to satisfy
         hydrostatic balance exactly yields ~0 loss, and perturbing a single geopotential
@@ -352,7 +355,6 @@ class TestNonNegativeConstraint(unittest.TestCase):
         return c.to(self.device)
 
     # --- eval / hard clamp ---
-
     def test_eval_hard_clamp_no_normalization(self):
         """Eval mode: constrained channels are >= 0; unconstrained channels unchanged."""
         B, C, H, W = 2, len(self.ALL_CHANNELS), 8, 8
@@ -389,7 +391,6 @@ class TestNonNegativeConstraint(unittest.TestCase):
         self.assertTrue(compare_tensors("positive inputs unchanged", y, x))
 
     # --- training / soft clamp ---
-
     def test_train_slightly_negative_not_zeroed(self):
         """Training mode: slightly negative values are not exactly zeroed (gradient path open)."""
         B, C, H, W = 1, len(self.ALL_CHANNELS), 4, 4
@@ -436,7 +437,6 @@ class TestNonNegativeConstraint(unittest.TestCase):
                                             x_raw, torch.zeros_like(x_raw), atol=0.1))
 
     # --- mode switching ---
-
     def test_train_eval_switch(self):
         """Switching train/eval changes hard vs soft clamping on the same instance."""
         B, C, H, W = 1, len(self.ALL_CHANNELS), 4, 4
@@ -449,6 +449,218 @@ class TestNonNegativeConstraint(unittest.TestCase):
         self.assertFalse((y_train[:, [1], :, :] == 0).all().item())
         self.assertTrue(compare_tensors("hard clamp to zero", y_eval[:, [1], :, :],
                                         torch.zeros_like(y_eval[:, [1], :, :])))
+
+
+class TestHydrostaticBalanceProjection(unittest.TestCase):
+    """Tests for HydrostaticBalanceProjection in makani/utils/constraints.py.
+
+    The layer takes a freely-predicted (T, Z) state and applies the minimum-norm
+    correction onto the hydrostatic-balance manifold
+
+        Z_i - Z_{i-1} = c_i (Tv_i + Tv_{i-1}),   c_i = 0.5 * R_dry * ln(p_{i-1}/p_i),
+
+    with Tv = T (dry) or Tv = T(1 + eps q) (moist, q held fixed). At strength 1
+    the output satisfies balance exactly; the residual scales as (1 - strength).
+    """
+
+    LEVELS = [925, 850, 700, 500, 300, 100, 50]
+    P_MIN, P_MAX = 0, 2000  # window that admits all of LEVELS
+
+    def setUp(self):
+        disable_tf32()
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        set_seed(333)
+
+    # --- helpers ---
+    def _channels(self, moist):
+        names = [f"t{p}" for p in self.LEVELS] + [f"z{p}" for p in self.LEVELS]
+        if moist:
+            names += [f"q{p}" for p in self.LEVELS]
+        names += ["u10m", "v10m", "t2m"]  # aux passthrough channels
+        return names
+
+    def _stats(self, channel_names, identity):
+        """Per-channel (bias, scale) with realistic magnitudes, or None for identity."""
+        if identity:
+            return None, None
+        C = len(channel_names)
+        bias = torch.zeros(1, C, 1, 1)
+        scale = torch.ones(1, C, 1, 1)
+        for i, nm in enumerate(channel_names):
+            if nm.startswith("z"):
+                bias[0, i, 0, 0], scale[0, i, 0, 0] = 5.0e4, 3.0e3
+            elif nm.startswith("q"):
+                bias[0, i, 0, 0], scale[0, i, 0, 0] = 5.0e-3, 5.0e-3
+            elif nm.startswith("t"):
+                bias[0, i, 0, 0], scale[0, i, 0, 0] = 250.0, 30.0
+        return bias.to(self.device), scale.to(self.device)
+
+    def _split(self, channel_names, moist):
+        z_idx, t_idx, pressures = get_matching_channels_pl(channel_names, "z", "t", self.P_MIN, self.P_MAX)
+        q_idx = None
+        if moist:
+            q_idx, _, _ = get_matching_channels_pl(channel_names, "q", "t", self.P_MIN, self.P_MAX)
+        return t_idx, z_idx, q_idx, pressures
+
+    def _residual(self, out, channel_names, moist, bias, scale):
+        """Relative hydrostatic-balance residual per interior level, in physical units."""
+        t_idx, z_idx, q_idx, pressures = self._split(channel_names, moist)
+
+        def unorm(idx):
+            v = out[:, idx, ...].float()
+            if bias is not None:
+                v = v * scale[:, idx, ...] + bias[:, idx, ...]
+            return v
+
+        T, Z = unorm(t_idx), unorm(z_idx)
+        Tv = T * (1.0 + const.Q_CORRECTION_MOIST_AIR * unorm(q_idx)) if moist else T
+
+        res, denom = [], []
+        for i in range(1, len(pressures)):
+            c = 0.5 * const.R_DRY_AIR * float(np.log(pressures[i - 1] / pressures[i]))
+            res.append((Z[:, i] - Z[:, i - 1]) - c * (Tv[:, i] + Tv[:, i - 1]))
+            denom.append((Z[:, i] - Z[:, i - 1]).abs() + c * (Tv[:, i].abs() + Tv[:, i - 1].abs()))
+        return torch.stack(res, dim=1), torch.stack(denom, dim=1)
+
+    def _balanced_field(self, channel_names, moist, B, H, W):
+        """A full normalized model-output field whose (T, Z[, q]) satisfy balance exactly
+        before normalization is undone again by the constraint (used for fixed-point tests)."""
+        t_idx, z_idx, q_idx, pressures = self._split(channel_names, moist)
+        n = len(pressures)
+        T = 200.0 + 60.0 * torch.rand(B, n, H, W, device=self.device)
+        if moist:
+            q = 0.02 * torch.rand(B, n, H, W, device=self.device)
+            Tv = T * (1.0 + const.Q_CORRECTION_MOIST_AIR * q)
+        else:
+            Tv = T
+        Z = torch.zeros(B, n, H, W, device=self.device)
+        Z[:, 0, ...] = 1000.0
+        for i in range(1, n):
+            plog = float(np.log(pressures[i - 1] / pressures[i]))
+            Z[:, i, ...] = Z[:, i - 1, ...] + const.R_DRY_AIR * 0.5 * (Tv[:, i, ...] + Tv[:, i - 1, ...]) * plog
+
+        C = len(channel_names)
+        field = torch.randn(B, C, H, W, device=self.device)  # aux channels arbitrary
+        field[:, t_idx, ...] = T
+        field[:, z_idx, ...] = Z
+        if moist:
+            field[:, q_idx, ...] = q
+        return field
+
+    # --- strict tests at strength = 1 ---
+    def test_projection_enforces_balance_strict(self):
+        """strength=1: an arbitrary (unbalanced) input is projected to satisfy balance
+        to fp32 precision, for dry/moist and identity/realistic normalization."""
+        B, H, W = 2, 5, 6
+        for moist in [False, True]:
+            for identity in [True, False]:
+                with self.subTest(moist=moist, identity=identity):
+                    names = self._channels(moist)
+                    bias, scale = self._stats(names, identity)
+                    proj = HydrostaticBalanceProjection(names, bias=bias, scale=scale,
+                                                        p_min=self.P_MIN, p_max=self.P_MAX,
+                                                        strength=1.0,
+                                                        use_moist_air_formula=moist).to(self.device)
+                    x = torch.randn(B, len(names), H, W, device=self.device)
+                    y = proj(x)
+                    res, denom = self._residual(y, names, moist, bias, scale)
+                    rel = (res.abs() / denom.clamp(min=1e-6)).max().item()
+                    self.assertLess(rel, 1e-4, f"residual not eliminated (rel={rel})")
+
+    def test_balanced_input_is_fixed_point(self):
+        """strength=1: a balanced input is returned essentially unchanged."""
+        B, H, W = 2, 4, 5
+        for moist in [False, True]:
+            for identity in [True, False]:
+                with self.subTest(moist=moist, identity=identity):
+                    names = self._channels(moist)
+                    bias, scale = self._stats(names, identity)
+                    field = self._balanced_field(names, moist, B, H, W)
+                    x = field if identity else (field - bias) / scale
+                    proj = HydrostaticBalanceProjection(names, bias=bias, scale=scale,
+                                                        p_min=self.P_MIN, p_max=self.P_MAX,
+                                                        strength=1.0,
+                                                        use_moist_air_formula=moist).to(self.device)
+                    y = proj(x)
+                    self.assertTrue(compare_tensors("balanced fixed point", y, x,
+                                                    atol=1e-2, rtol=1e-4, verbose=True))
+
+    def test_passthrough_channels_untouched(self):
+        """strength=1: channels outside (T, Z) -- aux, and humidity in the moist case --
+        are passed through bit-for-bit."""
+        B, H, W = 2, 4, 4
+        for moist in [False, True]:
+            with self.subTest(moist=moist):
+                names = self._channels(moist)
+                t_idx, z_idx, q_idx, _ = self._split(names, moist)
+                touched = set(t_idx) | set(z_idx)
+                aux_idx = [i for i in range(len(names)) if i not in touched]
+                proj = HydrostaticBalanceProjection(names, bias=None, scale=None,
+                                                    p_min=self.P_MIN, p_max=self.P_MAX,
+                                                    strength=1.0,
+                                                    use_moist_air_formula=moist).to(self.device)
+                x = torch.randn(B, len(names), H, W, device=self.device)
+                y = proj(x)
+                # all non-(T,Z) channels, which includes humidity, are identical
+                self.assertTrue(compare_tensors("aux/humidity passthrough",
+                                                y[:, aux_idx, ...], x[:, aux_idx, ...]))
+                if moist:
+                    self.assertTrue(compare_tensors("humidity held fixed",
+                                                    y[:, q_idx, ...], x[:, q_idx, ...]))
+
+    # --- soft tests: strength scales the correction linearly ---
+    def test_strength_scales_correction(self):
+        """The correction (x - out) is linear in strength, and the leftover balance
+        residual scales as (1 - strength). strength=0 is the identity."""
+        B, H, W = 2, 5, 6
+        for moist in [False, True]:
+            with self.subTest(moist=moist):
+                names = self._channels(moist)
+                bias, scale = self._stats(names, identity=False)
+                proj = HydrostaticBalanceProjection(names, bias=bias, scale=scale,
+                                                    p_min=self.P_MIN, p_max=self.P_MAX,
+                                                    strength=1.0,
+                                                    use_moist_air_formula=moist).to(self.device)
+                x = torch.randn(B, len(names), H, W, device=self.device)
+
+                proj.strength = 0.0
+                self.assertTrue(compare_tensors("strength=0 identity", proj(x), x, atol=1e-5, rtol=1e-5))
+
+                proj.strength = 1.0
+                y1 = proj(x)
+                proj.strength = 0.5
+                yh = proj(x)
+
+                # deviation from the input is exactly half of the full correction
+                self.assertTrue(compare_tensors("half correction", (x - yh), 0.5 * (x - y1),
+                                                atol=1e-4, rtol=1e-3, verbose=True))
+
+                # the residual that remains at strength 0.5 is half the input's residual
+                res_in, _ = self._residual(x, names, moist, bias, scale)
+                res_half, _ = self._residual(yh, names, moist, bias, scale)
+                self.assertTrue(compare_tensors("residual halved", res_half, 0.5 * res_in,
+                                                atol=1e-1, rtol=1e-3, verbose=True))
+
+    # --- gradients ---
+    def test_gradients_flow(self):
+        """Gradients reach T and Z (and q in the moist case, which modulates the split)."""
+        B, H, W = 1, 4, 4
+        for moist in [False, True]:
+            with self.subTest(moist=moist):
+                names = self._channels(moist)
+                bias, scale = self._stats(names, identity=False)
+                t_idx, z_idx, q_idx, _ = self._split(names, moist)
+                proj = HydrostaticBalanceProjection(names, bias=bias, scale=scale,
+                                                    p_min=self.P_MIN, p_max=self.P_MAX,
+                                                    strength=1.0,
+                                                    use_moist_air_formula=moist).to(self.device)
+                x = torch.randn(B, len(names), H, W, device=self.device, requires_grad=True)
+                proj(x).pow(2).sum().backward()
+                self.assertIsNotNone(x.grad)
+                self.assertFalse((x.grad[:, t_idx, ...] == 0).all().item())
+                self.assertFalse((x.grad[:, z_idx, ...] == 0).all().item())
+                if moist:
+                    self.assertFalse((x.grad[:, q_idx, ...] == 0).all().item())
 
 
 if __name__ == '__main__':
