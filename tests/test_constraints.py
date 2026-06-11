@@ -21,6 +21,8 @@ import numpy as np
 
 import torch
 
+from parameterized import parameterized
+
 import makani.utils.constants as const
 from makani.utils.losses.hydrostatic_loss import HydrostaticBalanceLoss
 from makani.models.parametrizations import ConstraintsWrapper
@@ -54,127 +56,129 @@ class TestConstraints(unittest.TestCase):
         self.crop_offset = data["crop_offset"]
 
     
-    def test_hydrostatic_balance_loss(self):
-        for use_moist_air_formula in [False, True]:
-            with self.subTest(f"moist air formula: {use_moist_air_formula}"):
-                # loss
-                hbloss = HydrostaticBalanceLoss(img_shape=self.img_shape,
-                                                crop_shape=self.crop_shape,
-                                                crop_offset=self.crop_offset,
-                                                channel_names=self.channel_names,
-                                                grid_type="equiangular",
-                                                bias=self.bias,
-                                                scale=self.scale,
-                                                p_min=50,
-                                                p_max=900,
-                                                use_moist_air_formula=use_moist_air_formula).to(self.device)
-                loss_tens = hbloss(self.data, None)
-                
-                # average over batch and sum over channels
-                loss_val = torch.mean(torch.sum(loss_tens, dim=1)).item()
-                
-                self.assertTrue(loss_val <= 1e-4)
-                
-    def test_hydrostatic_balance_constraint_wrapper_era5(self):
-        for use_moist_air_formula in [False, True]:
-            with self.subTest(f"moist air formula: {use_moist_air_formula}"):
-                # loss
-                hbloss = HydrostaticBalanceLoss(img_shape=self.img_shape,
-                                                crop_shape=self.crop_shape,
-                                                crop_offset=self.crop_offset,
-                                                channel_names=self.channel_names,
-                                                grid_type="equiangular",
-                                                bias=self.bias,
-                                                scale=self.scale,
-                                                p_min=50,
-                                                p_max=900,
-                                                use_moist_air_formula=use_moist_air_formula).to(self.device)
+    @parameterized.expand([("dry", False), ("moist", True)])
+    def test_hydrostatic_balance_loss(self, _name, use_moist_air_formula):
+        # loss
+        hbloss = HydrostaticBalanceLoss(img_shape=self.img_shape,
+                                        crop_shape=self.crop_shape,
+                                        crop_offset=self.crop_offset,
+                                        channel_names=self.channel_names,
+                                        grid_type="equiangular",
+                                        bias=self.bias,
+                                        scale=self.scale,
+                                        p_min=50,
+                                        p_max=900,
+                                        use_moist_air_formula=use_moist_air_formula).to(self.device)
+        loss_tens = hbloss(self.data, None)
 
-                # constraints wrapper
-                constraint_dict = {"type": "hydrostatic_balance",
-                                   "options": dict(p_min=50, p_max=900,
-                                                   use_moist_air_formula=use_moist_air_formula)}
-                cwrap = ConstraintsWrapper(constraints=[constraint_dict],
-                                           channel_names=self.channel_names,
-                                           bias=self.bias, scale=self.scale,
-                                           model_handle=None).to(self.device)
+        # average over batch and sum over channels
+        loss_val = torch.mean(torch.sum(loss_tens, dim=1)).item()
 
-                # create a short vector:
-                B, C, H, W = self.data.shape
-                data_short = torch.empty((B, cwrap.N_in_channels, H, W), dtype=torch.float32, device=self.device)
-                # t_idx
-                data_short[:, 0, ...] = self.data[:, cwrap.constraint_list[0].t_idx[0], ...]
-                # z_idx
-                data_short[:, 1:len(cwrap.constraint_list[0].z_idx)+1, ...] = self.data[:, cwrap.constraint_list[0].z_idx, ...]
-                # q_idx
-                off_idx = len(cwrap.constraint_list[0].z_idx)+1
-                if use_moist_air_formula:
-                    data_short[:, off_idx:off_idx+len(cwrap.constraint_list[0].q_idx), ...] = self.data[:, cwrap.constraint_list[0].q_idx, ...]
-                    off_idx += len(cwrap.constraint_list[0].q_idx)
-                # remaining channels
-                data_short[:, off_idx:, ...] = self.data[:, cwrap.constraint_list[0].aux_idx, ...]
-                data_map = cwrap(data_short)
-                
-                # check the hb loss
-                hb_loss_tens = hbloss(data_map, None)
+        self.assertTrue(loss_val <= 1e-4)
 
-                # average over batch and sum over channels
-                hb_loss_val = torch.mean(torch.sum(hb_loss_tens, dim=1)).item()
-                
-                self.assertTrue(hb_loss_val <= 1e-6)
+    @parameterized.expand([("dry", False), ("moist", True)])
+    def test_hydrostatic_balance_constraint_wrapper_era5(self, _name, use_moist_air_formula):
+        # loss
+        hbloss = HydrostaticBalanceLoss(img_shape=self.img_shape,
+                                        crop_shape=self.crop_shape,
+                                        crop_offset=self.crop_offset,
+                                        channel_names=self.channel_names,
+                                        grid_type="equiangular",
+                                        bias=self.bias,
+                                        scale=self.scale,
+                                        p_min=50,
+                                        p_max=900,
+                                        use_moist_air_formula=use_moist_air_formula).to(self.device)
 
-                # now check that the loss on the non-hb components is zero too
-                aux_loss_val = torch.nn.functional.mse_loss(data_map[:, cwrap.constraint_list[0].aux_idx, ...],
-                                                            self.data[:, cwrap.constraint_list[0].aux_idx, ...]).item()
-                self.assertTrue(aux_loss_val <= 1e-6)
+        # constraints wrapper
+        constraint_dict = {"type": "hydrostatic_balance",
+                           "options": dict(p_min=50, p_max=900,
+                                           use_moist_air_formula=use_moist_air_formula)}
+        cwrap = ConstraintsWrapper(constraints=[constraint_dict],
+                                   channel_names=self.channel_names,
+                                   bias=self.bias, scale=self.scale,
+                                   model_handle=None).to(self.device)
 
-    def test_hydrostatic_balance_constraint_wrapper_random(self):
-        for use_moist_air_formula in [False, True]:
-            with self.subTest(f"moist air formula: {use_moist_air_formula}"):
-                # loss
-                hbloss = HydrostaticBalanceLoss(img_shape=self.img_shape,
-                                                crop_shape=self.crop_shape,
-                                                crop_offset=self.crop_offset,
-                                                channel_names=self.channel_names,
-                                                grid_type="equiangular",
-                                                bias=self.bias,
-                                                scale=self.scale,
-                                                p_min=50,
-                                                p_max=900,
-                                                use_moist_air_formula=use_moist_air_formula).to(self.device)
+        # create a short vector:
+        B, C, H, W = self.data.shape
+        data_short = torch.empty((B, cwrap.N_in_channels, H, W), dtype=torch.float32, device=self.device)
+        # t_idx
+        data_short[:, 0, ...] = self.data[:, cwrap.constraint_list[0].t_idx[0], ...]
+        # z_idx
+        data_short[:, 1:len(cwrap.constraint_list[0].z_idx)+1, ...] = self.data[:, cwrap.constraint_list[0].z_idx, ...]
+        # q_idx
+        off_idx = len(cwrap.constraint_list[0].z_idx)+1
+        if use_moist_air_formula:
+            data_short[:, off_idx:off_idx+len(cwrap.constraint_list[0].q_idx), ...] = self.data[:, cwrap.constraint_list[0].q_idx, ...]
+            off_idx += len(cwrap.constraint_list[0].q_idx)
+        # remaining channels
+        data_short[:, off_idx:, ...] = self.data[:, cwrap.constraint_list[0].aux_idx, ...]
+        data_map = cwrap(data_short)
 
-                # constraints wrapper
-                constraint_dict = {"type": "hydrostatic_balance",
-                                   "options": dict(p_min=50, p_max=900,
-                                                   use_moist_air_formula=use_moist_air_formula)}
-                cwrap = ConstraintsWrapper(constraints=[constraint_dict],
-                                           channel_names=self.channel_names,
-                                           bias=self.bias, scale=self.scale,
-                                           model_handle=None).to(self.device)
+        # check the hb loss
+        hb_loss_tens = hbloss(data_map, None)
 
-                # create a short vector:
-                B, C, H, W = self.data.shape
-                data_short = torch.empty((B, cwrap.N_in_channels, H, W), dtype=torch.float32, device=self.device)
-                data_short.normal_(0., 1.)
-                data_map = cwrap(data_short)
-                
-                # check the hb loss
-                hb_loss_tens = hbloss(data_map, None)
+        # average over batch and sum over channels
+        hb_loss_val = torch.mean(torch.sum(hb_loss_tens, dim=1)).item()
 
-                # average over batch and sum over channels 
-                hb_loss_val = torch.mean(torch.sum(hb_loss_tens, dim=1)).item()
+        with self.subTest("hydrostatic balance loss"):
+            self.assertTrue(hb_loss_val <= 1e-6)
 
-                self.assertTrue(hb_loss_val <= 1e-6)
-                
-                # now check that the loss on the non-hb components is zero too
-                off_idx = len(cwrap.constraint_list[0].z_idx)+1
-                if use_moist_air_formula:
-                    off_idx += len(cwrap.constraint_list[0].q_idx)
-                aux_loss_val = torch.nn.functional.mse_loss(data_map[:, cwrap.constraint_list[0].aux_idx, ...],
-                                                            data_short[:, off_idx:, ...]).item()
-                self.assertTrue(aux_loss_val <= 1e-6)
+        # now check that the loss on the non-hb components is zero too
+        aux_loss_val = torch.nn.functional.mse_loss(data_map[:, cwrap.constraint_list[0].aux_idx, ...],
+                                                    self.data[:, cwrap.constraint_list[0].aux_idx, ...]).item()
+        with self.subTest("auxiliary channels unchanged"):
+            self.assertTrue(aux_loss_val <= 1e-6)
 
-    def test_hydrostatic_balance_matches_independent_integration(self):
+    @parameterized.expand([("dry", False), ("moist", True)])
+    def test_hydrostatic_balance_constraint_wrapper_random(self, _name, use_moist_air_formula):
+        # loss
+        hbloss = HydrostaticBalanceLoss(img_shape=self.img_shape,
+                                        crop_shape=self.crop_shape,
+                                        crop_offset=self.crop_offset,
+                                        channel_names=self.channel_names,
+                                        grid_type="equiangular",
+                                        bias=self.bias,
+                                        scale=self.scale,
+                                        p_min=50,
+                                        p_max=900,
+                                        use_moist_air_formula=use_moist_air_formula).to(self.device)
+
+        # constraints wrapper
+        constraint_dict = {"type": "hydrostatic_balance",
+                           "options": dict(p_min=50, p_max=900,
+                                           use_moist_air_formula=use_moist_air_formula)}
+        cwrap = ConstraintsWrapper(constraints=[constraint_dict],
+                                   channel_names=self.channel_names,
+                                   bias=self.bias, scale=self.scale,
+                                   model_handle=None).to(self.device)
+
+        # create a short vector:
+        B, C, H, W = self.data.shape
+        data_short = torch.empty((B, cwrap.N_in_channels, H, W), dtype=torch.float32, device=self.device)
+        data_short.normal_(0., 1.)
+        data_map = cwrap(data_short)
+
+        # check the hb loss
+        hb_loss_tens = hbloss(data_map, None)
+
+        # average over batch and sum over channels
+        hb_loss_val = torch.mean(torch.sum(hb_loss_tens, dim=1)).item()
+
+        with self.subTest("hydrostatic balance loss"):
+            self.assertTrue(hb_loss_val <= 1e-6)
+
+        # now check that the loss on the non-hb components is zero too
+        off_idx = len(cwrap.constraint_list[0].z_idx)+1
+        if use_moist_air_formula:
+            off_idx += len(cwrap.constraint_list[0].q_idx)
+        aux_loss_val = torch.nn.functional.mse_loss(data_map[:, cwrap.constraint_list[0].aux_idx, ...],
+                                                    data_short[:, off_idx:, ...]).item()
+        with self.subTest("auxiliary channels unchanged"):
+            self.assertTrue(aux_loss_val <= 1e-6)
+
+    @parameterized.expand([("dry", False), ("moist", True)])
+    def test_hydrostatic_balance_matches_independent_integration(self, _name, use_moist_air_formula):
         """Independent validation of the hydrostatic-balance formula.
 
         Instead of checking the wrapper output against HydrostaticBalanceLoss (which
@@ -185,84 +189,83 @@ class TestConstraints(unittest.TestCase):
 
             Phi_i - Phi_{i-1} = R_d * 0.5 * (Tv_i + Tv_{i-1}) * ln(p_{i-1}/p_i)
         """
-        import makani.utils.constants as const
-
         R = const.R_DRY_AIR
         qc = const.Q_CORRECTION_MOIST_AIR
 
-        for use_moist_air_formula in [False, True]:
-            with self.subTest(f"moist air formula: {use_moist_air_formula}"):
-                # synthetic channel set: matching t/z (and q) pressure levels + aux channels
-                levels = [925, 850, 700, 500, 300, 100, 50]
-                channel_names = [f"t{p}" for p in levels] + [f"z{p}" for p in levels]
-                if use_moist_air_formula:
-                    channel_names += [f"q{p}" for p in levels]
-                channel_names += ["u10m", "v10m", "t2m"]  # aux passthrough channels
+        # synthetic channel set: matching t/z (and q) pressure levels + aux channels
+        levels = [925, 850, 700, 500, 300, 100, 50]
+        channel_names = [f"t{p}" for p in levels] + [f"z{p}" for p in levels]
+        if use_moist_air_formula:
+            channel_names += [f"q{p}" for p in levels]
+        channel_names += ["u10m", "v10m", "t2m"]  # aux passthrough channels
 
-                constraint_dict = {"type": "hydrostatic_balance",
-                                   "options": dict(p_min=0, p_max=2000,
-                                                   use_moist_air_formula=use_moist_air_formula)}
-                cwrap = ConstraintsWrapper(constraints=[constraint_dict],
-                                           channel_names=channel_names,
-                                           bias=None, scale=None,
-                                           model_handle=None).to(self.device)
-                con = cwrap.constraint_list[0]
+        constraint_dict = {"type": "hydrostatic_balance",
+                           "options": dict(p_min=0, p_max=2000,
+                                           use_moist_air_formula=use_moist_air_formula)}
+        cwrap = ConstraintsWrapper(constraints=[constraint_dict],
+                                   channel_names=channel_names,
+                                   bias=None, scale=None,
+                                   model_handle=None).to(self.device)
+        con = cwrap.constraint_list[0]
 
-                # the wrapper orders pressures descending (bottom -> top)
-                pressures = con.pressures
-                n = len(pressures)
-                self.assertEqual(n, len(levels))
-                self.assertEqual(len(con.t_idx), n)
+        # the wrapper orders pressures descending (bottom -> top)
+        pressures = con.pressures
+        n = len(pressures)
+        self.assertEqual(n, len(levels))
+        self.assertEqual(len(con.t_idx), n)
 
-                B, H, W = 2, 3, 4
-                # known temperature profile (physical units, varying over space)
-                T = 200.0 + 60.0 * torch.rand(B, n, H, W, device=self.device, dtype=torch.float32)
-                if use_moist_air_formula:
-                    q = 0.02 * torch.rand(B, n, H, W, device=self.device, dtype=torch.float32)
-                    Tv = T * (1.0 + qc * q)
-                else:
-                    Tv = T
+        B, H, W = 2, 3, 4
+        # known temperature profile (physical units, varying over space)
+        T = 200.0 + 60.0 * torch.rand(B, n, H, W, device=self.device, dtype=torch.float32)
+        if use_moist_air_formula:
+            q = 0.02 * torch.rand(B, n, H, W, device=self.device, dtype=torch.float32)
+            Tv = T * (1.0 + qc * q)
+        else:
+            Tv = T
 
-                # integrate the hypsometric equation forward to get geopotential per level
-                Z = torch.zeros(B, n, H, W, device=self.device, dtype=torch.float32)
-                Z[:, 0, ...] = 1000.0  # arbitrary reference geopotential at the bottom level
-                for i in range(1, n):
-                    plog = float(np.log(pressures[i - 1] / pressures[i]))
-                    Z[:, i, ...] = Z[:, i - 1, ...] + R * 0.5 * (Tv[:, i, ...] + Tv[:, i - 1, ...]) * plog
+        # integrate the hypsometric equation forward to get geopotential per level
+        Z = torch.zeros(B, n, H, W, device=self.device, dtype=torch.float32)
+        Z[:, 0, ...] = 1000.0  # arbitrary reference geopotential at the bottom level
+        for i in range(1, n):
+            plog = float(np.log(pressures[i - 1] / pressures[i]))
+            Z[:, i, ...] = Z[:, i - 1, ...] + R * 0.5 * (Tv[:, i, ...] + Tv[:, i - 1, ...]) * plog
 
-                # assemble the reduced input in the wrapper's layout: [T0, Z0..Z_{n-1}, (q...), aux...]
-                inp = torch.zeros(B, cwrap.N_in_channels, H, W, device=self.device, dtype=torch.float32)
-                inp[:, 0, ...] = T[:, 0, ...]
-                inp[:, 1:n + 1, ...] = Z
-                off = n + 1
-                if use_moist_air_formula:
-                    inp[:, off:off + n, ...] = q
-                    off += n
-                n_aux = len(con.aux_idx)
-                aux_vals = torch.randn(B, n_aux, H, W, device=self.device, dtype=torch.float32)
-                inp[:, off:off + n_aux, ...] = aux_vals
+        # assemble the reduced input in the wrapper's layout: [T0, Z0..Z_{n-1}, (q...), aux...]
+        inp = torch.zeros(B, cwrap.N_in_channels, H, W, device=self.device, dtype=torch.float32)
+        inp[:, 0, ...] = T[:, 0, ...]
+        inp[:, 1:n + 1, ...] = Z
+        off = n + 1
+        if use_moist_air_formula:
+            inp[:, off:off + n, ...] = q
+            off += n
+        n_aux = len(con.aux_idx)
+        aux_vals = torch.randn(B, n_aux, H, W, device=self.device, dtype=torch.float32)
+        inp[:, off:off + n_aux, ...] = aux_vals
 
-                out = cwrap(inp)
+        out = cwrap(inp)
 
-                # the reconstructed temperatures must match the known profile
-                self.assertTrue(compare_tensors("reconstructed temperature", out[:, con.t_idx, ...], T,
-                                                atol=1e-1, rtol=1e-3, verbose=True))
-                # geopotentials, aux (and humidity) pass through unchanged
-                self.assertTrue(compare_tensors("geopotential passthrough", out[:, con.z_idx, ...], Z,
-                                                atol=1e-2, rtol=1e-5, verbose=True))
-                self.assertTrue(compare_tensors("aux passthrough", out[:, con.aux_idx, ...], aux_vals,
+        # the reconstructed temperatures must match the known profile
+        with self.subTest("reconstructed temperature"):
+            self.assertTrue(compare_tensors("reconstructed temperature", out[:, con.t_idx, ...], T,
+                                            atol=1e-1, rtol=1e-3, verbose=True))
+        # geopotentials, aux (and humidity) pass through unchanged
+        with self.subTest("geopotential passthrough"):
+            self.assertTrue(compare_tensors("geopotential passthrough", out[:, con.z_idx, ...], Z,
+                                            atol=1e-2, rtol=1e-5, verbose=True))
+        with self.subTest("aux passthrough"):
+            self.assertTrue(compare_tensors("aux passthrough", out[:, con.aux_idx, ...], aux_vals,
+                                            atol=1e-4, rtol=1e-5, verbose=True))
+        if use_moist_air_formula:
+            with self.subTest("humidity passthrough"):
+                self.assertTrue(compare_tensors("humidity passthrough", out[:, con.q_idx, ...], q,
                                                 atol=1e-4, rtol=1e-5, verbose=True))
-                if use_moist_air_formula:
-                    self.assertTrue(compare_tensors("humidity passthrough", out[:, con.q_idx, ...], q,
-                                                    atol=1e-4, rtol=1e-5, verbose=True))
 
-    def test_hydrostatic_balance_loss_on_balanced_profile(self):
+    @parameterized.expand([("dry", False), ("moist", True)])
+    def test_hydrostatic_balance_loss_on_balanced_profile(self, _name, use_moist_air_formula):
         """Independent check of the soft-constraint loss: a profile built to satisfy
         hydrostatic balance exactly yields ~0 loss, and perturbing a single geopotential
         level makes the loss clearly positive. Uses identity normalization so a synthetic
         physical-unit field is fed straight through (no dependence on the data sample)."""
-        import makani.utils.constants as const
-
         R = const.R_DRY_AIR
         qc = const.Q_CORRECTION_MOIST_AIR
 
@@ -279,47 +282,47 @@ class TestConstraints(unittest.TestCase):
         ident_bias = torch.zeros(1, C, 1, 1, dtype=torch.float32)
         ident_scale = torch.ones(1, C, 1, 1, dtype=torch.float32)
 
-        for use_moist_air_formula in [False, True]:
-            with self.subTest(f"moist air formula: {use_moist_air_formula}"):
-                hbloss = HydrostaticBalanceLoss(img_shape=img_shape, crop_shape=crop_shape,
-                                                crop_offset=crop_offset, channel_names=self.channel_names,
-                                                grid_type="equiangular", bias=ident_bias, scale=ident_scale,
-                                                p_min=50, p_max=900,
-                                                use_moist_air_formula=use_moist_air_formula).to(self.device)
-                pressures = hbloss.pressures
-                n = len(pressures)
-                B = 2
+        hbloss = HydrostaticBalanceLoss(img_shape=img_shape, crop_shape=crop_shape,
+                                        crop_offset=crop_offset, channel_names=self.channel_names,
+                                        grid_type="equiangular", bias=ident_bias, scale=ident_scale,
+                                        p_min=50, p_max=900,
+                                        use_moist_air_formula=use_moist_air_formula).to(self.device)
+        pressures = hbloss.pressures
+        n = len(pressures)
+        B = 2
 
-                # known temperature profile (physical units); aux channels arbitrary
-                field = torch.randn(B, C, H, W, device=self.device)
-                T = 200.0 + 60.0 * torch.rand(B, n, H, W, device=self.device)
-                if use_moist_air_formula:
-                    q = 0.02 * torch.rand(B, n, H, W, device=self.device)
-                    Tv = T * (1.0 + qc * q)
-                    field[:, hbloss.q_idx, ...] = q
-                else:
-                    Tv = T
+        # known temperature profile (physical units); aux channels arbitrary
+        field = torch.randn(B, C, H, W, device=self.device)
+        T = 200.0 + 60.0 * torch.rand(B, n, H, W, device=self.device)
+        if use_moist_air_formula:
+            q = 0.02 * torch.rand(B, n, H, W, device=self.device)
+            Tv = T * (1.0 + qc * q)
+            field[:, hbloss.q_idx, ...] = q
+        else:
+            Tv = T
 
-                # integrate the hypsometric equation to get balanced geopotentials
-                Z = torch.zeros(B, n, H, W, device=self.device)
-                Z[:, 0, ...] = 1000.0
-                for i in range(1, n):
-                    plog = float(np.log(pressures[i - 1] / pressures[i]))
-                    Z[:, i, ...] = Z[:, i - 1, ...] + R * 0.5 * (Tv[:, i, ...] + Tv[:, i - 1, ...]) * plog
-                field[:, hbloss.t_idx, ...] = T
-                field[:, hbloss.z_idx, ...] = Z
+        # integrate the hypsometric equation to get balanced geopotentials
+        Z = torch.zeros(B, n, H, W, device=self.device)
+        Z[:, 0, ...] = 1000.0
+        for i in range(1, n):
+            plog = float(np.log(pressures[i - 1] / pressures[i]))
+            Z[:, i, ...] = Z[:, i - 1, ...] + R * 0.5 * (Tv[:, i, ...] + Tv[:, i - 1, ...]) * plog
+        field[:, hbloss.t_idx, ...] = T
+        field[:, hbloss.z_idx, ...] = Z
 
-                # a balanced profile must give (numerically) zero loss
-                loss_bal = torch.mean(torch.sum(hbloss(field, None), dim=1)).item()
-                self.assertTrue(loss_bal <= 1e-4, f"balanced HB loss too large: {loss_bal}")
+        # a balanced profile must give (numerically) zero loss
+        loss_bal = torch.mean(torch.sum(hbloss(field, None), dim=1)).item()
+        with self.subTest("balanced profile gives zero loss"):
+            self.assertTrue(loss_bal <= 1e-4, f"balanced HB loss too large: {loss_bal}")
 
-                # perturbing one geopotential level breaks balance -> loss clearly positive
-                field_pert = field.clone()
-                field_pert[:, hbloss.z_idx[1], ...] += 50.0
-                loss_pert = torch.mean(torch.sum(hbloss(field_pert, None), dim=1)).item()
-                self.assertTrue(loss_pert >= 1e-2, f"perturbed HB loss unexpectedly small: {loss_pert}")
-                # and it must be vastly larger than the balanced residual
-                self.assertGreater(loss_pert, 1e3 * loss_bal)
+        # perturbing one geopotential level breaks balance -> loss clearly positive
+        field_pert = field.clone()
+        field_pert[:, hbloss.z_idx[1], ...] += 50.0
+        loss_pert = torch.mean(torch.sum(hbloss(field_pert, None), dim=1)).item()
+        with self.subTest("perturbation breaks balance"):
+            self.assertTrue(loss_pert >= 1e-2, f"perturbed HB loss unexpectedly small: {loss_pert}")
+            # and it must be vastly larger than the balanced residual
+            self.assertGreater(loss_pert, 1e3 * loss_bal)
 
 
 class TestNonNegativeConstraint(unittest.TestCase):
@@ -548,119 +551,130 @@ class TestHydrostaticBalanceProjection(unittest.TestCase):
         return field
 
     # --- strict tests at strength = 1 ---
-    def test_projection_enforces_balance_strict(self):
+    @parameterized.expand([
+        ("dry_identity", False, True),
+        ("dry_normalized", False, False),
+        ("moist_identity", True, True),
+        ("moist_normalized", True, False),
+    ])
+    def test_projection_enforces_balance_strict(self, _name, moist, identity):
         """strength=1: an arbitrary (unbalanced) input is projected to satisfy balance
-        to fp32 precision, for dry/moist and identity/realistic normalization."""
+        to fp32 precision."""
         B, H, W = 2, 5, 6
-        for moist in [False, True]:
-            for identity in [True, False]:
-                with self.subTest(moist=moist, identity=identity):
-                    names = self._channels(moist)
-                    bias, scale = self._stats(names, identity)
-                    proj = HydrostaticBalanceProjection(names, bias=bias, scale=scale,
-                                                        p_min=self.P_MIN, p_max=self.P_MAX,
-                                                        strength=1.0,
-                                                        use_moist_air_formula=moist).to(self.device)
-                    x = torch.randn(B, len(names), H, W, device=self.device)
-                    y = proj(x)
-                    res, denom = self._residual(y, names, moist, bias, scale)
-                    rel = (res.abs() / denom.clamp(min=1e-6)).max().item()
-                    self.assertLess(rel, 1e-4, f"residual not eliminated (rel={rel})")
+        names = self._channels(moist)
+        bias, scale = self._stats(names, identity)
+        proj = HydrostaticBalanceProjection(names, bias=bias, scale=scale,
+                                            p_min=self.P_MIN, p_max=self.P_MAX,
+                                            strength=1.0,
+                                            use_moist_air_formula=moist).to(self.device)
+        x = torch.randn(B, len(names), H, W, device=self.device)
+        y = proj(x)
+        res, denom = self._residual(y, names, moist, bias, scale)
+        rel = (res.abs() / denom.clamp(min=1e-6)).max().item()
+        self.assertLess(rel, 1e-4, f"residual not eliminated (rel={rel})")
 
-    def test_balanced_input_is_fixed_point(self):
+    @parameterized.expand([
+        ("dry_identity", False, True),
+        ("dry_normalized", False, False),
+        ("moist_identity", True, True),
+        ("moist_normalized", True, False),
+    ])
+    def test_balanced_input_is_fixed_point(self, _name, moist, identity):
         """strength=1: a balanced input is returned essentially unchanged."""
         B, H, W = 2, 4, 5
-        for moist in [False, True]:
-            for identity in [True, False]:
-                with self.subTest(moist=moist, identity=identity):
-                    names = self._channels(moist)
-                    bias, scale = self._stats(names, identity)
-                    field = self._balanced_field(names, moist, B, H, W)
-                    x = field if identity else (field - bias) / scale
-                    proj = HydrostaticBalanceProjection(names, bias=bias, scale=scale,
-                                                        p_min=self.P_MIN, p_max=self.P_MAX,
-                                                        strength=1.0,
-                                                        use_moist_air_formula=moist).to(self.device)
-                    y = proj(x)
-                    self.assertTrue(compare_tensors("balanced fixed point", y, x,
-                                                    atol=1e-2, rtol=1e-4, verbose=True))
+        names = self._channels(moist)
+        bias, scale = self._stats(names, identity)
+        field = self._balanced_field(names, moist, B, H, W)
+        x = field if identity else (field - bias) / scale
+        proj = HydrostaticBalanceProjection(names, bias=bias, scale=scale,
+                                            p_min=self.P_MIN, p_max=self.P_MAX,
+                                            strength=1.0,
+                                            use_moist_air_formula=moist).to(self.device)
+        y = proj(x)
+        self.assertTrue(compare_tensors("balanced fixed point", y, x,
+                                        atol=1e-2, rtol=1e-4, verbose=True))
 
-    def test_passthrough_channels_untouched(self):
+    @parameterized.expand([("dry", False), ("moist", True)])
+    def test_passthrough_channels_untouched(self, _name, moist):
         """strength=1: channels outside (T, Z) -- aux, and humidity in the moist case --
         are passed through bit-for-bit."""
         B, H, W = 2, 4, 4
-        for moist in [False, True]:
-            with self.subTest(moist=moist):
-                names = self._channels(moist)
-                t_idx, z_idx, q_idx, _ = self._split(names, moist)
-                touched = set(t_idx) | set(z_idx)
-                aux_idx = [i for i in range(len(names)) if i not in touched]
-                proj = HydrostaticBalanceProjection(names, bias=None, scale=None,
-                                                    p_min=self.P_MIN, p_max=self.P_MAX,
-                                                    strength=1.0,
-                                                    use_moist_air_formula=moist).to(self.device)
-                x = torch.randn(B, len(names), H, W, device=self.device)
-                y = proj(x)
-                # all non-(T,Z) channels, which includes humidity, are identical
-                self.assertTrue(compare_tensors("aux/humidity passthrough",
-                                                y[:, aux_idx, ...], x[:, aux_idx, ...]))
-                if moist:
-                    self.assertTrue(compare_tensors("humidity held fixed",
-                                                    y[:, q_idx, ...], x[:, q_idx, ...]))
+        names = self._channels(moist)
+        t_idx, z_idx, q_idx, _ = self._split(names, moist)
+        touched = set(t_idx) | set(z_idx)
+        aux_idx = [i for i in range(len(names)) if i not in touched]
+        proj = HydrostaticBalanceProjection(names, bias=None, scale=None,
+                                            p_min=self.P_MIN, p_max=self.P_MAX,
+                                            strength=1.0,
+                                            use_moist_air_formula=moist).to(self.device)
+        x = torch.randn(B, len(names), H, W, device=self.device)
+        y = proj(x)
+        # all non-(T,Z) channels, which includes humidity, are identical
+        with self.subTest("aux/humidity passthrough"):
+            self.assertTrue(compare_tensors("aux/humidity passthrough",
+                                            y[:, aux_idx, ...], x[:, aux_idx, ...]))
+        if moist:
+            with self.subTest("humidity held fixed"):
+                self.assertTrue(compare_tensors("humidity held fixed",
+                                                y[:, q_idx, ...], x[:, q_idx, ...]))
 
     # --- soft tests: strength scales the correction linearly ---
-    def test_strength_scales_correction(self):
+    @parameterized.expand([("dry", False), ("moist", True)])
+    def test_strength_scales_correction(self, _name, moist):
         """The correction (x - out) is linear in strength, and the leftover balance
         residual scales as (1 - strength). strength=0 is the identity."""
         B, H, W = 2, 5, 6
-        for moist in [False, True]:
-            with self.subTest(moist=moist):
-                names = self._channels(moist)
-                bias, scale = self._stats(names, identity=False)
-                proj = HydrostaticBalanceProjection(names, bias=bias, scale=scale,
-                                                    p_min=self.P_MIN, p_max=self.P_MAX,
-                                                    strength=1.0,
-                                                    use_moist_air_formula=moist).to(self.device)
-                x = torch.randn(B, len(names), H, W, device=self.device)
+        names = self._channels(moist)
+        bias, scale = self._stats(names, identity=False)
+        proj = HydrostaticBalanceProjection(names, bias=bias, scale=scale,
+                                            p_min=self.P_MIN, p_max=self.P_MAX,
+                                            strength=1.0,
+                                            use_moist_air_formula=moist).to(self.device)
+        x = torch.randn(B, len(names), H, W, device=self.device)
 
-                proj.strength = 0.0
-                self.assertTrue(compare_tensors("strength=0 identity", proj(x), x, atol=1e-5, rtol=1e-5))
+        proj.strength = 0.0
+        self.assertTrue(compare_tensors("strength=0 identity", proj(x), x, atol=1e-5, rtol=1e-5))
 
-                proj.strength = 1.0
-                y1 = proj(x)
-                proj.strength = 0.5
-                yh = proj(x)
+        proj.strength = 1.0
+        y1 = proj(x)
+        proj.strength = 0.5
+        yh = proj(x)
 
-                # deviation from the input is exactly half of the full correction
-                self.assertTrue(compare_tensors("half correction", (x - yh), 0.5 * (x - y1),
-                                                atol=1e-4, rtol=1e-3, verbose=True))
-
-                # the residual that remains at strength 0.5 is half the input's residual
-                res_in, _ = self._residual(x, names, moist, bias, scale)
-                res_half, _ = self._residual(yh, names, moist, bias, scale)
-                self.assertTrue(compare_tensors("residual halved", res_half, 0.5 * res_in,
-                                                atol=1e-1, rtol=1e-3, verbose=True))
+        # the two sub-checks below are facets of the same linearity property, so they
+        # share one test under subTest rather than splitting into separate cases
+        with self.subTest("deviation linear in strength"):
+            # deviation from the input is exactly half of the full correction
+            self.assertTrue(compare_tensors("half correction", (x - yh), 0.5 * (x - y1),
+                                            atol=1e-4, rtol=1e-3, verbose=True))
+        with self.subTest("residual scales as (1 - strength)"):
+            # the residual that remains at strength 0.5 is half the input's residual
+            res_in, _ = self._residual(x, names, moist, bias, scale)
+            res_half, _ = self._residual(yh, names, moist, bias, scale)
+            self.assertTrue(compare_tensors("residual halved", res_half, 0.5 * res_in,
+                                            atol=1e-1, rtol=1e-3, verbose=True))
 
     # --- gradients ---
-    def test_gradients_flow(self):
+    @parameterized.expand([("dry", False), ("moist", True)])
+    def test_gradients_flow(self, _name, moist):
         """Gradients reach T and Z (and q in the moist case, which modulates the split)."""
         B, H, W = 1, 4, 4
-        for moist in [False, True]:
-            with self.subTest(moist=moist):
-                names = self._channels(moist)
-                bias, scale = self._stats(names, identity=False)
-                t_idx, z_idx, q_idx, _ = self._split(names, moist)
-                proj = HydrostaticBalanceProjection(names, bias=bias, scale=scale,
-                                                    p_min=self.P_MIN, p_max=self.P_MAX,
-                                                    strength=1.0,
-                                                    use_moist_air_formula=moist).to(self.device)
-                x = torch.randn(B, len(names), H, W, device=self.device, requires_grad=True)
-                proj(x).pow(2).sum().backward()
-                self.assertIsNotNone(x.grad)
-                self.assertFalse((x.grad[:, t_idx, ...] == 0).all().item())
-                self.assertFalse((x.grad[:, z_idx, ...] == 0).all().item())
-                if moist:
-                    self.assertFalse((x.grad[:, q_idx, ...] == 0).all().item())
+        names = self._channels(moist)
+        bias, scale = self._stats(names, identity=False)
+        t_idx, z_idx, q_idx, _ = self._split(names, moist)
+        proj = HydrostaticBalanceProjection(names, bias=bias, scale=scale,
+                                            p_min=self.P_MIN, p_max=self.P_MAX,
+                                            strength=1.0,
+                                            use_moist_air_formula=moist).to(self.device)
+        x = torch.randn(B, len(names), H, W, device=self.device, requires_grad=True)
+        proj(x).pow(2).sum().backward()
+        self.assertIsNotNone(x.grad)
+        with self.subTest("temperature gradient"):
+            self.assertFalse((x.grad[:, t_idx, ...] == 0).all().item())
+        with self.subTest("geopotential gradient"):
+            self.assertFalse((x.grad[:, z_idx, ...] == 0).all().item())
+        if moist:
+            with self.subTest("humidity gradient"):
+                self.assertFalse((x.grad[:, q_idx, ...] == 0).all().item())
 
 
 if __name__ == '__main__':
