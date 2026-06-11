@@ -143,6 +143,7 @@ class PreLNMLP(nn.Module):
         act_layer=nn.GELU,
         layer_scale=True,
         gain=0.5,
+        use_te=False,
     ):
         super().__init__()
         norm_handle = _get_norm_layer_handle(h, w, chans, normalization_layer, sht_grid_type)
@@ -155,6 +156,7 @@ class PreLNMLP(nn.Module):
             hidden_features=int(chans * mlp_ratio),
             act_layer=act_layer,
             gain=gain,
+            use_te=use_te,
         )
 
         if layer_scale:
@@ -242,6 +244,7 @@ class DiscreteContinuousEncoder(nn.Module):
         normalization_layer="layer_norm",
         layer_scale=True,
         bias=False,
+        use_te=False,
     ):
         super().__init__()
 
@@ -328,6 +331,7 @@ class DiscreteContinuousEncoder(nn.Module):
                 sht_grid_type=grid_out,
                 act_layer=activation_function,
                 layer_scale=layer_scale,
+                use_te=use_te,
             )
 
     def forward(self, x):
@@ -366,6 +370,7 @@ class DiscreteContinuousDecoder(nn.Module):
         bias=False,
         upsample_sht=False,
         perceiver_decoder=False,
+        use_te=False,
     ):
         super().__init__()
 
@@ -434,6 +439,7 @@ class DiscreteContinuousDecoder(nn.Module):
                     sht_grid_type=grid_in,
                     act_layer=activation_function,
                     layer_scale=layer_scale,
+                    use_te=use_te,
                 )
 
             if upsample_sht:
@@ -501,6 +507,7 @@ class DiscreteContinuousDecoder(nn.Module):
                 sht_grid_type=grid_out,
                 act_layer=activation_function,
                 layer_scale=layer_scale,
+                use_te=use_te,
             )
 
     def forward(self, x):
@@ -549,6 +556,7 @@ class NeuralOperatorBlock(nn.Module):
         checkpointing_level=0,
         bias=False,
         aux_embed_dim=0,
+        use_te=False,
     ):
         super().__init__()
 
@@ -655,6 +663,7 @@ class NeuralOperatorBlock(nn.Module):
             drop_type="features",
             checkpointing=(checkpointing_level >= 2),
             gain=gain_factor,
+            use_te=use_te,
         )
 
         # layer scale for stable init: residual branches start near-zero
@@ -751,6 +760,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         freeze_processor=False,
         perceiver_decoder=False,
         num_groups=1,
+        use_te=True,
         **kwargs,
     ):
         super().__init__()
@@ -840,6 +850,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
                 mlp_ratio=mlp_ratio,
                 bias=bias,
                 use_mlp=encoder_mlp,
+                use_te=use_te,
             )
             self.decoder = DiscreteContinuousDecoder(
                 inp_shape=(self.h, self.w),
@@ -859,6 +870,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
                 use_mlp=encoder_mlp,
                 upsample_sht=upsample_sht,
                 perceiver_decoder=perceiver_decoder,
+                use_te=use_te,
             )
         else:
             # encoder for the atmospheric channels
@@ -879,6 +891,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
                 mlp_ratio=mlp_ratio,
                 bias=bias,
                 use_mlp=encoder_mlp,
+                use_te=use_te,
             )
 
             # encoder for the surface channels
@@ -899,6 +912,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
                     mlp_ratio=mlp_ratio,
                     bias=bias,
                     use_mlp=encoder_mlp,
+                    use_te=use_te,
                 )
 
             # decoder for the atmospheric variables
@@ -920,6 +934,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
                 use_mlp=encoder_mlp,
                 upsample_sht=upsample_sht,
                 perceiver_decoder=perceiver_decoder,
+                use_te=use_te,
             )
 
             # decoder for the surface variables
@@ -942,6 +957,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
                     use_mlp=encoder_mlp,
                     upsample_sht=upsample_sht,
                     perceiver_decoder=perceiver_decoder,
+                    use_te=use_te,
                 )
 
         # encoder for the auxiliary channels
@@ -962,6 +978,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
                 mlp_ratio=mlp_ratio,
                 bias=bias,
                 use_mlp=encoder_mlp,
+                use_te=use_te,
             )
 
         # dropout
@@ -996,6 +1013,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
                 bias=bias,
                 checkpointing_level=checkpointing_level,
                 aux_embed_dim=self.aux_embed_dim if self.n_aux_chans > 0 else 0,
+                use_te=use_te,
             )
 
             self.blocks.append(block)
