@@ -23,6 +23,7 @@ import torch
 
 from makani.utils.losses.hydrostatic_loss import HydrostaticBalanceLoss
 from makani.models.parametrizations import ConstraintsWrapper
+from makani.utils.constraints import NonNegativeConstraint
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from .testutils import disable_tf32, set_seed, compare_tensors
@@ -316,6 +317,138 @@ class TestConstraints(unittest.TestCase):
                 self.assertTrue(loss_pert >= 1e-2, f"perturbed HB loss unexpectedly small: {loss_pert}")
                 # and it must be vastly larger than the balanced residual
                 self.assertGreater(loss_pert, 1e3 * loss_bal)
+
+
+class TestNonNegativeConstraint(unittest.TestCase):
+    """Tests for NonNegativeConstraint in makani/utils/constraints.py.
+
+    Convention: x_norm = (x_raw - bias) / scale, so physical zero sits at
+    x_norm = -bias/scale.  In eval mode the constraint hard-clamps to guarantee
+    x_raw >= 0; in training mode it uses a smooth multiplicative approximation
+    so gradients flow for slightly negative values.
+    """
+
+    # synthetic channel set used across all subtests
+    ALL_CHANNELS = ["u10m", "q850", "t850", "q500", "t500"]
+    CLAMP_NAMES  = ["q850", "q500"]
+    CLAMP_IDX    = [1, 3]  # positions of CLAMP_NAMES in ALL_CHANNELS
+
+    def setUp(self):
+        disable_tf32()
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        set_seed(333)
+
+    def _make(self, names_to_clamp=None, means=None, stds=None, **kwargs):
+        """Build a NonNegativeConstraint using channel names.
+
+        means/stds are full-channel tensors (len(ALL_CHANNELS),); the
+        constructor slices out the constrained channels itself, mirroring
+        how _HydrostaticBalanceWrapper receives the full bias/scale.
+        """
+        names = names_to_clamp if names_to_clamp is not None else self.CLAMP_NAMES
+        bias  = means.view(1, -1, 1, 1) if means is not None else None
+        scale = stds.view(1, -1, 1, 1)  if stds  is not None else None
+        c = NonNegativeConstraint(self.ALL_CHANNELS, names, bias=bias, scale=scale, **kwargs)
+        return c.to(self.device)
+
+    # --- eval / hard clamp ---
+
+    def test_eval_hard_clamp_no_normalization(self):
+        """Eval mode: constrained channels are >= 0; unconstrained channels unchanged."""
+        B, C, H, W = 2, len(self.ALL_CHANNELS), 8, 8
+        c = self._make()
+        c.eval()
+        x = torch.randn(B, C, H, W, device=self.device)
+        y = c(x)
+        self.assertTrue((y[:, self.CLAMP_IDX, :, :] >= 0).all().item())
+        unconstrained = [i for i in range(C) if i not in self.CLAMP_IDX]
+        self.assertTrue(compare_tensors("unconstrained channels", y[:, unconstrained, :, :], x[:, unconstrained, :, :]))
+
+    def test_eval_hard_clamp_with_normalization(self):
+        """Eval mode: x_raw = y_norm * scale + bias >= 0 after clamping."""
+        B, C, H, W = 2, len(self.ALL_CHANNELS), 6, 6
+        means = torch.tensor([0.0, 5.0, 270.0, 3.0, 250.0])
+        stds  = torch.tensor([1.0, 2.0,  10.0, 1.5,   8.0])
+        c = self._make(means=means, stds=stds)
+        c.eval()
+        x = torch.randn(B, C, H, W, device=self.device) * 3.0
+        y = c(x)
+        for i, ci in enumerate(self.CLAMP_IDX):
+            x_raw = y[:, ci, :, :] * stds[ci].item() + means[ci].item()
+            self.assertTrue((x_raw >= -1e-6).all().item(), f"channel {self.ALL_CHANNELS[ci]} has negative physical values")
+
+    def test_eval_positive_input_unchanged(self):
+        """Eval mode: values already above physical zero are not modified."""
+        B, C, H, W = 2, len(self.ALL_CHANNELS), 4, 4
+        means = torch.tensor([0.0, 1.0, 270.0, 2.0, 250.0])
+        stds  = torch.ones(len(self.ALL_CHANNELS))
+        c = self._make(means=means, stds=stds)
+        c.eval()
+        x = torch.ones(B, C, H, W, device=self.device) * 5.0
+        y = c(x)
+        self.assertTrue(compare_tensors("positive inputs unchanged", y, x))
+
+    # --- training / soft clamp ---
+
+    def test_train_slightly_negative_not_zeroed(self):
+        """Training mode: slightly negative values are not exactly zeroed (gradient path open)."""
+        B, C, H, W = 1, len(self.ALL_CHANNELS), 4, 4
+        c = self._make(names_to_clamp=["q850"])
+        c.train()
+        x = torch.full((B, C, H, W), -0.05, device=self.device)
+        y = c(x)
+        self.assertFalse((y[:, [1], :, :] == 0).all().item())
+
+    def test_train_large_positive_identity(self):
+        """Training mode: large positive values pass through essentially unchanged."""
+        B, C, H, W = 2, len(self.ALL_CHANNELS), 4, 4
+        c = self._make(eps=0.1)
+        c.train()
+        x = torch.ones(B, C, H, W, device=self.device) * 5.0
+        y = c(x)
+        self.assertTrue(compare_tensors("large positive passthrough", y[:, self.CLAMP_IDX, :, :], x[:, self.CLAMP_IDX, :, :], atol=1e-3))
+
+    def test_train_gradient_flows(self):
+        """Training mode: gradient is nonzero for slightly negative inputs."""
+        B, C, H, W = 1, len(self.ALL_CHANNELS), 4, 4
+        c = self._make()
+        c.train()
+        x = torch.full((B, C, H, W), -0.2, device=self.device, requires_grad=True)
+        c(x).sum().backward()
+        self.assertIsNotNone(x.grad)
+        self.assertFalse((x.grad[:, self.CLAMP_IDX, :, :] == 0).all().item())
+
+    def test_train_normalization_offset(self):
+        """Training mode: with normalization, the clamp boundary is at physical zero."""
+        B, C, H, W = 1, len(self.ALL_CHANNELS), 4, 4
+        means = torch.tensor([0.0, 4.0, 270.0, 6.0, 250.0])
+        stds  = torch.tensor([1.0, 2.0,  10.0, 3.0,   8.0])
+        c = self._make(means=means, stds=stds, eps=0.01)
+        c.train()
+        # set constrained channels to physical zero in normalized space
+        x = torch.zeros(B, C, H, W, device=self.device)
+        for ci, mi, si in zip(self.CLAMP_IDX, means[self.CLAMP_IDX], stds[self.CLAMP_IDX]):
+            x[:, ci, :, :] = -mi / si
+        y = c(x)
+        for ci, mi, si in zip(self.CLAMP_IDX, means[self.CLAMP_IDX], stds[self.CLAMP_IDX]):
+            x_raw = y[:, ci, :, :] * si.item() + mi.item()
+            self.assertTrue(compare_tensors(f"{self.ALL_CHANNELS[ci]} at boundary",
+                                            x_raw, torch.zeros_like(x_raw), atol=0.1))
+
+    # --- mode switching ---
+
+    def test_train_eval_switch(self):
+        """Switching train/eval changes hard vs soft clamping on the same instance."""
+        B, C, H, W = 1, len(self.ALL_CHANNELS), 4, 4
+        c = self._make(names_to_clamp=["q850"])
+        x = torch.full((B, C, H, W), -1.0, device=self.device)
+        c.train()
+        y_train = c(x)
+        c.eval()
+        y_eval = c(x)
+        self.assertFalse((y_train[:, [1], :, :] == 0).all().item())
+        self.assertTrue(compare_tensors("hard clamp to zero", y_eval[:, [1], :, :],
+                                        torch.zeros_like(y_eval[:, [1], :, :])))
 
 
 if __name__ == '__main__':
