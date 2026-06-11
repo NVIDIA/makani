@@ -430,24 +430,39 @@ class MLP(nn.Module):
 
         if self.use_te:
             # keep the modules separate so forward can insert the channels-last
-            # transposes; dropout stays in nchw layout so "features" dropout keeps
-            # dropping channels (dim=1) as in the standard path.
+            # transposes around the te GEMMs.
             self.fc1 = fc1
             self.fc2 = fc2
             self.act = act
             self.drop = drop
+            # Dropout2d ("features") drops whole channels at dim=1, so it needs the
+            # nchw layout and forces a bounce back from channels-last around each
+            # dropout. Plain Dropout ("iid") and Identity are elementwise/no-ops, so
+            # for them we can stay channels-last across the whole MLP and pay only
+            # one permute in + one out.
+            self.inner_transpose = isinstance(drop, nn.Dropout2d)
         else:
             # create forward pass
             self.fwd = nn.Sequential(fc1, act, drop, fc2, drop)
 
     def _te_forward(self, x):
         if self.input_format == "nchw":
-            # nchw -> nhwc for the te GEMM, back to nchw for (channel) dropout
-            x = self.fc1(x.permute(0, 2, 3, 1).contiguous())
-            x = self.act(x)
-            x = self.drop(x.permute(0, 3, 1, 2).contiguous())
-            x = self.fc2(x.permute(0, 2, 3, 1).contiguous())
-            x = self.drop(x.permute(0, 3, 1, 2).contiguous())
+            # permute nchw -> nhwc once for the te GEMMs; act/iid-dropout are
+            # elementwise so they run channels-last too. Only feature dropout
+            # (Dropout2d) needs nchw to drop channels at dim=1, so the inner
+            # transposes around the first dropout are guarded by inner_transpose.
+            x = x.permute(0, 2, 3, 1).contiguous()
+            x = self.act(self.fc1(x))
+            if self.inner_transpose:
+                x = x.permute(0, 3, 1, 2).contiguous()
+            x = self.drop(x)
+            if self.inner_transpose:
+                x = x.permute(0, 2, 3, 1).contiguous()
+            x = self.fc2(x)
+            # final permute back to nchw is unconditional: it is the last op, and
+            # dropping in nchw is correct for both feature and iid/no dropout.
+            x = x.permute(0, 3, 1, 2).contiguous()
+            x = self.drop(x)
         else:
             # traditional format already has the channels in the last dimension
             x = self.drop(self.act(self.fc1(x)))
