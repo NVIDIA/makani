@@ -170,22 +170,6 @@ class PreLNMLP(nn.Module):
 
 
 @torch.compile
-def _soft_clamp(x: torch.Tensor, offset: float = 0.0):
-    dtype = x.dtype
-    x = x + offset
-    y = torch.where(x > 0.0, x**2, 0.0)
-    y = torch.where(x >= 0.5, x - 0.25, y)
-    y = y.to(dtype=dtype)
-    return y
-
-
-def _multiplicative_soft_clamp(x: torch.Tensor, offset: float = 0.0, eps: float = 0.1):
-    # x * sigmoid(x/eps): zero-preserving smooth approximation to max(0, x).
-    # Unlike softplus it has no zero-point bias, so it does not shift the
-    # distribution at initialization. eps controls the transition width;
-    # smaller eps approaches a hard clamp.
-    x = x + offset
-    return x * torch.sigmoid(x / eps) - offset
 
 
 @torch.compiler.disable(recursive=True)
@@ -763,13 +747,15 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         sfno_block_frequency=2,
         big_skip=False,
         clamp_water=False,
+        normalization_means=None,
+        normalization_stds=None,
         bias=False,
         checkpointing_level=0,
         freeze_encoder=False,
         freeze_processor=False,
         perceiver_decoder=False,
         num_groups=1,
-        use_te=True,
+        use_te=False,
         **kwargs,
     ):
         super().__init__()
@@ -859,7 +845,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
                 mlp_ratio=mlp_ratio,
                 bias=bias,
                 use_mlp=encoder_mlp,
-                use_te=use_te,
+                use_te=False,
             )
             self.decoder = DiscreteContinuousDecoder(
                 inp_shape=(self.h, self.w),
@@ -879,7 +865,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
                 use_mlp=encoder_mlp,
                 upsample_sht=upsample_sht,
                 perceiver_decoder=perceiver_decoder,
-                use_te=use_te,
+                use_te=False,
             )
         else:
             # encoder for the atmospheric channels
@@ -900,7 +886,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
                 mlp_ratio=mlp_ratio,
                 bias=bias,
                 use_mlp=encoder_mlp,
-                use_te=use_te,
+                use_te=False,
             )
 
             # encoder for the surface channels
@@ -921,7 +907,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
                     mlp_ratio=mlp_ratio,
                     bias=bias,
                     use_mlp=encoder_mlp,
-                    use_te=use_te,
+                    use_te=False,
                 )
 
             # decoder for the atmospheric variables
@@ -943,7 +929,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
                 use_mlp=encoder_mlp,
                 upsample_sht=upsample_sht,
                 perceiver_decoder=perceiver_decoder,
-                use_te=use_te,
+                use_te=False,
             )
 
             # decoder for the surface variables
@@ -966,7 +952,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
                     use_mlp=encoder_mlp,
                     upsample_sht=upsample_sht,
                     perceiver_decoder=perceiver_decoder,
-                    use_te=use_te,
+                    use_te=False,
                 )
 
         # encoder for the auxiliary channels
@@ -987,7 +973,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
                 mlp_ratio=mlp_ratio,
                 bias=bias,
                 use_mlp=encoder_mlp,
-                use_te=use_te,
+                use_te=False,
             )
 
         # dropout
@@ -1052,11 +1038,14 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
                 grid=model_grid_type,
             ).float()
 
-        # controlled output normalization of q and tcwv
+        # controlled output nonnegativity constraint on water channels
         if clamp_water:
-            water_chans = get_water_channels(channel_names)
-            if len(water_chans) > 0:
-                self.register_buffer("water_channels", torch.LongTensor(water_chans), persistent=False)
+            from makani.utils.constraints import NonNegativeConstraint
+            water_chan_names = [channel_names[i] for i in get_water_channels(channel_names)]
+            if water_chan_names:
+                bias_buf  = torch.as_tensor(normalization_means).view(1, -1, 1, 1) if normalization_means is not None else None
+                scale_buf = torch.as_tensor(normalization_stds).view(1, -1, 1, 1)  if normalization_stds  is not None else None
+                self.nonneg_constraint = NonNegativeConstraint(channel_names, water_chan_names, bias=bias_buf, scale=scale_buf)
 
         # freeze the encoder/decoder
         if freeze_encoder:
@@ -1236,20 +1225,8 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         return x
 
     def clamp_water_channels(self, x):
-        """
-        Clamp water channels to be nonneg. In training mode uses a zero-preserving
-        smooth approximation (x * sigmoid(x/eps)) so gradients flow for slightly
-        negative values. In eval/inference mode uses a hard clamp for a guaranteed
-        nonneg output before any conservation corrections are applied.
-        """
-        if hasattr(self, "water_channels"):
-            w = x[..., self.water_channels, :, :]
-            if self.training:
-                w = _multiplicative_soft_clamp(w)
-            else:
-                w = torch.clamp(w, min=0.0)
-            x = x.index_copy(-3, self.water_channels, w.to(x.dtype))
-
+        if hasattr(self, "nonneg_constraint"):
+            x = self.nonneg_constraint(x)
         return x
 
     def forward(self, x):
