@@ -179,6 +179,15 @@ def _soft_clamp(x: torch.Tensor, offset: float = 0.0):
     return y
 
 
+def _multiplicative_soft_clamp(x: torch.Tensor, offset: float = 0.0, eps: float = 0.1):
+    # x * sigmoid(x/eps): zero-preserving smooth approximation to max(0, x).
+    # Unlike softplus it has no zero-point bias, so it does not shift the
+    # distribution at initialization. eps controls the transition width;
+    # smaller eps approaches a hard clamp.
+    x = x + offset
+    return x * torch.sigmoid(x / eps) - offset
+
+
 @torch.compiler.disable(recursive=True)
 def _get_norm_layer_handle(
     h,
@@ -1227,11 +1236,18 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         return x
 
     def clamp_water_channels(self, x):
-        """clamp water channels with a smooth, positive activation function"""
+        """
+        Clamp water channels to be nonneg. In training mode uses a zero-preserving
+        smooth approximation (x * sigmoid(x/eps)) so gradients flow for slightly
+        negative values. In eval/inference mode uses a hard clamp for a guaranteed
+        nonneg output before any conservation corrections are applied.
+        """
         if hasattr(self, "water_channels"):
-            w = _soft_clamp(x[..., self.water_channels, :, :])
-            # the following eventually leads to spectral instability
-            # w = nn.functional.softplus(x[..., self.water_channels, :, :], beta=5, threshold=5)
+            w = x[..., self.water_channels, :, :]
+            if self.training:
+                w = _multiplicative_soft_clamp(w)
+            else:
+                w = torch.clamp(w, min=0.0)
             x = x.index_copy(-3, self.water_channels, w.to(x.dtype))
 
         return x
