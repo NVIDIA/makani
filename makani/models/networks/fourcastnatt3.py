@@ -747,6 +747,8 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         sfno_block_frequency=2,
         big_skip=False,
         clamp_water=False,
+        hydrostatic_balance_lambda=0.0,
+        hydrostatic_balance_use_moist_air_formula=True,
         normalization_means=None,
         normalization_stds=None,
         bias=False,
@@ -1046,6 +1048,18 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
                 bias_buf  = torch.as_tensor(normalization_means).view(1, -1, 1, 1) if normalization_means is not None else None
                 scale_buf = torch.as_tensor(normalization_stds).view(1, -1, 1, 1)  if normalization_stds  is not None else None
                 self.nonneg_constraint = NonNegativeConstraint(channel_names, water_chan_names, bias=bias_buf, scale=scale_buf)
+            
+        if hydrostatic_balance_lambda > 0.0:
+            from makani.utils.constraints import HydrostaticBalanceProjection
+            bias_buf  = torch.as_tensor(normalization_means).view(1, -1, 1, 1) if normalization_means is not None else None
+            scale_buf = torch.as_tensor(normalization_stds).view(1, -1, 1, 1)  if normalization_stds  is not None else None
+            self.hydrostatic_balance_constraint = HydrostaticBalanceProjection(
+                channel_names,
+                bias=bias_buf,
+                scale=scale_buf,
+                strength=hydrostatic_balance_lambda,
+                use_moist_air_formula=hydrostatic_balance_use_moist_air_formula,
+            )
 
         # freeze the encoder/decoder
         if freeze_encoder:
@@ -1224,9 +1238,13 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
 
         return x
 
-    def clamp_water_channels(self, x):
+    def apply_constraints(self, x):
         if hasattr(self, "nonneg_constraint"):
             x = self.nonneg_constraint(x)
+
+        if hasattr(self, "hydrostatic_balance_constraint"):
+            x = self.hydrostatic_balance_constraint(x)
+
         return x
 
     def forward(self, x):
@@ -1260,7 +1278,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
             x = x + self.residual_transform(residual_lp.to(x.dtype))
 
         # apply output transform
-        x = self.clamp_water_channels(x)
+        x = self.apply_constraints(x)
 
         return x
 
