@@ -16,6 +16,12 @@
 import argparse
 
 
+def _nonempty_str(value):
+    if not value:
+        raise argparse.ArgumentTypeError("--run_num must be a non-empty value (e.g. --run_num=0)")
+    return value
+
+
 def get_default_argument_parser(training=True):
 
     # parser instance
@@ -24,7 +30,7 @@ def get_default_argument_parser(training=True):
     # configuration options
     parser.add_argument("--yaml_config", default="./config/sfnonet.yaml", type=str)
     parser.add_argument("--config", default="base_73chq", type=str)
-    parser.add_argument("--run_num", default="00", type=str)
+    parser.add_argument("--run_num", default="00", type=_nonempty_str)
 
     # hyperparameters override
     parser.add_argument("--batch_size", default=-1, type=int, help="Switch for overriding batch size in the configuration file.")
