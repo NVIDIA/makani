@@ -16,6 +16,12 @@
 import argparse
 
 
+def _nonempty_str(value):
+    if not value:
+        raise argparse.ArgumentTypeError("--run_num must be a non-empty value (e.g. --run_num=0)")
+    return value
+
+
 def get_default_argument_parser(training=True):
 
     # parser instance
@@ -24,19 +30,18 @@ def get_default_argument_parser(training=True):
     # configuration options
     parser.add_argument("--yaml_config", default="./config/sfnonet.yaml", type=str)
     parser.add_argument("--config", default="base_73chq", type=str)
-    parser.add_argument("--run_num", default="00", type=str)
+    parser.add_argument("--run_num", default="00", type=_nonempty_str)
 
     # hyperparameters override
     parser.add_argument("--batch_size", default=-1, type=int, help="Switch for overriding batch size in the configuration file.")
 
     # model parallelization options
-    parser.add_argument("--fin_parallel_size", default=1, type=int, help="Input feature parallelization")
-    parser.add_argument("--fout_parallel_size", default=1, type=int, help="Output feature parallelization")
+    parser.add_argument("--matmul_parallel_size", default=1, type=int, help="Feature (tensor) parallelism dimension")
     parser.add_argument("--h_parallel_size", default=1, type=int, help="Spatial parallelism dimension in h")
     parser.add_argument("--w_parallel_size", default=1, type=int, help="Spatial parallelism dimension in w")
 
     # performance options
-    parser.add_argument("--amp_mode", default="none", type=str, choices=["none", "fp16", "bf16"], help="Specify the mixed precision mode which should be used.")
+    parser.add_argument("--amp_mode", default="none", type=str, help="Mixed precision mode: 'none', 'fp16', 'bf16', or a combined '<amp>-<fp8recipe>' such as 'bf16-fp8_delayed' (requires transformer_engine). See makani.utils.precision.")
     parser.add_argument("--jit_mode", default="none", type=str, choices=["none", "inductor"], help="Specify if and how to use torch compile.")
     parser.add_argument("--checkpointing_level", default=0, type=int, help="How aggressively checkpointing is used")
     parser.add_argument("--print_timings_frequency", default=-1, type=int, help="Frequency at which to print timing information")
@@ -72,6 +77,7 @@ def get_default_argument_parser(training=True):
     # multistep stuff
     if training:
         parser.add_argument("--multistep_count", default=1, type=int, help="Number of autoregressive training steps. A value of 1 denotes conventional training")
+        parser.add_argument("--multistep_checkpoint", action="store_true", help="Activation-checkpoint each autoregressive step's model forward to cut the O(n_future) activation memory of backprop-through-time at the cost of one extra forward per step.")
     
     # debug parameters
     if training:

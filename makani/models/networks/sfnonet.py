@@ -30,7 +30,6 @@ from makani.models.common import SpectralConv, SpectralAttention
 # get spectral transforms from torch_harmonics
 import torch_harmonics as th
 import torch_harmonics.distributed as thd
-from torch_harmonics.distributed import compute_split_shapes
 
 # wrap fft, to unify interface to spectral transforms
 from makani.models.common import RealFFT2, InverseRealFFT2, GeometricInstanceNormS2
@@ -41,7 +40,6 @@ from makani.mpu.layers import DistributedMLP, DistributedEncoderDecoder
 from makani.utils import comm
 
 # layer normalization
-from makani.mpu.mappings import scatter_to_parallel_region, gather_from_parallel_region
 from makani.mpu.layer_norm import DistributedInstanceNorm2d, DistributedLayerNorm, DistributedGeometricInstanceNormS2
 
 # for annotation of models
@@ -121,8 +119,7 @@ class NeuralOperatorBlock(nn.Module):
         inner_skip="linear",
         outer_skip=None,
         use_mlp=False,
-        comm_feature_inp_name=None,
-        comm_feature_hidden_name=None,
+        comm_feature_name="matmul",
         complex_activation="real",
         spectral_layers=1,
         bias=False,
@@ -207,8 +204,7 @@ class NeuralOperatorBlock(nn.Module):
                 act_layer=act_layer,
                 drop_rate=mlp_drop_rate,
                 drop_type="features",
-                comm_inp_name=comm_feature_inp_name,
-                comm_hidden_name=comm_feature_hidden_name,
+                comm_name=comm_feature_name,
                 checkpointing=(checkpointing_level>=2),
                 gain=gain_factor,
             )
@@ -327,11 +323,8 @@ class SphericalFourierNeuralOperatorNet(nn.Module):
                 hidden_dim=int(encoder_ratio * self.embed_dim),
                 act_layer=activation_function,
                 input_format="nchw",
-                comm_inp_name="fin",
-                comm_out_name="fout",
+                comm_name="matmul",
             )
-            fblock_mlp_inp_name = self.encoder.comm_out_name
-            fblock_mlp_hidden_name = "fout" if (self.encoder.comm_out_name == "fin") else "fin"
         else:
             self.encoder = EncoderDecoder(
                 num_layers=encoder_layers,
@@ -341,8 +334,6 @@ class SphericalFourierNeuralOperatorNet(nn.Module):
                 act_layer=activation_function,
                 input_format="nchw",
             )
-            fblock_mlp_inp_name = "fin"
-            fblock_mlp_hidden_name = "fout"
 
         # dropout
         self.pos_drop = nn.Dropout(p=pos_drop_rate) if pos_drop_rate > 0.0 else nn.Identity()
@@ -423,8 +414,7 @@ class SphericalFourierNeuralOperatorNet(nn.Module):
                 inner_skip=inner_skip,
                 outer_skip=outer_skip,
                 use_mlp=use_mlp,
-                comm_feature_inp_name=fblock_mlp_inp_name,
-                comm_feature_hidden_name=fblock_mlp_hidden_name,
+                comm_feature_name="matmul",
                 rank=rank,
                 separable=separable,
                 complex_activation=complex_activation,
@@ -437,8 +427,6 @@ class SphericalFourierNeuralOperatorNet(nn.Module):
 
         # decoder takes the output of FNO blocks and the residual from the big skip connection
         if comm.get_size("matmul") > 1:
-            comm_inp_name = fblock_mlp_inp_name
-            comm_out_name = fblock_mlp_hidden_name
             self.decoder = DistributedEncoderDecoder(
                 num_layers=encoder_layers,
                 input_dim=embed_dim,
@@ -446,11 +434,9 @@ class SphericalFourierNeuralOperatorNet(nn.Module):
                 hidden_dim=int(decoder_ratio * embed_dim),
                 act_layer=activation_function,
                 gain=0.5 if self.big_skip else 1.0,
-                comm_inp_name=comm_inp_name,
-                comm_out_name=comm_out_name,
+                comm_name="matmul",
                 input_format="nchw",
             )
-            self.gather_shapes = compute_split_shapes(self.out_chans, comm.get_size(self.decoder.comm_out_name))
 
         else:
             self.decoder = EncoderDecoder(
@@ -603,8 +589,8 @@ class SphericalFourierNeuralOperatorNet(nn.Module):
                 # only take the predicted channels
                 residual = x
 
-        if comm.get_size("fin") > 1:
-            x = scatter_to_parallel_region(x, 1, "fin")
+        # the column/row fork-join encoder consumes replicated (full-channel) input,
+        # so no channel scatter is needed at the model boundary
 
         if self.checkpointing_level >= 1:
             x = checkpoint(self.encoder, x, use_reentrant=False)
@@ -633,8 +619,8 @@ class SphericalFourierNeuralOperatorNet(nn.Module):
         else:
             x = self.decoder(x)
 
-        if hasattr(self.decoder, "comm_out_name") and (comm.get_size(self.decoder.comm_out_name) > 1):
-            x = gather_from_parallel_region(x, 1, self.gather_shapes, self.decoder.comm_out_name)
+        # the row-parallel decoder all-reduces to a replicated (full-channel)
+        # output, so no channel gather is needed at the model boundary
 
         if self.big_skip:
             x = x + self.residual_transform(residual)

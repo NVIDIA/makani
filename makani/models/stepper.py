@@ -15,8 +15,33 @@
 
 import torch
 import torch.nn as nn
+from torch.utils.checkpoint import checkpoint
 
 from makani.models.preprocessor import Preprocessor2D
+
+
+def _assert_checkpoint_safe(module: nn.Module):
+    """Guard for rollout activation checkpointing.
+
+    Checkpointing recomputes each step's model forward during backward. Global-RNG
+    stochastic ops (e.g. DropPath) are covered by checkpoint's preserve_rng_state, but
+    modules that advance their *own* torch.Generator (e.g. SeededDropout2d) are not:
+    their recomputed mask would diverge from the original forward and corrupt gradients.
+    Fail loudly rather than train silently-wrong.
+    """
+    offenders = sorted({
+        type(m).__name__
+        for m in module.modules()
+        if isinstance(getattr(m, "rng_cpu", None), torch.Generator)
+        or isinstance(getattr(m, "rng_gpu", None), torch.Generator)
+    })
+    if offenders:
+        raise RuntimeError(
+            f"multistep_checkpoint is incompatible with modules carrying private RNG "
+            f"generators (found: {offenders}). Their dropout masks are not restored on "
+            f"the checkpoint recompute, which would corrupt gradients. Disable "
+            f"multistep_checkpoint or make these modules use the global RNG."
+        )
 
 
 class SingleStepWrapper(nn.Module):
@@ -60,6 +85,15 @@ class MultiStepWrapper(nn.Module):
         multistep_parameters = params.get("multistep", {"push_forward": False})
         self.push_forward_mode = multistep_parameters["push_forward"]
 
+        # rollout-level activation checkpointing: recompute each step's model forward in
+        # the backward pass instead of retaining its full activation graph. Turns the
+        # O(n_future) activation multiplier of backprop-through-time back into O(1) at the
+        # cost of one extra forward per step. Set via the --multistep_checkpoint CLI flag
+        # (top-level param, like n_future). Off by default.
+        self.multistep_checkpoint = params.get("multistep_checkpoint", False)
+        if self.multistep_checkpoint:
+            _assert_checkpoint_safe(self.model)
+
         # collect parameters for history
         self.n_future = params.n_future
 
@@ -89,7 +123,16 @@ class MultiStepWrapper(nn.Module):
             inpans = self.preprocessor.add_static_features(inpan)
 
             # prediction
-            predn = self.model(inpans)
+            # Only the pure model forward is checkpointed; the stateful preprocessor calls
+            # (history/noise/state updates) stay outside the checkpoint so they run once and
+            # are not re-executed during the backward recompute. Global-RNG ops inside the
+            # model are handled by preserve_rng_state=True; private-generator modules are
+            # rejected up-front by _assert_checkpoint_safe. Push-forward mode already detaches
+            # between steps, so checkpointing would be redundant there.
+            if self.multistep_checkpoint and self.training and torch.is_grad_enabled() and not self.push_forward_mode:
+                predn = checkpoint(self.model, inpans, use_reentrant=False, preserve_rng_state=True)
+            else:
+                predn = self.model(inpans)
 
             # perform bias correction if requested
             predn = self.preprocessor.correct_bias(predn)

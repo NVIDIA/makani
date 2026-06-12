@@ -111,7 +111,7 @@ def cleanup():
     
 
 # initialization routine
-def init(model_parallel_sizes=[1, 1, 1, 1], model_parallel_names=["h", "w", "fin", "fout"], data_parallel_sizes=[1, -1], data_parallel_names=["ensemble", "batch"], verbose=False):
+def init(model_parallel_sizes=[1, 1, 1], model_parallel_names=["h", "w", "matmul"], data_parallel_sizes=[1, -1], data_parallel_names=["ensemble", "batch"], verbose=False):
 
     # call basic init first
     DistributedManager.initialize()
@@ -127,15 +127,14 @@ def init(model_parallel_sizes=[1, 1, 1, 1], model_parallel_names=["h", "w", "fin
     # add nodes:
     # model
     pconfig.add_node(ProcessGroupNode("model"), parent="world")
-    # spatial and matmul
+    # spatial and matmul. matmul is a single (1D) feature-parallel leaf group;
+    # the legacy 2D fin/fout decomposition has been retired in favor of a
+    # Megatron-style column/row fork-join over the single "matmul" group.
     pconfig.add_node(ProcessGroupNode("spatial"), parent="model")
     pconfig.add_node(ProcessGroupNode("matmul"), parent="model")
     # subgroups for spatial
     pconfig.add_node(ProcessGroupNode("w"), parent="spatial")
     pconfig.add_node(ProcessGroupNode("h"), parent="spatial")
-    # subgroups for matmul:
-    pconfig.add_node(ProcessGroupNode("fin"), parent="matmul")
-    pconfig.add_node(ProcessGroupNode("fout"), parent="matmul")
     # add data node last
     pconfig.add_node(ProcessGroupNode("data"), parent="world")
     # other data parallel dims

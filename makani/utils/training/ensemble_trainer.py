@@ -44,6 +44,7 @@ from makani.models import model_registry
 
 # distributed computing stuff
 from makani.utils import comm
+from makani.utils.precision import AutocastManager
 from makani.utils import visualize
 
 from makani.mpu.mappings import init_gradient_reduction_hooks
@@ -83,21 +84,14 @@ class EnsembleTrainer(Trainer):
                 dist.all_reduce(tens, group=comm.get_group("data"))
         self.timers["nccl init"] = timer.time
 
-        # set amp_parameters
-        if hasattr(self.params, "amp_mode") and (self.params.amp_mode != "none"):
-            self.amp_enabled = True
-            if self.params.amp_mode == "fp16":
-                self.amp_dtype = torch.float16
-            elif self.params.amp_mode == "bf16":
-                self.amp_dtype = torch.bfloat16
-            else:
-                raise ValueError(f"Unknown amp mode {self.params.amp_mode}")
-
-            if self.log_to_screen:
-                self.logger.info(f"Enabling automatic mixed precision in {self.params.amp_mode}.")
-        else:
-            self.amp_enabled = False
-            self.amp_dtype = torch.float32
+        # set up mixed precision (amp dtype + optional transformer-engine fp8 recipe).
+        # the manager parses the mode once and hands out a single nested autocast cm.
+        amp_mode = self.params.amp_mode if hasattr(self.params, "amp_mode") else "none"
+        self.autocast = AutocastManager(amp_mode, device_type="cuda", fp8_group=comm.get_group("data"))
+        self.amp_dtype = self.autocast.amp_dtype
+        self.amp_enabled = self.autocast.amp_enabled
+        if self.amp_enabled and self.log_to_screen:
+            self.logger.info(f"Enabling automatic mixed precision in '{amp_mode}'.")
 
         # initialize data loader
         with Timer() as	timer:
@@ -185,7 +179,7 @@ class EnsembleTrainer(Trainer):
         self.timers["optimizer and scheduler init"] = timer.time
 
         # gradient scaler
-        self.gscaler = amp.GradScaler("cuda", enabled=(self.amp_dtype == torch.float16))
+        self.gscaler = amp.GradScaler("cuda", enabled=self.autocast.grad_scaler_enabled)
 
         # gradient clipping
         self.max_grad_norm = self.params.get("optimizer_max_grad_norm", -1.0)
@@ -231,10 +225,7 @@ class EnsembleTrainer(Trainer):
         # visualization wrapper:
         with Timer() as timer:
             out_bias, out_scale = self.train_dataloader.get_output_normalization()
-            self.visualizer = self.init_visualizer(self.params, self.lat_lon_global, out_bias, out_scale, self.device)
-
-            if self.visualizer is None:
-                self.logger.info("No channels to visualize, skipping visualization.")
+            self._setup_visualizer(out_bias, out_scale)
         self.timers["visualizer init"] = timer.time
 
         # reload checkpoints
@@ -526,7 +517,7 @@ class EnsembleTrainer(Trainer):
                 loss_scaling_fact = 1.0 / np.float32(self.params["gradient_accumulation_steps"])
 
             # accumulate loss into this tensor
-            with amp.autocast(device_type="cuda", enabled=self.amp_enabled, dtype=self.amp_dtype):
+            with self.autocast():
 
                 if do_update:
                     pred, loss = self._ensemble_step(inp, tar)
@@ -627,7 +618,7 @@ class EnsembleTrainer(Trainer):
         # initialize metrics buffers
         self.metrics.zero_buffers()
 
-        visualize_data = self.params.log_video and (epoch % self.params.log_video == 0) and (self.visualizer is not None)
+        visualize_data = self.params.log_video and (epoch % self.params.log_video == 0)
 
         # start the timer
         valid_start = time.time()
@@ -678,7 +669,7 @@ class EnsembleTrainer(Trainer):
                         # flatten history of the target
                         targ = self.preprocessor.flatten_history(targ)
 
-                        with amp.autocast(device_type="cuda", enabled=self.amp_enabled, dtype=self.amp_dtype):
+                        with self.autocast():
                             # single forward on the folded batch: at idt==0 the noise state was
                             # just drawn fresh, so skip the stepper's internal update; for
                             # subsequent steps run the standard AR update.
@@ -708,19 +699,7 @@ class EnsembleTrainer(Trainer):
                             pred_gather = self.metrics._gather_input(pred_gather)
                             targ_gather = self.metrics._gather_input(targ_gather)
 
-                            if self.visualizer.stream is not None:
-                                self.visualizer.stream.wait_stream(torch.cuda.current_stream())
-                            with torch.cuda.stream(self.visualizer.stream):
-                                self.visualizer.prediction_cpu.copy_(pred_gather, non_blocking=True)
-                                self.visualizer.target_cpu.copy_(targ_gather, non_blocking=True)
-                            if self.visualizer.stream is not None:
-                                self.visualizer.stream.synchronize()
-
-                            pred_cpu = self.visualizer.prediction_cpu.to(torch.float32).numpy()
-                            targ_cpu = self.visualizer.target_cpu.to(torch.float32).numpy()
-
-                            tag = f"step{eval_steps}_time{str(idt).zfill(3)}"
-                            self.visualizer.add(tag, pred_cpu, targ_cpu, progress=idt / max(len(tarlist) - 1, 1))
+                            self._visualize_step(pred_gather, targ_gather, eval_steps, idt, len(tarlist))
 
                         # update metrics
                         self.metrics.update(pred, targ, loss, idt)
@@ -737,7 +716,7 @@ class EnsembleTrainer(Trainer):
 
         # finalize plotting
         viz_time = time.perf_counter_ns()
-        if visualize_data:
+        if visualize_data and self.visualizer is not None:
             self.visualizer.finalize()
         viz_time = (time.perf_counter_ns() - viz_time) * 10 ** (-9)
 

@@ -17,8 +17,14 @@ import torch
 import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
 import math
+import warnings
 
 from makani.utils.context import rng_context
+
+# transformer engine is an optional dependency: it is only used for the
+# (optional) FP8/FP4 MLP path and must not be required for import. availability is
+# checked without importing it; the module is imported lazily where used.
+from makani.utils.te_helpers import TE_AVAILABLE as _TE_AVAILABLE, get_te
 
 
 @torch.compile(fullgraph=False)
@@ -357,55 +363,60 @@ class MLP(nn.Module):
         drop_type="iid",
         checkpointing=False,
         gain=1.0,
+        use_te=False,
         **kwargs,
     ):
         super(MLP, self).__init__()
         self.checkpointing = checkpointing
+        self.input_format = input_format
         out_features = out_features or in_features
         hidden_features = hidden_features or in_features
 
-        # First fully connected layer
-        if input_format == "nchw":
-            fc1 = nn.Conv2d(in_features, hidden_features, 1, bias=True)
-        elif input_format == "traditional":
-            fc1 = nn.Linear(in_features, hidden_features, bias=True)
-        else:
-            raise NotImplementedError(f"Error, input format {input_format} not supported.")
-
-        # sharing settings
-        fc1.weight.is_shared_mp = ["spatial"]
-        fc1.bias.is_shared_mp = ["spatial"]
-
-        # initialize the weights correctly
-        scale = math.sqrt(2.0 / in_features)
-        nn.init.normal_(fc1.weight, mean=0.0, std=scale)
-        nn.init.constant_(fc1.bias, 0.0)
-
-        # activation
-        act = act_layer()
+        # only use transformer engine if it was requested and is actually available
+        self.use_te = use_te and _TE_AVAILABLE
+        if use_te and not _TE_AVAILABLE:
+            warnings.warn("use_te=True was requested but transformer_engine is not installed; falling back to the standard MLP.")
 
         # sanity checks
         if (input_format == "traditional") and (drop_type == "features"):
             raise NotImplementedError(f"Error, traditional input format and feature dropout cannot be selected simultaneously")
 
-        # output layer
-        if input_format == "nchw":
+        # transformer engine linears operate on the last (channel) dimension; for
+        # nchw inputs we transpose to channels-last around the GEMMs (see forward).
+        if self.use_te:
+            te = get_te()
+            fc1 = te.Linear(in_features, hidden_features, bias=True)
+            fc2 = te.Linear(hidden_features, out_features, bias=output_bias)
+        elif input_format == "nchw":
+            fc1 = nn.Conv2d(in_features, hidden_features, 1, bias=True)
             fc2 = nn.Conv2d(hidden_features, out_features, 1, bias=output_bias)
         elif input_format == "traditional":
+            fc1 = nn.Linear(in_features, hidden_features, bias=True)
             fc2 = nn.Linear(hidden_features, out_features, bias=output_bias)
         else:
             raise NotImplementedError(f"Error, input format {input_format} not supported.")
 
-        # sharing settings
+        # sharing settings: weights/biases are replicated across the spatial model
+        # group, so the gradient reduction hook sums them over "spatial". This must
+        # be stamped on every parameter (including te.Linear ones, which otherwise
+        # arrive unannotated) for the comm hook to reduce them correctly.
+        fc1.weight.is_shared_mp = ["spatial"]
+        fc1.bias.is_shared_mp = ["spatial"]
         fc2.weight.is_shared_mp = ["spatial"]
         if fc2.bias is not None:
             fc2.bias.is_shared_mp = ["spatial"]
 
+        # initialize the weights correctly (identical to the standard path so that
+        # toggling use_te does not change initialization)
+        nn.init.normal_(fc1.weight, mean=0.0, std=math.sqrt(2.0 / in_features))
+        nn.init.constant_(fc1.bias, 0.0)
         # gain factor for the output determines the scaling of the output init
-        scale = math.sqrt(gain / hidden_features)
-        nn.init.normal_(fc2.weight, mean=0.0, std=scale)
+        nn.init.normal_(fc2.weight, mean=0.0, std=math.sqrt(gain / hidden_features))
         if fc2.bias is not None:
             nn.init.constant_(fc2.bias, 0.0)
+
+        # activation
+        act = act_layer()
 
         if drop_rate > 0.0:
             if drop_type == "iid":
@@ -417,16 +428,57 @@ class MLP(nn.Module):
         else:
             drop = nn.Identity()
 
-        # create forward pass
-        self.fwd = nn.Sequential(fc1, act, drop, fc2, drop)
+        if self.use_te:
+            # keep the modules separate so forward can insert the channels-last
+            # transposes around the te GEMMs.
+            self.fc1 = fc1
+            self.fc2 = fc2
+            self.act = act
+            self.drop = drop
+            # Dropout2d ("features") drops whole channels at dim=1, so it needs the
+            # nchw layout and forces a bounce back from channels-last around each
+            # dropout. Plain Dropout ("iid") and Identity are elementwise/no-ops, so
+            # for them we can stay channels-last across the whole MLP and pay only
+            # one permute in + one out.
+            self.inner_transpose = isinstance(drop, nn.Dropout2d)
+        else:
+            # create forward pass
+            self.fwd = nn.Sequential(fc1, act, drop, fc2, drop)
+
+    def _te_forward(self, x):
+        if self.input_format == "nchw":
+            # permute nchw -> nhwc once for the te GEMMs; act/iid-dropout are
+            # elementwise so they run channels-last too. Only feature dropout
+            # (Dropout2d) needs nchw to drop channels at dim=1, so the inner
+            # transposes around the first dropout are guarded by inner_transpose.
+            x = x.permute(0, 2, 3, 1).contiguous()
+            x = self.act(self.fc1(x))
+            if self.inner_transpose:
+                x = x.permute(0, 3, 1, 2).contiguous()
+            x = self.drop(x)
+            if self.inner_transpose:
+                x = x.permute(0, 2, 3, 1).contiguous()
+            x = self.fc2(x)
+            # final permute back to nchw is unconditional: it is the last op, and
+            # dropping in nchw is correct for both feature and iid/no dropout.
+            x = x.permute(0, 3, 1, 2).contiguous()
+            x = self.drop(x)
+        else:
+            # traditional format already has the channels in the last dimension
+            x = self.drop(self.act(self.fc1(x)))
+            x = self.drop(self.fc2(x))
+        return x
 
     @torch.compiler.disable(recursive=False)
     def checkpoint_forward(self, x):
-        return checkpoint(self.fwd, x, use_reentrant=False)
+        fwd = self._te_forward if self.use_te else self.fwd
+        return checkpoint(fwd, x, use_reentrant=False)
 
     def forward(self, x):
         if self.checkpointing:
             return self.checkpoint_forward(x)
+        elif self.use_te:
+            return self._te_forward(x)
         else:
             return self.fwd(x)
 

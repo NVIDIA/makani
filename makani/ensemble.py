@@ -46,15 +46,14 @@ if __name__ == "__main__":
 
     # distributed
     params["ensemble_parallel_size"] = args.ensemble_parallel_size
-    params["fin_parallel_size"] = args.fin_parallel_size
-    params["fout_parallel_size"] = args.fout_parallel_size
+    params["matmul_parallel_size"] = args.matmul_parallel_size
     params["h_parallel_size"] = args.h_parallel_size
     params["w_parallel_size"] = args.w_parallel_size
 
     params["data_parallel_sizes"] = [args.ensemble_parallel_size, -1]
     params["data_parallel_names"] = ["ensemble", "batch"]
-    params["model_parallel_sizes"] = [args.h_parallel_size, args.w_parallel_size, args.fin_parallel_size, args.fout_parallel_size]
-    params["model_parallel_names"] = ["h", "w", "fin", "fout"]
+    params["model_parallel_sizes"] = [args.h_parallel_size, args.w_parallel_size, args.matmul_parallel_size]
+    params["model_parallel_names"] = ["h", "w", "matmul"]
     params["parameters_reduction_buffer_count"] = args.parameters_reduction_buffer_count
 
     # checkpoint format
@@ -139,6 +138,7 @@ if __name__ == "__main__":
     params["print_timings_frequency"] = args.print_timings_frequency
     params["multistep_count"] = args.multistep_count
     params["n_future"] = args.multistep_count - 1  # note that n_future counts only the additional samples
+    params["multistep_checkpoint"] = args.multistep_checkpoint
 
     # debug:
     params["disable_ddp"] = args.disable_ddp
@@ -180,6 +180,8 @@ if __name__ == "__main__":
                 ],
                 schedule=torch.profiler.schedule(wait=args.capture_range_start - 1, warmup=1, active=args.capture_range_stop - args.capture_range_start, repeat=1),
                 on_trace_ready=trace_handler,
+                record_shapes=True,
+                profile_memory=True,
             ) as profiler:
                 if args.capture_mode == "training":
                     ensemble_trainer.train(training_profiler=profiler)

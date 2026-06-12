@@ -76,15 +76,14 @@ if __name__ == "__main__":
 
     # distributed
     params["ensemble_parallel_size"] = args.ensemble_parallel_size
-    params["fin_parallel_size"] = args.fin_parallel_size
-    params["fout_parallel_size"] = args.fout_parallel_size
+    params["matmul_parallel_size"] = args.matmul_parallel_size
     params["h_parallel_size"] = args.h_parallel_size
     params["w_parallel_size"] = args.w_parallel_size
 
     params["data_parallel_sizes"] = [args.ensemble_parallel_size, -1]
     params["data_parallel_names"] = ["ensemble", "batch"]
-    params["model_parallel_sizes"] = [args.h_parallel_size, args.w_parallel_size, args.fin_parallel_size, args.fout_parallel_size]
-    params["model_parallel_names"] = ["h", "w", "fin", "fout"]
+    params["model_parallel_sizes"] = [args.h_parallel_size, args.w_parallel_size, args.matmul_parallel_size]
+    params["model_parallel_names"] = ["h", "w", "matmul"]
 
     # checkpoint format
     params["load_checkpoint"] = args.load_checkpoint
@@ -213,6 +212,8 @@ if __name__ == "__main__":
                 ],
                 schedule=torch.profiler.schedule(wait=args.capture_range_start - 1, warmup=1, active=args.capture_range_stop - args.capture_range_start, repeat=1),
                 on_trace_ready=trace_handler,
+                record_shapes=True,
+                profile_memory=True,
             ) as profiler:
                 inferencer.score_model(
                     metrics_file=metrics_file,

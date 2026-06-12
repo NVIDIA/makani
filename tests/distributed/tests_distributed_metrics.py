@@ -92,8 +92,8 @@ class TestDistributedMetricHandler(unittest.TestCase):
 
         # init groups
         comm.init(
-            model_parallel_sizes=[self.grid_size_h, self.grid_size_w, 1, 1],
-            model_parallel_names=["h", "w", "fin", "fout"],
+            model_parallel_sizes=[self.grid_size_h, self.grid_size_w, 1],
+            model_parallel_names=["h", "w", "matmul"],
             data_parallel_sizes=[self.grid_size_e, self.grid_size_b],
             data_parallel_names=["ensemble", "batch"],
         )

@@ -784,3 +784,30 @@ class Driver(metaclass=abc.ABCMeta):
             visualizer = None
 
         return visualizer
+
+    def _setup_visualizer(self, out_bias: torch.Tensor, out_scale: torch.Tensor):
+        """Initialize self.visualizer on rank 0; set to None on all other ranks."""
+        if self.world_rank == 0:
+            self.visualizer = self.init_visualizer(self.params, self.lat_lon_global, out_bias, out_scale, self.device)
+            if self.visualizer is None:
+                self.logger.info("No channels to visualize, skipping visualization.")
+        else:
+            self.visualizer = None
+
+    def _visualize_step(self, pred_gather: torch.Tensor, targ_gather: torch.Tensor, eval_steps: int, idt: int, ndt: Optional[int] = None):
+        """Copy gathered tensors to the visualizer and queue a frame. No-op when self.visualizer is None."""
+        if self.visualizer is None:
+            return
+        if self.visualizer.stream is not None:
+            self.visualizer.stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(self.visualizer.stream):
+                self.visualizer.prediction_cpu.copy_(pred_gather, non_blocking=True)
+                self.visualizer.target_cpu.copy_(targ_gather, non_blocking=True)
+            self.visualizer.stream.synchronize()
+        else:
+            self.visualizer.prediction_cpu.copy_(pred_gather)
+            self.visualizer.target_cpu.copy_(targ_gather)
+        pred_cpu = self.visualizer.prediction_cpu.to(torch.float32).numpy()
+        targ_cpu = self.visualizer.target_cpu.to(torch.float32).numpy()
+        progress = idt / max(ndt - 1, 1) if ndt is not None else None
+        self.visualizer.add(f"step{eval_steps}_time{str(idt).zfill(3)}", pred_cpu, targ_cpu, progress=progress)
