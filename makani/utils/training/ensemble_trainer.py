@@ -699,7 +699,7 @@ class EnsembleTrainer(Trainer):
                             pred_gather = self.metrics._gather_input(pred_gather)
                             targ_gather = self.metrics._gather_input(targ_gather)
 
-                            self._visualize_step(pred_gather, targ_gather, eval_steps, idt)
+                            self._visualize_step(pred_gather, targ_gather, eval_steps, idt, len(tarlist))
 
                         # update metrics
                         self.metrics.update(pred, targ, loss, idt)
