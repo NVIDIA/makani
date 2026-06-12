@@ -941,6 +941,5 @@ class TestDummyLoader(unittest.TestCase):
         self.assertTrue((out_bias == 0).all())
         self.assertTrue((out_scale == 1).all())
 
-
 if __name__ == "__main__":
     unittest.main()
