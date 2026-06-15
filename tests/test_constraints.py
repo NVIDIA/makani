@@ -529,8 +529,9 @@ class TestHydrostaticBalanceProjection(unittest.TestCase):
 
     def _dummy_climatology(self, n_levels):
         """Deterministic, non-uniform per-interior-level residual b_clim (physical
-        units, m^2/s^2), length n_levels - 1, for affine-offset tests."""
-        return np.linspace(-150.0, 150.0, n_levels - 1)
+        units, m^2/s^2), length n_levels - 1, for affine-offset tests. Returned as a
+        torch.Tensor, matching the constraint's expected input type (like bias/scale)."""
+        return torch.from_numpy(np.linspace(-150.0, 150.0, n_levels - 1))
 
     def _balanced_field(self, channel_names, moist, B, H, W, offset=None):
         """A full normalized model-output field whose (T, Z[, q]) satisfy balance exactly
@@ -787,7 +788,7 @@ class TestHydrostaticBalanceProjection(unittest.TestCase):
         """A climatology offset whose length is not (#all matching levels - 1) is rejected."""
         names = self._channels(moist=False)
         _, _, _, pressures_all = self._split(names, moist=False)
-        bad_offset = np.zeros(len(pressures_all))  # one too long: should be len - 1
+        bad_offset = torch.zeros(len(pressures_all))  # one too long: should be len - 1
         with self.assertRaises(ValueError):
             HydrostaticBalanceProjection(names, p_min=self.P_MIN, p_max=self.P_MAX,
                                          climatology_offset=bad_offset)

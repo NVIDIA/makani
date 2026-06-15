@@ -148,11 +148,12 @@ class HydrostaticBalanceProjection(nn.Module):
         p_min, p_max:          pressure-level window (hPa) to include.
         strength:              damping factor lambda in [0, 1] (default 1.0 = exact).
         use_moist_air_formula: use virtual temperature (requires matching q levels).
-        climatology_offset:    optional per-interior-level residual b_clim (physical
-                               units) over ALL matching z/t levels (length
-                               (#matching z/t levels) - 1), defining an affine target
-                               manifold A x = b_clim. Sliced internally to the
-                               [p_min, p_max] window. None (default) -> A x = 0.
+        climatology_offset:    optional per-interior-level residual b_clim as a
+                               torch.Tensor (physical units; like bias/scale) over ALL
+                               matching z/t levels (length (#matching z/t levels) - 1),
+                               defining an affine target manifold A x = b_clim. Sliced
+                               internally to the [p_min, p_max] window. None (default)
+                               -> A x = 0.
     """
 
     def __init__(self, channel_names, bias=None, scale=None, p_min=50, p_max=900, strength=1.0,
@@ -180,7 +181,7 @@ class HydrostaticBalanceProjection(nn.Module):
                 if p1 != p2:
                     raise ValueError("Error, make sure that you have the same pressure levels for t, z and q channels")
             self.q_prefact = const.Q_CORRECTION_MOIST_AIR
-            self.register_buffer("q_indices", torch.tensor(q_idx, dtype=torch.long), persistent=False)
+            self.register_buffer("q_indices", torch.as_tensor(q_idx, dtype=torch.long), persistent=False)
 
         # physical-units constraint matrix A: (L-1) x 2L, columns [T (or Tv)..., Z...]
         A = np.zeros((L - 1, 2 * L), dtype=np.float64)
@@ -214,7 +215,7 @@ class HydrostaticBalanceProjection(nn.Module):
 
         # affine offset onto the target manifold A x = b_clim
         if climatology_offset is not None:
-            b_clim_full = np.asarray(climatology_offset, dtype=np.float64).reshape(-1)
+            b_clim_full = climatology_offset.cpu().numpy().astype(np.float64).reshape(-1)
             # The climatology is expected to be computed over ALL matching z/t levels (the
             # convention of get_hydrostatic_balance_climatology), so its length is one per
             # interior level over the full set. Verify that, then slice out the contiguous
@@ -233,15 +234,15 @@ class HydrostaticBalanceProjection(nn.Module):
             off = np.zeros(2 * L, dtype=np.float64)
 
         # store as fp32; forward runs in fp32 regardless of AMP
-        self.register_buffer("proj", torch.from_numpy(Pphys).float(), persistent=False)
-        self.register_buffer("off", torch.from_numpy(off).float().view(1, -1, 1, 1), persistent=False)
-        self.register_buffer("scale_sub", torch.from_numpy(scale_sub).float().view(1, -1, 1, 1), persistent=False)
-        self.register_buffer("bias_sub", torch.from_numpy(bias_sub).float().view(1, -1, 1, 1), persistent=False)
+        self.register_buffer("proj", torch.as_tensor(Pphys).float(), persistent=False)
+        self.register_buffer("off", torch.as_tensor(off).float().view(1, -1, 1, 1), persistent=False)
+        self.register_buffer("scale_sub", torch.as_tensor(scale_sub).float().view(1, -1, 1, 1), persistent=False)
+        self.register_buffer("bias_sub", torch.as_tensor(bias_sub).float().view(1, -1, 1, 1), persistent=False)
         if self.use_moist_air_formula:
             q_scale = _gather(scale, q_idx, 1.0)
             q_bias = _gather(bias, q_idx, 0.0)
-            self.register_buffer("q_scale", torch.from_numpy(q_scale).float().view(1, -1, 1, 1), persistent=False)
-            self.register_buffer("q_bias", torch.from_numpy(q_bias).float().view(1, -1, 1, 1), persistent=False)
+            self.register_buffer("q_scale", torch.as_tensor(q_scale).float().view(1, -1, 1, 1), persistent=False)
+            self.register_buffer("q_bias", torch.as_tensor(q_bias).float().view(1, -1, 1, 1), persistent=False)
         self.num_levels = L
 
     def forward(self, x):

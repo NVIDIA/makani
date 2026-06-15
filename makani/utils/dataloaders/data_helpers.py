@@ -134,6 +134,10 @@ def get_climatology(params, mask_nan=True):
 
     return clim
 
+def get_hydrostatic_balance_climatology(params):
+    hydrostatic_balance_means = np.load(params.hydrostatic_balance_means_path)
+
+    return hydrostatic_balance_means
 
 # compute UTC timestamp fom year and hour into year.
 def get_timestamp(year, hour):
