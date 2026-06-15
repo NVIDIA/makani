@@ -498,16 +498,18 @@ class TestHydrostaticBalanceProjection(unittest.TestCase):
                 bias[0, i, 0, 0], scale[0, i, 0, 0] = 250.0, 30.0
         return bias.to(self.device), scale.to(self.device)
 
-    def _split(self, channel_names, moist):
-        z_idx, t_idx, pressures = get_matching_channels_pl(channel_names, "z", "t", self.P_MIN, self.P_MAX)
+    def _split(self, channel_names, moist, p_min=None, p_max=None):
+        p_min = self.P_MIN if p_min is None else p_min
+        p_max = self.P_MAX if p_max is None else p_max
+        z_idx, t_idx, pressures = get_matching_channels_pl(channel_names, "z", "t", p_min, p_max)
         q_idx = None
         if moist:
-            q_idx, _, _ = get_matching_channels_pl(channel_names, "q", "t", self.P_MIN, self.P_MAX)
+            q_idx, _, _ = get_matching_channels_pl(channel_names, "q", "t", p_min, p_max)
         return t_idx, z_idx, q_idx, pressures
 
-    def _residual(self, out, channel_names, moist, bias, scale):
+    def _residual(self, out, channel_names, moist, bias, scale, p_min=None, p_max=None):
         """Relative hydrostatic-balance residual per interior level, in physical units."""
-        t_idx, z_idx, q_idx, pressures = self._split(channel_names, moist)
+        t_idx, z_idx, q_idx, pressures = self._split(channel_names, moist, p_min, p_max)
 
         def unorm(idx):
             v = out[:, idx, ...].float()
@@ -749,11 +751,43 @@ class TestHydrostaticBalanceProjection(unittest.TestCase):
         self.assertTrue(compare_tensors("residual interpolated toward climatology", res_out, expected,
                                         atol=1e-1, rtol=1e-3, verbose=True))
 
+    @parameterized.expand([("dry", False), ("moist", True)])
+    def test_climatology_full_offset_sliced_to_window(self, _name, moist):
+        """The offset is specified over ALL matching levels; a projection on a strict
+        sub-window must verify the full length and pin only its own interior levels to
+        the correct contiguous slice of b_clim."""
+        B, H, W = 2, 4, 5
+        names = self._channels(moist)
+        bias, scale = self._stats(names, identity=False)
+        # full level set and full-length climatology (one value per full interior level)
+        _, _, _, pressures_all = self._split(names, moist)  # P_MIN/P_MAX admit all LEVELS
+        b_clim_full = self._dummy_climatology(len(pressures_all))
+
+        # narrow window: a strict, contiguous subset of the levels
+        pw_min, pw_max = 200, 800
+        _, _, _, pressures_win = self._split(names, moist, p_min=pw_min, p_max=pw_max)
+        self.assertLess(len(pressures_win), len(pressures_all))  # genuinely narrower
+        start = pressures_all.index(pressures_win[0])
+        expected_slice = b_clim_full[start:start + (len(pressures_win) - 1)]
+
+        proj = HydrostaticBalanceProjection(names, bias=bias, scale=scale,
+                                            p_min=pw_min, p_max=pw_max,
+                                            strength=1.0,
+                                            use_moist_air_formula=moist,
+                                            climatology_offset=b_clim_full).to(self.device)
+        x = torch.randn(B, len(names), H, W, device=self.device)
+        y = proj(x)
+        # residual over the windowed levels must equal the corresponding b_clim slice
+        res, _ = self._residual(y, names, moist, bias, scale, p_min=pw_min, p_max=pw_max)
+        target = torch.as_tensor(expected_slice, dtype=res.dtype, device=res.device).view(1, -1, 1, 1).expand_as(res)
+        self.assertTrue(compare_tensors("windowed residual pinned to b_clim slice", res, target,
+                                        atol=1e-1, rtol=1e-3, verbose=True))
+
     def test_climatology_offset_wrong_length_raises(self):
-        """A climatology offset of the wrong length (must be len(pressures) - 1) is rejected."""
+        """A climatology offset whose length is not (#all matching levels - 1) is rejected."""
         names = self._channels(moist=False)
-        _, _, _, pressures = self._split(names, moist=False)
-        bad_offset = np.zeros(len(pressures))  # one too long: should be len - 1
+        _, _, _, pressures_all = self._split(names, moist=False)
+        bad_offset = np.zeros(len(pressures_all))  # one too long: should be len - 1
         with self.assertRaises(ValueError):
             HydrostaticBalanceProjection(names, p_min=self.P_MIN, p_max=self.P_MAX,
                                          climatology_offset=bad_offset)
