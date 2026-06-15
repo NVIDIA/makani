@@ -525,9 +525,16 @@ class TestHydrostaticBalanceProjection(unittest.TestCase):
             denom.append((Z[:, i] - Z[:, i - 1]).abs() + c * (Tv[:, i].abs() + Tv[:, i - 1].abs()))
         return torch.stack(res, dim=1), torch.stack(denom, dim=1)
 
-    def _balanced_field(self, channel_names, moist, B, H, W):
+    def _dummy_climatology(self, n_levels):
+        """Deterministic, non-uniform per-interior-level residual b_clim (physical
+        units, m^2/s^2), length n_levels - 1, for affine-offset tests."""
+        return np.linspace(-150.0, 150.0, n_levels - 1)
+
+    def _balanced_field(self, channel_names, moist, B, H, W, offset=None):
         """A full normalized model-output field whose (T, Z[, q]) satisfy balance exactly
-        before normalization is undone again by the constraint (used for fixed-point tests)."""
+        (used for fixed-point tests). With an `offset` (length n-1, physical units) the
+        geopotential is integrated so that the residual A x equals `offset` per interior
+        level instead of zero -- i.e. the affine manifold A x = offset."""
         t_idx, z_idx, q_idx, pressures = self._split(channel_names, moist)
         n = len(pressures)
         T = 200.0 + 60.0 * torch.rand(B, n, H, W, device=self.device)
@@ -541,6 +548,8 @@ class TestHydrostaticBalanceProjection(unittest.TestCase):
         for i in range(1, n):
             plog = float(np.log(pressures[i - 1] / pressures[i]))
             Z[:, i, ...] = Z[:, i - 1, ...] + const.R_DRY_AIR * 0.5 * (Tv[:, i, ...] + Tv[:, i - 1, ...]) * plog
+            if offset is not None:
+                Z[:, i, ...] = Z[:, i, ...] + float(offset[i - 1])
 
         C = len(channel_names)
         field = torch.randn(B, C, H, W, device=self.device)  # aux channels arbitrary
@@ -675,6 +684,79 @@ class TestHydrostaticBalanceProjection(unittest.TestCase):
         if moist:
             with self.subTest("humidity gradient"):
                 self.assertFalse((x.grad[:, q_idx, ...] == 0).all().item())
+
+    # --- climatology affine offset ---
+    @parameterized.expand([("dry", False), ("moist", True)])
+    def test_climatology_pins_residual(self, _name, moist):
+        """strength=1 with a climatology offset: the output residual equals b_clim
+        exactly (the affine target), not zero, independent of the input."""
+        B, H, W = 2, 5, 6
+        names = self._channels(moist)
+        bias, scale = self._stats(names, identity=False)
+        _, _, _, pressures = self._split(names, moist)
+        b_clim = self._dummy_climatology(len(pressures))
+        proj = HydrostaticBalanceProjection(names, bias=bias, scale=scale,
+                                            p_min=self.P_MIN, p_max=self.P_MAX,
+                                            strength=1.0,
+                                            use_moist_air_formula=moist,
+                                            climatology_offset=b_clim).to(self.device)
+        x = torch.randn(B, len(names), H, W, device=self.device)
+        y = proj(x)
+        res, _ = self._residual(y, names, moist, bias, scale)
+        target = torch.as_tensor(b_clim, dtype=res.dtype, device=res.device).view(1, -1, 1, 1).expand_as(res)
+        self.assertTrue(compare_tensors("residual pinned to climatology", res, target,
+                                        atol=1e-1, rtol=1e-3, verbose=True))
+
+    @parameterized.expand([("dry", False), ("moist", True)])
+    def test_climatology_affine_fixed_point(self, _name, moist):
+        """strength=1: a state already on the affine manifold A x = b_clim is unchanged."""
+        B, H, W = 2, 4, 5
+        names = self._channels(moist)
+        bias, scale = self._stats(names, identity=False)
+        _, _, _, pressures = self._split(names, moist)
+        b_clim = self._dummy_climatology(len(pressures))
+        field = self._balanced_field(names, moist, B, H, W, offset=b_clim)
+        x = (field - bias) / scale
+        proj = HydrostaticBalanceProjection(names, bias=bias, scale=scale,
+                                            p_min=self.P_MIN, p_max=self.P_MAX,
+                                            strength=1.0,
+                                            use_moist_air_formula=moist,
+                                            climatology_offset=b_clim).to(self.device)
+        y = proj(x)
+        self.assertTrue(compare_tensors("affine fixed point", y, x,
+                                        atol=1e-2, rtol=1e-4, verbose=True))
+
+    @parameterized.expand([("dry", False), ("moist", True)])
+    def test_climatology_strength_interpolates(self, _name, moist):
+        """0<lambda<1 with an offset: the output residual is
+        (1 - lambda) * input_residual + lambda * b_clim."""
+        B, H, W = 2, 5, 6
+        names = self._channels(moist)
+        bias, scale = self._stats(names, identity=False)
+        _, _, _, pressures = self._split(names, moist)
+        b_clim = self._dummy_climatology(len(pressures))
+        proj = HydrostaticBalanceProjection(names, bias=bias, scale=scale,
+                                            p_min=self.P_MIN, p_max=self.P_MAX,
+                                            strength=0.5,
+                                            use_moist_air_formula=moist,
+                                            climatology_offset=b_clim).to(self.device)
+        x = torch.randn(B, len(names), H, W, device=self.device)
+        y = proj(x)
+        res_in, _ = self._residual(x, names, moist, bias, scale)
+        res_out, _ = self._residual(y, names, moist, bias, scale)
+        target = torch.as_tensor(b_clim, dtype=res_in.dtype, device=res_in.device).view(1, -1, 1, 1)
+        expected = 0.5 * res_in + 0.5 * target
+        self.assertTrue(compare_tensors("residual interpolated toward climatology", res_out, expected,
+                                        atol=1e-1, rtol=1e-3, verbose=True))
+
+    def test_climatology_offset_wrong_length_raises(self):
+        """A climatology offset of the wrong length (must be len(pressures) - 1) is rejected."""
+        names = self._channels(moist=False)
+        _, _, _, pressures = self._split(names, moist=False)
+        bad_offset = np.zeros(len(pressures))  # one too long: should be len - 1
+        with self.assertRaises(ValueError):
+            HydrostaticBalanceProjection(names, p_min=self.P_MIN, p_max=self.P_MAX,
+                                         climatology_offset=bad_offset)
 
 
 if __name__ == '__main__':
