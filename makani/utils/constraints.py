@@ -120,11 +120,14 @@ class HydrostaticBalanceProjection(nn.Module):
     its climatological mean preserves that systematic imbalance (so scores against
     the reanalysis are not penalized) while still constraining the residual's
     fluctuations (so autoregressive rollouts stay on a consistent manifold). The
-    offset is a per-interior-level residual b_clim of length ``len(pressures) - 1``,
-    in physical geopotential units (m^2/s^2), aligned with the descending-pressure
-    constraint rows; b_clim[i-1] is the expected value of
-    ``(Z_i - Z_{i-1}) - c_i (Tv_i + Tv_{i-1})``. ``None`` (default) recovers the
-    homogeneous projection exactly.
+    offset is a per-interior-level residual b_clim in physical geopotential units
+    (m^2/s^2); b_clim[i-1] is the expected value of
+    ``(Z_i - Z_{i-1}) - c_i (Tv_i + Tv_{i-1})``. It is expected to be computed over
+    *all* matching z/t pressure levels (as get_hydrostatic_balance_climatology does),
+    so its length must be ``(#matching z/t levels) - 1``; the constructor verifies
+    this and slices out the contiguous subset for the requested [p_min, p_max]
+    window, relying on the metadata-consistent channel ordering rather than an
+    explicit level file. ``None`` (default) recovers the homogeneous projection.
 
     Moist-air variant (``use_moist_air_formula=True``): the relation uses virtual
     temperature T_v = T (1 + eps q), which is bilinear in (T, q) and would break a
@@ -145,9 +148,11 @@ class HydrostaticBalanceProjection(nn.Module):
         p_min, p_max:          pressure-level window (hPa) to include.
         strength:              damping factor lambda in [0, 1] (default 1.0 = exact).
         use_moist_air_formula: use virtual temperature (requires matching q levels).
-        climatology_offset:    optional per-interior-level residual b_clim (length
-                               len(pressures) - 1, physical units) defining an affine
-                               target manifold A x = b_clim. None (default) -> A x = 0.
+        climatology_offset:    optional per-interior-level residual b_clim (physical
+                               units) over ALL matching z/t levels (length
+                               (#matching z/t levels) - 1), defining an affine target
+                               manifold A x = b_clim. Sliced internally to the
+                               [p_min, p_max] window. None (default) -> A x = 0.
     """
 
     def __init__(self, channel_names, bias=None, scale=None, p_min=50, p_max=900, strength=1.0,
@@ -209,9 +214,20 @@ class HydrostaticBalanceProjection(nn.Module):
 
         # affine offset onto the target manifold A x = b_clim
         if climatology_offset is not None:
-            b_clim = np.asarray(climatology_offset, dtype=np.float64).reshape(-1)
-            if b_clim.shape[0] != L - 1:
-                raise ValueError(f"climatology_offset must have length {L - 1} (one per interior level), got {b_clim.shape[0]}.")
+            b_clim_full = np.asarray(climatology_offset, dtype=np.float64).reshape(-1)
+            # The climatology is expected to be computed over ALL matching z/t levels (the
+            # convention of get_hydrostatic_balance_climatology), so its length is one per
+            # interior level over the full set. Verify that, then slice out the contiguous
+            # subset for this [p_min, p_max] window -- relying, like the other stats, on the
+            # metadata-consistent channel ordering rather than an explicit level file.
+            _, _, pressures_all = get_matching_channels_pl(channel_names, "z", "t", float("-inf"), float("inf"))
+            if b_clim_full.shape[0] != len(pressures_all) - 1:
+                raise ValueError(
+                    f"climatology_offset must have length {len(pressures_all) - 1} (one per interior level "
+                    f"over all {len(pressures_all)} matching z/t pressure levels), got {b_clim_full.shape[0]}."
+                )
+            start = pressures_all.index(pressures[0])
+            b_clim = b_clim_full[start : start + (L - 1)]
             off = M @ b_clim  # (2L,)
         else:
             off = np.zeros(2 * L, dtype=np.float64)

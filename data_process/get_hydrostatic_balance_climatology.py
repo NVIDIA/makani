@@ -46,7 +46,7 @@ from data_process.data_process_helpers import (
     binary_reduce,
 )
 
-
+@torch.compile()
 def compute_residual(tdata, z_idx, t_idx, q_idx, coeffs, q_prefact):
     """Per-point hydrostatic-balance residual for each interior level.
 
@@ -165,8 +165,8 @@ def get_file_stats(filename,
 
 
 def get_hydrostatic_balance_climatology(input_path: str, output_path: str, metadata_file: str,
-                                        quadrature_rule: str, p_min: float, p_max: float,
-                                        use_moist_air_formula: bool, fail_on_nan: bool = False,
+                                        quadrature_rule: str, p_min: Optional[float] = None, p_max: Optional[float] = None,
+                                        use_moist_air_formula: bool = False, fail_on_nan: bool = False,
                                         batch_size: Optional[int] = 16, reduction_group_size: Optional[int] = 8):
     """Compute the climatology of the hydrostatic-balance residual of a makani HDF5 dataset.
 
@@ -191,6 +191,12 @@ def get_hydrostatic_balance_climatology(input_path: str, output_path: str, metad
     ranks use parallel Welford combination. ``use_moist_air_formula`` selects virtual temperature
     and must match the setting used by the projection that consumes the offset.
     """
+
+    # unspecified pressure bounds -> include all available levels
+    if p_min is None:
+        p_min = -float("inf")
+    if p_max is None:
+        p_max = float("inf")
 
     # disable gradients globally
     torch.set_grad_enabled(False)
@@ -434,8 +440,8 @@ if __name__ == "__main__":
     parser.add_argument("--output_path", type=str, help="Directory for saving stats files.", required=True)
     parser.add_argument("--reduction_group_size", type=int, default=8, help="Size of collective reduction groups.")
     parser.add_argument("--quadrature_rule", type=str, default="naive", choices=["naive", "clenshaw-curtiss", "legendre-gauss"], help="Specify quadrature_rule for spatial averages.")
-    parser.add_argument("--p_min", type=float, default=0.0, help="Minimum pressure level (hPa) to include.")
-    parser.add_argument("--p_max", type=float, default=2000.0, help="Maximum pressure level (hPa) to include.")
+    parser.add_argument("--p_min", type=float, default=None, help="Minimum pressure level (hPa) to include. If unspecified, includes all available levels.")
+    parser.add_argument("--p_max", type=float, default=None, help="Maximum pressure level (hPa) to include. If unspecified, includes all available levels.")
     parser.add_argument("--use_moist_air_formula", action="store_true", help="Use virtual temperature Tv = T(1 + eps q); requires matching q pressure levels.")
     parser.add_argument('--fail_on_nan', action='store_true', help="When computing stats, code will fail if NaN values are encountered.")
     parser.add_argument("--batch_size", type=int, default=16, help="Batch size used for reading chunks from a file at a time to avoid OOM errors.")
