@@ -1054,15 +1054,14 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
             from makani.utils.constraints import HydrostaticBalanceProjection
             bias_buf  = torch.as_tensor(normalization_means).view(1, -1, 1, 1) if normalization_means is not None else None
             scale_buf = torch.as_tensor(normalization_stds).view(1, -1, 1, 1)  if normalization_stds  is not None else None
-            if hydrostatic_balance_means is not None:
-                hydrostatic_balance_means = torch.as_tensor(hydrostatic_balance_means).view(1, -1, 1, 1)
+            offset_buf = torch.as_tensor(hydrostatic_balance_means).view(1, -1, 1, 1) if hydrostatic_balance_means is not None else None
             self.hydrostatic_balance_constraint = HydrostaticBalanceProjection(
                 channel_names,
                 bias=bias_buf,
                 scale=scale_buf,
                 strength=hydrostatic_balance_lambda,
                 use_moist_air_formula=hydrostatic_balance_use_moist_air_formula,
-                climatology_offset=hydrostatic_balance_means,
+                climatology_offset=offset_buf,
             )
 
         # freeze the encoder/decoder

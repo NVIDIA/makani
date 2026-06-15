@@ -14,7 +14,7 @@
 # limitations under the License.
 
 
-import numpy as np
+import math
 
 import torch
 import torch.nn as nn
@@ -58,8 +58,8 @@ class NonNegativeConstraint(nn.Module):
         self.register_buffer("channel_indices", torch.tensor(chan_idx, dtype=torch.long), persistent=False)
 
         if bias is not None and scale is not None:
-            means = bias[0, chan_idx, 0, 0].float()
-            stds  = scale[0, chan_idx, 0, 0].float()
+            means = bias[0, chan_idx, 0, 0].to(torch.float32)
+            stds  = scale[0, chan_idx, 0, 0].to(torch.float32)
             # offset = bias/scale; physical zero is at x_norm = -offset
             offset = (means / stds).view(1, -1, 1, 1)
             self.register_buffer("offset", offset, persistent=False)
@@ -184,20 +184,22 @@ class HydrostaticBalanceProjection(nn.Module):
             self.register_buffer("q_indices", torch.as_tensor(q_idx, dtype=torch.long), persistent=False)
 
         # physical-units constraint matrix A: (L-1) x 2L, columns [T (or Tv)..., Z...]
-        A = np.zeros((L - 1, 2 * L), dtype=np.float64)
+        # built once at construction in float64 for an accurate (ill-conditioned) inverse;
+        # the resulting operators are stored as fp32 buffers and forward() is pure torch.
+        A = torch.zeros((L - 1, 2 * L), dtype=torch.float64)
         for i in range(1, L):
-            c_i = 0.5 * const.R_DRY_AIR * np.log(pressures[i - 1] / pressures[i])
+            c_i = 0.5 * const.R_DRY_AIR * math.log(pressures[i - 1] / pressures[i])
             r = i - 1
             A[r, L + i] = 1.0  # Z_i
             A[r, L + i - 1] = -1.0  # Z_{i-1}
             A[r, i] = -c_i  # T_i
             A[r, i - 1] = -c_i  # T_{i-1}
 
-        # normalization of the gathered sub-state (defaults: identity)
+        # normalization of the gathered sub-state (defaults: identity), CPU float64
         def _gather(stat, idx, default):
             if stat is not None:
-                return stat[0, idx, 0, 0].double().cpu().numpy()
-            return np.full(len(idx), default, dtype=np.float64)
+                return stat[0, idx, 0, 0].to(device="cpu", dtype=torch.float64)
+            return torch.full((len(idx),), default, dtype=torch.float64)
 
         scale_sub = _gather(scale, all_idx, 1.0)
         bias_sub = _gather(bias, all_idx, 0.0)
@@ -210,12 +212,12 @@ class HydrostaticBalanceProjection(nn.Module):
         # identical to the normalized-space form.
         Winv = scale_sub**2
         AWinv = A * Winv[None, :]
-        M = (A.T * Winv[:, None]) @ np.linalg.inv(AWinv @ A.T)  # (2L, L-1)
+        M = (A.T * Winv[:, None]) @ torch.linalg.inv(AWinv @ A.T)  # (2L, L-1)
         Pphys = M @ A  # (2L, 2L)
 
         # affine offset onto the target manifold A x = b_clim
         if climatology_offset is not None:
-            b_clim_full = climatology_offset.cpu().numpy().astype(np.float64).reshape(-1)
+            b_clim_full = climatology_offset.to(device="cpu", dtype=torch.float64).reshape(-1)
             # The climatology is expected to be computed over ALL matching z/t levels (the
             # convention of get_hydrostatic_balance_climatology), so its length is one per
             # interior level over the full set. Verify that, then slice out the contiguous
@@ -231,18 +233,18 @@ class HydrostaticBalanceProjection(nn.Module):
             b_clim = b_clim_full[start : start + (L - 1)]
             off = M @ b_clim  # (2L,)
         else:
-            off = np.zeros(2 * L, dtype=np.float64)
+            off = torch.zeros(2 * L, dtype=torch.float64)
 
-        # store as fp32; forward runs in fp32 regardless of AMP
-        self.register_buffer("proj", torch.as_tensor(Pphys).float(), persistent=False)
-        self.register_buffer("off", torch.as_tensor(off).float().view(1, -1, 1, 1), persistent=False)
-        self.register_buffer("scale_sub", torch.as_tensor(scale_sub).float().view(1, -1, 1, 1), persistent=False)
-        self.register_buffer("bias_sub", torch.as_tensor(bias_sub).float().view(1, -1, 1, 1), persistent=False)
+        # store as fp32 buffers; forward runs in fp32 regardless of AMP
+        self.register_buffer("proj", Pphys.float(), persistent=False)
+        self.register_buffer("off", off.float().view(1, -1, 1, 1), persistent=False)
+        self.register_buffer("scale_sub", scale_sub.float().view(1, -1, 1, 1), persistent=False)
+        self.register_buffer("bias_sub", bias_sub.float().view(1, -1, 1, 1), persistent=False)
         if self.use_moist_air_formula:
             q_scale = _gather(scale, q_idx, 1.0)
             q_bias = _gather(bias, q_idx, 0.0)
-            self.register_buffer("q_scale", torch.as_tensor(q_scale).float().view(1, -1, 1, 1), persistent=False)
-            self.register_buffer("q_bias", torch.as_tensor(q_bias).float().view(1, -1, 1, 1), persistent=False)
+            self.register_buffer("q_scale", q_scale.float().view(1, -1, 1, 1), persistent=False)
+            self.register_buffer("q_bias", q_bias.float().view(1, -1, 1, 1), persistent=False)
         self.num_levels = L
 
     def forward(self, x):
