@@ -113,6 +113,19 @@ class HydrostaticBalanceProjection(nn.Module):
     residual imbalance through. Already-balanced states are left untouched at
     any strength.
 
+    A ``climatology_offset`` makes the target manifold affine, ``A x = b_clim``
+    instead of the homogeneous ``A x = 0``. This is useful for reanalysis data
+    (e.g. ERA5 on pressure levels) which carries a systematic hydrostatic residual
+    from the model-level -> pressure-level interpolation: pinning the residual to
+    its climatological mean preserves that systematic imbalance (so scores against
+    the reanalysis are not penalized) while still constraining the residual's
+    fluctuations (so autoregressive rollouts stay on a consistent manifold). The
+    offset is a per-interior-level residual b_clim of length ``len(pressures) - 1``,
+    in physical geopotential units (m^2/s^2), aligned with the descending-pressure
+    constraint rows; b_clim[i-1] is the expected value of
+    ``(Z_i - Z_{i-1}) - c_i (Tv_i + Tv_{i-1})``. ``None`` (default) recovers the
+    homogeneous projection exactly.
+
     Moist-air variant (``use_moist_air_formula=True``): the relation uses virtual
     temperature T_v = T (1 + eps q), which is bilinear in (T, q) and would break a
     linear projection. We hold the predicted specific humidity q fixed (balance
@@ -132,9 +145,13 @@ class HydrostaticBalanceProjection(nn.Module):
         p_min, p_max:          pressure-level window (hPa) to include.
         strength:              damping factor lambda in [0, 1] (default 1.0 = exact).
         use_moist_air_formula: use virtual temperature (requires matching q levels).
+        climatology_offset:    optional per-interior-level residual b_clim (length
+                               len(pressures) - 1, physical units) defining an affine
+                               target manifold A x = b_clim. None (default) -> A x = 0.
     """
 
-    def __init__(self, channel_names, bias=None, scale=None, p_min=50, p_max=900, strength=1.0, use_moist_air_formula=False):
+    def __init__(self, channel_names, bias=None, scale=None, p_min=50, p_max=900, strength=1.0,
+                 use_moist_air_formula=False, climatology_offset=None):
         super().__init__()
 
         self.strength = float(strength)
@@ -180,15 +197,28 @@ class HydrostaticBalanceProjection(nn.Module):
         bias_sub = _gather(bias, all_idx, 0.0)
 
         # weighted physical projection with metric W = diag(1/scale^2):
-        # x' = x - lambda * P x,   P = W^{-1} A^T (A W^{-1} A^T)^{-1} A.
-        # A x = 0 is homogeneous in physical units, so no affine offset is needed;
-        # this is algebraically identical to the normalized-space projection.
+        #   x' = x - lambda * M (A x - b_clim),   M = W^{-1} A^T (A W^{-1} A^T)^{-1}.
+        # Split into P = M A (the projection) and off = M b_clim (the affine shift):
+        #   x' = x - lambda * (P x - off).
+        # With b_clim = 0 this is the homogeneous projection (off = 0), algebraically
+        # identical to the normalized-space form.
         Winv = scale_sub**2
         AWinv = A * Winv[None, :]
-        Pphys = (A.T * Winv[:, None]) @ np.linalg.inv(AWinv @ A.T) @ A  # (2L, 2L)
+        M = (A.T * Winv[:, None]) @ np.linalg.inv(AWinv @ A.T)  # (2L, L-1)
+        Pphys = M @ A  # (2L, 2L)
+
+        # affine offset onto the target manifold A x = b_clim
+        if climatology_offset is not None:
+            b_clim = np.asarray(climatology_offset, dtype=np.float64).reshape(-1)
+            if b_clim.shape[0] != L - 1:
+                raise ValueError(f"climatology_offset must have length {L - 1} (one per interior level), got {b_clim.shape[0]}.")
+            off = M @ b_clim  # (2L,)
+        else:
+            off = np.zeros(2 * L, dtype=np.float64)
 
         # store as fp32; forward runs in fp32 regardless of AMP
         self.register_buffer("proj", torch.from_numpy(Pphys).float(), persistent=False)
+        self.register_buffer("off", torch.from_numpy(off).float().view(1, -1, 1, 1), persistent=False)
         self.register_buffer("scale_sub", torch.from_numpy(scale_sub).float().view(1, -1, 1, 1), persistent=False)
         self.register_buffer("bias_sub", torch.from_numpy(bias_sub).float().view(1, -1, 1, 1), persistent=False)
         if self.use_moist_air_formula:
@@ -219,8 +249,8 @@ class HydrostaticBalanceProjection(nn.Module):
                 mult = torch.cat([1.0 + self.q_prefact * q_phys, torch.ones_like(x_phys[..., L:, :, :])], dim=-3)
                 x_phys = x_phys * mult
 
-            # minimum-(weighted-)norm correction onto the balance manifold
-            corr = F.conv2d(x_phys, self.proj.unsqueeze(-1).unsqueeze(-1))
+            # minimum-(weighted-)norm correction onto the (affine) balance manifold
+            corr = F.conv2d(x_phys, self.proj.unsqueeze(-1).unsqueeze(-1)) - self.off
             x_phys = x_phys - self.strength * corr
 
             # recover temperature from virtual temperature (q held fixed)
