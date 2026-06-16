@@ -186,7 +186,7 @@ def get_model(params: ParamsBase, use_stochastic_interpolation: bool = False, mu
                 model_kwargs["normalization_means"] = bias
                 model_kwargs["normalization_stds"] = scale
 
-        hydrostatic_balance_means = params.get("hydrostatic_balance_means", None)
+        hydrostatic_balance_means = params.get("hydrostatic_balance_means_path", None)
         if hydrostatic_balance_means is not None:
             from makani.utils.dataloaders.data_helpers import get_hydrostatic_balance_climatology
             hydrostatic_balance_means = get_hydrostatic_balance_climatology(params)
