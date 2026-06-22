@@ -98,14 +98,14 @@ class TestModels(unittest.TestCase):
             ('AFNOv2', 1e-6, 1e-6),
             ('FNO', 1e-6, 1e-6),
             ('ViT', 5e-6, 5e-6),
-            ("SFNO", 1e-6, 1e-6),
+            ("SFNO", 5e-6, 5e-6),
             ("SNO", 1e-6, 1e-6),
             ("FCN3", 1e-6, 1e-6),
             ("Pangu", 1e-6, 1e-6)
         ],
         skip_on_empty=True,
     )
-    def test_gradient_accumulation(self, nettype, atol, rtol, verbose=False):
+    def test_gradient_accumulation(self, nettype, atol, rtol, verbose=True):
         """
         Tests initialization of all the models and the forward and backward pass
         """

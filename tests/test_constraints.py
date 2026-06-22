@@ -461,6 +461,7 @@ class TestNonNegativeConstraint(unittest.TestCase):
                                         torch.zeros_like(y_eval[:, [1], :, :])))
 
 
+@parameterized_class(("device",), _devices)
 class TestHydrostaticBalanceProjection(unittest.TestCase):
     """Tests for HydrostaticBalanceProjection in makani/utils/constraints.py.
 
@@ -478,7 +479,6 @@ class TestHydrostaticBalanceProjection(unittest.TestCase):
 
     def setUp(self):
         disable_tf32()
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         set_seed(333)
 
     # --- helpers ---
