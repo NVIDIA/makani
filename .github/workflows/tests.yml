@@ -41,10 +41,11 @@ jobs:
         python -m pip install -e .[test,vis]
     - name: Install optional test dependencies
       run: |
-        # WeatherBench2 — --no-deps avoids pulling a numpy that breaks the stack.
+        # WeatherBench2 is not on PyPI — install from source with --no-deps to
+        # avoid pulling a numpy version that breaks the stack.
         # Note: NVIDIA DALI has no CPU-only wheel and requires CUDA runtime, so
         # DALI tests are skipped on this runner (guarded by skipUnless(_have_dali)).
-        python -m pip install --no-deps weatherbench2
+        python -m pip install --no-deps git+https://github.com/google-research/weatherbench2.git
     - name: Test with pytest
       run: |
         python -m pytest -ra ./tests --cov=makani --cov-report=term-missing
