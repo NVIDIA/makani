@@ -14,7 +14,7 @@
 # limitations under the License.
 
 import unittest
-from parameterized import parameterized
+from parameterized import parameterized, parameterized_class
 import tempfile
 import os
 import sys
@@ -28,6 +28,10 @@ from makani.utils.dataloaders.data_helpers import get_lat_lon_grid
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from .testutils import disable_tf32, set_seed, init_hdf5_dataset, get_default_parameters, compare_arrays, compare_tensors, H5_PATH, IMG_SIZE_H, IMG_SIZE_W
+
+_devices = [(torch.device("cpu"),)]
+if torch.cuda.is_available():
+    _devices.append((torch.device("cuda"),))
 
 
 def init_dataset_params(
@@ -73,6 +77,7 @@ def init_dataset_params(
     return params
 
 
+@parameterized_class(("device",), _devices)
 class TestTemporalAverageBufferIntegration(unittest.TestCase):
     """
     End-to-end test for ``TemporalAverageBuffer``: feeds real HDF5 data through
@@ -89,8 +94,6 @@ class TestTemporalAverageBufferIntegration(unittest.TestCase):
     @classmethod
     def setUpClass(cls, path: Optional[str] = "/tmp"):
         """Set up test environment using class-level setup like test_dataloader.py"""
-        
-        cls.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
         # Set random seed for reproducibility
         set_seed(333)
@@ -1565,7 +1568,7 @@ class TestRolloutBufferStreaming(unittest.TestCase):
     def test_buffer_device_cuda_keeps_buffer_on_gpu(self, verbose=False):
         # When buffer_device is CUDA, the buffer tensors must live on GPU and
         # pin_memory must be False (pinning only applies to host memory).
-        cuda_dev = torch.device("cuda:0")
+        cuda_dev = torch.device("cuda", torch.cuda.current_device())
         buf = self._make_buffer(output_file=None, buffer_device=cuda_dev)
         with self.subTest(desc="rollout_data on cuda"):
             self.assertEqual(buf.rollout_data.device.type, "cuda")
@@ -1579,7 +1582,7 @@ class TestRolloutBufferStreaming(unittest.TestCase):
         # End-to-end: CUDA-resident buffer must produce the same file as a
         # CPU buffer for identical inputs. This catches mistakes in the
         # GPU→CPU bridge inside _flush_buffer_to_disk.
-        cuda_dev = torch.device("cuda:0")
+        cuda_dev = torch.device("cuda", torch.cuda.current_device())
         num_samples = 4
         R = 1
         H, W = 2, 3

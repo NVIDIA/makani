@@ -22,7 +22,7 @@ import math
 import tempfile
 import datetime as dt
 from typing import Optional
-from parameterized import parameterized
+from parameterized import parameterized, parameterized_class
 
 import unittest
 import torch
@@ -41,6 +41,10 @@ _have_dali = importlib.util.find_spec("nvidia.dali") is not None
 
 if _have_dali:
     _multifiles_params.append(False)
+
+_dali_devices = [("cpu",)]
+if torch.cuda.is_available():
+    _dali_devices.append(("gpu",))
 
 
 def get_sample(path: str, idx):
@@ -473,8 +477,7 @@ class DataLoaderBase:
             if idt > self.num_steps:
                 break
 
-    @unittest.skipUnless(_have_dali, "nvidia.dali is not installed")
-    def test_dali_temporal_window_across_year_boundary_no_duplicates(self):
+    def _test_dali_temporal_window_across_year_boundary_no_duplicates(self):
         """
         DALI path, eval mode on the 2-year training set with n_future > 0.
 
@@ -498,7 +501,7 @@ class DataLoaderBase:
         params.batch_size = 1
 
         loader, _, _ = get_dataloader(
-            params, params.train_data_path, mode="eval", device=self.device,
+            params, params.train_data_path, mode="eval", device=self.device, dali_device=self.dali_device,
         )
 
         fingerprints = []
@@ -524,9 +527,7 @@ class DataLoaderBase:
             "loaded samples do not match direct HDF5 reads of indices_select",
         )
 
-    @parameterized.expand([(1,), (2,), (4,)], skip_on_empty=False)
-    @unittest.skipUnless(_have_dali, "nvidia.dali is not installed")
-    def test_dali_parallel_workers_full_epoch_coverage(self, num_workers):
+    def _test_dali_parallel_workers_full_epoch_coverage(self, num_workers):
         """
         DALI path, eval mode, parameterized on num_data_workers.
 
@@ -565,7 +566,7 @@ class DataLoaderBase:
         params.num_data_workers = num_workers
 
         loader, _, _ = get_dataloader(
-            params, params.valid_data_path, mode="eval", device=self.device,
+            params, params.valid_data_path, mode="eval", device=self.device, dali_device=self.dali_device,
         )
 
         fps = []
@@ -592,8 +593,7 @@ class DataLoaderBase:
             f"direct HDF5 reads",
         )
 
-    @unittest.skipUnless(_have_dali, "nvidia.dali is not installed")
-    def test_dali_multi_epoch_reset_state(self):
+    def _test_dali_multi_epoch_reset_state(self):
         """
         DALI path, train mode on the 2-year training set.
 
@@ -613,7 +613,7 @@ class DataLoaderBase:
         params.n_future = 0
 
         loader, _, _ = get_dataloader(
-            params, params.train_data_path, mode="train", device=self.device,
+            params, params.train_data_path, mode="train", device=self.device, dali_device=self.dali_device,
         )
 
         def _collect_epoch():
@@ -644,6 +644,7 @@ class DataLoaderBase:
             self.assertNotEqual(fps_ep0, fps_ep1)
 
 
+@parameterized_class(("dali_device",), _dali_devices)
 class TestHDF5DataLoader(DataLoaderBase, unittest.TestCase):
     """DataLoaderBase exercised against HDF5-backed files.
 
@@ -703,6 +704,21 @@ class TestHDF5DataLoader(DataLoaderBase, unittest.TestCase):
     def test_distributed_subsampling(self, multifiles):
         self._test_distributed_subsampling(multifiles)
 
+    # DALI-specific mechanics tests — defined here (not in DataLoaderBase) so
+    # @parameterized_class strips them from the unparameterized base class.
+    @unittest.skipUnless(_have_dali, "nvidia.dali is not installed")
+    def test_dali_temporal_window_across_year_boundary_no_duplicates(self):
+        self._test_dali_temporal_window_across_year_boundary_no_duplicates()
+
+    @parameterized.expand([(1,), (2,), (4,)], skip_on_empty=False)
+    @unittest.skipUnless(_have_dali, "nvidia.dali is not installed")
+    def test_dali_parallel_workers_full_epoch_coverage(self, num_workers):
+        self._test_dali_parallel_workers_full_epoch_coverage(num_workers)
+
+    @unittest.skipUnless(_have_dali, "nvidia.dali is not installed")
+    def test_dali_multi_epoch_reset_state(self):
+        self._test_dali_multi_epoch_reset_state()
+
     # HDF5-only: MultifilesDataset date/index retrieval API
     def test_date_retrieval(self):
         self.params.multifiles = True
@@ -725,6 +741,7 @@ class TestHDF5DataLoader(DataLoaderBase, unittest.TestCase):
         self.assertEqual(train_loader.dataset.get_index_at_time(tstamp), 365)
 
 
+@parameterized_class(("dali_device",), _dali_devices)
 @unittest.skipUnless(_have_dali, "nvidia.dali is not installed — zarr tests require DALI")
 class TestZarrDataLoader(DataLoaderBase, unittest.TestCase):
     """DataLoaderBase exercised against zarr-backed files (makani flat format).
@@ -807,6 +824,7 @@ class TestZarrDataLoader(DataLoaderBase, unittest.TestCase):
         self.assertEqual(train_loader.dataset.get_index_at_time(tstamp), 365)
 
 
+@parameterized_class(("dali_device",), _dali_devices)
 @unittest.skipUnless(_have_dali, "nvidia.dali is not installed — zarr WB2 tests require DALI")
 class TestZarrWB2DataLoader(DataLoaderBase, unittest.TestCase):
     """DataLoaderBase exercised against WB2-layout zarr files, DALI path only.
