@@ -39,6 +39,12 @@ jobs:
     - name: Install package
       run: |
         python -m pip install -e .[test,vis]
+    - name: Install optional test dependencies
+      run: |
+        # DALI CPU-only wheel — enables the DALI dataloader tests on CPU.
+        python -m pip install --extra-index-url https://developer.download.nvidia.com/compute/redist nvidia-dali-cpu
+        # WeatherBench2 — --no-deps avoids pulling a numpy that breaks the stack.
+        python -m pip install --no-deps weatherbench2
     - name: Test with pytest
       run: |
         python -m pytest -ra ./tests --cov=makani --cov-report=term-missing
