@@ -65,7 +65,7 @@ def init_distributed_io(params):
     return
 
 
-def get_dataloader(params, files_pattern, device, mode="train"):
+def get_dataloader(params, files_pattern, device, mode="train", dali_device=None):
     init_distributed_io(params)
 
     if (mode == "inference") and (not params.get("multifiles", False)):
@@ -197,7 +197,8 @@ def get_dataloader(params, files_pattern, device, mode="train"):
         from makani.utils.dataloaders.data_loader_dali_2d import ERA5DaliESDataloader as ERA5DaliESDataloader2D
 
         # dali loader
-        dali_device = "gpu" if torch.cuda.is_available() else "cpu"
+        if dali_device is None:
+            dali_device = "gpu" if torch.cuda.is_available() else "cpu"
         dataloader = ERA5DaliESDataloader2D(params, files_pattern, (mode == "train"), dali_device=dali_device)
 
         dataset = types.SimpleNamespace(

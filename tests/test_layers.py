@@ -16,7 +16,7 @@
 import sys
 import os
 import unittest
-from parameterized import parameterized
+from parameterized import parameterized, parameterized_class
 
 import torch
 
@@ -36,6 +36,11 @@ from makani.mpu.layers import StochasticMLP
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from .testutils import disable_tf32, set_seed, get_default_parameters, compare_tensors
 
+_devices = [(torch.device("cpu"),)]
+if torch.cuda.is_available():
+    _devices.append((torch.device("cuda"),))
+
+@parameterized_class(("device",), _devices)
 class TestLayers(unittest.TestCase):
 
     def setUp(self):
@@ -61,8 +66,7 @@ class TestLayers(unittest.TestCase):
         # also set the batch size for testing
         self.params.batch_size = 4
 
-        # set device and seed
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # set seed
         set_seed(333)
 
         return

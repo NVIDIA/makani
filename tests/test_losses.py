@@ -18,7 +18,7 @@ import os
 import math
 import tempfile
 from typing import Optional
-from parameterized import parameterized
+from parameterized import parameterized, parameterized_class
 
 import unittest
 import numpy as np
@@ -49,6 +49,10 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from .testutils import disable_tf32, set_seed, get_default_parameters, compare_tensors, compare_arrays
 
 from properscoring import crps_ensemble, crps_gaussian
+
+_devices = [(torch.device("cpu"),)]
+if torch.cuda.is_available():
+    _devices.append((torch.device("cuda"),))
 
 _loss_params = [
     ([{"type": "l1"}], False),
@@ -940,11 +944,12 @@ class TestSpectralLossWeighted(unittest.TestCase):
         )
 
 # ===========================================================================
+@parameterized_class(("device",), _devices)
 class TestLossHandler(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls, path: Optional[str] = "/tmp"):
-        cls.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
         cls.img_shape_x = 32
         cls.img_shape_y = 64
 
@@ -2041,11 +2046,12 @@ class TestSpectralCRPSLoss(unittest.TestCase):
 
 
 # ===========================================================================
+@parameterized_class(("device",), _devices)
 class TestSobolevEnergyScoreLoss(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls, path: Optional[str] = "/tmp"):
-        cls.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
         cls.tmpdir = tempfile.TemporaryDirectory(dir=path)
         tmp_path = cls.tmpdir.name
         params = get_default_parameters()

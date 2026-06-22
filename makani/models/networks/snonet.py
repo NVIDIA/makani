@@ -42,7 +42,7 @@ from makani.mpu.layer_norm import DistributedInstanceNorm2d, DistributedLayerNor
 
 # heuristic for finding theta_cutoff
 def _compute_cutoff_radius(nlat, kernel_shape, basis_type):
-    theta_cutoff_factor = {"piecewise linear": 0.5, "morlet": 0.5, "zernike": math.sqrt(2.0)}
+    theta_cutoff_factor = {"piecewise linear": 0.5, "morlet": 0.5, "harmonic": 0.5, "zernike": math.sqrt(2.0)}
 
     return (kernel_shape[0] + 1) * theta_cutoff_factor[basis_type] * math.pi / float(nlat - 1)
 
@@ -57,7 +57,7 @@ class DiscreteContinuousEncoder(nn.Module):
         inp_chans=2,
         out_chans=2,
         kernel_shape=(3,3),
-        basis_type="morlet",
+        basis_type="harmonic",
         basis_norm_mode="mean",
         use_mlp=False,
         mlp_ratio=2.0,
@@ -132,7 +132,7 @@ class DiscreteContinuousDecoder(nn.Module):
         inp_chans=2,
         out_chans=2,
         kernel_shape=(3, 3),
-        basis_type="morlet",
+        basis_type="harmonic",
         basis_norm_mode="mean",
         use_mlp=False,
         mlp_ratio=2.0,
@@ -234,7 +234,7 @@ class NeuralOperatorBlock(nn.Module):
         layer_scale=True,
         use_mlp=False,
         kernel_shape=(3, 3),
-        basis_type="morlet",
+        basis_type="harmonic",
         basis_norm_mode="mean",
         checkpointing_level=0,
         bias=False,
@@ -383,7 +383,7 @@ class SphericalNeuralOperatorNet(nn.Module):
         inp_shape=(721, 1440),
         out_shape=(721, 1440),
         kernel_shape=(3, 3),
-        filter_basis_type="morlet",
+        filter_basis_type="harmonic",
         filter_basis_norm_mode="mean",
         scale_factor=8,
         encoder_kernel_shape=(3, 3),
