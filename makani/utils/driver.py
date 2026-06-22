@@ -794,7 +794,7 @@ class Driver(metaclass=abc.ABCMeta):
         else:
             self.visualizer = None
 
-    def _visualize_step(self, pred_gather: torch.Tensor, targ_gather: torch.Tensor, eval_steps: int, idt: int):
+    def _visualize_step(self, pred_gather: torch.Tensor, targ_gather: torch.Tensor, eval_steps: int, idt: int, ndt: Optional[int] = None):
         """Copy gathered tensors to the visualizer and queue a frame. No-op when self.visualizer is None."""
         if self.visualizer is None:
             return
@@ -809,4 +809,5 @@ class Driver(metaclass=abc.ABCMeta):
             self.visualizer.target_cpu.copy_(targ_gather)
         pred_cpu = self.visualizer.prediction_cpu.to(torch.float32).numpy()
         targ_cpu = self.visualizer.target_cpu.to(torch.float32).numpy()
-        self.visualizer.add(f"step{eval_steps}_time{str(idt).zfill(3)}", pred_cpu, targ_cpu)
+        progress = idt / max(ndt - 1, 1) if ndt is not None else None
+        self.visualizer.add(f"step{eval_steps}_time{str(idt).zfill(3)}", pred_cpu, targ_cpu, progress=progress)
