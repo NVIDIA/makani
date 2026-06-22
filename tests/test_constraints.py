@@ -16,6 +16,7 @@
 import os
 import sys
 import unittest
+from parameterized import parameterized_class
 
 import numpy as np
 
@@ -31,13 +32,18 @@ from makani.utils.constraints import NonNegativeConstraint, HydrostaticBalancePr
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from .testutils import disable_tf32, set_seed, compare_tensors
 
+_devices = [(torch.device("cpu"),)]
+if torch.cuda.is_available():
+    _devices.append((torch.device("cuda"),))
+
+@parameterized_class(("device",), _devices)
 class TestConstraints(unittest.TestCase):
 
     def setUp(self):
 
         disable_tf32()
 
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
         set_seed(333)
 
         # load the data:
@@ -325,6 +331,7 @@ class TestConstraints(unittest.TestCase):
             self.assertGreater(loss_pert, 1e3 * loss_bal)
 
 
+@parameterized_class(("device",), _devices)
 class TestNonNegativeConstraint(unittest.TestCase):
     """Tests for NonNegativeConstraint in makani/utils/constraints.py.
 
@@ -341,7 +348,7 @@ class TestNonNegativeConstraint(unittest.TestCase):
 
     def setUp(self):
         disable_tf32()
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
         set_seed(333)
 
     def _make(self, names_to_clamp=None, means=None, stds=None, **kwargs):

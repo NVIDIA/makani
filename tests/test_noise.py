@@ -15,6 +15,7 @@
 
 import math
 import unittest
+from parameterized import parameterized_class
 
 import numpy as np
 import torch
@@ -29,6 +30,10 @@ from makani.models.noise import (
 import sys, os
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from .testutils import disable_tf32, set_seed, compare_tensors
+
+_devices = [(torch.device("cpu"),)]
+if torch.cuda.is_available():
+    _devices.append((torch.device("cuda"),))
 
 # -------------------------------------------------------------------------
 # Common test dimensions (small enough to be fast on CPU)
@@ -83,13 +88,14 @@ class TestToep(unittest.TestCase):
 # ===========================================================================
 # 2. DummyNoiseS2
 # ===========================================================================
+@parameterized_class(("device",), _devices)
 class TestDummyNoiseS2(unittest.TestCase):
     """DummyNoiseS2 contract: finite output with the correct shape."""
 
     def setUp(self):
         disable_tf32()
         set_seed(333)
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
         self.B = BATCH_SIZE
         self.T = NUM_TIME_STEPS
         self.C = NUM_CHANNELS
@@ -171,13 +177,14 @@ class TestDummyNoiseS2(unittest.TestCase):
 # ===========================================================================
 # 2b. DummyNoiseS2 — constant_random mode
 # ===========================================================================
+@parameterized_class(("device",), _devices)
 class TestDummyNoiseS2ConstantRandom(unittest.TestCase):
     """DummyNoiseS2(mode='constant_random'): fixed non-zero noise redrawn on each update()."""
 
     def setUp(self):
         disable_tf32()
         set_seed(333)
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
         self.B = BATCH_SIZE
         self.T = NUM_TIME_STEPS
         self.C = NUM_CHANNELS
@@ -270,12 +277,13 @@ class TestDummyNoiseS2ConstantRandom(unittest.TestCase):
 # ===========================================================================
 # 3. IsotropicGaussianRandomFieldS2
 # ===========================================================================
+@parameterized_class(("device",), _devices)
 class TestIsotropicGRF(unittest.TestCase):
 
     def setUp(self):
         disable_tf32()
         set_seed(333)
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
         self.B = BATCH_SIZE
         self.T = NUM_TIME_STEPS
         self.C = NUM_CHANNELS
@@ -506,12 +514,13 @@ class TestIsotropicGRF(unittest.TestCase):
 # ===========================================================================
 # 4. DiffusionNoiseS2
 # ===========================================================================
+@parameterized_class(("device",), _devices)
 class TestDiffusionNoiseS2(unittest.TestCase):
 
     def setUp(self):
         disable_tf32()
         set_seed(333)
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
         self.B     = BATCH_SIZE
         self.T     = NUM_TIME_STEPS
         self.C     = 2          # use 2 channels to exercise per-channel phi/sigma

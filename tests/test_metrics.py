@@ -17,7 +17,7 @@ import importlib.util
 import os
 import sys
 import unittest
-from parameterized import parameterized
+from parameterized import parameterized, parameterized_class
 
 import itertools
 import tempfile
@@ -42,6 +42,10 @@ from makani.utils.dataloaders.data_helpers import get_lat_lon_grid
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from .testutils import disable_tf32, set_seed, get_default_parameters, compare_arrays
+
+_devices = [(torch.device("cpu"),)]
+if torch.cuda.is_available():
+    _devices.append((torch.device("cuda"),))
 
 # check consistency with weatherbench2 if it is installed
 _have_wb2 = importlib.util.find_spec("weatherbench2") is not None
@@ -175,6 +179,7 @@ _metric_handler_params = [
     ("equiangular", 4, 16, 3, "sum"),
 ]
 
+@parameterized_class(("device",), _devices)
 class TestMetrics(unittest.TestCase):
     """
     Testsuite for makani metrics. Compares to properscoring
@@ -184,7 +189,7 @@ class TestMetrics(unittest.TestCase):
 
         disable_tf32()
 
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
         set_seed(333)
 
         return
@@ -367,13 +372,14 @@ class TestMetrics(unittest.TestCase):
             self.assertTrue(compare_arrays("rank histogram", rankhist.cpu().numpy(), rankhist_xskillscore, atol=atol, rtol=rtol, verbose=verbose))
 
 
+@parameterized_class(("device",), _devices)
 class TestMetricsAggregation(unittest.TestCase):
     """
     A set of tests that test the aggregation
     """
 
     def setUp(self):
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
         set_seed(333)
 
         return
@@ -677,13 +683,14 @@ class TestMetricsAggregation(unittest.TestCase):
         self.assertTrue(compare_arrays("probabilistic aggregation nan", res_full.cpu().numpy(), res_split.cpu().numpy(), rtol=1e-6, atol=1e-6, verbose=verbose))
 
         
+@parameterized_class(("device",), _devices)
 class TestMetricsHandler(unittest.TestCase):
     """
     A set of tests for the metrics handler
     """
     
     def setUp(self):
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
         set_seed(333)
 
         self.params = get_default_parameters()
@@ -1137,6 +1144,7 @@ class TestMetricsHandler(unittest.TestCase):
 
 # TODO: ssr test comparing to weatherbench2
 @unittest.skipUnless(_have_wb2, "test requires weatherbench2 installation")
+@parameterized_class(("device",), _devices)
 class ComparetMetricsWB2(unittest.TestCase):
     """
     A set of tests that compare weatherbench2 metrics to makani metrics
@@ -1144,7 +1152,7 @@ class ComparetMetricsWB2(unittest.TestCase):
 
     def setUp(self):
 
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
         set_seed(333)
 
     # same as above but compare to wb2
