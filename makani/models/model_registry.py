@@ -186,6 +186,13 @@ def get_model(params: ParamsBase, use_stochastic_interpolation: bool = False, mu
                 model_kwargs["normalization_means"] = bias
                 model_kwargs["normalization_stds"] = scale
 
+        hydrostatic_balance_means = params.get("hydrostatic_balance_means_path", None)
+        if hydrostatic_balance_means is not None:
+            from makani.utils.dataloaders.data_helpers import get_hydrostatic_balance_climatology
+            hydrostatic_balance_means = get_hydrostatic_balance_climatology(params)
+            model_kwargs["hydrostatic_balance_means"] = hydrostatic_balance_means
+
+        # create model handle
         model_handle = partial(model_handle, inp_shape=inp_shape, out_shape=out_shape, inp_chans=inp_chans, out_chans=out_chans, **model_kwargs)
     else:
         raise KeyError(f"No model is registered under the name {params.nettype}")
