@@ -1172,14 +1172,19 @@ class ComparetMetricsWB2(unittest.TestCase):
         fct = torch.randn(batch_size, ensemble_size, num_channels, nlat, nlon, device=self.device)
 
         # create xarray datasets according to wb2 specification
+        # wb2 requires latitude monotonically increasing (south→north);
+        # get_lat_lon_grid returns north→south, so flip lat axis.
         latitude, longitude = get_lat_lon_grid((nlat, nlon))
+        latitude_sn = latitude[::-1]
+        obs_np = obs.cpu().numpy()[..., ::-1, :]
+        fct_np = fct.cpu().numpy()[..., ::-1, :]
         xr_obs = xr.Dataset(
-            data_vars=dict(var=(["batch", "channel", "latitude", "longitude"], obs.cpu().numpy())),
-            coords=dict(latitude=latitude, longitude=longitude),
+            data_vars=dict(var=(["batch", "channel", "latitude", "longitude"], obs_np)),
+            coords=dict(latitude=latitude_sn, longitude=longitude),
         )
         xr_fct = xr.Dataset(
-            data_vars=dict(var=(["batch", "ensemble", "channel", "latitude", "longitude"], fct.cpu().numpy())),
-            coords=dict(latitude=latitude, longitude=longitude),
+            data_vars=dict(var=(["batch", "ensemble", "channel", "latitude", "longitude"], fct_np)),
+            coords=dict(latitude=latitude_sn, longitude=longitude),
         )
 
         # compute and compare CRPS
@@ -1205,14 +1210,19 @@ class ComparetMetricsWB2(unittest.TestCase):
         fct = torch.randn(batch_size, ensemble_size, num_channels, nlat, nlon, device=self.device)
 
         # create xarray datasets according to wb2 specification
+        # wb2 requires latitude monotonically increasing (south→north);
+        # get_lat_lon_grid returns north→south, so flip lat axis.
         latitude, longitude = get_lat_lon_grid((nlat, nlon))
+        latitude_sn = latitude[::-1]
+        obs_np = obs.cpu().numpy()[..., ::-1, :]
+        fct_np = fct.cpu().numpy()[..., ::-1, :]
         xr_obs = xr.Dataset(
-            data_vars=dict(var=(["batch", "channel", "latitude", "longitude"], obs.cpu().numpy())),
-            coords=dict(latitude=latitude, longitude=longitude),
+            data_vars=dict(var=(["batch", "channel", "latitude", "longitude"], obs_np)),
+            coords=dict(latitude=latitude_sn, longitude=longitude),
         )
         xr_fct = xr.Dataset(
-            data_vars=dict(var=(["batch", "ensemble", "channel", "latitude", "longitude"], fct.cpu().numpy())),
-            coords=dict(latitude=latitude, longitude=longitude),
+            data_vars=dict(var=(["batch", "ensemble", "channel", "latitude", "longitude"], fct_np)),
+            coords=dict(latitude=latitude_sn, longitude=longitude),
         )
 
         # compute and compare ssr
