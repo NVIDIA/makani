@@ -127,7 +127,7 @@ def scatter_model_state_dict(model: nn.Module, state_dict: OrderedDict, strict: 
 
         elif strict:
             # TODO: maybe do at least a warning for non-strict mode
-            raise ValueError(f"Missing key {k}")
+            raise ValueError(f"Missing key {name}")
 
     return state_dict
 
