@@ -16,12 +16,14 @@
 import os
 import glob
 import re
+import zlib
 
 from collections import OrderedDict
 from typing import Optional, Dict, Any
 
 import torch
 import torch.nn as nn
+import torch.distributed as dist
 from torch.optim import Optimizer
 
 from makani.utils import comm
@@ -43,6 +45,31 @@ def get_latest_checkpoint_version(checkpoint_path):
 
 
 def gather_model_state_dict(model: nn.Module, grads: Optional[bool]=False) -> OrderedDict:
+    # precondition: every rank in the model group must issue the SAME ordered
+    # sequence of gather_uneven calls, otherwise the all_gather inside
+    # gather_uneven deadlocks (600s NCCL timeout instead of a readable error).
+    if comm.get_size("model") > 1:
+        plan = [
+            f"{name}:{d}:{group}"
+            for name, param in model.named_parameters()
+            if hasattr(param, "sharded_dims_mp")
+            for d, group in enumerate(param.sharded_dims_mp)
+            if group is not None
+        ]
+        # deterministic hash (Python's hash() is per-process randomized)
+        sig = zlib.crc32(("|".join(plan)).encode())
+        device = next(model.parameters()).device
+        sig_t = torch.tensor([sig], dtype=torch.int64, device=device)
+        sig_list = [torch.empty_like(sig_t) for _ in range(comm.get_size("model"))]
+        dist.all_gather(sig_list, sig_t, group=comm.get_group("model"))
+        sigs = [int(s.item()) for s in sig_list]
+        if len(set(sigs)) != 1:
+            raise RuntimeError(
+                f"[rank {comm.get_world_rank()}] checkpoint gather plan mismatch "
+                f"across model group: per-rank crc32 = {sigs}. "
+                f"This rank's plan has {len(plan)} gather ops."
+            )
+
     # create empty dict to hold the state
     state_dict = OrderedDict()
 
