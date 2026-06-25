@@ -24,6 +24,7 @@ import torch.distributed as dist
 
 from makani.utils import comm
 from makani.utils.driver import Driver
+from makani.utils.checkpoint_helpers import gather_model_state_dict
 
 from .distributed_helpers import _init_grid, reduce_success, sync_and_barrier
 
@@ -55,17 +56,51 @@ class _ShardedTestModel(nn.Module):
         return x  # not used; tests touch state_dict only
 
 
+class _DivergentPlanModel(_ShardedTestModel):
+    """
+    Model whose gather *plan* differs across the model group: only the model-root
+    rank registers an extra sharded parameter, so its ordered sequence of
+    gather_uneven calls has one more entry than every other rank's.
+
+    This is the artificial analog of the real failure mode behind the checkpoint
+    hang -- ``model.named_parameters()`` (and hence the per-param all_gather
+    sequence) not matching across the model-parallel ranks. The crc precondition
+    in ``gather_model_state_dict`` must catch it as a clean ``RuntimeError`` rather
+    than letting it deadlock the ``all_gather`` inside ``gather_uneven`` (the
+    600s NCCL timeout we are guarding against).
+    """
+
+    def __init__(self, local_weight: torch.Tensor, num_features: int):
+        super().__init__(local_weight, num_features)
+        if comm.get_rank("model") == 0:
+            # extra parameter sharded over "w" -> adds one entry to this rank's
+            # gather plan only. (Never actually gathered: the crc check fires first.)
+            self.extra = nn.Parameter(torch.zeros(num_features))
+            self.extra.is_shared_mp = ["spatial"]
+            self.extra.sharded_dims_mp = ["w"]
+
+
 class TestDistributedCheckpoint(unittest.TestCase):
     """
     Round-trip tests for the legacy and flexible checkpoint formats under
-    spatial model parallelism (h × w groups).
+    spatial model parallelism (h × w groups), with optional ensemble (E) and
+    batch (B) data parallelism layered on top.
 
     Run with e.g.::
 
-        GRID_H=2 GRID_W=2 mpirun -n 4 pytest tests/distributed/test_distributed_checkpoint.py
+        # pure spatial model parallel (H x W)
+        GRID_H=2 GRID_W=2 mpirun -n 4 pytest tests/distributed/tests_distributed_checkpoint.py
 
-    The test passes trivially when world_size=1 (no sharding actually happens),
-    so meaningful coverage requires multi-process launch.
+        # spatial + ensemble + batch: model=H*W*M=4, data=E*B; with -n 16 and
+        # GRID_E=2 the remaining factor (16/4/2 = 2) auto-fills the batch group,
+        # so this exercises H x W x E x B = 2 x 2 x 2 x 2.
+        GRID_H=2 GRID_W=2 GRID_E=2 mpirun -n 16 pytest tests/distributed/tests_distributed_checkpoint.py
+
+    The flexible save gathers sharded params over the *model* group only and
+    replicates the result across the data-parallel (ensemble/batch) groups, so
+    running with E,B > 1 is what exercises the desync the crc precondition guards
+    against. The tests pass trivially when world_size=1 (no sharding actually
+    happens), so meaningful coverage requires multi-process launch.
     """
 
     @classmethod
@@ -260,6 +295,48 @@ class TestDistributedCheckpoint(unittest.TestCase):
         with self.subTest(desc="fresh model matches snapshot after restore"):
             self._verify_match(fresh, snapshot, label="flexible-fresh", verbose=verbose)
 
+
+    # ----------------------------------------------------------------------
+    # Gather-plan consistency precondition (the checkpoint-hang guard).
+    #
+    # The flexible gather deadlocks if the ranks of a model group do not issue
+    # the SAME ordered sequence of all_gather calls (e.g. named_parameters drifts
+    # across ranks). gather_model_state_dict crc-checks the plan up front and
+    # raises instead of hanging. These two tests cover both verdicts under
+    # H x W x E x B: a matching plan passes, a divergent plan raises cleanly.
+    # ----------------------------------------------------------------------
+    def test_flexible_gather_plan_consistent(self, verbose=False):
+        """Positive: identical plan across the model group -> gather completes."""
+        if comm.get_size("model") == 1:
+            self.skipTest("requires model parallelism (set GRID_H/GRID_W/GRID_M > 1)")
+
+        model = self._build_model()
+
+        # Must not raise and must not hang: every model-group rank runs the same
+        # crc all_gather and agrees. Data-parallel (E/B) replicas each run the
+        # gather over their own model group independently.
+        state_dict = gather_model_state_dict(model)
+
+        n_params = len(list(model.named_parameters()))
+        with self.subTest(desc="gather returns one entry per parameter"):
+            self.assertTrue(
+                reduce_success(len(state_dict) == n_params, self.device),
+                msg=f"rank {self.world_rank}: gathered {len(state_dict)} entries, expected {n_params}",
+            )
+
+    def test_flexible_gather_plan_mismatch_raises(self, verbose=False):
+        """Negative: a divergent plan must raise RuntimeError, not deadlock."""
+        if comm.get_size("model") == 1:
+            self.skipTest("requires model parallelism (set GRID_H/GRID_W/GRID_M > 1)")
+
+        local_weight = self._build_local_slice()
+        model = _DivergentPlanModel(local_weight, num_features=self.num_features).to(self.device)
+
+        # Every model group has exactly one diverging rank (model-rank 0), so the
+        # crc check raises on ALL ranks symmetrically -- no rank is left waiting in
+        # a collective. assertRaises therefore fires consistently everywhere.
+        with self.assertRaises(RuntimeError):
+            gather_model_state_dict(model)
 
     # ----------------------------------------------------------------------
     # Optimizer state, flexible format, with MULTIPLE parameter groups.
