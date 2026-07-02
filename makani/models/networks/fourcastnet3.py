@@ -121,6 +121,7 @@ class DiscreteContinuousEncoder(nn.Module):
         lmax=240,
         groups=1,
         bias=False,
+        fused=False,
     ):
         super().__init__()
 
@@ -142,6 +143,7 @@ class DiscreteContinuousEncoder(nn.Module):
             groups=groups,
             bias=bias,
             theta_cutoff=theta_cutoff,
+            fused=fused,
         )
         if comm.get_size("spatial") > 1:
             self.conv.weight.is_shared_mp = ["spatial"]
@@ -174,6 +176,7 @@ class DiscreteContinuousDecoder(nn.Module):
         resample_sht=False,
         groups=1,
         bias=False,
+        fused=False,
     ):
         super().__init__()
 
@@ -217,6 +220,7 @@ class DiscreteContinuousDecoder(nn.Module):
             groups=groups,
             bias=bias,
             theta_cutoff=theta_cutoff,
+            fused=fused,
         )
         if comm.get_size("spatial") > 1:
             self.conv.weight.is_shared_mp = ["spatial"]
@@ -259,6 +263,7 @@ class NeuralOperatorBlock(nn.Module):
         lmax=240,
         checkpointing_level=0,
         bias=False,
+        fused=False,
     ):
         super().__init__()
 
@@ -290,6 +295,7 @@ class NeuralOperatorBlock(nn.Module):
                 grid_out=inverse_transform.grid,
                 bias=False,
                 theta_cutoff=theta_cutoff,
+                fused=fused,
             )
             if comm.get_size("spatial") > 1:
                 self.local_conv.weight.is_shared_mp = ["spatial"]
@@ -454,6 +460,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         freeze_processor=False,
         normalization_means=None,
         normalization_stds=None,
+        fused=True,
         **kwargs,
     ):
         super().__init__()
@@ -525,6 +532,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
             lmax=self.lmax,
             groups=math.gcd(self.n_in_chans, self.embed_dim),
             bias=encoder_bias,
+            fused=fused,
         )
 
         # encoder for the auxiliary channels
@@ -542,6 +550,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
                 lmax=self.lmax,
                 groups=math.gcd(self.n_aux_chans, self.aux_embed_dim),
                 bias=encoder_bias,
+                fused=fused,
             )
 
 
@@ -560,6 +569,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
             groups=math.gcd(self.n_out_chans, self.embed_dim),
             bias=encoder_bias,
             resample_sht=resample_sht,
+            fused=fused,
         )
 
         # position embedding
@@ -601,6 +611,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
                 lmax=self.lmax,
                 checkpointing_level=checkpointing_level,
                 bias=bias,
+                fused=fused,
             )
 
             self.blocks.append(block)
