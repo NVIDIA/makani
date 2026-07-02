@@ -57,7 +57,7 @@ class CUDAProfiler(object):
 
     def __enter__(self):
         if not self.enabled:
-            return
+            return self
         if self.entered:
             raise RuntimeError("CUDA context manager is not reentrant")
         self.entered = True
@@ -83,11 +83,11 @@ class CUDAProfiler(object):
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         if not self.enabled:
-            return
+            return False
 
         torch.cuda.synchronize()
         if self.profiling_started:
-            libcudart.cudaProfilerStop()
+            self.libcudart.cudaProfilerStop()
             self.profiling_started = False
 
         return False
