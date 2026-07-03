@@ -969,6 +969,12 @@ class TestLossHandler(unittest.TestCase):
 
     def setUp(self):
 
+        # clear in-process dynamo state (compiled code, guards, recompile counters)
+        # first so each test method compiles from a clean slate — makes the compile
+        # subtests order-independent (a prior test can otherwise seed dynamic dims /
+        # exhaust the recompile limit on a shared loss forward code object)
+        torch._dynamo.reset()
+
         disable_tf32()
 
         set_seed(333)
@@ -1001,23 +1007,26 @@ class TestLossHandler(unittest.TestCase):
         self.params.losses = losses
         self.params.uncertainty_weighting = uncertainty_weighting
 
-        # test initialization of loss object
-        loss_obj = LossHandler(self.params)
-
         shape = (self.params.batch_size, self.params.N_out_channels, self.params.img_shape_x, self.params.img_shape_y)
 
-        inp = torch.randn(*shape)
-        inp.requires_grad = True
-        tar = torch.randn(*shape)
-        tar.requires_grad = True
+        # exercise both the eager and torch.compile paths
+        for compile_loss in (False, True):
+            with self.subTest(compile=compile_loss):
+                # test initialization of loss object
+                loss_obj = LossHandler(self.params, compile=compile_loss)
 
-        # forward pass and check shapes
-        out = loss_obj(tar, inp)
-        self.assertEqual(torch.numel(out), 1)
-        self.assertTrue(out.item() >= 0.0)
+                inp = torch.randn(*shape)
+                inp.requires_grad = True
+                tar = torch.randn(*shape)
+                tar.requires_grad = True
 
-        # backward pass and check gradients are not None
-        out.backward()
+                # forward pass and check shapes
+                out = loss_obj(tar, inp)
+                self.assertEqual(torch.numel(out), 1)
+                self.assertTrue(out.item() >= 0.0)
+
+                # backward pass and check gradients are not None
+                out.backward()
 
 
     @parameterized.expand(_loss_params)
@@ -1031,20 +1040,24 @@ class TestLossHandler(unittest.TestCase):
         # not supported for bs independence:
         self.params.uncertainty_weighting = False
 
-        # test initialization of loss object
-        loss_obj = LossHandler(self.params)
-
         shape = (self.params.batch_size, self.params.N_out_channels, self.params.img_shape_x, self.params.img_shape_y)
 
-        inp = torch.randn(*shape)
-        tar = torch.randn(*shape)
-        out = loss_obj(tar, inp)
+        # exercise both the eager and torch.compile paths (the compiled path also
+        # covers a recompile for the doubled batch size below)
+        for compile_loss in (False, True):
+            with self.subTest(compile=compile_loss):
+                # test initialization of loss object
+                loss_obj = LossHandler(self.params, compile=compile_loss)
 
-        inp2 = torch.cat([inp, inp], dim=0)
-        tar2 = torch.cat([tar, tar], dim=0)
-        out2 = loss_obj(tar2, inp2)
+                inp = torch.randn(*shape)
+                tar = torch.randn(*shape)
+                out = loss_obj(tar, inp)
 
-        self.assertTrue(compare_tensors("loss", out, out2, verbose=verbose))
+                inp2 = torch.cat([inp, inp], dim=0)
+                tar2 = torch.cat([tar, tar], dim=0)
+                out2 = loss_obj(tar2, inp2)
+
+                self.assertTrue(compare_tensors("loss", out, out2, verbose=verbose))
 
 
     @parameterized.expand(_loss_weighted_params)
@@ -1056,26 +1069,29 @@ class TestLossHandler(unittest.TestCase):
         self.params.losses = losses
         self.params.uncertainty_weighting = uncertainty_weighting
 
-        # test initialization of loss object
-        loss_obj = LossHandler(self.params)
-
         shape = (self.params.batch_size, self.params.N_out_channels, self.params.img_shape_x, self.params.img_shape_y)
 
-        inp = torch.randn(*shape).clone()
-        inp.requires_grad = True
-        tar = torch.randn(*shape).clone()
-        tar.requires_grad = True
-        wgt = torch.ones_like(tar)
+        # exercise both the eager and torch.compile paths
+        for compile_loss in (False, True):
+            with self.subTest(compile=compile_loss):
+                # test initialization of loss object
+                loss_obj = LossHandler(self.params, compile=compile_loss)
 
-        # forward pass and check shapes
-        out = loss_obj(tar, inp)
-        self.assertEqual(torch.numel(out), 1)
-        self.assertTrue(out.item() >= 0.0)
+                inp = torch.randn(*shape).clone()
+                inp.requires_grad = True
+                tar = torch.randn(*shape).clone()
+                tar.requires_grad = True
+                wgt = torch.ones_like(tar)
 
-        # compute weighted loss
-        out_weighted = loss_obj(tar, inp, wgt)
+                # forward pass and check shapes
+                out = loss_obj(tar, inp)
+                self.assertEqual(torch.numel(out), 1)
+                self.assertTrue(out.item() >= 0.0)
 
-        self.assertTrue(compare_tensors("loss", out, out_weighted, verbose=verbose))
+                # compute weighted loss
+                out_weighted = loss_obj(tar, inp, wgt)
+
+                self.assertTrue(compare_tensors("loss", out, out_weighted, verbose=verbose))
 
 
     @parameterized.expand(_loss_weighted_params)
@@ -1088,38 +1104,44 @@ class TestLossHandler(unittest.TestCase):
         self.params.losses = losses
         self.params.uncertainty_weighting = uncertainty_weighting
 
-        # test initialization of loss object
-        loss_obj = LossHandler(self.params)
-
         shape = (self.params.batch_size, (self.params.n_future + 1) * self.params.N_out_channels, self.params.img_shape_x, self.params.img_shape_y)
 
-        inp = torch.randn(*shape).clone()
-        inp.requires_grad = True
-        tar = torch.randn(*shape).clone()
-        tar.requires_grad = True
-        wgt = torch.ones_like(tar)
+        # exercise both the eager and torch.compile paths
+        for compile_loss in (False, True):
+            with self.subTest(compile=compile_loss):
+                # test initialization of loss object
+                loss_obj = LossHandler(self.params, compile=compile_loss)
 
-        # forward pass and check shapes
-        out = loss_obj(tar, inp)
-        self.assertEqual(torch.numel(out), 1)
-        self.assertTrue(out.item() >= 0.0)
+                inp = torch.randn(*shape).clone()
+                inp.requires_grad = True
+                tar = torch.randn(*shape).clone()
+                tar.requires_grad = True
+                wgt = torch.ones_like(tar)
 
-        # compute weighted loss
-        out_weighted = loss_obj(tar, inp, wgt)
+                # forward pass and check shapes
+                out = loss_obj(tar, inp)
+                self.assertEqual(torch.numel(out), 1)
+                self.assertTrue(out.item() >= 0.0)
 
-        self.assertTrue(compare_tensors("loss", out, out_weighted, verbose=verbose))
+                # compute weighted loss
+                out_weighted = loss_obj(tar, inp, wgt)
+
+                self.assertTrue(compare_tensors("loss", out, out_weighted, verbose=verbose))
 
     @parameterized.expand(_loss_zero_params)
     def test_zero_on_perfect_prediction(self, losses, uncertainty_weighting=False, verbose=False):
         """Loss must be exactly zero when prediction equals target."""
         self.params.losses = losses
         self.params.uncertainty_weighting = uncertainty_weighting
-        loss_obj = LossHandler(self.params)
         shape = (self.params.batch_size, self.params.N_out_channels, self.params.img_shape_x, self.params.img_shape_y)
-        # use a non-zero random field so spectral losses avoid 0/0 in per-mode coherence
-        prd = torch.randn(*shape)
-        out = loss_obj(prd, prd)
-        self.assertTrue(compare_tensors("zero loss", out, torch.zeros_like(out), atol=1e-5, verbose=verbose))
+        # exercise both the eager and torch.compile paths
+        for compile_loss in (False, True):
+            with self.subTest(compile=compile_loss):
+                loss_obj = LossHandler(self.params, compile=compile_loss)
+                # use a non-zero random field so spectral losses avoid 0/0 in per-mode coherence
+                prd = torch.randn(*shape)
+                out = loss_obj(prd, prd)
+                self.assertTrue(compare_tensors("zero loss", out, torch.zeros_like(out), atol=1e-5, verbose=verbose))
 
     def test_running_stats(self, verbose=False):
         """
@@ -1178,22 +1200,26 @@ class TestLossHandler(unittest.TestCase):
         self.params.losses = [{"type": "l2", "channel_weights": "constant"}]
         self.params.multistep = {"weight_type": weight_type}
 
-        loss_obj = LossHandler(self.params)
-
-        # the multistep_weight buffer is tiled by ncw; the per-step prefix is n_future+1 entries
-        # tiled to (n_future + 1) * ncw — verify length matches that contract
-        expected_len = (self.params.n_future + 1) * loss_obj.channel_weights.shape[1]
-        self.assertEqual(loss_obj.multistep_weight.numel(), expected_len)
-
         shape = (self.params.batch_size, (self.params.n_future + 1) * self.params.N_out_channels,
                  self.params.img_shape_x, self.params.img_shape_y)
-        inp = torch.randn(*shape, requires_grad=True)
-        tar = torch.randn(*shape)
-        out = loss_obj(tar, inp)
-        self.assertEqual(torch.numel(out), 1)
-        self.assertTrue(torch.isfinite(out))
-        out.backward()
-        self.assertIsNotNone(inp.grad)
+
+        # exercise both the eager and torch.compile paths
+        for compile_loss in (False, True):
+            with self.subTest(compile=compile_loss):
+                loss_obj = LossHandler(self.params, compile=compile_loss)
+
+                # the multistep_weight buffer is tiled by ncw; the per-step prefix is n_future+1 entries
+                # tiled to (n_future + 1) * ncw — verify length matches that contract
+                expected_len = (self.params.n_future + 1) * loss_obj.channel_weights.shape[1]
+                self.assertEqual(loss_obj.multistep_weight.numel(), expected_len)
+
+                inp = torch.randn(*shape, requires_grad=True)
+                tar = torch.randn(*shape)
+                out = loss_obj(tar, inp)
+                self.assertEqual(torch.numel(out), 1)
+                self.assertTrue(torch.isfinite(out))
+                out.backward()
+                self.assertIsNotNone(inp.grad)
 
     def test_multistep_weight_custom(self):
         """custom mode passes through user-supplied weights and asserts shape match."""
