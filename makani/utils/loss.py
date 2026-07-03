@@ -139,7 +139,12 @@ class LossHandler(nn.Module):
 
             # append to dict and compile before:
             if compile:
-                loss_fn = torch.compile(loss_fn)
+                # dynamic=False forces per-shape specialization. The auto (dynamic=None)
+                # path marks batch/channel dims symbolic after seeing >1 shape, and the
+                # symbolic-shape backward trips an inductor assert (NYI SymInt equality).
+                # The set of distinct loss input shapes is tiny, so recompiling per shape
+                # is effectively free.
+                loss_fn = torch.compile(loss_fn, dynamic=False)
             self.loss_fn.append(loss_fn)
             self.loss_requires_input.append(requires_input)
 
