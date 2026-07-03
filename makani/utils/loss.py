@@ -146,7 +146,14 @@ class LossHandler(nn.Module):
             self.loss_types.append(loss_fn.type)
 
             # append to dict and compile before:
-            if compile:
+            # Losses carrying a spherical harmonic transform (self.sht / self.vsht) are NOT
+            # compiled: torch_harmonics' SHT lowers to an aten.complex whose inductor meta
+            # kernel mispredicts strides on some torch builds (e.g. 2.7.x), tripping an
+            # assert_size_stride under torch.compile(dynamic=False). The SHT is already an
+            # efficient module and the surrounding loss arithmetic is cheap, so running these
+            # eager costs little.
+            uses_sht = hasattr(loss_fn, "sht") or hasattr(loss_fn, "vsht")
+            if compile and not uses_sht:
                 # dynamic=False forces per-shape specialization. The auto (dynamic=None)
                 # path marks batch/channel dims symbolic after seeing >1 shape, and the
                 # symbolic-shape backward trips an inductor assert (NYI SymInt equality).
