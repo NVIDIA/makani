@@ -61,7 +61,7 @@ class LossHandler(nn.Module):
     which in the end gets weighted and aggregated.
     """
 
-    def __init__(self, params, track_running_stats: bool = False, seed: int = 0, eps: float = 1e-6, **kwargs):
+    def __init__(self, params, track_running_stats: bool = False, seed: int = 0, eps: float = 1e-6, compile: bool = True, **kwargs):
         super().__init__()
 
         self.rank = comm.get_rank("matmul")
@@ -138,6 +138,8 @@ class LossHandler(nn.Module):
             )
 
             # append to dict and compile before:
+            if compile:
+                loss_fn = torch.compile(loss_fn)
             self.loss_fn.append(loss_fn)
             self.loss_requires_input.append(requires_input)
 
