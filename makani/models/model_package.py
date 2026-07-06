@@ -48,7 +48,7 @@ class LocalPackage:
     MEANS_FILE = "global_means.npy"
     STDS_FILE = "global_stds.npy"
     OROGRAPHY_FILE = "orography.nc"
-    LANDMASK_FILE = "land_sea_mask.nc"
+    LANDMASK_FILE = "land_mask.nc"
     SOILTYPE_FILE = "soil_type.nc"
 
     def __init__(self, root):
