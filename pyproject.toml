@@ -84,13 +84,13 @@ test = [
     "pytest-cov",
     "parameterized",
     "properscoring",
-    "xarray",
+    "xarray>=2025.1.0",
     "xskillscore",
 ]
 
 data_process = [
     "mpi4py",
-    "xarray",
+    "xarray>=2025.1.0",
     "gcsfs",
     "dask",
     "tqdm",
