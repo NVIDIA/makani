@@ -36,6 +36,15 @@ from torch_harmonics.distributed import compute_split_shapes
 from .data_helpers import get_lat_lon_grid, get_date_from_string, get_timestamp, get_date_from_timestamp, get_date_ranges, get_default_aws_connector
 from .wb2_helpers import build_wb2_channel_map
 
+# zarr v3 requires the `out` target of get_basic_selection to be an NDBuffer rather than a raw
+# numpy array. from_ndarray_like wraps the (possibly strided) view without copying, so decoded
+# data still lands directly in the preallocated buffer (zero-copy read).
+from zarr.core.buffer.cpu import NDBuffer as _ZarrNDBuffer
+
+
+def _zarr_out(arr):
+    return _ZarrNDBuffer.from_ndarray_like(arr)
+
 
 class GeneralES(object):
     def _get_slices(self, lst):
@@ -377,45 +386,47 @@ class GeneralES(object):
         self.timestamps = []
         self.zarr_format = "makani"
 
-        with self._zarr_open(self.files_paths[0]) as _f:
-            if enable_logging:
-                logging.info("Getting file stats from {}".format(self.files_paths[0]))
+        # zarr groups are lazy views over the store and are not context managers in zarr v3;
+        # open and use them directly (no close needed).
+        _f = self._zarr_open(self.files_paths[0])
+        if enable_logging:
+            logging.info("Getting file stats from {}".format(self.files_paths[0]))
 
-            if self.dataset_name in _f:
-                # makani format: single (time, channels, lat, lon) array
-                dset = _f[self.dataset_name]
-                self.img_shape = dset.shape[2:4]
-                self.total_channels = dset.shape[1]
-                self.n_samples_year.append(dset.shape[0])
-                self.timestamps.append(self._zarr_read_timestamps(_f, dset, self.years[0]))
-            else:
-                # WB2 format: one variable array per field, levels stored separately
-                if self.channel_names is None:
-                    raise ValueError(
-                        f"WB2 zarr format detected ('{self.dataset_name}' not found in store) "
-                        "but channel_names was not provided to the dataloader."
-                    )
-                self.zarr_format = "wb2"
-                level_values = np.asarray(_f["level"]) if "level" in _f else None
-                self.wb2_channel_map = build_wb2_channel_map(self.channel_names, level_values)
-                # derive shape from any variable in the store
-                probe_name = self.wb2_channel_map[0][0]
-                probe = _f[probe_name]
-                self.img_shape = (probe.shape[-2], probe.shape[-1])
-                self.total_channels = len(self.channel_names)
-                self.n_samples_year.append(probe.shape[0])
-                self.timestamps.append(self._zarr_read_timestamps(_f, probe, self.years[0]))
+        if self.dataset_name in _f:
+            # makani format: single (time, channels, lat, lon) array
+            dset = _f[self.dataset_name]
+            self.img_shape = dset.shape[2:4]
+            self.total_channels = dset.shape[1]
+            self.n_samples_year.append(dset.shape[0])
+            self.timestamps.append(self._zarr_read_timestamps(_f, dset, self.years[0]))
+        else:
+            # WB2 format: one variable array per field, levels stored separately
+            if self.channel_names is None:
+                raise ValueError(
+                    f"WB2 zarr format detected ('{self.dataset_name}' not found in store) "
+                    "but channel_names was not provided to the dataloader."
+                )
+            self.zarr_format = "wb2"
+            level_values = np.asarray(_f["level"]) if "level" in _f else None
+            self.wb2_channel_map = build_wb2_channel_map(self.channel_names, level_values)
+            # derive shape from any variable in the store
+            probe_name = self.wb2_channel_map[0][0]
+            probe = _f[probe_name]
+            self.img_shape = (probe.shape[-2], probe.shape[-1])
+            self.total_channels = len(self.channel_names)
+            self.n_samples_year.append(probe.shape[0])
+            self.timestamps.append(self._zarr_read_timestamps(_f, probe, self.years[0]))
 
         for idf, filename in enumerate(self.files_paths[1:], start=1):
-            with self._zarr_open(filename) as _f:
-                if self.zarr_format == "wb2":
-                    probe = _f[self.wb2_channel_map[0][0]]
-                    self.n_samples_year.append(probe.shape[0])
-                    self.timestamps.append(self._zarr_read_timestamps(_f, probe, self.years[idf]))
-                else:
-                    dset = _f[self.dataset_name]
-                    self.n_samples_year.append(dset.shape[0])
-                    self.timestamps.append(self._zarr_read_timestamps(_f, dset, self.years[idf]))
+            _f = self._zarr_open(filename)
+            if self.zarr_format == "wb2":
+                probe = _f[self.wb2_channel_map[0][0]]
+                self.n_samples_year.append(probe.shape[0])
+                self.timestamps.append(self._zarr_read_timestamps(_f, probe, self.years[idf]))
+            else:
+                dset = _f[self.dataset_name]
+                self.n_samples_year.append(dset.shape[0])
+                self.timestamps.append(self._zarr_read_timestamps(_f, dset, self.years[idf]))
 
         self.timestamps = np.concatenate(self.timestamps, axis=0)
         return
@@ -457,12 +468,12 @@ class GeneralES(object):
             if level_idx is None:
                 group[zarr_name].get_basic_selection(
                     np.s_[t_inp, start_x:end_x:sf, start_y:end_y:sf],
-                    out=self.inp_buff[:, out_ch, ...],
+                    out=_zarr_out(self.inp_buff[:, out_ch, ...]),
                 )
             else:
                 group[zarr_name].get_basic_selection(
                     np.s_[t_inp, level_idx, start_x:end_x:sf, start_y:end_y:sf],
-                    out=self.inp_buff[:, out_ch, ...],
+                    out=_zarr_out(self.inp_buff[:, out_ch, ...]),
                 )
 
         for out_ch, src_ch in enumerate(self.out_channels_sorted):
@@ -470,12 +481,12 @@ class GeneralES(object):
             if level_idx is None:
                 group[zarr_name].get_basic_selection(
                     np.s_[t_tar, start_x:end_x:sf, start_y:end_y:sf],
-                    out=self.tar_buff[:, out_ch, ...],
+                    out=_zarr_out(self.tar_buff[:, out_ch, ...]),
                 )
             else:
                 group[zarr_name].get_basic_selection(
                     np.s_[t_tar, level_idx, start_x:end_x:sf, start_y:end_y:sf],
-                    out=self.tar_buff[:, out_ch, ...],
+                    out=_zarr_out(self.tar_buff[:, out_ch, ...]),
                 )
 
         inp, tar = self._reorder_channels(self.inp_buff, self.tar_buff)
@@ -495,7 +506,7 @@ class GeneralES(object):
                     start_x:end_x:sf,
                     start_y:end_y:sf,
                 ],
-                out=self.inp_buff[:, start:end, ...],
+                out=_zarr_out(self.inp_buff[:, start:end, ...]),
             )
             off = end
 
@@ -510,7 +521,7 @@ class GeneralES(object):
                     start_x:end_x:sf,
                     start_y:end_y:sf,
                 ],
-                out=self.tar_buff[:, start:end, ...],
+                out=_zarr_out(self.tar_buff[:, start:end, ...]),
             )
             off = end
 
