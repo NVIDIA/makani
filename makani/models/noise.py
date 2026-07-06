@@ -287,6 +287,11 @@ class IsotropicGaussianRandomFieldS2(BaseNoiseS2):
             + f", sigma={self.sigma}, alpha={self.alpha}, learnable={self.learnable}"
         )
 
+    # run eager: the noise field is complex-valued (torch.complex + inverse SHT), and
+    # inductor's Triton backend has no mapping for complex dtypes (KeyError: 'complex64'
+    # in signature_of). Disabling compilation graph-breaks cleanly so the complex ops
+    # execute in eager where they are supported.
+    @torch.compiler.disable
     @override
     def forward(self, update_internal_state=False):
 
@@ -522,6 +527,10 @@ class DiffusionNoiseS2(BaseNoiseS2):
 
         return
 
+    # run eager: complex-valued (torch.complex + inverse SHT); inductor's Triton backend
+    # has no mapping for complex dtypes (KeyError: 'complex64'). See the note on
+    # IsotropicGaussianRandomFieldS2.forward.
+    @torch.compiler.disable
     @override
     def forward(self, update_internal_state=False):
 

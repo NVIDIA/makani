@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import os
+import sys
 import importlib.util
 
 from importlib.metadata import entry_points
@@ -73,8 +74,16 @@ def _register_from_file(model_string: str, name: Union[str, None] = None) -> Non
     if not os.path.exists(model_path):
         raise ValueError(f"Expected string of format 'path/to/model_file.py:ModuleName' but {model_path} does not exist.")
 
-    module_spec = importlib.util.spec_from_file_location(model_handle, model_path)
+    # Load under a dotted module name derived from the file (not the class handle) and register
+    # it in sys.modules. Otherwise the module's __name__ is the bare class name and is not
+    # importable, which breaks torch.compile: dynamo resolves a traced function's module via
+    # f_globals["__name__"] and calls importlib.import_module on it
+    # (ModuleNotFoundError: No module named 'AtmoSphericNeuralOperatorNet'). Entry-point models
+    # already get a proper module name; this brings the file-path fallback in line.
+    module_name = "makani.models._dynamic." + os.path.splitext(os.path.basename(model_path))[0]
+    module_spec = importlib.util.spec_from_file_location(module_name, model_path)
     module = importlib.util.module_from_spec(module_spec)
+    sys.modules[module_name] = module
     module_spec.loader.exec_module(module)
     model = getattr(module, model_handle)
 
