@@ -273,7 +273,11 @@ class StochasticTrainer(Driver):
 
         if self.params.jit_mode == "inductor":
             self.model = torch.compile(self.model)
-            self.loss_obj = torch.compile(self.loss_obj)
+            # NOTE: do not torch.compile the whole LossHandler. It compiles its individual
+            # loss terms internally (skipping the spherical-harmonic/spectral losses, whose
+            # complex-valued SHT cannot be codegen'd by inductor's Triton backend —
+            # KeyError: 'complex64'). Compiling the handler on top would trace back into those
+            # spectral losses and hit that error; the handler orchestration is cheap anyway.
             self.model_train = self.model
             self.model_eval = self.model
 

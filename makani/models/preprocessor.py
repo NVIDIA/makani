@@ -27,6 +27,19 @@ from makani.mpu.mappings import copy_to_parallel_region
 from makani.models.preprocessor_helpers import get_bias_correction, get_static_features
 
 
+@torch.compiler.disable
+def _run_eager(fn, *args, **kwargs):
+    """Run a callable outside torch.compile (forces a graph break).
+
+    The noise field is complex-valued (torch.complex + inverse SHT) and inductor's Triton
+    backend cannot codegen complex dtypes (KeyError: 'complex64'). A method-level
+    @torch.compiler.disable on the noise module's forward is NOT honored when dynamo inlines
+    the nn.Module call (it traces straight into it), whereas a disable on a plain function call
+    like this one is respected — so we break at the call site instead.
+    """
+    return fn(*args, **kwargs)
+
+
 class Preprocessor2D(nn.Module):
     def __init__(self, params):
         super().__init__()
@@ -273,7 +286,10 @@ class Preprocessor2D(nn.Module):
 
         # this routine also adds noise every time a channel gets appended
         if hasattr(self, "input_noise"):
-            n = self.input_noise()
+            # run the noise module eagerly: it is complex-valued (SHT) and cannot be inductor-
+            # compiled; the method-level disable on its forward is not honored through the
+            # nn.Module call, so break at the call site. See _run_eager.
+            n = _run_eager(self.input_noise)
             torch._check(
                 n.shape[0] == x.shape[0],
                 lambda: (
