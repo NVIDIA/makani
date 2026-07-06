@@ -47,6 +47,18 @@ def _compute_cutoff_radius(nlat, kernel_shape, basis_type):
 
     return (kernel_shape[0] + 1) * theta_cutoff_factor[basis_type] * math.pi / float(nlat - 1)
 
+
+@torch.compiler.disable
+def _run_eager(fn, *args, **kwargs):
+    """Run a spherical-harmonic transform (and its complex-valued glue) outside torch.compile.
+
+    Inductor's Triton backend has no mapping for complex dtypes (KeyError: 'complex64' during
+    kernel-signature generation), and the distributed SHT primitives wrap untraceable NCCL
+    collectives. Calling through this disabled shim forces a graph break so the transform runs
+    eagerly; the compiled region only sees the real-valued tensors on either side.
+    """
+    return fn(*args, **kwargs)
+
 def _init_low_l_spectral(spec_param, isht, std=0.1, l_cutoff_frac=0.25):
     """
     Init a complex spectral parameter with small Gaussian noise on low-l modes only.
@@ -327,12 +339,18 @@ class DiscreteContinuousEncoder(nn.Module):
                 use_te=use_te,
             )
 
-    def forward(self, x):
-        # spectral latent → spatial grid via iSHT
+    @torch.compiler.disable
+    def _spectral_query(self, x):
+        # spectral latent → spatial grid via iSHT; kept eager (complex dtype + distributed
+        # NCCL are not compilable). Returns a real-valued query so the attention downstream
+        # sits inside the compiled region. See _run_eager.
         with amp.autocast(device_type=x.device.type, enabled=False):
             query = self.latent_query_spec.to(torch.complex64).expand(x.shape[0], -1, -1, -1).contiguous()
             query = self.isht(query)
-        query = query.to(dtype=x.dtype)
+        return query.to(dtype=x.dtype)
+
+    def forward(self, x):
+        query = self._spectral_query(x)
 
         # cross-attention: learned spectral queries attend to full-resolution input
         xd = self.attn(query=query, key=x, value=x)
@@ -503,13 +521,19 @@ class DiscreteContinuousDecoder(nn.Module):
                 use_te=use_te,
             )
 
+    @torch.compiler.disable
+    def _spectral_query(self, x):
+        # spectral latent → output grid via iSHT; kept eager (complex dtype + distributed
+        # NCCL are not compilable). Returns a real-valued query. See _run_eager.
+        with amp.autocast(device_type=x.device.type, enabled=False):
+            query = self.latent_query_spec.to(torch.complex64).expand(x.shape[0], -1, -1, -1).contiguous()
+            query = self.isht_out(query)
+        return query.to(dtype=x.dtype)
+
     def forward(self, x):
         if hasattr(self, "latent_query_spec"):
             # Perceiver-style: project spectral query to output grid, cross-attend to latent
-            with amp.autocast(device_type=x.device.type, enabled=False):
-                query = self.latent_query_spec.to(torch.complex64).expand(x.shape[0], -1, -1, -1).contiguous()
-                query = self.isht_out(query)
-            query = query.to(dtype=x.dtype)
+            query = self._spectral_query(x)
             x = self.attn(query=query, key=x, value=x)
         else:
             # classic path: optional pre-mlp residual on the latent, upsample, self-attention
@@ -518,7 +542,8 @@ class DiscreteContinuousDecoder(nn.Module):
             dtype = x.dtype
             with amp.autocast(device_type=x.device.type, enabled=False):
                 x = x.to(torch.float32)
-                x = self.upsample(x)
+                # SHT roundtrip upsample runs eager (complex internals). See _run_eager.
+                x = _run_eager(self.upsample, x)
             x = x.to(dtype=dtype)
             x = self.attn(x)
 
@@ -690,7 +715,8 @@ class NeuralOperatorBlock(nn.Module):
         if x_aux is not None and hasattr(self, "film_attn"):
             x_norm = self.film_attn(x_norm, x_aux)
         if hasattr(self, "global_conv"):
-            mix_out = self.global_conv(x_norm)
+            # global spectral conv is an SHT roundtrip (complex internals); run eager. See _run_eager.
+            mix_out = _run_eager(self.global_conv, x_norm)
         else:
             mix_out = self.attn(x_norm)
         x = x + self.drop_path(attn_scale(mix_out))
@@ -1197,6 +1223,13 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
 
         return x_aux
 
+    @torch.compiler.disable
+    def _bandlimit_residual(self, residual):
+        # SHT roundtrip to bandwidth-limit the residual; kept eager (complex dtype +
+        # distributed NCCL are not compilable). Returns a real tensor. See _run_eager.
+        with amp.autocast(device_type=residual.device.type, enabled=False):
+            return self.residual_isht(self.residual_sht(residual.float()))
+
     def decode(self, x):
         """
         forward pass for the decoder
@@ -1275,9 +1308,8 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
             x = self.decode(x)
 
         if self.big_skip:
-            # bandwidth-limit the residual via SHT roundtrip before mixing it in
-            with amp.autocast(device_type=x.device.type, enabled=False):
-                residual_lp = self.residual_isht(self.residual_sht(residual.float()))
+            # bandwidth-limit the residual via SHT roundtrip before mixing it in (runs eager)
+            residual_lp = self._bandlimit_residual(residual)
             x = x + self.residual_transform(residual_lp.to(x.dtype))
 
         # apply output transform

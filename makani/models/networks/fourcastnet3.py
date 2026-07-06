@@ -48,6 +48,18 @@ def _compute_cutoff_radius(lmax, kernel_shape, basis_type):
     margin_factor = {"piecewise linear": 1.0, "morlet": 1.0, "harmonic": 1.0, "zernike": 1.0, "fourier-bessel": 1.5}
     return margin_factor[basis_type] * kernel_shape[0] * math.pi / float(lmax)
 
+
+@torch.compiler.disable
+def _run_eager(fn, *args, **kwargs):
+    """Run a spherical-harmonic transform (and its complex-valued glue) outside torch.compile.
+
+    Inductor's Triton backend has no mapping for complex dtypes (KeyError: 'complex64' during
+    kernel-signature generation), and the distributed SHT primitives wrap untraceable NCCL
+    collectives. Calling through this disabled shim forces a graph break so the transform runs
+    eagerly; the compiled region only sees the real-valued tensors on either side.
+    """
+    return fn(*args, **kwargs)
+
 @torch.compile
 def _soft_clamp(x: torch.Tensor, offset: float = 0.0):
     x = x + offset
@@ -233,7 +245,8 @@ class DiscreteContinuousDecoder(nn.Module):
         dtype = x.dtype
 
         with amp.autocast(device_type="cuda", enabled=False):
-            res = self.resample(x.float())
+            # resample may be an SHT roundtrip (complex internals); run eager. See _run_eager.
+            res = _run_eager(self.resample, x.float())
             res = res.to(dtype=dtype)
 
         x = self.conv(res)
@@ -377,7 +390,8 @@ class NeuralOperatorBlock(nn.Module):
 
     def _conv_forward(self, x):
         if hasattr(self, "global_conv"):
-            dx, _ = self.global_conv(x)
+            # global spectral conv is an SHT roundtrip (complex internals); run eager. See _run_eager.
+            dx, _ = _run_eager(self.global_conv, x)
         elif hasattr(self, "local_conv"):
             dx = self.local_conv(x)
 
