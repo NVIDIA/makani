@@ -246,28 +246,30 @@ class MultifilesDataset(Dataset):
         self.date_ranges = []
         timestamps = []
 
-        with self._zarr_open(self.files_paths[0]) as _f:
-            if enable_logging:
-                logging.info("Getting file stats from {}".format(self.files_paths[0]))
+        # zarr groups are lazy views over the store and are not context managers in zarr v3;
+        # open and use them directly (no close needed).
+        _f = self._zarr_open(self.files_paths[0])
+        if enable_logging:
+            logging.info("Getting file stats from {}".format(self.files_paths[0]))
+        dset = _f[self.dataset_name]
+        self.img_shape = dset.shape[2:4]
+        self.total_channels = dset.shape[1]
+        self.n_samples_file.append(dset.shape[0])
+        self.lat_lon = (
+            np.asarray(_f[self.latitude_name]).tolist(),
+            np.asarray(_f[self.longitude_name]).tolist(),
+        )
+        tstamps = self._zarr_read_timestamps(_f, dset)
+        self.date_ranges.append((fn_handle(tstamps[0]), fn_handle(tstamps[-1])))
+        timestamps.append(tstamps)
+
+        for filename in self.files_paths[1:]:
+            _f = self._zarr_open(filename)
             dset = _f[self.dataset_name]
-            self.img_shape = dset.shape[2:4]
-            self.total_channels = dset.shape[1]
             self.n_samples_file.append(dset.shape[0])
-            self.lat_lon = (
-                np.asarray(_f[self.latitude_name]).tolist(),
-                np.asarray(_f[self.longitude_name]).tolist(),
-            )
             tstamps = self._zarr_read_timestamps(_f, dset)
             self.date_ranges.append((fn_handle(tstamps[0]), fn_handle(tstamps[-1])))
             timestamps.append(tstamps)
-
-        for filename in self.files_paths[1:]:
-            with self._zarr_open(filename) as _f:
-                dset = _f[self.dataset_name]
-                self.n_samples_file.append(dset.shape[0])
-                tstamps = self._zarr_read_timestamps(_f, dset)
-                self.date_ranges.append((fn_handle(tstamps[0]), fn_handle(tstamps[-1])))
-                timestamps.append(tstamps)
 
         lower_order = np.argsort([x[0] for x in self.date_ranges])
         upper_order = np.argsort([x[1] for x in self.date_ranges])

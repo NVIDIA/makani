@@ -402,14 +402,14 @@ def init_zarr_dataset(
 
     def _write_year(store_path, year, data):
         g = zarr.open_group(store_path, mode="w")
-        g.create_dataset(H5_PATH, data=data, chunks=(1, num_channels, img_size_h, img_size_w))
+        g.create_array(H5_PATH, data=data, chunks=(1, num_channels, img_size_h, img_size_w))
         if annotate:
             year_start = dt.datetime(year=year, month=1, day=1, hour=0, tzinfo=dt.timezone.utc).timestamp()
             timestamps = year_start + np.arange(0, hours_per_year * 3600, dhours * 3600, dtype=np.float64)
-            g.create_dataset("time", data=timestamps)
-            g.create_dataset("channel", data=np.array(channel_names))
-            g.create_dataset("lat", data=latitude)
-            g.create_dataset("lon", data=longitude)
+            g.create_array("time", data=timestamps)
+            g.create_array("channel", data=np.array(channel_names))
+            g.create_array("lat", data=latitude)
+            g.create_array("lon", data=longitude)
         if consolidate:
             zarr.consolidate_metadata(store_path)
 
@@ -526,19 +526,19 @@ def init_wb2_zarr_dataset(
                 [np.datetime64(int((year_start + dt.timedelta(hours=i * dhours)).timestamp() * 1e9), "ns")
                  for i in range(num_samples_per_year)]
             )
-            g.create_dataset("time", data=times)
-            g.create_dataset("latitude", data=latitude)
-            g.create_dataset("longitude", data=longitude)
+            g.create_array("time", data=times)
+            g.create_array("latitude", data=latitude)
+            g.create_array("longitude", data=longitude)
             if n_levels > 0:
-                g.create_dataset("level", data=levels)
+                g.create_array("level", data=levels)
 
         for wb2_name in surf_vars:
             data = rng.random((num_samples_per_year, img_size_h, img_size_w), dtype=np.float32)
-            g.create_dataset(wb2_name, data=data, chunks=(1, img_size_h, img_size_w))
+            g.create_array(wb2_name, data=data, chunks=(1, img_size_h, img_size_w))
 
         for wb2_name in atm_vars:
             data = rng.random((num_samples_per_year, n_levels, img_size_h, img_size_w), dtype=np.float32)
-            g.create_dataset(wb2_name, data=data, chunks=(1, n_levels, img_size_h, img_size_w))
+            g.create_array(wb2_name, data=data, chunks=(1, n_levels, img_size_h, img_size_w))
 
         if consolidate:
             zarr.consolidate_metadata(store_path)
