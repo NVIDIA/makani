@@ -127,8 +127,8 @@ def _make_distinctive_zarr_dir(root):
         data, timestamps = _distinctive_year_arrays(year)
         store_path = os.path.join(root, f"{year}.zarr")
         g = zarr.open_group(store_path, mode="w")
-        g.create_dataset(H5_PATH, data=data, chunks=(1, _N_CH, _IMG_H, _IMG_W))
-        g.create_dataset("time", data=timestamps)
+        g.create_array(H5_PATH, data=data, chunks=(1, _N_CH, _IMG_H, _IMG_W))
+        g.create_array("time", data=timestamps)
         zarr.consolidate_metadata(store_path)
     return root
 
@@ -161,19 +161,19 @@ def _make_distinctive_zarr_wb2_dir(root):
         times_ns = np.array(
             [np.datetime64(int(ts * 1e9), "ns") for ts in timestamps]
         )
-        g.create_dataset("time", data=times_ns)
-        g.create_dataset("latitude", data=np.linspace(90, -90, _IMG_H, endpoint=True, dtype=np.float32))
-        g.create_dataset("longitude", data=np.linspace(0, 360, _IMG_W, endpoint=False, dtype=np.float32))
-        g.create_dataset("level", data=levels)
+        g.create_array("time", data=times_ns)
+        g.create_array("latitude", data=np.linspace(90, -90, _IMG_H, endpoint=True, dtype=np.float32))
+        g.create_array("longitude", data=np.linspace(0, 360, _IMG_W, endpoint=False, dtype=np.float32))
+        g.create_array("level", data=levels)
 
         for wb2n, ch_idx in surf_vars.items():
-            g.create_dataset(wb2n, data=data[:, ch_idx, :, :], chunks=(1, _IMG_H, _IMG_W))
+            g.create_array(wb2n, data=data[:, ch_idx, :, :], chunks=(1, _IMG_H, _IMG_W))
 
         for wb2n, level_map in atm_vars.items():
             arr = np.zeros((_N_PER_YEAR, len(levels), _IMG_H, _IMG_W), dtype=np.float32)
             for lv, ch_idx in level_map.items():
                 arr[:, level_to_idx[lv], :, :] = data[:, ch_idx, :, :]
-            g.create_dataset(wb2n, data=arr, chunks=(1, len(levels), _IMG_H, _IMG_W))
+            g.create_array(wb2n, data=arr, chunks=(1, len(levels), _IMG_H, _IMG_W))
 
         zarr.consolidate_metadata(store_path)
     return root
