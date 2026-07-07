@@ -184,24 +184,27 @@ def save_model_package(params):
         msg = json.dumps(params.to_dict(), indent=4, sort_keys=True)
         f.write(msg)
 
+    # copy static data into the package under the canonical file names expected
+    # by LocalPackage, so packages are self-consistent regardless of how the
+    # source files happen to be named on a given system
     if params.get("add_orography", False):
-        shutil.copy(params.orography_path, os.path.join(params.experiment_dir, os.path.basename(params.orography_path)))
+        shutil.copy(params.orography_path, os.path.join(params.experiment_dir, LocalPackage.OROGRAPHY_FILE))
 
     if params.get("add_landmask", False):
-        shutil.copy(params.landmask_path, os.path.join(params.experiment_dir, os.path.basename(params.landmask_path)))
+        shutil.copy(params.landmask_path, os.path.join(params.experiment_dir, LocalPackage.LANDMASK_FILE))
 
     if params.get("add_soiltype", False):
-        shutil.copy(params.soiltype_path, os.path.join(params.experiment_dir, os.path.basename(params.soiltype_path)))
+        shutil.copy(params.soiltype_path, os.path.join(params.experiment_dir, LocalPackage.SOILTYPE_FILE))
 
-    # always save out all normalization files
+    # always save out all normalization files under their canonical names
     if params.get("global_means_path", None) is not None:
-        shutil.copy(params.global_means_path, os.path.join(params.experiment_dir, os.path.basename(params.global_means_path)))
+        shutil.copy(params.global_means_path, os.path.join(params.experiment_dir, LocalPackage.MEANS_FILE))
     if params.get("global_stds_path", None) is not None:
-        shutil.copy(params.global_stds_path, os.path.join(params.experiment_dir, os.path.basename(params.global_stds_path)))
+        shutil.copy(params.global_stds_path, os.path.join(params.experiment_dir, LocalPackage.STDS_FILE))
     if params.get("min_path", None) is not None:
-        shutil.copy(params.min_path, os.path.join(params.experiment_dir, os.path.basename(params.min_path)))
+        shutil.copy(params.min_path, os.path.join(params.experiment_dir, LocalPackage.MINS_FILE))
     if params.get("max_path", None) is not None:
-        shutil.copy(params.max_path, os.path.join(params.experiment_dir, os.path.basename(params.max_path)))
+        shutil.copy(params.max_path, os.path.join(params.experiment_dir, LocalPackage.MAXS_FILE))
 
     # write out earth2mip metadata.json
     fcn_mip_data = {
