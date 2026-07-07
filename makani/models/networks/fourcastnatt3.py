@@ -798,19 +798,23 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
 
         self.inp_shape = inp_shape
         self.out_shape = out_shape
-        self.atmo_embed_dim = atmo_embed_dim
-        self.surf_embed_dim = surf_embed_dim
         self.aux_embed_dim = aux_embed_dim
         self.embed_dim = embed_dim
-        # unified-encoder mode: when embed_dim is set, all predicted channels share
-        # a single encoder/decoder pair at that width (FCN3-style). When None, fall
-        # back to the per-pressure-level (per-group) encoder/decoder design.
-        self.unified_encoder = (embed_dim is not None)
+        # single (unified) encoder/decoder over all predicted channels (atmo concat surf).
+        # The per-pressure-level weight-shared encoder path has been retired, so embed_dim
+        # is required.
+        if embed_dim is None:
+            raise ValueError(
+                "fourcastnatt3 requires embed_dim to be set (unified encoder/decoder); "
+                "the per-level encoder path has been removed."
+            )
         self.big_skip = big_skip
         self.checkpointing_level = checkpointing_level
 
-        # currently doesn't support neither history nor future:
-        assert n_history == 0
+        # history is folded into the channel dimension by the preprocessor (flattened-history
+        # layout [dyn_step0, ..., dyn_stepH, static_aux], steps oldest->newest). The encoder
+        # ingests all n_history+1 steps; the decoder predicts a single step.
+        self.n_history = n_history
 
         # compute the downscaled image size
         self.h = int(self.inp_shape[0] // scale_factor)
@@ -833,14 +837,11 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
             decoder_inv_transform = None
 
         # compute static permutations to extract
-        self._precompute_channel_groups(channel_names, aux_channel_names)
+        self._precompute_channel_groups(channel_names, aux_channel_names, n_history)
 
         # compute the total number of internal groups
         self.n_out_chans = self.n_atmo_groups * self.n_atmo_chans + self.n_surf_chans
-        if self.unified_encoder:
-            self.total_embed_dim = self.embed_dim
-        else:
-            self.total_embed_dim = self.n_atmo_groups * self.atmo_embed_dim + self.surf_embed_dim
+        self.total_embed_dim = self.embed_dim
 
         # convert kernel shape to tuple
         kernel_shape = tuple(kernel_shape)
@@ -855,134 +856,46 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         else:
             raise ValueError(f"Unknown activation function {activation_function}")
 
-        if self.unified_encoder:
-            # single encoder/decoder pair over all predicted channels (atmo concat surf).
-            # Trades the per-level weight-sharing prior for a narrower, cheaper processor.
-            self.encoder = DiscreteContinuousEncoder(
-                inp_shape=inp_shape,
-                out_shape=(self.h, self.w),
-                inp_chans=self.n_out_chans,
-                out_chans=self.embed_dim,
-                grid_in=model_grid_type,
-                grid_out=sht_grid_type,
-                kernel_shape=kernel_shape,
-                basis_type=filter_basis_type,
-                inverse_transform=self.isht,
-                activation_function=activation_function,
-                normalization_layer=normalization_layer,
-                layer_scale=layer_scale,
-                mlp_ratio=mlp_ratio,
-                bias=bias,
-                use_mlp=encoder_mlp,
-                use_te=False,
-            )
-            self.decoder = DiscreteContinuousDecoder(
-                inp_shape=(self.h, self.w),
-                out_shape=out_shape,
-                inp_chans=self.embed_dim,
-                out_chans=self.n_out_chans,
-                grid_in=sht_grid_type,
-                grid_out=model_grid_type,
-                kernel_shape=kernel_shape,
-                basis_type=filter_basis_type,
-                inverse_transform=decoder_inv_transform,
-                activation_function=activation_function,
-                normalization_layer=normalization_layer,
-                layer_scale=layer_scale,
-                mlp_ratio=mlp_ratio,
-                bias=bias,
-                use_mlp=encoder_mlp,
-                upsample_sht=upsample_sht,
-                perceiver_decoder=perceiver_decoder,
-                use_te=False,
-            )
-        else:
-            # encoder for the atmospheric channels
-            # TODO: add the groups
-            self.atmo_encoder = DiscreteContinuousEncoder(
-                inp_shape=inp_shape,
-                out_shape=(self.h, self.w),
-                inp_chans=self.n_atmo_chans,
-                out_chans=self.atmo_embed_dim,
-                grid_in=model_grid_type,
-                grid_out=sht_grid_type,
-                kernel_shape=kernel_shape,
-                basis_type=filter_basis_type,
-                inverse_transform=self.isht,
-                activation_function=activation_function,
-                normalization_layer=normalization_layer,
-                layer_scale=layer_scale,
-                mlp_ratio=mlp_ratio,
-                bias=bias,
-                use_mlp=encoder_mlp,
-                use_te=False,
-            )
-
-            # encoder for the surface channels
-            if self.n_surf_chans > 0:
-                self.surf_encoder = DiscreteContinuousEncoder(
-                    inp_shape=inp_shape,
-                    out_shape=(self.h, self.w),
-                    inp_chans=self.n_surf_chans,
-                    out_chans=self.surf_embed_dim,
-                    grid_in=model_grid_type,
-                    grid_out=sht_grid_type,
-                    kernel_shape=kernel_shape,
-                    basis_type=filter_basis_type,
-                    inverse_transform=self.isht,
-                    activation_function=activation_function,
-                    normalization_layer=normalization_layer,
-                    layer_scale=layer_scale,
-                    mlp_ratio=mlp_ratio,
-                    bias=bias,
-                    use_mlp=encoder_mlp,
-                    use_te=False,
-                )
-
-            # decoder for the atmospheric variables
-            self.atmo_decoder = DiscreteContinuousDecoder(
-                inp_shape=(self.h, self.w),
-                out_shape=out_shape,
-                inp_chans=self.atmo_embed_dim,
-                out_chans=self.n_atmo_chans,
-                grid_in=sht_grid_type,
-                grid_out=model_grid_type,
-                kernel_shape=kernel_shape,
-                basis_type=filter_basis_type,
-                inverse_transform=decoder_inv_transform,
-                activation_function=activation_function,
-                normalization_layer=normalization_layer,
-                layer_scale=layer_scale,
-                mlp_ratio=mlp_ratio,
-                bias=bias,
-                use_mlp=encoder_mlp,
-                upsample_sht=upsample_sht,
-                perceiver_decoder=perceiver_decoder,
-                use_te=False,
-            )
-
-            # decoder for the surface variables
-            if self.n_surf_chans > 0:
-                self.surf_decoder = DiscreteContinuousDecoder(
-                    inp_shape=(self.h, self.w),
-                    out_shape=out_shape,
-                    inp_chans=self.surf_embed_dim,
-                    out_chans=self.n_surf_chans,
-                    grid_in=sht_grid_type,
-                    grid_out=model_grid_type,
-                    kernel_shape=kernel_shape,
-                    basis_type=filter_basis_type,
-                    inverse_transform=decoder_inv_transform,
-                    activation_function=activation_function,
-                    normalization_layer=normalization_layer,
-                    layer_scale=layer_scale,
-                    mlp_ratio=mlp_ratio,
-                    bias=bias,
-                    use_mlp=encoder_mlp,
-                    upsample_sht=upsample_sht,
-                    perceiver_decoder=perceiver_decoder,
-                    use_te=False,
-                )
+        # single encoder/decoder pair over all predicted channels (atmo concat surf).
+        self.encoder = DiscreteContinuousEncoder(
+            inp_shape=inp_shape,
+            out_shape=(self.h, self.w),
+            # history is folded into the channel dim: encode all n_history+1 steps
+            inp_chans=self.n_out_chans * (self.n_history + 1),
+            out_chans=self.embed_dim,
+            grid_in=model_grid_type,
+            grid_out=sht_grid_type,
+            kernel_shape=kernel_shape,
+            basis_type=filter_basis_type,
+            inverse_transform=self.isht,
+            activation_function=activation_function,
+            normalization_layer=normalization_layer,
+            layer_scale=layer_scale,
+            mlp_ratio=mlp_ratio,
+            bias=bias,
+            use_mlp=encoder_mlp,
+            use_te=False,
+        )
+        self.decoder = DiscreteContinuousDecoder(
+            inp_shape=(self.h, self.w),
+            out_shape=out_shape,
+            inp_chans=self.embed_dim,
+            out_chans=self.n_out_chans,
+            grid_in=sht_grid_type,
+            grid_out=model_grid_type,
+            kernel_shape=kernel_shape,
+            basis_type=filter_basis_type,
+            inverse_transform=decoder_inv_transform,
+            activation_function=activation_function,
+            normalization_layer=normalization_layer,
+            layer_scale=layer_scale,
+            mlp_ratio=mlp_ratio,
+            bias=bias,
+            use_mlp=encoder_mlp,
+            upsample_sht=upsample_sht,
+            perceiver_decoder=perceiver_decoder,
+            use_te=False,
+        )
 
         # encoder for the auxiliary channels
         if self.n_aux_chans > 0:
@@ -1092,12 +1005,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
 
         # freeze the encoder/decoder
         if freeze_encoder:
-            if self.unified_encoder:
-                frozen_params = list(self.encoder.parameters()) + list(self.decoder.parameters())
-            else:
-                frozen_params = list(self.atmo_encoder.parameters()) + list(self.atmo_decoder.parameters())
-                if hasattr(self, "surf_encoder"):
-                    frozen_params += list(self.surf_encoder.parameters()) + list(self.surf_decoder.parameters())
+            frozen_params = list(self.encoder.parameters()) + list(self.decoder.parameters())
             if hasattr(self, "aux_encoder"):
                 frozen_params += list(self.aux_encoder.parameters())
             if self.big_skip:
@@ -1155,28 +1063,53 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         self,
         channel_names=[],
         aux_channel_names=[],
+        n_history=0,
     ):
         """
         group the channels appropriately into atmospheric pressure levels and surface variables
         """
 
         atmo_chans, surf_chans, dyn_aux_chans, stat_aux_chans, pressure_lvls = get_channel_groups(channel_names, aux_channel_names)
-        aux_chans = dyn_aux_chans + stat_aux_chans
 
         # compute how many channel groups will be kept internally
         self.n_atmo_groups = len(pressure_lvls)
         self.n_atmo_chans = len(atmo_chans) // self.n_atmo_groups
+        self.n_surf_chans = len(surf_chans)
+        self.n_dyn_aux_chans = len(dyn_aux_chans)
+        self.n_stat_aux_chans = len(stat_aux_chans)
+        # aux fed to the encoder: dynamic aux is repeated per history step, static aux once
+        self.n_aux_chans = self.n_dyn_aux_chans * (n_history + 1) + self.n_stat_aux_chans
 
         # make sure they are divisible. Attention! This does not guarantee that the grrouping is correct
         if len(atmo_chans) % self.n_atmo_groups:
             raise ValueError(f"Expected number of atmospheric variables to be divisible by number of atmospheric groups but got {len(atmo_chans)} and {self.n_atmo_groups}")
 
+        # Flattened-history input layout: [dyn_step0, dyn_step1, ..., dyn_stepH, static_aux],
+        # where each dynamic step chunk is (atmo | surf | dynamic aux) of size n_dyn_chans and
+        # steps run oldest (0) -> newest (H). The encoder ingests all history copies of the
+        # dynamic channels (the *_in index sets below); the decoder output and the residual
+        # skip are single-timestep and use the base (step-0-shaped) layout.
+        n_dyn_chans = len(atmo_chans) + len(surf_chans) + len(dyn_aux_chans)
+        self.n_dyn_chans = n_dyn_chans
+
+        atmo_chans_in = atmo_chans.copy()
+        surf_chans_in = surf_chans.copy()
+        dyn_aux_chans_in = dyn_aux_chans.copy()
+        for ih in range(1, n_history + 1):
+            atmo_chans_in += [c + ih * n_dyn_chans for c in atmo_chans]
+            surf_chans_in += [c + ih * n_dyn_chans for c in surf_chans]
+            dyn_aux_chans_in += [c + ih * n_dyn_chans for c in dyn_aux_chans]
+        stat_aux_chans_in = [c + n_history * n_dyn_chans for c in stat_aux_chans]
+        aux_chans_in = dyn_aux_chans_in + stat_aux_chans_in
+
+        # input (history-expanded) index sets gathered by the encoder
+        self.register_buffer("atmo_channels_in", torch.LongTensor(atmo_chans_in), persistent=False)
+        self.register_buffer("surf_channels_in", torch.LongTensor(surf_chans_in), persistent=False)
+        self.register_buffer("aux_channels", torch.LongTensor(aux_chans_in), persistent=False)
+
+        # base (single-timestep) index sets used to scatter the decoder output
         self.register_buffer("atmo_channels", torch.LongTensor(atmo_chans), persistent=False)
         self.register_buffer("surf_channels", torch.LongTensor(surf_chans), persistent=False)
-        self.register_buffer("aux_channels", torch.LongTensor(aux_chans), persistent=False)
-
-        self.n_surf_chans = self.surf_channels.shape[0]
-        self.n_aux_chans = self.aux_channels.shape[0]
 
         return
 
@@ -1184,29 +1117,12 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         """
         forward pass for the encoder
         """
-        if self.unified_encoder:
-            # gather predicted channels (atmo concat surf) and run a single encoder
-            if self.n_surf_chans > 0:
-                x_in = torch.cat([x[..., self.atmo_channels, :, :], x[..., self.surf_channels, :, :]], dim=-3)
-            else:
-                x_in = x[..., self.atmo_channels, :, :]
-            return self.encoder(x_in)
-
-        batchdims = x.shape[:-3]
-
-        # for atmospheric channels the same encoder is applied to each atmospheric level
-        x_atmo = x[..., self.atmo_channels, :, :].reshape(-1, self.n_atmo_chans, *x.shape[-2:])
-        x_out = self.atmo_encoder(x_atmo)
-        x_out = x_out.reshape(*batchdims, self.n_atmo_groups * self.atmo_embed_dim, *x_out.shape[-2:])
-
-        if hasattr(self, "surf_encoder"):
-            x_surf = x[..., self.surf_channels, :, :]
-            x_surf = self.surf_encoder(x_surf)
-            x_out = torch.cat((x_out, x_surf), dim=-3)
-
-        x_out = x_out.reshape(*batchdims, self.total_embed_dim, *x_out.shape[-2:])
-
-        return x_out
+        # gather predicted channels (atmo concat surf) across all history steps and run a single encoder
+        if self.n_surf_chans > 0:
+            x_in = torch.cat([x[..., self.atmo_channels_in, :, :], x[..., self.surf_channels_in, :, :]], dim=-3)
+        else:
+            x_in = x[..., self.atmo_channels_in, :, :]
+        return self.encoder(x_in)
 
     def encode_auxiliary_channels(self, x):
         """
@@ -1237,27 +1153,14 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
 
         batchdims = x.shape[:-3]
 
-        if self.unified_encoder:
-            # single decoder produces all n_out_chans at once, ordered atmo then surf;
-            # scatter back into the canonical channel layout used by the rest of the model.
-            y = self.decoder(x)
-            x_out = torch.zeros(*batchdims, self.n_out_chans, *y.shape[-2:], dtype=y.dtype, device=y.device)
-            n_atmo_out = self.n_atmo_groups * self.n_atmo_chans
-            x_out[..., self.atmo_channels, :, :] = y[..., :n_atmo_out, :, :]
-            if self.n_surf_chans > 0:
-                x_out[..., self.surf_channels, :, :] = y[..., n_atmo_out:, :, :]
-            return x_out
-
-        x_atmo = x[..., : (self.n_atmo_groups * self.atmo_embed_dim), :, :].reshape(-1, self.atmo_embed_dim, *x.shape[-2:])
-        x_atmo = self.atmo_decoder(x_atmo)
-        x_out = torch.zeros(*batchdims, self.n_out_chans, *x_atmo.shape[-2:], dtype=x.dtype, device=x.device)
-        x_out[..., self.atmo_channels, :, :] = x_atmo.reshape(*batchdims, -1, *x_atmo.shape[-2:])
-
-        if hasattr(self, "surf_decoder"):
-            x_surf = x[..., -self.surf_embed_dim :, :, :]
-            x_surf = self.surf_decoder(x_surf)
-            x_out[..., self.surf_channels, :, :] = x_surf.reshape(*batchdims, -1, *x_surf.shape[-2:])
-
+        # single decoder produces all n_out_chans at once, ordered atmo then surf;
+        # scatter back into the canonical channel layout used by the rest of the model.
+        y = self.decoder(x)
+        x_out = torch.zeros(*batchdims, self.n_out_chans, *y.shape[-2:], dtype=y.dtype, device=y.device)
+        n_atmo_out = self.n_atmo_groups * self.n_atmo_chans
+        x_out[..., self.atmo_channels, :, :] = y[..., :n_atmo_out, :, :]
+        if self.n_surf_chans > 0:
+            x_out[..., self.surf_channels, :, :] = y[..., n_atmo_out:, :, :]
         return x_out
 
     def processor_blocks(self, x, x_aux):
@@ -1285,9 +1188,12 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
 
     def forward(self, x):
 
-        # save big skip
+        # save big skip: use only the latest history step (the current state). In the
+        # flattened-history layout steps run oldest->newest, so the newest dynamic chunk
+        # starts at n_history * n_dyn_chans; its first n_out_chans are the predicted channels.
         if self.big_skip:
-            residual = x[..., : self.n_out_chans, :, :].contiguous()
+            skip_offset = self.n_history * self.n_dyn_chans
+            residual = x[..., skip_offset : skip_offset + self.n_out_chans, :, :].contiguous()
 
         # extract embeddings for the auxiliary embeddings
         x_aux = self.encode_auxiliary_channels(x)
