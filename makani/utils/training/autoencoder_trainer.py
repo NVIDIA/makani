@@ -132,8 +132,7 @@ class AutoencoderTrainer(Driver):
             ddp_process_group = comm.get_group("data")
 
         # log gradients to wandb
-        if self.log_to_wandb:
-            wandb.watch(self.model, log="all")
+        self._watch_model(log="all")
 
         # print model
         if self.log_to_screen:

@@ -60,6 +60,30 @@ class Driver(metaclass=abc.ABCMeta):
             for k,v in self.timers.items():
                 self.logger.info(f"{print_prefix}{k} [s]: {v:.2f}")
 
+    def _watch_model(self, log="all"):
+        """Register wandb gradient/parameter logging, unless the model will be torch.compiled.
+
+        ``wandb.watch`` installs per-module/per-parameter hooks that compute histograms via
+        ``.item()``/``.tolist()``. Under ``torch.compile`` these hooks get traced into the graph:
+        every ``.item()`` is a graph break and the parameter ``name`` is specialized as a
+        constant, so dynamo recompiles once per parameter until it hits ``recompile_limit`` and
+        abandons compilation for that frame. The hook-based design is fundamentally incompatible
+        with a single compiled graph, so we skip watching when ``jit_mode`` enables compilation.
+        (If gradient/parameter histograms are needed under compile, log them out-of-graph in the
+        training loop after ``backward()`` instead.)
+        """
+        if not self.log_to_wandb:
+            return
+        if self.params.get("jit_mode", "none") == "inductor":
+            if self.log_to_screen:
+                self.logger.info(
+                    "Skipping wandb.watch under jit_mode=inductor: its hooks would be traced into "
+                    "the compiled graph and trigger a recompile per parameter (recompile_limit). "
+                    "Gradient/parameter histograms are disabled under torch.compile."
+                )
+            return
+        wandb.watch(self.model, log=log)
+
     def __init__(self, params: YParams = None, world_rank: Optional[int] = 0, device: Optional[str] = None):
         # define timer dict
         self.timers = {}
