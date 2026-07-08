@@ -1155,5 +1155,75 @@ class TestPreprocessor2DBasic(unittest.TestCase):
         self.assertIn("input_noise state", msg)
 
 
+class TestPreprocessor2DStochasticPhysics(unittest.TestCase):
+    """The preprocessor owns the SPPT-style stochastic-physics module and drives its state."""
+
+    def setUp(self):
+        set_seed(333)
+        self.params = get_default_parameters()
+        # fields the real driver derives but get_default_parameters() does not set
+        self.params.dhours = 6
+        self.params.N_in_predicted_channels = self.params.N_in_channels
+        self.params.stochastic_physics = {
+            "type": "diffusion", "n_channels": 1, "sigma": 0.5,
+            "lmax": 20, "kT": [3.15e-2], "clip": 0.8,
+        }
+        self.pp = Preprocessor2D(self.params)
+        self.B = self.params.batch_size
+        self.C = self.params.N_out_channels
+        self.H = self.params.img_shape_x
+        self.W = self.params.img_shape_y
+
+    def _fields(self):
+        inp = torch.randn(self.B, self.C, self.H, self.W)
+        pred = torch.randn(self.B, self.C, self.H, self.W)
+        return inp, pred
+
+    def test_module_constructed_from_config(self):
+        """A stochastic_physics config block attaches the module to the preprocessor."""
+        self.assertTrue(hasattr(self.pp, "stochastic_physics"))
+
+    def test_apply_is_noop_without_config(self):
+        """apply_stochastic_physics is a pass-through when nothing is configured."""
+        pp = Preprocessor2D(get_default_parameters())
+        self.assertFalse(hasattr(pp, "stochastic_physics"))
+        inp, pred = self._fields()
+        out = pp.apply_stochastic_physics(inp, pred)
+        self.assertTrue(compare_tensors("sp_noop", out, pred, atol=0.0, rtol=0.0))
+
+    def test_zero_tendency_no_perturbation(self):
+        """Through the preprocessor: pred == baseline => output == pred."""
+        self.pp.update_internal_state(replace_state=True)
+        inp, _ = self._fields()
+        out = self.pp.apply_stochastic_physics(inp, inp.clone())
+        self.assertTrue(compare_tensors("sp_zero_tendency", out, inp, atol=1e-6, verbose=True))
+
+    def test_nonzero_tendency_is_perturbed(self):
+        self.pp.update_internal_state(replace_state=True)
+        inp, pred = self._fields()
+        out = self.pp.apply_stochastic_physics(inp, pred)
+        self.assertFalse(compare_tensors("sp_nonzero_tendency", out, pred, atol=1e-6))
+
+    def test_update_internal_state_advances_module(self):
+        """update_internal_state drives the SP noise (AR step changes the perturbation)."""
+        self.pp.update_internal_state(replace_state=True)
+        inp, pred = self._fields()
+        out1 = self.pp.apply_stochastic_physics(inp, pred)
+        self.pp.update_internal_state(replace_state=False)
+        out2 = self.pp.apply_stochastic_physics(inp, pred)
+        self.assertFalse(compare_tensors("sp_ar_step", out1, out2, atol=1e-6))
+
+    def test_set_rng_makes_perturbation_reproducible(self):
+        """set_rng reseeds+resets the SP module, so the same seed reproduces the field."""
+        inp, pred = self._fields()
+        self.pp.set_rng(reset=True, seed=7)
+        self.pp.update_internal_state(replace_state=True)
+        out_a = self.pp.apply_stochastic_physics(inp, pred)
+        self.pp.set_rng(reset=True, seed=7)
+        self.pp.update_internal_state(replace_state=True)
+        out_b = self.pp.apply_stochastic_physics(inp, pred)
+        self.assertTrue(compare_tensors("sp_reproducible", out_a, out_b, atol=0.0, rtol=0.0))
+
+
 if __name__ == "__main__":
     unittest.main()
