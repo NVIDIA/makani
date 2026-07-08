@@ -211,6 +211,7 @@ class IsotropicGaussianRandomFieldS2(BaseNoiseS2):
         sigma=1.0,
         alpha=0.0,
         grid_type="equiangular",
+        lmax=None,
         seed=333,
         reflect=False,
         learnable=False,
@@ -241,7 +242,7 @@ class IsotropicGaussianRandomFieldS2(BaseNoiseS2):
         learnable : bool, default is False
             Parameter which enables learnable Gaussian noise
         """
-        super().__init__(img_shape=img_shape, batch_size=batch_size, num_channels=num_channels, num_time_steps=num_time_steps, grid_type=grid_type, seed=seed, reflect=reflect)
+        super().__init__(img_shape=img_shape, batch_size=batch_size, num_channels=num_channels, num_time_steps=num_time_steps, grid_type=grid_type, lmax=lmax, seed=seed, reflect=reflect)
 
         # stash config for extra_repr
         self.sigma = sigma
@@ -348,6 +349,7 @@ class DiffusionNoiseS2(BaseNoiseS2):
         kT=0.5 * (500.0 / 6370.0) ** 2,
         lambd=1.0,
         grid_type="equiangular",
+        lmax=None,
         seed=333,
         reflect=False,
         learnable =False,
@@ -378,7 +380,7 @@ class DiffusionNoiseS2(BaseNoiseS2):
         learnable : bool, default is False
             Parameter which enables learnable Diffusion noise
         """
-        super().__init__(img_shape=img_shape, batch_size=batch_size, num_channels=num_channels, num_time_steps=num_time_steps, grid_type=grid_type, seed=seed, reflect=reflect)
+        super().__init__(img_shape=img_shape, batch_size=batch_size, num_channels=num_channels, num_time_steps=num_time_steps, grid_type=grid_type, lmax=lmax, seed=seed, reflect=reflect)
 
         # stash config for extra_repr (store originals before processing into tensors below)
         self.sigma = sigma
