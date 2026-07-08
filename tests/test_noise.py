@@ -870,5 +870,107 @@ class TestDiffusionNoiseS2(unittest.TestCase):
         )
 
 
+# ===========================================================================
+# 5. lmax band-limit forwarding
+# ===========================================================================
+@parameterized_class(("device",), _devices)
+class TestNoiseLmaxTruncation(unittest.TestCase):
+    """Regression tests for the ``lmax`` band-limit argument.
+
+    ``lmax`` used to be swallowed by ``**kwargs`` in ``DiffusionNoiseS2`` and
+    ``IsotropicGaussianRandomFieldS2`` and never forwarded to ``BaseNoiseS2``, so
+    the config-level noise band-limit (``input_noise.lmax``) was a silent no-op.
+    These tests pin the forwarding so the spectral truncation actually takes
+    effect. Under the old code, the ``*_lmax_forwarded`` cases fail because the
+    explicit ``lmax`` is ignored and ``noise.lmax`` stays at the full band.
+    """
+
+    def setUp(self):
+        disable_tf32()
+        set_seed(333)
+
+        self.B = BATCH_SIZE
+        self.T = NUM_TIME_STEPS
+        self.C = NUM_CHANNELS
+        # torch-harmonics default truncation for an equiangular grid: (nlat + 1) // 2
+        self.default_lmax = (IMG_SHAPE[0] + 1) // 2
+        # a strictly smaller, resolvable band
+        self.capped_lmax = self.default_lmax // 2
+        self.assertGreater(self.capped_lmax, 1)
+
+    def _make_diffusion(self, lmax):
+        return DiffusionNoiseS2(
+            img_shape=IMG_SHAPE, batch_size=self.B, num_channels=self.C,
+            num_time_steps=self.T, lambd=0.5, lmax=lmax, seed=333,
+        ).to(self.device)
+
+    def _make_grf(self, lmax):
+        return IsotropicGaussianRandomFieldS2(
+            img_shape=IMG_SHAPE, batch_size=self.B, num_channels=self.C,
+            num_time_steps=self.T, sigma=1.0, alpha=0.0, lmax=lmax, seed=333,
+        ).to(self.device)
+
+    # --- default (lmax=None) resolves to the full equiangular band ---
+    def test_diffusion_default_lmax(self):
+        noise = self._make_diffusion(lmax=None)
+        self.assertEqual(noise.lmax, self.default_lmax)
+        self.assertEqual(noise.isht.lmax, self.default_lmax)
+
+    def test_grf_default_lmax(self):
+        noise = self._make_grf(lmax=None)
+        self.assertEqual(noise.lmax, self.default_lmax)
+        self.assertEqual(noise.isht.lmax, self.default_lmax)
+
+    # --- explicit lmax is forwarded to BaseNoiseS2/the iSHT (the regression) ---
+    def test_diffusion_lmax_forwarded(self):
+        noise = self._make_diffusion(lmax=self.capped_lmax)
+        self.assertEqual(noise.lmax, self.capped_lmax)
+        self.assertEqual(noise.isht.lmax, self.capped_lmax)
+        # spectral state carries the truncated bandwidth: (B, T, C, lmax, mmax, 2)
+        self.assertEqual(noise.state.shape[-3], self.capped_lmax)
+        self.assertEqual(noise.state.shape[-2], self.capped_lmax)
+
+    def test_grf_lmax_forwarded(self):
+        noise = self._make_grf(lmax=self.capped_lmax)
+        self.assertEqual(noise.lmax, self.capped_lmax)
+        self.assertEqual(noise.isht.lmax, self.capped_lmax)
+
+    # --- truncation is purely spectral: the sampled field stays on the full grid ---
+    def test_diffusion_output_grid_unchanged(self):
+        noise = self._make_diffusion(lmax=self.capped_lmax)
+        noise.update(replace_state=True)
+        with torch.no_grad():
+            out = noise()
+        self.assertEqual(out.shape, (self.B, self.T, self.C, IMG_SHAPE[0], IMG_SHAPE[1]))
+        self.assertTrue(torch.isfinite(out).all())
+
+    def test_grf_output_grid_unchanged(self):
+        noise = self._make_grf(lmax=self.capped_lmax)
+        noise.update(replace_state=True)
+        with torch.no_grad():
+            out = noise()
+        self.assertEqual(out.shape, (self.B, self.T, self.C, IMG_SHAPE[0], IMG_SHAPE[1]))
+        self.assertTrue(torch.isfinite(out).all())
+
+    # --- capping bounds the finest scale: a rough (small-kT) channel is smoother ---
+    def test_diffusion_cap_reduces_fine_scale_roughness(self):
+        """A capped band removes high-l power, so the field's grid-scale roughness
+        (mean-square nearest-neighbour difference) drops. Uses a single small-kT
+        channel where the high-l tail dominates, so the effect is unambiguous."""
+        def roughness(lmax):
+            n = DiffusionNoiseS2(
+                img_shape=IMG_SHAPE, batch_size=self.B, num_channels=1,
+                num_time_steps=self.T, kT=[1e-5], lambd=0.5, lmax=lmax, seed=333,
+            ).to(self.device)
+            n.update(replace_state=True)
+            with torch.no_grad():
+                f = n()  # (B, T, 1, H, W)
+            dlat = (f[..., 1:, :] - f[..., :-1, :]).pow(2).mean()
+            dlon = (f[..., :, 1:] - f[..., :, :-1]).pow(2).mean()
+            return (dlat + dlon).item()
+
+        self.assertLess(roughness(self.capped_lmax), roughness(self.default_lmax))
+
+
 if __name__ == "__main__":
     unittest.main()

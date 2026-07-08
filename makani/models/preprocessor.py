@@ -25,19 +25,7 @@ from makani.utils.grids import GridQuadrature, grid_to_quadrature_rule
 from makani.mpu.mappings import copy_to_parallel_region
 
 from makani.models.preprocessor_helpers import get_bias_correction, get_static_features
-
-
-@torch.compiler.disable
-def _run_eager(fn, *args, **kwargs):
-    """Run a callable outside torch.compile (forces a graph break).
-
-    The noise field is complex-valued (torch.complex + inverse SHT) and inductor's Triton
-    backend cannot codegen complex dtypes (KeyError: 'complex64'). A method-level
-    @torch.compiler.disable on the noise module's forward is NOT honored when dynamo inlines
-    the nn.Module call (it traces straight into it), whereas a disable on a plain function call
-    like this one is respected — so we break at the call site instead.
-    """
-    return fn(*args, **kwargs)
+from makani.models.noise import build_noise, noise_seed_reflect, run_eager as _run_eager
 
 
 class Preprocessor2D(nn.Module):
@@ -107,19 +95,11 @@ class Preprocessor2D(nn.Module):
             noise_params = params.input_noise
             centered_noise = noise_params.get("centered", False)
 
-            # noise seed: important, this will be passed down as-is
-            if not centered_noise:
-                self.noise_base_seed = 333 + comm.get_rank("model") + comm.get_size("model") * comm.get_rank("data")
-                reflect = False
-            else:
-                # here, ranks (0,1), (2,3), ... should map to the same eff rank, since they only differ by reflection but should otherwise get the
-                # same seed
-                ensemble_eff_rank = comm.get_rank("ensemble") // 2
-                reflect = (comm.get_rank("ensemble") % 2 == 0)
-                self.noise_base_seed = 333 + comm.get_rank("model") + comm.get_size("model") * ensemble_eff_rank + comm.get_size("model") * comm.get_size("ensemble") * comm.get_rank("batch")
-
             if "type" not in noise_params:
                 raise ValueError("Error, please specify an input noise type")
+
+            # per-member seed + antithetic (reflect) flag; input noise uses the base stream
+            self.noise_base_seed, reflect = noise_seed_reflect(centered_noise)
 
             self.input_noise_mode = noise_params.get("mode", "concatenate")
 
@@ -132,56 +112,24 @@ class Preprocessor2D(nn.Module):
             else:
                 raise NotImplementedError(f"Error, input noise mode {self.input_noise_mode} not supported.")
 
-            noise_lmax = noise_params.get("lmax", None)
+            self.input_noise = build_noise(
+                noise_params,
+                img_shape=self.img_shape_resampled,
+                batch_size=params.batch_size,
+                num_channels=noise_channels,
+                num_time_steps=self.n_history + 1,
+                grid_type=params.model_grid_type,
+                seed=self.noise_base_seed,
+                reflect=reflect,
+                default_lambd=params.dt * params.dhours / 6.0,
+            )
 
-            if noise_params["type"] == "diffusion":
-                from makani.models.noise import DiffusionNoiseS2
+        # stochastic physics: SPPT-style multiplicative tendency perturbation, applied by the
+        # stepper after the model forward. Independent of (and composable with) input_noise.
+        if params.get("stochastic_physics", None) is not None:
+            from makani.models.stochastic_physics import StochasticPhysics
 
-                # set the spatio-temporal correlation length
-                kT = noise_params.get("kT", 0.5 * (100 / 6370) ** 2)
-                lambd = noise_params.get("lambd", params.dt * params.dhours / 6.0)
-
-                self.input_noise = DiffusionNoiseS2(
-                    img_shape=self.img_shape_resampled,
-                    batch_size=params.batch_size,
-                    num_channels=noise_channels,
-                    num_time_steps=self.n_history + 1,
-                    sigma=noise_params.get("sigma", 1.0),
-                    kT=kT,  # use various scales
-                    lambd=lambd,  # use suggestion here: tau=6h
-                    grid_type=params.model_grid_type,
-                    lmax=noise_lmax,
-                    seed=self.noise_base_seed,
-                    reflect=reflect,
-                    learnable=noise_params.get("learnable", False)
-                )
-            elif noise_params["type"] == "white":
-                from makani.models.noise import IsotropicGaussianRandomFieldS2
-
-                self.input_noise = IsotropicGaussianRandomFieldS2(
-                    img_shape=self.img_shape_resampled,
-                    batch_size=params.batch_size,
-                    num_channels=noise_channels,
-                    num_time_steps=self.n_history + 1,
-                    sigma=noise_params.get("sigma", 1.0),
-                    alpha=noise_params.get("alpha", 0.0),
-                    grid_type=params.model_grid_type,
-                    lmax=noise_lmax,
-                    seed=self.noise_base_seed,
-                    reflect=reflect,
-                    learnable=noise_params.get("learnable", False)
-                )
-            elif noise_params["type"] == "dummy":
-                from makani.models.noise import DummyNoiseS2
-
-                self.input_noise = DummyNoiseS2(
-                    img_shape=self.img_shape_resampled,
-                    batch_size=params.batch_size,
-                    num_channels=noise_channels,
-                    num_time_steps=self.n_history + 1,
-                )
-            else:
-                raise NotImplementedError(f'Error, input noise type {noise_params["type"]} not supported.')
+            self.stochastic_physics = StochasticPhysics(params)
 
     def flatten_history(self, x):
         # flatten input
@@ -498,6 +446,8 @@ class Preprocessor2D(nn.Module):
             self.input_noise.set_rng(seed)
             if reset:
                 self.input_noise.reset()
+        if hasattr(self, "stochastic_physics"):
+            self.stochastic_physics.set_rng(seed=seed, reset=reset)
         return
 
     def get_internal_state(self, tensor=False):
@@ -526,7 +476,20 @@ class Preprocessor2D(nn.Module):
     def update_internal_state(self, replace_state=False, batch_size=None):
         if hasattr(self, "input_noise"):
             self.input_noise.update(replace_state=replace_state, batch_size=batch_size)
+        if hasattr(self, "stochastic_physics"):
+            self.stochastic_physics.update(replace_state=replace_state, batch_size=batch_size)
         return
+
+    def apply_stochastic_physics(self, inp, pred):
+        """Apply the SPPT-style tendency perturbation, if configured.
+
+        ``inp`` is the raw (physical) input for the current step and ``pred`` the denormalized
+        model prediction. No-op when ``stochastic_physics`` is not configured, so the stepper
+        can call it unconditionally.
+        """
+        if hasattr(self, "stochastic_physics"):
+            pred = self.stochastic_physics(inp, pred)
+        return pred
 
     def append_unpredicted_features(self, inp, target=False):
         if self.training:

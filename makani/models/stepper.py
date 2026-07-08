@@ -74,6 +74,9 @@ class SingleStepWrapper(nn.Module):
         # undo normalization
         y = self.preprocessor.history_denormalize(yn, target=True)
 
+        # SPPT-style multiplicative tendency perturbation (no-op unless configured)
+        y = self.preprocessor.apply_stochastic_physics(inp, y)
+
         return y
 
 
@@ -142,6 +145,11 @@ class MultiStepWrapper(nn.Module):
             # will have been updated later:
             pred = self.preprocessor.history_denormalize(predn, target=True)
 
+            # SPPT-style multiplicative tendency perturbation (no-op unless configured).
+            # Applied before append_history so the perturbed state feeds the next rollout step,
+            # letting the spread grow through the learned dynamics.
+            pred = self.preprocessor.apply_stochastic_physics(inpt, pred)
+
             # append output
             result.append(pred)
 
@@ -184,6 +192,9 @@ class MultiStepWrapper(nn.Module):
         # important, remove normalization here,
         # because otherwise normalization stats are already outdated
         y = self.preprocessor.history_denormalize(yn, target=True)
+
+        # SPPT-style multiplicative tendency perturbation (no-op unless configured)
+        y = self.preprocessor.apply_stochastic_physics(inp, y)
 
         return y
 

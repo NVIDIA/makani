@@ -667,3 +667,97 @@ class DummyNoiseS2(BaseNoiseS2):
             self.update()
 
         return state
+
+
+@torch.compiler.disable
+def run_eager(fn, *args, **kwargs):
+    """Run a callable outside torch.compile (forces a graph break).
+
+    The noise field is complex-valued (torch.complex + inverse SHT) and inductor's Triton
+    backend cannot codegen complex dtypes (KeyError: 'complex64'). A method-level
+    @torch.compiler.disable on the noise module's forward is NOT honored when dynamo inlines
+    the nn.Module call (it traces straight into it), whereas a disable on a plain function call
+    like this one is respected — so we break at the call site instead.
+    """
+    return fn(*args, **kwargs)
+
+
+def noise_seed_reflect(centered: bool, seed_offset: int = 0):
+    """Derive the per-rank base seed and reflection flag for a noise source.
+
+    Mirrors the seeding used for the input noise so that every ensemble member gets an
+    independent realization while model-parallel ranks stay consistent. ``seed_offset``
+    lets independent noise sources (e.g. input noise vs. stochastic physics) draw from
+    decorrelated streams while keeping the same per-member structure.
+
+    centered=False: each ensemble member is fully independent.
+    centered=True: antithetic pairing -- ranks (0,1), (2,3), ... share a seed and differ
+    only by a sign flip (variance reduction for the ensemble estimator).
+    """
+    if not centered:
+        seed = 333 + seed_offset + comm.get_rank("model") + comm.get_size("model") * comm.get_rank("data")
+        reflect = False
+    else:
+        ensemble_eff_rank = comm.get_rank("ensemble") // 2
+        reflect = (comm.get_rank("ensemble") % 2 == 0)
+        seed = (
+            333 + seed_offset + comm.get_rank("model")
+            + comm.get_size("model") * ensemble_eff_rank
+            + comm.get_size("model") * comm.get_size("ensemble") * comm.get_rank("batch")
+        )
+    return seed, reflect
+
+
+def build_noise(noise_params, *, img_shape, batch_size, num_channels, num_time_steps, grid_type, seed, reflect, default_lambd=1.0):
+    """Factory that constructs a noise module from a config dict.
+
+    Centralizes the type dispatch so both the input-noise path and the stochastic-physics
+    module share a single construction routine. ``num_channels`` is passed explicitly (the
+    input-noise "perturb" mode resolves it from the perturbed channel list, so it is not read
+    from ``noise_params`` here). ``default_lambd`` supplies the temporal correlation default
+    (typically dt*dhours/6h) since it depends on the dataset cadence.
+    """
+    ntype = noise_params.get("type", None)
+    if ntype is None:
+        raise ValueError("Error, please specify a noise type")
+
+    lmax = noise_params.get("lmax", None)
+
+    if ntype == "diffusion":
+        return DiffusionNoiseS2(
+            img_shape=img_shape,
+            batch_size=batch_size,
+            num_channels=num_channels,
+            num_time_steps=num_time_steps,
+            sigma=noise_params.get("sigma", 1.0),
+            kT=noise_params.get("kT", 0.5 * (100 / 6370) ** 2),
+            lambd=noise_params.get("lambd", default_lambd),
+            grid_type=grid_type,
+            lmax=lmax,
+            seed=seed,
+            reflect=reflect,
+            learnable=noise_params.get("learnable", False),
+        )
+    elif ntype == "white":
+        return IsotropicGaussianRandomFieldS2(
+            img_shape=img_shape,
+            batch_size=batch_size,
+            num_channels=num_channels,
+            num_time_steps=num_time_steps,
+            sigma=noise_params.get("sigma", 1.0),
+            alpha=noise_params.get("alpha", 0.0),
+            grid_type=grid_type,
+            lmax=lmax,
+            seed=seed,
+            reflect=reflect,
+            learnable=noise_params.get("learnable", False),
+        )
+    elif ntype == "dummy":
+        return DummyNoiseS2(
+            img_shape=img_shape,
+            batch_size=batch_size,
+            num_channels=num_channels,
+            num_time_steps=num_time_steps,
+        )
+    else:
+        raise NotImplementedError(f"Error, noise type {ntype} not supported.")
