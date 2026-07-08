@@ -73,6 +73,7 @@ def get_default_parameters():
 
     # dataset related
     params.dt = 1
+    params.dhours = 1  # dataset cadence in hours; set from data by the driver in real runs
     params.n_history = 0
     params.n_future = 0
     params.normalization = "none"

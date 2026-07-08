@@ -1161,8 +1161,7 @@ class TestPreprocessor2DStochasticPhysics(unittest.TestCase):
     def setUp(self):
         set_seed(333)
         self.params = get_default_parameters()
-        # fields the real driver derives but get_default_parameters() does not set
-        self.params.dhours = 6
+        # N_in_predicted_channels is derived by the driver; set it for the standalone test
         self.params.N_in_predicted_channels = self.params.N_in_channels
         self.params.stochastic_physics = {
             "type": "diffusion", "n_channels": 1, "sigma": 0.5,
