@@ -409,7 +409,7 @@ class NeuralOperatorBlock(nn.Module):
         return x
 
 
-class AtmoSphericNeuralOperatorNet(nn.Module):
+class AtmoSphericNeuralOperatorNet31(nn.Module):
     """
     Backbone of the FourCastNet2 architecture. Uses a Spherical Neural Operator which is derived from the
     Spherical Fourier Neural Operator and augmented with localized spherical Neural Operator Convolutions.
@@ -862,7 +862,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
 # this part exposes the model to modulus by constructing modulus Modules
 @dataclass
 class AtmoSphericNeuralOperatorNetMetaData(ModelMetaData):
-    name: str = "FCN3"
+    name: str = "FCN3.1"
 
     jit: bool = False
     cuda_graphs: bool = False
@@ -870,4 +870,4 @@ class AtmoSphericNeuralOperatorNetMetaData(ModelMetaData):
     amp_gpu: bool = True
 
 
-FCN3 = physicsnemo.Module.from_torch(AtmoSphericNeuralOperatorNet, AtmoSphericNeuralOperatorNetMetaData())
+FCN3 = physicsnemo.Module.from_torch(AtmoSphericNeuralOperatorNet31, AtmoSphericNeuralOperatorNetMetaData())
