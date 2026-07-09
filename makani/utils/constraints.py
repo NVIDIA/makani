@@ -31,11 +31,22 @@ class NonNegativeConstraint(nn.Module):
     zero sits at x_norm = -bias/scale. The offset = bias/scale is precomputed
     in the constructor so the forward pass is cheap.
 
-    Training mode: smooth multiplicative approximation x*sigmoid(x/eps) applied
-    in the shifted (physical-zero-centered) space so gradients flow for slightly
-    negative values.
+    Training mode: a smooth soft clamp applied in the shifted (physical-zero-centered)
+    space so gradients flow for slightly negative values. Two shapes are available via
+    ``mode``:
 
-    Eval/inference mode: hard clamp, guaranteeing x_raw >= 0 before any
+      - "silu" (default): ``x * sigmoid(x/eps)``. Smooth, but *non-monotonic* -- it dips
+        below zero for x < 0 with a negative gradient there. For a channel whose target
+        sits at the physical-zero floor (e.g. stratospheric specific humidity q50), that
+        negative-side gradient drives the prediction ever more negative until the gradient
+        vanishes, a self-reinforcing collapse to 0 with no way back.
+      - "softplus": a leaky blend ``leak*x + (1-leak)*eps*softplus(x/eps)``. Monotonic
+        (gradient > 0 everywhere) so a below-target prediction is always pushed up, with a
+        gradient floor of ``leak`` so an already-collapsed channel can still recover. It is
+        identity on the bulk (large x), matching "silu" spectrally, and only lifts the floor
+        slightly (physical zero -> ~(1-leak)*eps*ln2), which nudges values off the dead floor.
+
+    Eval/inference mode (both): hard clamp, guaranteeing x_raw >= 0 before any
     downstream conservation corrections.
 
     Args:
@@ -45,11 +56,17 @@ class NonNegativeConstraint(nn.Module):
         bias:           normalization bias tensor, shape (1, C, 1, 1) or None.
         scale:          normalization scale tensor, shape (1, C, 1, 1) or None.
         eps:            transition width for the soft clamp (normalized units).
+        mode:           "silu" (default, legacy) or "softplus" (monotonic, recommended).
+        leak:           negative-side gradient floor for the "softplus" mode (ignored for "silu").
     """
 
-    def __init__(self, channel_names, names_to_clamp, bias=None, scale=None, eps=0.1):
+    def __init__(self, channel_names, names_to_clamp, bias=None, scale=None, eps=0.1, mode="silu", leak=0.02):
         super().__init__()
+        if mode not in ("silu", "softplus"):
+            raise ValueError(f"NonNegativeConstraint mode must be 'silu' or 'softplus', got {mode!r}")
         self.eps = eps
+        self.mode = mode
+        self.leak = leak
 
         # resolve names to indices, skipping any not present in channel_names
         chan_idx = [channel_names.index(n) for n in names_to_clamp if n in channel_names]
@@ -73,7 +90,10 @@ class NonNegativeConstraint(nn.Module):
         if self.training:
             # shift so physical zero maps to 0, apply smooth clamp, shift back
             w_shifted = w + offset if offset is not None else w
-            w = w_shifted * torch.sigmoid(w_shifted / self.eps)
+            if self.mode == "silu":
+                w = w_shifted * torch.sigmoid(w_shifted / self.eps)
+            else:  # "softplus": monotonic leaky blend (no collapse-inducing negative-gradient dip)
+                w = self.leak * w_shifted + (1.0 - self.leak) * self.eps * F.softplus(w_shifted / self.eps)
             if offset is not None:
                 w = w - offset
         else:

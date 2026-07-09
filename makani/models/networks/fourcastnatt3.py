@@ -772,7 +772,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         hard_thresholding_fraction=1.0,
         sfno_block_frequency=2,
         big_skip=False,
-        clamp_water=False,
+        clamp_water="none",
         hydrostatic_balance_lambda=0.0,
         hydrostatic_balance_use_moist_air_formula=True,
         normalization_means=None,
@@ -981,13 +981,21 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
             ).float()
 
         # controlled output nonnegativity constraint on water channels
-        if clamp_water:
+        # clamp_water selects the nonnegativity soft clamp: "none" disables it, "silu" (legacy)
+        # or "softplus" (monotonic, recommended) pick the training-mode clamp shape. Accept the
+        # legacy boolean too (True -> "silu", False -> "none").
+        if isinstance(clamp_water, bool):
+            clamp_water = "silu" if clamp_water else "none"
+        if clamp_water not in ("none", "silu", "softplus"):
+            raise ValueError(f"clamp_water must be one of 'none', 'silu', 'softplus' (or bool), got {clamp_water!r}")
+
+        if clamp_water != "none":
             from makani.utils.constraints import NonNegativeConstraint
             water_chan_names = [channel_names[i] for i in get_water_channels(channel_names)]
             if water_chan_names:
                 bias_buf  = torch.as_tensor(normalization_means).view(1, -1, 1, 1) if normalization_means is not None else None
                 scale_buf = torch.as_tensor(normalization_stds).view(1, -1, 1, 1)  if normalization_stds  is not None else None
-                self.nonneg_constraint = NonNegativeConstraint(channel_names, water_chan_names, bias=bias_buf, scale=scale_buf)
+                self.nonneg_constraint = NonNegativeConstraint(channel_names, water_chan_names, bias=bias_buf, scale=scale_buf, mode=clamp_water)
             
         if hydrostatic_balance_lambda > 0.0:
             from makani.utils.constraints import HydrostaticBalanceProjection

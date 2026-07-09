@@ -365,10 +365,11 @@ class TestNonNegativeConstraint(unittest.TestCase):
         return c.to(self.device)
 
     # --- eval / hard clamp ---
-    def test_eval_hard_clamp_no_normalization(self):
+    @parameterized.expand([("silu",), ("softplus",)])
+    def test_eval_hard_clamp_no_normalization(self, mode):
         """Eval mode: constrained channels are >= 0; unconstrained channels unchanged."""
         B, C, H, W = 2, len(self.ALL_CHANNELS), 8, 8
-        c = self._make()
+        c = self._make(mode=mode)
         c.eval()
         x = torch.randn(B, C, H, W, device=self.device)
         y = c(x)
@@ -376,12 +377,13 @@ class TestNonNegativeConstraint(unittest.TestCase):
         unconstrained = [i for i in range(C) if i not in self.CLAMP_IDX]
         self.assertTrue(compare_tensors("unconstrained channels", y[:, unconstrained, :, :], x[:, unconstrained, :, :]))
 
-    def test_eval_hard_clamp_with_normalization(self):
+    @parameterized.expand([("silu",), ("softplus",)])
+    def test_eval_hard_clamp_with_normalization(self, mode):
         """Eval mode: x_raw = y_norm * scale + bias >= 0 after clamping."""
         B, C, H, W = 2, len(self.ALL_CHANNELS), 6, 6
         means = torch.tensor([0.0, 5.0, 270.0, 3.0, 250.0])
         stds  = torch.tensor([1.0, 2.0,  10.0, 1.5,   8.0])
-        c = self._make(means=means, stds=stds)
+        c = self._make(means=means, stds=stds, mode=mode)
         c.eval()
         x = torch.randn(B, C, H, W, device=self.device) * 3.0
         y = c(x)
@@ -389,52 +391,57 @@ class TestNonNegativeConstraint(unittest.TestCase):
             x_raw = y[:, ci, :, :] * stds[ci].item() + means[ci].item()
             self.assertTrue((x_raw >= -1e-6).all().item(), f"channel {self.ALL_CHANNELS[ci]} has negative physical values")
 
-    def test_eval_positive_input_unchanged(self):
+    @parameterized.expand([("silu",), ("softplus",)])
+    def test_eval_positive_input_unchanged(self, mode):
         """Eval mode: values already above physical zero are not modified."""
         B, C, H, W = 2, len(self.ALL_CHANNELS), 4, 4
         means = torch.tensor([0.0, 1.0, 270.0, 2.0, 250.0])
         stds  = torch.ones(len(self.ALL_CHANNELS))
-        c = self._make(means=means, stds=stds)
+        c = self._make(means=means, stds=stds, mode=mode)
         c.eval()
         x = torch.ones(B, C, H, W, device=self.device) * 5.0
         y = c(x)
         self.assertTrue(compare_tensors("positive inputs unchanged", y, x))
 
     # --- training / soft clamp ---
-    def test_train_slightly_negative_not_zeroed(self):
+    @parameterized.expand([("silu",), ("softplus",)])
+    def test_train_slightly_negative_not_zeroed(self, mode):
         """Training mode: slightly negative values are not exactly zeroed (gradient path open)."""
         B, C, H, W = 1, len(self.ALL_CHANNELS), 4, 4
-        c = self._make(names_to_clamp=["q850"])
+        c = self._make(names_to_clamp=["q850"], mode=mode)
         c.train()
         x = torch.full((B, C, H, W), -0.05, device=self.device)
         y = c(x)
         self.assertFalse((y[:, [1], :, :] == 0).all().item())
 
-    def test_train_large_positive_identity(self):
+    @parameterized.expand([("silu",), ("softplus",)])
+    def test_train_large_positive_identity(self, mode):
         """Training mode: large positive values pass through essentially unchanged."""
         B, C, H, W = 2, len(self.ALL_CHANNELS), 4, 4
-        c = self._make(eps=0.1)
+        c = self._make(eps=0.1, mode=mode)
         c.train()
         x = torch.ones(B, C, H, W, device=self.device) * 5.0
         y = c(x)
         self.assertTrue(compare_tensors("large positive passthrough", y[:, self.CLAMP_IDX, :, :], x[:, self.CLAMP_IDX, :, :], atol=1e-3))
 
-    def test_train_gradient_flows(self):
+    @parameterized.expand([("silu",), ("softplus",)])
+    def test_train_gradient_flows(self, mode):
         """Training mode: gradient is nonzero for slightly negative inputs."""
         B, C, H, W = 1, len(self.ALL_CHANNELS), 4, 4
-        c = self._make()
+        c = self._make(mode=mode)
         c.train()
         x = torch.full((B, C, H, W), -0.2, device=self.device, requires_grad=True)
         c(x).sum().backward()
         self.assertIsNotNone(x.grad)
         self.assertFalse((x.grad[:, self.CLAMP_IDX, :, :] == 0).all().item())
 
-    def test_train_normalization_offset(self):
+    @parameterized.expand([("silu",), ("softplus",)])
+    def test_train_normalization_offset(self, mode):
         """Training mode: with normalization, the clamp boundary is at physical zero."""
         B, C, H, W = 1, len(self.ALL_CHANNELS), 4, 4
         means = torch.tensor([0.0, 4.0, 270.0, 6.0, 250.0])
         stds  = torch.tensor([1.0, 2.0,  10.0, 3.0,   8.0])
-        c = self._make(means=means, stds=stds, eps=0.01)
+        c = self._make(means=means, stds=stds, eps=0.01, mode=mode)
         c.train()
         # set constrained channels to physical zero in normalized space
         x = torch.zeros(B, C, H, W, device=self.device)
@@ -447,10 +454,11 @@ class TestNonNegativeConstraint(unittest.TestCase):
                                             x_raw, torch.zeros_like(x_raw), atol=0.1))
 
     # --- mode switching ---
-    def test_train_eval_switch(self):
+    @parameterized.expand([("silu",), ("softplus",)])
+    def test_train_eval_switch(self, mode):
         """Switching train/eval changes hard vs soft clamping on the same instance."""
         B, C, H, W = 1, len(self.ALL_CHANNELS), 4, 4
-        c = self._make(names_to_clamp=["q850"])
+        c = self._make(names_to_clamp=["q850"], mode=mode)
         x = torch.full((B, C, H, W), -1.0, device=self.device)
         c.train()
         y_train = c(x)
@@ -459,6 +467,27 @@ class TestNonNegativeConstraint(unittest.TestCase):
         self.assertFalse((y_train[:, [1], :, :] == 0).all().item())
         self.assertTrue(compare_tensors("hard clamp to zero", y_eval[:, [1], :, :],
                                         torch.zeros_like(y_eval[:, [1], :, :])))
+
+    # --- soft-clamp shape: the reason "softplus" mode exists ---
+    @parameterized.expand([("silu",), ("softplus",)])
+    def test_train_soft_clamp_shape(self, mode):
+        """softplus is monotonic (grad > 0 everywhere), so a below-target channel is always
+        pushed up. silu is non-monotonic: it has a negative-gradient dip that can drive a
+        near-zero channel (e.g. q50) deeper negative until the gradient vanishes."""
+        c = self._make(names_to_clamp=["q850"], mode=mode)  # no normalization -> input is the shifted space
+        c.train()
+        C = len(self.ALL_CHANNELS)
+        # sweep the clamped channel (index 1) across negative values; keep the rest positive
+        x = torch.full((1, C, 1, 40), 5.0, device=self.device)
+        x[:, 1, 0, :] = torch.linspace(-1.0, 0.5, 40, device=self.device)
+        x = x.requires_grad_(True)
+        c(x).sum().backward()
+        # d(sum output)/dx is the elementwise soft-clamp derivative on this channel
+        g = x.grad[:, 1, 0, :]
+        if mode == "softplus":
+            self.assertTrue((g > 0).all().item(), "softplus soft clamp must be monotonic (grad > 0)")
+        else:
+            self.assertTrue((g < 0).any().item(), "silu soft clamp has a non-monotonic negative-gradient dip")
 
 
 @parameterized_class(("device",), _devices)
