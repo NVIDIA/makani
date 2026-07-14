@@ -416,13 +416,41 @@ class TestNonNegativeConstraint(unittest.TestCase):
 
     @parameterized.expand([("silu",), ("softplus",)])
     def test_train_large_positive_identity(self, mode):
-        """Training mode: large positive values pass through essentially unchanged."""
+        """Training mode: on the bulk the clamp has unit slope, so it preserves spatial
+        structure (only the l=0 DC mode may shift). silu is exact identity there; softplus
+        is identity up to the constant (1-leak)*eps*ln2 introduced to pin the floor to physical
+        zero -- a DC offset the decoder bias absorbs, so we check the slope, not the offset."""
         B, C, H, W = 2, len(self.ALL_CHANNELS), 4, 4
         c = self._make(eps=0.1, mode=mode)
         c.train()
-        x = torch.ones(B, C, H, W, device=self.device) * 5.0
+        x1 = torch.ones(B, C, H, W, device=self.device) * 5.0
+        y1 = c(x1)
+
+        with self.subTest("bulk unit slope"):
+            # two bulk inputs one unit apart: unit slope <=> y2 - y1 == x2 - x1 == 1
+            y2 = c(x1 + 1.0)
+            slope = (y2 - y1)[:, self.CLAMP_IDX, :, :]
+            self.assertTrue(compare_tensors("bulk unit slope", slope, torch.ones_like(slope), atol=1e-3))
+
+        if mode == "silu":
+            with self.subTest("exact passthrough (silu has zero DC offset)"):
+                self.assertTrue(compare_tensors("large positive passthrough",
+                                                y1[:, self.CLAMP_IDX, :, :], x1[:, self.CLAMP_IDX, :, :], atol=1e-3))
+
+    @parameterized.expand([("silu",), ("softplus",)])
+    def test_train_floor_fixed_point(self, mode):
+        """The training soft clamp must map physical zero to physical zero (w(0)=0 in the
+        shifted space). Otherwise the training floor sits above the eval hard-clamp floor,
+        biasing genuinely-dry channels (e.g. q50) upward; the loss then drives raw predictions
+        negative to cancel the bias and the inference hard clamp flattens them to 0."""
+        c = self._make(names_to_clamp=["q850"], mode=mode)  # no normalization -> input is the shifted space
+        c.train()
+        C = len(self.ALL_CHANNELS)
+        x = torch.full((1, C, 1, 1), 5.0, device=self.device)
+        x[:, 1, 0, 0] = 0.0  # physical zero for the clamped channel
         y = c(x)
-        self.assertTrue(compare_tensors("large positive passthrough", y[:, self.CLAMP_IDX, :, :], x[:, self.CLAMP_IDX, :, :], atol=1e-3))
+        self.assertAlmostEqual(y[0, 1, 0, 0].item(), 0.0, places=5,
+                               msg=f"{mode} training floor must be a fixed point at physical zero")
 
     @parameterized.expand([("silu",), ("softplus",)])
     def test_train_gradient_flows(self, mode):

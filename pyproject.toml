@@ -156,6 +156,7 @@ omit = [
 AFNO     = "makani.models.networks.afnonet:AdaptiveFourierNeuralOperatorNet"
 AFNOv2   = "makani.models.networks.afnonet_v2:AdaptiveFourierNeuralOperatorNet"
 FCN3     = "makani.models.networks.fourcastnet3:AtmoSphericNeuralOperatorNet"
+"FCN3.1" = "makani.models.networks.fourcastnet3_1:AtmoSphericNeuralOperatorNet31"
 FNO      = "makani.models.networks.sfnonet:FourierNeuralOperatorNet"
 SFNO     = "makani.models.networks.sfnonet:SphericalFourierNeuralOperatorNet"
 SNO      = "makani.models.networks.snonet:SphericalNeuralOperatorNet"
@@ -166,3 +167,4 @@ Pangu    = "makani.models.networks.pangu:Pangu"
 [project.entry-points."physicsnemo.models"]
 SFNO     = "makani.models.networks.sfnonet:SFNO"
 FCN3     = "makani.models.networks.fourcastnet3:FCN3"
+"FCN3.1" = "makani.models.networks.fourcastnet3_1:FCN3"

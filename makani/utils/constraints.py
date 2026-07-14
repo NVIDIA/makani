@@ -40,11 +40,16 @@ class NonNegativeConstraint(nn.Module):
         sits at the physical-zero floor (e.g. stratospheric specific humidity q50), that
         negative-side gradient drives the prediction ever more negative until the gradient
         vanishes, a self-reinforcing collapse to 0 with no way back.
-      - "softplus": a leaky blend ``leak*x + (1-leak)*eps*softplus(x/eps)``. Monotonic
+      - "softplus": a leaky blend ``leak*x + (1-leak)*eps*(softplus(x/eps) - ln2)``. Monotonic
         (gradient > 0 everywhere) so a below-target prediction is always pushed up, with a
-        gradient floor of ``leak`` so an already-collapsed channel can still recover. It is
-        identity on the bulk (large x), matching "silu" spectrally, and only lifts the floor
-        slightly (physical zero -> ~(1-leak)*eps*ln2), which nudges values off the dead floor.
+        gradient floor of ``leak`` so an already-collapsed channel can still recover. The
+        ``-ln2`` constant pins the floor to a fixed point at physical zero (w(0)=0), matching
+        the eval hard-clamp floor: without it the raw ``softplus`` sits ~(1-leak)*eps*ln2 above
+        physical zero, biasing genuinely-dry channels (e.g. stratospheric q50) upward. The loss
+        then drives raw predictions negative to cancel that bias, and the inference hard clamp
+        flattens them to 0 -- a collapse routed through the floor mismatch rather than a negative
+        gradient. It is identity minus a negligible ~(1-leak)*eps*ln2 on the bulk, matching "silu"
+        spectrally.
 
     Eval/inference mode (both): hard clamp, guaranteeing x_raw >= 0 before any
     downstream conservation corrections.
@@ -92,8 +97,10 @@ class NonNegativeConstraint(nn.Module):
             w_shifted = w + offset if offset is not None else w
             if self.mode == "silu":
                 w = w_shifted * torch.sigmoid(w_shifted / self.eps)
-            else:  # "softplus": monotonic leaky blend (no collapse-inducing negative-gradient dip)
-                w = self.leak * w_shifted + (1.0 - self.leak) * self.eps * F.softplus(w_shifted / self.eps)
+            else:  # "softplus": monotonic leaky blend (no collapse-inducing negative-gradient dip),
+                   # with the constant softplus(0)=ln2 subtracted so physical zero is a fixed point
+                   # (w(0)=0), matching the eval hard-clamp floor instead of sitting ~(1-leak)*eps*ln2 above it.
+                w = self.leak * w_shifted + (1.0 - self.leak) * self.eps * (F.softplus(w_shifted / self.eps) - math.log(2.0))
             if offset is not None:
                 w = w - offset
         else:

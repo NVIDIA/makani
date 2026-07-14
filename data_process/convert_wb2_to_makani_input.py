@@ -16,6 +16,7 @@
 from typing import Optional, List
 from itertools import batched
 import os
+import sys
 import json
 import time
 import numpy as np
@@ -110,6 +111,9 @@ def convert(input_file: str, output_dir: str, metadata_file: str, years: List[in
     # open cloud dataset and align to metadata grid
     storage_options = gcs_storage_options() if input_file.startswith(("gs://", "gcs://")) else {}
     wb2_data = xr.open_dataset(input_file, engine="zarr", storage_options=storage_options)
+    # some WB2 zarrs store atmospheric/surface fields as (..., longitude, latitude);
+    # the rest of this routine assumes (..., latitude, longitude).
+    wb2_data = wb2_data.transpose(..., "latitude", "longitude")
     if coord_mode == 'match':
         wb2_data = wb2_data.sel(latitude=lat, longitude=lon)
     elif coord_mode == 'force-flip-lat':
@@ -233,26 +237,33 @@ def convert(input_file: str, output_dir: str, metadata_file: str, years: List[in
 
                 f[entry_key][tstart:tend, cidx, ...] = data[...]
 
-            # atmospheric level variables
+            # atmospheric level variables: one bulk read per variable per batch,
+            # then subset levels in numpy. WB2 atmospheric vars are chunked
+            # (time, level=all, H, W), so per-level .sel(level=...) inside the
+            # loop made each level refetch the same chunk from storage.
             for ac, acwb2 in zip(atmospheric_channel_names, atmospheric_channel_names_wb2):
+                if acwb2 not in wb2_data:
+                    if skip_missing_channels:
+                        if (comm_rank == 0) and not (acwb2 in skipped_channels):
+                            print(f"Key {acwb2} not found in dataset, skipping")
+                        skipped_channels.add(acwb2)
+                        continue
+                    else:
+                        raise IndexError(f"Key {acwb2} not found in dataset.")
+
+                wb2_sel_all = wb2_data[acwb2].sel(level=list(atmospheric_levels))
+                bulk = wb2_sel_all[wb2_sel_all["time"].isin(timebatch)].values  # (T, L, H, W)
+
                 for idl, alevel in enumerate(atmospheric_levels):
                     cidx = channel_names.index(ac + str(alevel))
-                    if acwb2 not in wb2_data:
-                        if skip_missing_channels:
-                            if (comm_rank == 0) and not (acwb2 in skipped_channels):
-                                print(f"Key {acwb2} not found in dataset, skipping")
-                            skipped_channels.add(acwb2)
-                            continue
-                        else:
-                            raise IndexError(f"Key {acwb2} not found in dataset.")
-                    wb2_sel = wb2_data[acwb2].sel(level=alevel)
-                    data = wb2_sel[wb2_sel["time"].isin(timebatch)].values
-
-                    if data.shape[0] != len(timebatch):
+                    if bulk.shape[0] == len(timebatch):
+                        data = bulk[:, idl]
+                    else:
                         if not impute_missing_timestamps:
                             raise IndexError(f"Dates {timebatch} not all found in dataset for {acwb2}.")
                         # else:
                         #iterate over all timestamps and impute the missing values
+                        wb2_sel = wb2_data[acwb2].sel(level=alevel)
                         data = np.empty((len(timebatch), len(lat), len(lon)), dtype=np.float32)
                         for tid, t in enumerate(timebatch):
                             if t not in wb2_sel["time"]:
@@ -261,7 +272,7 @@ def convert(input_file: str, output_dir: str, metadata_file: str, years: List[in
                                 f["valid_data"][tstart+tid, cidx] = 0
                             else:
                                 data[tid, ...] = wb2_sel[wb2_sel["time"].isin([t])].values[...]
-                    
+
                     f[entry_key][tstart:tend, cidx, ...] = data[...]
 
             # update progressbar
