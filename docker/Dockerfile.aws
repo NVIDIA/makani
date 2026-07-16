@@ -30,7 +30,8 @@ RUN apt remove cmake -y && \
 RUN pip install mpi4py
 
 # install onnx
-RUN pip install onnxruntime onnxruntime-gpu
+RUN pip install onnxruntime && \
+    if [ "$(uname -m)" = "x86_64" ]; then pip install onnxruntime-gpu; fi
 
 # install AWS prereqs for HDF5
 RUN cd /opt && git clone https://github.com/awslabs/aws-c-common.git && \
