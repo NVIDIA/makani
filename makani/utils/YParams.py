@@ -92,7 +92,7 @@ class YParams(ParamsBase):
             print("------------------ Configuration ------------------")
 
         with open(yaml_filename) as _file:
-            token = YAML().load(_file)
+            token = YAML(typ="safe").load(_file)
             if config_name is not None:
                 d = token[config_name]
             else:
