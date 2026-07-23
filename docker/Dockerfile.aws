@@ -30,7 +30,8 @@ RUN apt remove cmake -y && \
 RUN pip install mpi4py
 
 # install onnx
-RUN pip install onnxruntime onnxruntime-gpu
+RUN pip install onnxruntime && \
+    if [ "$(uname -m)" = "x86_64" ]; then pip install onnxruntime-gpu; fi
 
 # install AWS prereqs for HDF5
 RUN cd /opt && git clone https://github.com/awslabs/aws-c-common.git && \
@@ -107,7 +108,7 @@ RUN cd /opt && git clone https://github.com/awslabs/aws-c-auth.git && \
     make install
 
 # 7. aws-c-s3 (final target for HDF5)
-RUn cd /opt && git clone https://github.com/awslabs/aws-c-s3.git && \
+RUN cd /opt && git clone https://github.com/awslabs/aws-c-s3.git && \
     cd aws-c-s3 && \
     mkdir build && cd build && \
     cmake .. -DCMAKE_BUILD_TYPE=Release && \
@@ -156,9 +157,8 @@ RUN pip install "git+https://github.com/google-research/weatherbench2.git"
 RUN pip install --ignore-installed "git+https://github.com/NVIDIA/mlperf-common.git"
 
 # torch-harmonics
-ENV FORCE_CUDA_EXTENSION 1
-ENV TORCH_CUDA_ARCH_LIST "8.0 8.6 8.7 9.0 10.0 12.0+PTX"
-ENV HARMONICS_VERSION 0.8.5
+ENV FORCE_CUDA_EXTENSION=1
+ENV TORCH_CUDA_ARCH_LIST="8.0 8.6 8.7 9.0a 10.0a 12.0+PTX"
 RUN cd /opt && git clone https://github.com/NVIDIA/torch-harmonics.git && \
     cd torch-harmonics && \
     pip install --no-build-isolation -e .

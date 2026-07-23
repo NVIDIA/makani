@@ -27,7 +27,8 @@ RUN apt remove cmake -y && \
 RUN pip install mpi4py
 
 # install onnx
-RUN pip install onnxruntime onnxruntime-gpu
+RUN pip install onnxruntime && \
+    if [ "$(uname -m)" = "x86_64" ]; then pip install onnxruntime-gpu; fi
 
 # hdf5 and h5py
 ENV HDF5_VERSION=2.0.0
@@ -74,8 +75,8 @@ RUN pip install git+https://github.com/NVIDIA/physicsnemo.git@v1.3.0
 
 # torch-harmonics
 RUN pip install setuptools_scm
-ENV FORCE_CUDA_EXTENSION 1
-ENV TORCH_CUDA_ARCH_LIST "8.0 8.6 8.7 9.0 10.0+PTX"
+ENV FORCE_CUDA_EXTENSION=1
+ENV TORCH_CUDA_ARCH_LIST="8.0 8.6 8.7 9.0a 10.0a+PTX"
 RUN cd /opt && git clone https://github.com/NVIDIA/torch-harmonics.git && \
     cd torch-harmonics && \
     pip install --no-build-isolation -e .
