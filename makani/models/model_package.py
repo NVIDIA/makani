@@ -155,7 +155,8 @@ class ModelWrapper(torch.nn.Module):
         self.model.preprocessor.set_rng(reset=reset, seed=seed)
         return
 
-    def forward(self, x, time, normalized_data=True, replace_state=None):
+    def _prepare_input(self, x, time, normalized_data):
+        """Apply package-level normalization and time-dependent features."""
         if not normalized_data:
             x = (x - self.in_bias) / self.in_scale
 
@@ -167,6 +168,25 @@ class ModelWrapper(torch.nn.Module):
                 z = z[None]
             self.model.preprocessor.cache_unpredicted_features(None, None, xz=z, yz=None)
 
+        return x
+
+    def encode_process(self, x, time, normalized_data=True, replace_state=None):
+        """Return FCN3's processed latent state without running its decoder.
+
+        Input normalization, zenith-angle generation, history handling, and
+        static-feature preparation are identical to :meth:`forward`. The
+        returned tensor remains in FCN3's latent feature space and therefore is
+        not target-denormalized.
+        """
+        if not hasattr(self.model, "encode_process"):
+            raise NotImplementedError(
+                f"{type(self.model).__name__} does not expose encode_process()."
+            )
+        x = self._prepare_input(x, time, normalized_data)
+        return self.model.encode_process(x, replace_state=replace_state)
+
+    def forward(self, x, time, normalized_data=True, replace_state=None):
+        x = self._prepare_input(x, time, normalized_data)
         out = self.model(x, replace_state=replace_state)
 
         if not normalized_data:
