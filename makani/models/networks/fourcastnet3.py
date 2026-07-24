@@ -818,7 +818,18 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
 
         return x_out
 
-    def processor_blocks(self, x, x_aux):
+    def process(self, x, x_aux=None):
+        """Run the neural-operator processor on encoded features.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Dynamic features returned by :meth:`encode`.
+        x_aux : torch.Tensor or None, optional
+            Auxiliary features returned by :meth:`encode_auxiliary_channels`.
+            They are concatenated before every processor block, matching the
+            full :meth:`forward` path.
+        """
         # maybe clean the padding just in case
         x = self.pos_drop(x)
 
@@ -835,6 +846,24 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
                 x = blk(x)
 
         return x
+
+    def processor_blocks(self, x, x_aux=None):
+        """Backward-compatible alias for :meth:`process`."""
+        return self.process(x, x_aux)
+
+    def encode_process(self, x):
+        """Encode an FCN3 input and run all processor blocks without decoding.
+
+        This is the public feature-extraction path for downstream models that
+        consume FCN3's latent state. Input preparation and normalization remain
+        the responsibility of the surrounding makani step/model wrappers.
+        """
+        x_aux = self.encode_auxiliary_channels(x)
+        if self.checkpointing_level >= 1:
+            x = checkpoint(self.encode, x, use_reentrant=False)
+        else:
+            x = self.encode(x)
+        return self.process(x, x_aux)
 
     def clamp_water_channels(self, x):
         """
@@ -864,17 +893,8 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         if self.big_skip:
             residual = x[..., : self.n_out_chans, :, :].contiguous()
 
-        # extract embeddings for the auxiliary embeddings
-        x_aux = self.encode_auxiliary_channels(x)
-
-        # run the encoder
-        if self.checkpointing_level >= 1:
-            x = checkpoint(self.encode, x, use_reentrant=False)
-        else:
-            x = self.encode(x)
-
-        # run the processor
-        x = self.processor_blocks(x, x_aux)
+        # run the encoder and processor
+        x = self.encode_process(x)
 
         # run the decoder
         if self.checkpointing_level >= 1:

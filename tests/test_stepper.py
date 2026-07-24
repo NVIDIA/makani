@@ -48,6 +48,11 @@ class _ScaleModel(nn.Module):
         return self.scale * x[..., -self.n_out_chans:, :, :]
 
 
+class _StagedScaleModel(_ScaleModel):
+    def encode_process(self, x):
+        return self.scale * x[..., -self.n_out_chans:, :, :]
+
+
 class TestStepper(unittest.TestCase):
 
     def setUp(self):
@@ -91,6 +96,26 @@ class TestStepper(unittest.TestCase):
         self.assertEqual(out.shape, (self.B, self.C, self.H, self.W))
         # only the most-recent timestep slice is consumed by the dummy model
         self.assertTrue(compare_tensors("single_step_with_history", out, 2.0 * inp[:, -self.C:], verbose=True))
+
+    def test_single_step_encode_process_uses_forward_preprocessing(self):
+        params = self._make_params(n_history=0)
+        wrapper = SingleStepWrapper(
+            params,
+            lambda: _StagedScaleModel(n_out_chans=self.C, scale=2.0),
+        )
+        inp = torch.randn(self.B, self.C, self.H, self.W)
+
+        features = wrapper.encode_process(inp)
+
+        self.assertEqual(features.shape, inp.shape)
+        self.assertTrue(
+            compare_tensors(
+                "single_step_encode_process",
+                features,
+                2.0 * inp,
+                verbose=True,
+            )
+        )
 
     # ------------------------------------------------------------------
     # MultiStepWrapper — train mode produces the full rollout

@@ -76,6 +76,27 @@ class SingleStepWrapper(nn.Module):
 
         return y
 
+    def encode_process(self, inp, update_state=True, replace_state=True):
+        """Prepare one input and return backbone features before decoding.
+
+        The preprocessing is identical to :meth:`forward`; only the final
+        decoder, bias correction, and target denormalization are skipped.
+        """
+        if not hasattr(self.model, "encode_process"):
+            raise NotImplementedError(
+                f"{type(self.model).__name__} does not expose encode_process()."
+            )
+
+        if update_state:
+            self.preprocessor.update_internal_state(replace_state=replace_state)
+
+        inpa = self.preprocessor.append_unpredicted_features(inp)
+        self.preprocessor.history_compute_stats(inpa)
+        inpan = self.preprocessor.history_normalize(inpa, target=False)
+        inpans = self.preprocessor.add_static_features(inpan)
+
+        return self.model.encode_process(inpans)
+
 
 class MultiStepWrapper(nn.Module):
     def __init__(self, params, model_handle):
