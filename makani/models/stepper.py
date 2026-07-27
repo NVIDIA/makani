@@ -88,7 +88,16 @@ class SingleStepWrapper(nn.Module):
             )
 
         if update_state:
-            self.preprocessor.update_internal_state(replace_state=replace_state)
+            # Size the stochastic state to THIS call's batch. The noise module is
+            # constructed with params.batch_size (1 for the packaged FCN3), but the
+            # latent path drives it with arbitrary batches -- e.g. the diagnostic
+            # ensemble runs B*E members through as one batched forward. Without an
+            # explicit batch_size the state stays at 1 and append_unpredicted_features
+            # raises "_append_channels: batch mismatch ... input_noise state (1)".
+            # _ensure_state(batch_size) reallocates only when the batch changes.
+            self.preprocessor.update_internal_state(
+                replace_state=replace_state, batch_size=inp.shape[0]
+            )
 
         inpa = self.preprocessor.append_unpredicted_features(inp)
         self.preprocessor.history_compute_stats(inpa)
