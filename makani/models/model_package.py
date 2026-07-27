@@ -161,11 +161,18 @@ class ModelWrapper(torch.nn.Module):
             x = (x - self.in_bias) / self.in_scale
 
         if self.add_zenith:
+            # cos_zenith_angle returns [T, H, W] where T == batch (one time per
+            # sample). Insert the missing singleton dims at the CHANNEL axis (dim 1)
+            # so the leading batch dim is preserved: (B, H, W) -> (B, 1, H, W). The
+            # old `z[None]` prepended instead, collapsing batch to 1 -- harmless for
+            # the historical batch-1 loop but wrong once we push a batched
+            # (B*ensemble) state through FCN3, where it tripped the preprocessor's
+            # batch check (cached unpredicted features B=1 vs input B>1).
             cosz = cos_zenith_angle(time, self.lon_grid, self.lat_grid)
             cosz = cosz.astype(np.float32)
             z = torch.as_tensor(cosz).to(device=x.device)
             while z.ndim != x.ndim:
-                z = z[None]
+                z = z.unsqueeze(1)
             self.model.preprocessor.cache_unpredicted_features(None, None, xz=z, yz=None)
 
         return x
