@@ -3270,11 +3270,18 @@ class TestEnsembleLossE1FastPath(unittest.TestCase):
       - perfect prediction (single member == observation) gives zero loss
       - backward through the E=1 path produces finite gradients
 
-    Note: the energy-score family (LpEnergyScore, SobolevEnergyScore,
-    SpectralL2EnergyScore, CorrectedSpectralL2EnergyScore, SpectralCoherence)
-    and MMD do *not* have an E=1 fast-path — their spread terms divide by
-    N(N-1), so calling them with E=1 hits division-by-zero. That's a separate
-    concern (whether to add explicit guards or accept E>=2 as a precondition).
+    The energy-score family and the coherence losses are covered here too. They
+    have no fast path -- their structure is skill minus spread -- but their
+    spread terms divide by N(N-1), which is 0/0 at E=1 and used to make the whole
+    score NaN. Per issue #96 they now zero the spread instead, since a sum over
+    member pairs is empty when there is only one member, so the score degrades to
+    the skill term. GaussianMMDLoss already did this.
+
+    For those, ``test_e1_spread_term_vanishes`` is the semantic check: E=1 must
+    agree with a two-member ensemble of *identical* members, whose pairwise
+    spread is also zero. MMD is excluded from it because its spread is a kernel
+    sum rather than a difference sum -- k(x,x)=1, so identical members carry a
+    non-zero spread by construction, and only the E=1 empty-sum case is zero.
     """
 
     def setUp(self):
@@ -3313,6 +3320,36 @@ class TestEnsembleLossE1FastPath(unittest.TestCase):
             spatial_distributed=False, ensemble_distributed=False,
         )
 
+    # -- factories: the skill-minus-spread family (issue #96) ---------------
+    #
+    # eps is shrunk from its 1e-6 default for the two coherence losses: their
+    # spread is a ratio, and the eps floor keeps (1 - Coh) slightly above zero for
+    # identical members, which would otherwise mask the property under test.
+
+    def _lp_energy_score(self):
+        return LpEnergyScoreLoss(**_GEOM_KWARGS, p=2.0, spatial_distributed=False, ensemble_distributed=False)
+
+    def _sobolev_energy_score(self):
+        return SobolevEnergyScoreLoss(**_SPEC_KWARGS, spatial_distributed=False, ensemble_distributed=False)
+
+    def _spectral_l2_energy_score(self):
+        return SpectralL2EnergyScoreLoss(**_SPEC_KWARGS, spatial_distributed=False, ensemble_distributed=False)
+
+    def _corrected_spectral_l2_energy_score(self):
+        return CorrectedSpectralL2EnergyScoreLoss(**_SPEC_KWARGS, spatial_distributed=False, ensemble_distributed=False)
+
+    def _spectral_coherence(self):
+        return SpectralCoherenceLoss(**_SPEC_KWARGS, eps=1e-16, spatial_distributed=False, ensemble_distributed=False)
+
+    def _coherence_regularization(self):
+        return CoherenceRegularization(
+            **_SPEC_KWARGS, eps=1e-16, ensemble_coherence_weight=0.5,
+            spatial_distributed=False, ensemble_distributed=False,
+        )
+
+    def _gaussian_mmd(self):
+        return GaussianMMDLoss(**_GEOM_KWARGS, spatial_distributed=False, ensemble_distributed=False)
+
     def _make(self, name):
         return {
             "CRPSLoss": (self._crps, _NUM_CH),
@@ -3320,6 +3357,13 @@ class TestEnsembleLossE1FastPath(unittest.TestCase):
             "GradientCRPSLoss": (self._gradient_crps, _NUM_CH),
             "VortDivCRPSLoss": (self._vortdiv_crps, _NUM_WIND_CH),
             "KernelScoreLoss": (self._kernel_score, _NUM_CH),
+            "LpEnergyScoreLoss": (self._lp_energy_score, _NUM_CH),
+            "SobolevEnergyScoreLoss": (self._sobolev_energy_score, _NUM_CH),
+            "SpectralL2EnergyScoreLoss": (self._spectral_l2_energy_score, _NUM_CH),
+            "CorrectedSpectralL2EnergyScoreLoss": (self._corrected_spectral_l2_energy_score, _NUM_CH),
+            "SpectralCoherenceLoss": (self._spectral_coherence, _NUM_CH),
+            "CoherenceRegularization": (self._coherence_regularization, _NUM_CH),
+            "GaussianMMDLoss": (self._gaussian_mmd, _NUM_CH),
         }[name]
 
     # -- tests --------------------------------------------------------------
@@ -3330,6 +3374,13 @@ class TestEnsembleLossE1FastPath(unittest.TestCase):
         ("GradientCRPSLoss",),
         ("VortDivCRPSLoss",),
         ("KernelScoreLoss",),
+        ("LpEnergyScoreLoss",),
+        ("SobolevEnergyScoreLoss",),
+        ("SpectralL2EnergyScoreLoss",),
+        ("CorrectedSpectralL2EnergyScoreLoss",),
+        ("SpectralCoherenceLoss",),
+        ("CoherenceRegularization",),
+        ("GaussianMMDLoss",),
     ])
     def test_e1_output_shape_and_finite(self, name):
         """E=1 path produces (B, n_channels) and finite values."""
@@ -3348,6 +3399,10 @@ class TestEnsembleLossE1FastPath(unittest.TestCase):
         ("GradientCRPSLoss",),
         ("VortDivCRPSLoss",),
         ("KernelScoreLoss",),
+        ("LpEnergyScoreLoss",),
+        ("SobolevEnergyScoreLoss",),
+        ("SpectralL2EnergyScoreLoss",),
+        ("CorrectedSpectralL2EnergyScoreLoss",),
     ])
     def test_e1_zero_on_perfect_prediction(self, name, verbose=False):
         """At E=1, fc[:,0] == obs reduces to |obs - obs| = 0; loss must be (near) zero."""
@@ -3368,6 +3423,13 @@ class TestEnsembleLossE1FastPath(unittest.TestCase):
         ("GradientCRPSLoss",),
         ("VortDivCRPSLoss",),
         ("KernelScoreLoss",),
+        ("LpEnergyScoreLoss",),
+        ("SobolevEnergyScoreLoss",),
+        ("SpectralL2EnergyScoreLoss",),
+        ("CorrectedSpectralL2EnergyScoreLoss",),
+        ("SpectralCoherenceLoss",),
+        ("CoherenceRegularization",),
+        ("GaussianMMDLoss",),
     ])
     def test_e1_backward_finite(self, name):
         """Gradient through the E=1 path must be finite — no NaN/Inf even though
@@ -3380,6 +3442,58 @@ class TestEnsembleLossE1FastPath(unittest.TestCase):
         self.assertIsNotNone(fc.grad)
         self.assertFalse(torch.isnan(fc.grad).any(), f"{name}: NaN grad in E=1 backward")
         self.assertFalse(torch.isinf(fc.grad).any(), f"{name}: Inf grad in E=1 backward")
+
+    @parameterized.expand([
+        ("LpEnergyScoreLoss",),
+        ("SobolevEnergyScoreLoss",),
+        ("SpectralL2EnergyScoreLoss",),
+        ("CorrectedSpectralL2EnergyScoreLoss",),
+        ("SpectralCoherenceLoss",),
+        ("CoherenceRegularization",),
+    ])
+    def test_e1_spread_term_vanishes(self, name, verbose=False):
+        """Issue #96: at E=1 the spread is an empty sum and must contribute nothing.
+
+        Rather than reimplementing each score's formula, compare against a
+        two-member ensemble whose members are identical: its pairwise spread is
+        zero as well, so the two must agree exactly. If the E=1 guard instead
+        returned NaN, or dropped the skill term, this would catch it.
+
+        GaussianMMDLoss is excluded: its spread is a kernel sum with k(x,x)=1, so
+        identical members have a non-zero spread by construction and only the
+        genuinely empty E=1 sum is zero.
+        """
+        builder, n_ch = self._make(name)
+        fn = builder()
+        obs = torch.randn(_BATCH, n_ch, _IMG_H, _IMG_W)
+        fc1 = torch.randn(_BATCH, 1, n_ch, _IMG_H, _IMG_W)
+
+        out_e1 = fn(fc1, obs)
+        out_e2 = fn(fc1.repeat(1, 2, 1, 1, 1), obs)
+
+        self.assertTrue(torch.isfinite(out_e1).all(), f"{name}: non-finite E=1 output")
+        self.assertTrue(
+            compare_tensors(f"{name} E=1 vs E=2-identical", out_e1, out_e2, atol=1e-4, verbose=verbose)
+        )
+
+    @parameterized.expand([
+        ("LpEnergyScoreLoss",),
+        ("SobolevEnergyScoreLoss",),
+        ("SpectralL2EnergyScoreLoss",),
+        ("CorrectedSpectralL2EnergyScoreLoss",),
+        ("SpectralCoherenceLoss",),
+        ("CoherenceRegularization",),
+        ("GaussianMMDLoss",),
+    ])
+    def test_e1_matches_larger_ensemble_shape(self, name):
+        """The E=1 guard must not change the output contract for E > 1."""
+        builder, n_ch = self._make(name)
+        fn = builder()
+        obs = torch.randn(_BATCH, n_ch, _IMG_H, _IMG_W)
+        out1 = fn(torch.randn(_BATCH, 1, n_ch, _IMG_H, _IMG_W), obs)
+        out4 = fn(torch.randn(_BATCH, 4, n_ch, _IMG_H, _IMG_W), obs)
+        self.assertEqual(out1.shape, out4.shape)
+        self.assertTrue(torch.isfinite(out4).all(), f"{name}: non-finite E=4 output")
 
 
 class TestCoherenceRegularization(unittest.TestCase):
