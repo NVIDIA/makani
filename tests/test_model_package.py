@@ -182,11 +182,19 @@ class TestZenithFeatureShapes(_ModelPackageTestBase):
         self.assertIn("add_zenith", msg)
         self.assertIn("Pass either 4 times", msg)
 
-    def test_non_4d_input_raises(self):
-        wrapper = self._make_wrapper(n_history=0)
+    def test_non_4d_input_raises_with_zenith(self):
+        wrapper = self._make_wrapper(n_history=0, add_zenith=True)
         x = torch.randn(2, 1, self.C, self.H, self.W)
         with self.assertRaises(ValueError):
             wrapper._prepare_input(x, self._times(2), normalized_data=True)
+
+    def test_non_4d_input_allowed_without_zenith(self):
+        # the rank requirement belongs to the zenith path only; without it the rest
+        # of the pipeline broadcasts fine and must not be newly restricted
+        wrapper = self._make_wrapper(n_history=0, add_zenith=False)
+        x = torch.randn(2, 1, self.C, self.H, self.W)
+        out = wrapper._prepare_input(x, self._times(2), normalized_data=True)
+        self.assertEqual(tuple(out.shape), tuple(x.shape))
 
 
 class TestModelPackageForward(_ModelPackageTestBase):
