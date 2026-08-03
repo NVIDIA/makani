@@ -79,7 +79,7 @@ class TestDistributedLayers(unittest.TestCase):
         ],
         skip_on_empty=True,
     )
-    def test_distributed_spectral_conv(self, nlat_in, nlon_in, nlat_out, nlon_out, batch_size, num_chan, tol, verbose=True):
+    def test_distributed_spectral_conv(self, nlat_in, nlon_in, nlat_out, nlon_out, batch_size, num_chan, tol, verbose=False):
         B, C, Hi, Wi, Ho, Wo = batch_size, num_chan, nlat_in, nlon_in, nlat_out, nlon_out
 
         from makani.models.common import SpectralConv
@@ -473,7 +473,7 @@ class TestDistributedLayers(unittest.TestCase):
         ],
         skip_on_empty=True,
     )
-    def test_distributed_mlp_te(self, nlat, nlon, batch_size, num_chan, hidden_dim, input_format, bias, amp_mode, atol, rtol, verbose=True):
+    def test_distributed_mlp_te(self, nlat, nlon, batch_size, num_chan, hidden_dim, input_format, bias, amp_mode, atol, rtol, verbose=False):
         """The transformer-engine MLP path must match the native distributed MLP under
         the same (reduced) precision.
 
