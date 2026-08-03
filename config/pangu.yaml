@@ -27,9 +27,9 @@ base_config: &BASE_CONFIG
     num_atmospheric: 5
     num_levels: 13
     embed_dim: 96
-    patch_size: !!python/tuple [2,4,4]
-    depth_layers: !!python/tuple [2,6,6,2]
-    num_heads: !!python/tuple [6,12,12,6]
+    patch_size: [2,4,4]
+    depth_layers: [2,6,6,2]
+    num_heads: [6,12,12,6]
 
     # training parameters
     losses:
