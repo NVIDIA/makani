@@ -78,7 +78,7 @@ class TestStepper(unittest.TestCase):
         inp = torch.randn(self.B, self.C, self.H, self.W)
         out = wrapper(inp)
         self.assertEqual(out.shape, inp.shape)
-        self.assertTrue(compare_tensors("single_step_no_history", out, 2.0 * inp, verbose=True))
+        self.assertTrue(compare_tensors("single_step_no_history", out, 2.0 * inp, verbose=False))
 
     def test_single_step_with_history(self):
         n_history = 2
@@ -90,7 +90,7 @@ class TestStepper(unittest.TestCase):
         out = wrapper(inp)
         self.assertEqual(out.shape, (self.B, self.C, self.H, self.W))
         # only the most-recent timestep slice is consumed by the dummy model
-        self.assertTrue(compare_tensors("single_step_with_history", out, 2.0 * inp[:, -self.C:], verbose=True))
+        self.assertTrue(compare_tensors("single_step_with_history", out, 2.0 * inp[:, -self.C:], verbose=False))
 
     # ------------------------------------------------------------------
     # MultiStepWrapper — train mode produces the full rollout
@@ -121,7 +121,7 @@ class TestStepper(unittest.TestCase):
                     f"multistep_train_step_{k}_h{n_history}",
                     block,
                     (2.0 ** (k + 1)) * last,
-                    verbose=True,
+                    verbose=False,
                 )
             )
 
@@ -138,7 +138,7 @@ class TestStepper(unittest.TestCase):
         out = wrapper(inp)
         # _forward_eval returns one step regardless of n_future
         self.assertEqual(out.shape, (self.B, self.C, self.H, self.W))
-        self.assertTrue(compare_tensors("multistep_eval", out, 2.0 * inp, verbose=True))
+        self.assertTrue(compare_tensors("multistep_eval", out, 2.0 * inp, verbose=False))
 
     def test_train_eval_dispatch(self):
         params = self._make_params(n_history=0, n_future=2)
@@ -170,7 +170,7 @@ class TestStepper(unittest.TestCase):
 
         out_off = wrapper_off(inp)
         out_on = wrapper_on(inp)
-        self.assertTrue(compare_tensors("push_forward_values", out_off, out_on, verbose=True))
+        self.assertTrue(compare_tensors("push_forward_values", out_off, out_on, verbose=False))
 
     def test_push_forward_truncates_gradient(self):
         # use ones() so the gradient takes a known closed form and we can
