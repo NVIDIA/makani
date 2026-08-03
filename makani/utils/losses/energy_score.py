@@ -209,7 +209,15 @@ class LpEnergyScoreLoss(GeometricBaseLoss):
         # mask and sum; factor of 2 accounts for symmetric (j,i) counterparts
         diff = torch.where(diff_mask, 0.0, diff)
         eskill = torch.where(eskill_mask, 0.0, eskill)
-        espread = diff.sum(dim=0) * 2.0 * (float(num_ensemble) - 1.0 + self.alpha) / float(num_ensemble * num_ensemble * (num_ensemble - 1))
+        # The spread is a sum over member pairs. With a single member that sum is empty
+        # and therefore zero, but the 1/(N^2 (N-1)) normalization is 0/0 and would turn
+        # the whole score into NaN. Degrade to the skill term instead, matching
+        # GaussianMMDLoss and the E=1 short-circuit in the CRPS losses.
+        espread = diff.sum(dim=0)
+        if num_ensemble > 1:
+            espread = espread * 2.0 * (float(num_ensemble) - 1.0 + self.alpha) / float(num_ensemble * num_ensemble * (num_ensemble - 1))
+        else:
+            espread = torch.zeros_like(espread)
 
         # sum over ensemble
         eskill = eskill.sum(dim=0) / float(num_ensemble)
@@ -407,7 +415,13 @@ class SobolevEnergyScoreLoss(SpectralBaseLoss):
         # mask espread and sum
         espread = torch.where(espread_mask, 0.0, espread)
         eskill = torch.where(eskill_mask, 0.0, eskill)
-        espread = espread.sum(dim=(0,1)) * (float(num_ensemble) - 1.0 + self.alpha) / float(num_ensemble * num_ensemble * (num_ensemble - 1))
+        # single member: the pair sum is empty, so the spread term vanishes rather than
+        # dividing 0/0. See the note in LpEnergyScoreLoss.forward.
+        espread = espread.sum(dim=(0,1))
+        if num_ensemble > 1:
+            espread = espread * (float(num_ensemble) - 1.0 + self.alpha) / float(num_ensemble * num_ensemble * (num_ensemble - 1))
+        else:
+            espread = torch.zeros_like(espread)
 
         # compute the skill term
         eskill = eskill.sum(dim=0) / float(num_ensemble)
@@ -572,7 +586,13 @@ class SpectralL2EnergyScoreLoss(SpectralBaseLoss):
         eskill = torch.where(eskill_mask, 0.0, eskill)
 
         # now we have reduced everything and need to sum appropriately (B, C, H)
-        espread = espread.sum(dim=(0,1)) * (float(num_ensemble) - 1.0 + self.alpha) / float(num_ensemble * num_ensemble * (num_ensemble - 1))
+        # single member: the pair sum is empty, so the spread term vanishes rather than
+        # dividing 0/0. See the note in LpEnergyScoreLoss.forward.
+        espread = espread.sum(dim=(0,1))
+        if num_ensemble > 1:
+            espread = espread * (float(num_ensemble) - 1.0 + self.alpha) / float(num_ensemble * num_ensemble * (num_ensemble - 1))
+        else:
+            espread = torch.zeros_like(espread)
         eskill = eskill.sum(dim=0) / float(num_ensemble)
 
         # we now have the loss per wavenumber, which we can normalize
@@ -744,7 +764,13 @@ class SpectralCoherenceLoss(SpectralBaseLoss):
 
         # mask the diagonal of coherence_spread with 0.0
         coherence_spread = torch.where(torch.eye(num_ensemble, device=coherence_forecasts.device).bool().reshape(num_ensemble, num_ensemble, 1, 1, 1), 0.0, 1.0 - coherence_forecasts)
-        coherence_spread = coherence_spread.sum(dim=(0, 1)) / float(num_ensemble * (num_ensemble - 1))
+        # single member: only the diagonal exists and it is masked out, so the spread is
+        # an empty sum. Guard the 1/(N (N-1)) normalization. See LpEnergyScoreLoss.forward.
+        coherence_spread = coherence_spread.sum(dim=(0, 1))
+        if num_ensemble > 1:
+            coherence_spread = coherence_spread / float(num_ensemble * (num_ensemble - 1))
+        else:
+            coherence_spread = torch.zeros_like(coherence_spread)
 
         # compute the loss
         if self.relative:
@@ -916,7 +942,13 @@ class CorrectedSpectralL2EnergyScoreLoss(SpectralBaseLoss):
         espread = torch.where(espread_mask, 0.0, espread)
         eskill = torch.where(eskill_mask, 0.0, eskill)
 
-        espread = espread.sum(dim=(0, 1)) * (float(num_ensemble) - 1.0 + self.alpha) / float(num_ensemble * num_ensemble * (num_ensemble - 1))
+        # single member: the pair sum is empty, so the spread term vanishes rather than
+        # dividing 0/0. See the note in LpEnergyScoreLoss.forward.
+        espread = espread.sum(dim=(0, 1))
+        if num_ensemble > 1:
+            espread = espread * (float(num_ensemble) - 1.0 + self.alpha) / float(num_ensemble * num_ensemble * (num_ensemble - 1))
+        else:
+            espread = torch.zeros_like(espread)
         eskill = eskill.sum(dim=0) / float(num_ensemble)
 
         # Option 2: spread term = P_true * (1 - Coh^ens) = (P_true / P_pred) * [P_pred * (1 - Coh^ens)]
