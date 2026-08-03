@@ -381,8 +381,6 @@ class TestDistributedLoss(unittest.TestCase):
         # observation grads
         with self.subTest(desc="observation gradients"):
             obsgrad_gather_full = self._gather_helper_bwd(obsgrad_local, False)
-            if self.world_rank == 0:
-                print("obsgrad_gather_full", obsgrad_gather_full[0, 0, ...], "obsgrad_full", obsgrad_full[0, 0, ...])
             self.assertTrue(reduce_success(compare_tensors("observation gradients", obsgrad_gather_full, obsgrad_full, tol, tol, verbose=verbose), self.device))
 
 
