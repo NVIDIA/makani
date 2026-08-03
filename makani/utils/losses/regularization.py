@@ -202,21 +202,33 @@ class CoherenceRegularization(SpectralBaseLoss):
     """
     Mesoscale spectral coherence regularization for ensemble forecasts.
 
-    Penalizes low squared coherence between each ensemble member and the
-    observation in a configurable wavenumber band [l_min, l_max], targeting
-    the mesoscale range where decorrelated noise tends to appear.
+    Penalizes low coherence between each ensemble member and the observation in
+    a configurable wavenumber band [lmin, lmax], targeting the mesoscale range
+    where decorrelated noise tends to appear.
 
-    For each wavenumber l in the band, the multivariate squared coherence is:
+    For each wavenumber l in the band, the coherence is:
 
-        CrossPSD_l  = sum_{c,m} w_m * Re( f^(e)_{c,l,m} * conj(y_{c,l,m}) )
-        PSD^f_l     = sum_{c,m} w_m * |f^(e)_{c,l,m}|^2
-        PSD^y_l     = sum_{c,m} w_m * |y_{c,l,m}|^2
-        Coh_l       = CrossPSD_l^2 / (PSD^f_l * PSD^y_l + eps)
+        CrossPSD_l  = sum_{m} w_m * Re( f^(e)_{c,l,m} * conj(y_{c,l,m}) )
+        PSD^f_l     = sum_{m} w_m * |f^(e)_{c,l,m}|^2
+        PSD^y_l     = sum_{m} w_m * |y_{c,l,m}|^2
+        Coh_l       = CrossPSD_l / sqrt(PSD^f_l * PSD^y_l + eps)
 
     Loss = (1 / |band|) * sum_{l in band} (1 - mean_{e} Coh_l^(e))
 
-    Optionally adds an inter-member coherence penalty (ensemble-ensemble)
-    to discourage fully independent phases between members.
+    The coherence is signed and lies in [-1, 1], so the loss is 0 for a member
+    that matches the observation, 1 for an uncorrelated one, and 2 for a
+    sign-flipped one. This deliberately follows SpectralCoherenceLoss rather
+    than the sign-blind magnitude-squared convention: squaring would score a
+    perfectly anti-correlated forecast as well as a perfect one.
+
+    Sums run over m only, not over channels: the loss framework expects one
+    value per channel (see ``SpectralBaseLoss.n_channels``) so that channel
+    weighting can be applied downstream.
+
+    When ``ensemble_coherence_weight`` is non-zero, an inter-member term
+    ``w * mean_{e != e'} (1 - Coh^(e,e'))`` is added to discourage fully
+    independent phases between members. It requires at least two members and is
+    skipped otherwise.
     """
 
     def __init__(
@@ -255,8 +267,12 @@ class CoherenceRegularization(SpectralBaseLoss):
         else:
             self.ensemble_weights = ensemble_weights
 
-        # clamp band to available wavenumbers
+        # clamp band to available wavenumbers. The upper edge is enforced by the SHT
+        # itself: lmax is passed to super().__init__, so self.sht.lmax is already the
+        # truncation. Only the lower edge needs an explicit mask.
         self.lmin = lmin if lmin is not None else 0
+        if self.lmin >= self.sht.lmax:
+            raise ValueError(f"Error, lmin ({self.lmin}) must be smaller than the SHT truncation lmax ({self.sht.lmax}), otherwise the band is empty.")
 
         # m-summation weights: 1 for m=0, 2 for m>0, 0 for m>l
         ls = torch.arange(self.sht.lmax).reshape(-1, 1)
@@ -270,6 +286,11 @@ class CoherenceRegularization(SpectralBaseLoss):
         l_band = torch.zeros(self.sht.lmax)
         l_band[self.lmin : self.sht.lmax] = 1.0
 
+        # Number of wavenumbers in the band, captured BEFORE the spatial split so it is
+        # the global width. Normalizing by this makes the loss a mean over the band and
+        # therefore independent of both the band width and the h-decomposition.
+        band_size = l_band.sum().clamp(min=1.0)
+
         # split for spatial distribution (l -> h, m -> w)
         if self.spatial_distributed and comm.get_size("h") > 1:
             m_weights = split_tensor_along_dim(m_weights, dim=-2, num_chunks=comm.get_size("h"))[comm.get_rank("h")]
@@ -279,6 +300,7 @@ class CoherenceRegularization(SpectralBaseLoss):
 
         self.register_buffer("m_weights", m_weights.contiguous(), persistent=False)
         self.register_buffer("l_band", l_band.contiguous(), persistent=False)
+        self.register_buffer("band_size", band_size, persistent=False)
 
     @property
     def type(self):
@@ -312,38 +334,57 @@ class CoherenceRegularization(SpectralBaseLoss):
 
         num_ensemble = forecasts.shape[0]
 
-        # PSD per member: sum over c and m -> (E, B, C, L)
+        # per-member PSD, observation PSD and the forecast-observation cross-PSD.
+        # Summing over m only leaves (E, B, C, L); channels are kept so that the
+        # framework can weight them downstream.
         psd_fcasts = (m_weights_local * forecasts.abs().square()).sum(dim=-1)
         psd_obs = (m_weights_local * observations.abs().square()).sum(dim=-1)
+        cross_psd = (m_weights_local * (forecasts.conj() * observations).real).sum(dim=-1)
 
-        # compute inter-member coherence (E, E, B, C, L)
-        coh_fcasts = (m_weights_local * (forecasts.unsqueeze(0).conj() * forecasts.unsqueeze(1)).real).sum(dim=-1)
+        # the inter-member term is optional and undefined for a single member
+        compute_inter = (self.ensemble_coherence_weight != 0.0) and (num_ensemble > 1)
+        if compute_inter:
+            coh_inter = (m_weights_local * (forecasts.unsqueeze(0).conj() * forecasts.unsqueeze(1)).real).sum(dim=-1)
 
-        # do the reduction over the distributed m dimensions
+        # do the reduction over the distributed m dimensions. This has to happen before
+        # the normalization below, since a ratio of partial sums is not the partial sum
+        # of ratios.
         if self.spatial_distributed and comm.get_size("w") > 1:
             psd_fcasts = reduce_from_parallel_region(psd_fcasts, "w")
             psd_obs = reduce_from_parallel_region(psd_obs, "w")
-            coh_fcasts = reduce_from_parallel_region(coh_fcasts, "w")
+            cross_psd = reduce_from_parallel_region(cross_psd, "w")
+            if compute_inter:
+                coh_inter = reduce_from_parallel_region(coh_inter, "w")
 
         if self.ensemble_distributed:
             psd_fcasts = reduce_from_parallel_region(psd_fcasts, "ensemble")
             psd_obs = reduce_from_parallel_region(psd_obs, "ensemble")
-            coh_fcasts = reduce_from_parallel_region(coh_fcasts, "ensemble")
+            cross_psd = reduce_from_parallel_region(cross_psd, "ensemble")
+            if compute_inter:
+                coh_inter = reduce_from_parallel_region(coh_inter, "ensemble")
 
-        # normalize by the power-spectral densities
-        coh_fcasts = 1.0 - coh_fcasts / torch.sqrt(psd_fcasts.unsqueeze(0) * psd_fcasts.unsqueeze(1) + self.eps)
+        # signed coherence in [-1, 1] against the observation
+        coh_obs = cross_psd / torch.sqrt(psd_fcasts * psd_obs + self.eps)
 
-        # just to be sure, mask the diagonal of the coherence with 0.0
-        coh_fcasts = psd_obs.unsqueeze(0) * torch.where(torch.eye(num_ensemble, device=coh_fcasts.device).bool().reshape(num_ensemble, num_ensemble, 1, 1, 1), 0.0, coh_fcasts)
+        # (1 - Coh) averaged over the ensemble -> (B, C, L)
+        loss = (1.0 - coh_obs).sum(dim=0) / float(num_ensemble)
 
-        # reduce over the leading ensemble dims to compute the mean coherence
-        coh_fcasts = coh_fcasts.sum(dim=(0, 1)) / float(num_ensemble * (num_ensemble - 1))
+        # optional inter-member decoherence penalty, diagonal excluded
+        if compute_inter:
+            coh_inter = coh_inter / torch.sqrt(psd_fcasts.unsqueeze(0) * psd_fcasts.unsqueeze(1) + self.eps)
+            eye = torch.eye(num_ensemble, device=coh_inter.device).bool().reshape(num_ensemble, num_ensemble, 1, 1, 1)
+            coh_inter = torch.where(eye, 0.0, 1.0 - coh_inter)
+            coh_inter = coh_inter.sum(dim=(0, 1)) / float(num_ensemble * (num_ensemble - 1))
+            loss = loss + self.ensemble_coherence_weight * coh_inter
 
-        # finally do the reduction over the l dimensions
-        coh_fcasts = coh_fcasts.sum(dim=-1)
+        # restrict to the configured wavenumber band and reduce over l
+        loss = (self.l_band * loss).sum(dim=-1)
 
         # reduce over the spatial dimensions
         if self.spatial_distributed and comm.get_size("h") > 1:
-            coh_fcasts = reduce_from_parallel_region(coh_fcasts, "h")
+            loss = reduce_from_parallel_region(loss, "h")
 
-        return coh_fcasts
+        # normalize to a mean over the band
+        loss = loss / self.band_size
+
+        return loss
