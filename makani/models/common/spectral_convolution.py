@@ -314,8 +314,11 @@ class SpectralAttention(nn.Module):
             if self.scale_residual:
                 residual = self.inverse_transform(x)
 
-        # convert back
-        x = x.to(dtype=dtype)
+        # convert back. Only the residual is cast here: x still holds the complex
+        # spectral coefficients that forward_mlp consumes via view_as_real, so
+        # casting it to the (real) input dtype at this point would discard the
+        # imaginary part. It is cast once after the inverse transform below,
+        # matching SpectralConv.forward.
         if self.scale_residual:
             residual = residual.to(dtype=dtype)
 
