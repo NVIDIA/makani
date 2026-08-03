@@ -27,7 +27,7 @@ from functools import partial
 import torch
 import torch.nn as nn
 
-from makani.utils.YParams import ParamsBase
+from makani.utils.YParams import ParamsBase, ensure_resampled_shapes
 from makani.models import SingleStepWrapper, MultiStepWrapper
 from makani.models import StochasticInterpolantWrapper
 from makani.utils.dataloaders.data_helpers import get_data_normalization
@@ -154,6 +154,12 @@ def get_model(params: ParamsBase, use_stochastic_interpolation: bool = False, mu
         from makani.models.parametrizations import ConstraintsWrapper
 
     if params is not None:
+        # callers outside training (model packages predating resampling, earth2studio)
+        # may not carry the resampled shapes; fall back to the unresampled ones. This
+        # also covers Preprocessor2D, which is constructed further down from this same
+        # params object.
+        ensure_resampled_shapes(params)
+
         # makani requires that these entries are set in params for now
         inp_shape = (params.img_shape_x_resampled, params.img_shape_y_resampled)
         out_shape = (params.out_shape_x, params.out_shape_y) if hasattr(params, "out_shape_x") and hasattr(params, "out_shape_y") else inp_shape
