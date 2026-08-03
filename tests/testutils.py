@@ -38,7 +38,7 @@ CHANNEL_NAMES = ["u10m", "t2m", "u500", "z500", "t500"]
 # Dataset layout used by init_hdf5_dataset
 NUM_SAMPLES_PER_YEAR = 365
 TRAIN_YEARS = [2017, 2018]
-TEST_YEARS  = [2019]
+TEST_YEARS = [2019]
 DHOURS = (365 * 24) // NUM_SAMPLES_PER_YEAR  # 24
 
 
@@ -219,7 +219,7 @@ def init_hdf5_dataset(
 
     # storage for the concatenated training file (populated when create_concat=True)
     concat_data_list = []
-    concat_ts_list   = []
+    concat_ts_list = []
 
     # create training files
     num_train = 0
@@ -280,7 +280,9 @@ def init_hdf5_dataset(
         data_path = os.path.join(test_path, f"{y}.h5")
         with h5.File(data_path, "w") as hf:
             hf.create_dataset(H5_PATH, shape=(num_samples_per_year, num_channels, img_size_h, img_size_w), dtype="f4")
-            hf[H5_PATH][...] = rng.random((num_samples_per_year, num_channels, img_size_h, img_size_w), dtype=np.float32)
+            hf[H5_PATH][...] = rng.random(
+                (num_samples_per_year, num_channels, img_size_h, img_size_w), dtype=np.float32
+            )
 
             # annotations
             if annotate:
@@ -310,7 +312,10 @@ def init_hdf5_dataset(
 
     np.save(os.path.join(stats_path, "maxs.npy"), np.ones((1, num_channels, 1, 1), dtype=np.float64))
 
-    np.save(os.path.join(stats_path, "time_means.npy"), np.zeros((1, num_channels, img_size_h, img_size_w), dtype=np.float64))
+    np.save(
+        os.path.join(stats_path, "time_means.npy"),
+        np.zeros((1, num_channels, img_size_h, img_size_w), dtype=np.float64),
+    )
 
     np.save(os.path.join(stats_path, "global_means.npy"), np.zeros((1, num_channels, 1, 1), dtype=np.float64))
 
@@ -324,7 +329,7 @@ def init_hdf5_dataset(
     if create_concat:
         concat_train_path = os.path.join(path, "train_concat.h5")
         concat_data = np.concatenate(concat_data_list, axis=0)
-        concat_ts   = np.concatenate(concat_ts_list)
+        concat_ts = np.concatenate(concat_ts_list)
         with h5.File(concat_train_path, "w") as hf:
             hf.create_dataset(H5_PATH, data=concat_data)
             hf.create_dataset("timestamp", data=concat_ts)
@@ -416,7 +421,9 @@ def init_zarr_dataset(
     num_train = 0
     for y in [2017, 2018]:
         num_dof = num_samples_per_year * num_channels * img_size_h * img_size_w
-        data = rng.random((num_dof,), dtype=np.float32).reshape(num_samples_per_year, num_channels, img_size_h, img_size_w)
+        data = rng.random((num_dof,), dtype=np.float32).reshape(
+            num_samples_per_year, num_channels, img_size_h, img_size_w
+        )
         if nan_fraction > 0.0:
             n_nan = int(nan_fraction * num_dof)
             idx = rng.choice(num_dof, size=n_nan, replace=False)
@@ -433,7 +440,10 @@ def init_zarr_dataset(
     # stats files are format-agnostic — reuse the same .npy layout
     np.save(os.path.join(stats_path, "mins.npy"), np.zeros((1, num_channels, 1, 1), dtype=np.float64))
     np.save(os.path.join(stats_path, "maxs.npy"), np.ones((1, num_channels, 1, 1), dtype=np.float64))
-    np.save(os.path.join(stats_path, "time_means.npy"), np.zeros((1, num_channels, img_size_h, img_size_w), dtype=np.float64))
+    np.save(
+        os.path.join(stats_path, "time_means.npy"),
+        np.zeros((1, num_channels, img_size_h, img_size_w), dtype=np.float64),
+    )
     np.save(os.path.join(stats_path, "global_means.npy"), np.zeros((1, num_channels, 1, 1), dtype=np.float64))
     np.save(os.path.join(stats_path, "global_stds.npy"), np.ones((1, num_channels, 1, 1), dtype=np.float64))
     np.save(os.path.join(stats_path, "time_diff_means.npy"), np.zeros((1, num_channels, 1, 1), dtype=np.float64))
@@ -499,7 +509,7 @@ def init_wb2_zarr_dataset(
     dhours = hours_per_year // num_samples_per_year
 
     # parse channel_names to determine which WB2 variables are needed and at what levels
-    atm_vars = {}    # wb2_name -> set of required pressure levels
+    atm_vars = {}  # wb2_name -> set of required pressure levels
     surf_vars = set()
 
     for ch_name in channel_names:
@@ -523,8 +533,10 @@ def init_wb2_zarr_dataset(
         if annotate:
             year_start = dt.datetime(year, 1, 1, 0, 0, 0, tzinfo=dt.timezone.utc)
             times = np.array(
-                [np.datetime64(int((year_start + dt.timedelta(hours=i * dhours)).timestamp() * 1e9), "ns")
-                 for i in range(num_samples_per_year)]
+                [
+                    np.datetime64(int((year_start + dt.timedelta(hours=i * dhours)).timestamp() * 1e9), "ns")
+                    for i in range(num_samples_per_year)
+                ]
             )
             g.create_array("time", data=times)
             g.create_array("latitude", data=latitude)
@@ -556,7 +568,9 @@ def init_wb2_zarr_dataset(
     n_channels = len(channel_names)
     np.save(os.path.join(stats_path, "mins.npy"), np.zeros((1, n_channels, 1, 1), dtype=np.float64))
     np.save(os.path.join(stats_path, "maxs.npy"), np.ones((1, n_channels, 1, 1), dtype=np.float64))
-    np.save(os.path.join(stats_path, "time_means.npy"), np.zeros((1, n_channels, img_size_h, img_size_w), dtype=np.float64))
+    np.save(
+        os.path.join(stats_path, "time_means.npy"), np.zeros((1, n_channels, img_size_h, img_size_w), dtype=np.float64)
+    )
     np.save(os.path.join(stats_path, "global_means.npy"), np.zeros((1, n_channels, 1, 1), dtype=np.float64))
     np.save(os.path.join(stats_path, "global_stds.npy"), np.ones((1, n_channels, 1, 1), dtype=np.float64))
     np.save(os.path.join(stats_path, "time_diff_means.npy"), np.zeros((1, n_channels, 1, 1), dtype=np.float64))
@@ -583,25 +597,33 @@ def compare_tensors(msg, tensor1, tensor2, atol=1e-8, rtol=1e-5, verbose=False):
     elif tensor1 is None and tensor2 is not None:
         allclose = False
         if verbose:
-            print(f"tensor1 is None and tensor2 is not None")
+            print("tensor1 is None and tensor2 is not None")
     elif tensor1 is not None and tensor2 is None:
         allclose = False
         if verbose:
-            print(f"tensor1 is not None and tensor2 is None")
+            print("tensor1 is not None and tensor2 is None")
     else:
         diff = torch.abs(tensor1 - tensor2)
         abs_diff = torch.mean(diff, dim=0)
         rel_diff = torch.mean(diff / torch.clamp(torch.abs(tensor2), min=1e-6), dim=0)
         allclose = torch.allclose(tensor1, tensor2, atol=atol, rtol=rtol)
         if not allclose and verbose:
-            print(f"Absolute difference on {msg}: min = {abs_diff.min()}, mean = {abs_diff.mean()}, max = {abs_diff.max()}")
-            print(f"Relative difference on {msg}: min = {rel_diff.min()}, mean = {rel_diff.mean()}, max = {rel_diff.max()}")
-            print(f"Element values with max difference on {msg}: {tensor1.flatten()[diff.argmax()]} and {tensor2.flatten()[diff.argmax()]}")
+            print(
+                f"Absolute difference on {msg}: min = {abs_diff.min()}, mean = {abs_diff.mean()}, max = {abs_diff.max()}"
+            )
+            print(
+                f"Relative difference on {msg}: min = {rel_diff.min()}, mean = {rel_diff.mean()}, max = {rel_diff.max()}"
+            )
+            print(
+                f"Element values with max difference on {msg}: {tensor1.flatten()[diff.argmax()]} and {tensor2.flatten()[diff.argmax()]}"
+            )
             # find violating entry
             worst_diff = torch.argmax(diff - (atol + rtol * torch.abs(tensor2)))
             diff_bad = diff.flatten()[worst_diff].item()
             tensor2_abs_bad = torch.abs(tensor2).flatten()[worst_diff].item()
-            print(f"Worst allclose condition violation: {diff_bad} <= {atol} + {rtol} * {tensor2_abs_bad} = {atol + rtol * tensor2_abs_bad}")
+            print(
+                f"Worst allclose condition violation: {diff_bad} <= {atol} + {rtol} * {tensor2_abs_bad} = {atol + rtol * tensor2_abs_bad}"
+            )
 
     return allclose
 
@@ -613,11 +635,11 @@ def compare_arrays(msg, array1, array2, atol=1e-8, rtol=1e-5, verbose=False):
     elif array1 is None and array2 is not None:
         allclose = False
         if verbose:
-            print(f"array1 is None and array2 is not None")
+            print("array1 is None and array2 is not None")
     elif array1 is not None and array2 is None:
         allclose = False
         if verbose:
-            print(f"array1 is not None and array2 is None")
+            print("array1 is not None and array2 is None")
     else:
         # some sanitization
         if array1.ndim == 0:
@@ -630,26 +652,21 @@ def compare_arrays(msg, array1, array2, atol=1e-8, rtol=1e-5, verbose=False):
         rel_diff = np.mean(diff / np.clip(np.abs(array2), a_min=1e-6, a_max=None), axis=0)
         allclose = np.allclose(array1, array2, atol=atol, rtol=rtol)
         if not allclose and verbose:
-            print(f"Absolute difference on {msg}: min = {abs_diff.min()}, mean = {abs_diff.mean()}, max = {abs_diff.max()}")
-            print(f"Relative difference on {msg}: min = {rel_diff.min()}, mean = {rel_diff.mean()}, max = {rel_diff.max()}")
-            print(f"Element values with max difference on {msg}: {array1.flatten()[diff.argmax()]} and {array2.flatten()[diff.argmax()]}")
+            print(
+                f"Absolute difference on {msg}: min = {abs_diff.min()}, mean = {abs_diff.mean()}, max = {abs_diff.max()}"
+            )
+            print(
+                f"Relative difference on {msg}: min = {rel_diff.min()}, mean = {rel_diff.mean()}, max = {rel_diff.max()}"
+            )
+            print(
+                f"Element values with max difference on {msg}: {array1.flatten()[diff.argmax()]} and {array2.flatten()[diff.argmax()]}"
+            )
             # find violating entry
             worst_diff = np.argmax(diff - (atol + rtol * np.abs(array2)))
             diff_bad = diff.flatten()[worst_diff].item()
             array2_abs_bad = np.abs(array2).flatten()[worst_diff].item()
-            print(f"Worst allclose condition violation: {diff_bad} <= {atol} + {rtol} * {array2_abs_bad} = {atol + rtol * array2_abs_bad}")
+            print(
+                f"Worst allclose condition violation: {diff_bad} <= {atol} + {rtol} * {array2_abs_bad} = {atol + rtol * array2_abs_bad}"
+            )
 
     return allclose
-
-def disable_tf32():
-    # the api for this was changed lately in pytorch
-    if torch.cuda.is_available():
-        if version.parse(torch.__version__) >= version.parse("2.9.0"):
-            torch.backends.cuda.matmul.fp32_precision = "ieee"
-            torch.backends.cudnn.fp32_precision = "ieee"
-            torch.backends.cudnn.conv.fp32_precision = "ieee"
-            torch.backends.cudnn.rnn.fp32_precision = "ieee"
-        else:
-            torch.backends.cuda.matmul.allow_tf32 = False
-            torch.backends.cudnn.allow_tf32 = False
-    return

@@ -33,7 +33,15 @@ import zarr
 from makani.utils.dataloader import get_dataloader
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from .testutils import disable_tf32, get_default_parameters, init_hdf5_dataset, init_zarr_dataset, init_wb2_zarr_dataset, compare_tensors, compare_arrays
+from .testutils import (
+    disable_tf32,
+    get_default_parameters,
+    init_hdf5_dataset,
+    init_zarr_dataset,
+    init_wb2_zarr_dataset,
+    compare_tensors,
+    compare_arrays,
+)
 from .testutils import H5_PATH, NUM_CHANNELS, IMG_SIZE_H, IMG_SIZE_W, CHANNEL_NAMES
 
 _multifiles_params = [True]
@@ -156,7 +164,16 @@ class DataLoaderBase:
     def setUp(self):
         disable_tf32()
 
-        self.params = init_dataset_params(self.train_path, self.valid_path, self.stats_path, batch_size=2, n_history=0, n_future=0, normalization="zscore", num_data_workers=1)
+        self.params = init_dataset_params(
+            self.train_path,
+            self.valid_path,
+            self.stats_path,
+            batch_size=2,
+            n_history=0,
+            n_future=0,
+            normalization="zscore",
+            num_data_workers=1,
+        )
 
         self.params.multifiles = True
         self.params.num_train = self.num_train
@@ -168,14 +185,15 @@ class DataLoaderBase:
 
         self.num_steps = 5
 
-
     def _test_shapes_and_sample_counts(self, multifiles):
 
         # set mutltifiles
         self.params.multifiles = multifiles
 
         # create dataloaders
-        valid_loader, valid_dataset, _ = get_dataloader(self.params, self.params.valid_data_path, mode="eval", device=self.device)
+        valid_loader, valid_dataset, _ = get_dataloader(
+            self.params, self.params.valid_data_path, mode="eval", device=self.device
+        )
 
         # do tests
         num_valid_steps = self.params.num_valid // self.params.batch_size
@@ -188,14 +206,15 @@ class DataLoaderBase:
 
         self.assertEqual((idt + 1), num_valid_steps)
 
-
     def _test_content(self, multifiles):
 
         # set mutltifiles
         self.params.multifiles = multifiles
 
         # create dataloaders
-        valid_loader, valid_dataset, _ = get_dataloader(self.params, self.params.valid_data_path, mode="eval", device=self.device)
+        valid_loader, valid_dataset, _ = get_dataloader(
+            self.params, self.params.valid_data_path, mode="eval", device=self.device
+        )
 
         # do tests
         for idt, token in enumerate(valid_loader):
@@ -228,31 +247,32 @@ class DataLoaderBase:
         # non-trivial stats: per-channel means/stds distinct from (0, 1)
         rng = np.random.default_rng(seed=1234)
         means = rng.normal(loc=0.5, scale=1.0, size=(1, NUM_CHANNELS, 1, 1)).astype(np.float64)
-        stds  = rng.uniform(low=0.5, high=2.0, size=(1, NUM_CHANNELS, 1, 1)).astype(np.float64)
+        stds = rng.uniform(low=0.5, high=2.0, size=(1, NUM_CHANNELS, 1, 1)).astype(np.float64)
 
         with tempfile.TemporaryDirectory() as tmp_stats:
             np.save(os.path.join(tmp_stats, "global_means.npy"), means)
-            np.save(os.path.join(tmp_stats, "global_stds.npy"),  stds)
+            np.save(os.path.join(tmp_stats, "global_stds.npy"), stds)
             # ancillary stats files: copy defaults from the shared stats dir
-            for fname in ("mins.npy", "maxs.npy", "time_means.npy",
-                          "time_diff_means.npy", "time_diff_stds.npy"):
+            for fname in ("mins.npy", "maxs.npy", "time_means.npy", "time_diff_means.npy", "time_diff_stds.npy"):
                 src = os.path.join(self.stats_path, fname)
                 np.save(os.path.join(tmp_stats, fname), np.load(src))
 
             params = copy.deepcopy(self.params)
-            params.global_means_path    = os.path.join(tmp_stats, "global_means.npy")
-            params.global_stds_path     = os.path.join(tmp_stats, "global_stds.npy")
-            params.min_path             = os.path.join(tmp_stats, "mins.npy")
-            params.max_path             = os.path.join(tmp_stats, "maxs.npy")
-            params.time_means_path      = os.path.join(tmp_stats, "time_means.npy")
+            params.global_means_path = os.path.join(tmp_stats, "global_means.npy")
+            params.global_stds_path = os.path.join(tmp_stats, "global_stds.npy")
+            params.min_path = os.path.join(tmp_stats, "mins.npy")
+            params.max_path = os.path.join(tmp_stats, "maxs.npy")
+            params.time_means_path = os.path.join(tmp_stats, "time_means.npy")
             params.time_diff_means_path = os.path.join(tmp_stats, "time_diff_means.npy")
-            params.time_diff_stds_path  = os.path.join(tmp_stats, "time_diff_stds.npy")
+            params.time_diff_stds_path = os.path.join(tmp_stats, "time_diff_stds.npy")
 
-            valid_loader, valid_dataset, _ = get_dataloader(params, params.valid_data_path, mode="eval", device=self.device)
+            valid_loader, valid_dataset, _ = get_dataloader(
+                params, params.valid_data_path, mode="eval", device=self.device
+            )
 
             # the same (B, C, 1, 1) stats broadcast over (B, C, H, W) raw samples
             means_b = means.astype(np.float32)
-            stds_b  = stds.astype(np.float32)
+            stds_b = stds.astype(np.float32)
 
             for idt, token in enumerate(valid_loader):
                 inp, tar = token
@@ -274,12 +294,12 @@ class DataLoaderBase:
                 inp_np = np.squeeze(inp.cpu().numpy())
                 tar_np = np.squeeze(tar.cpu().numpy())
 
-                self.assertTrue(compare_arrays("zscore normalized inp",
-                                               inp_np, np.squeeze(expected_inp),
-                                               atol=1e-5, rtol=1e-4))
-                self.assertTrue(compare_arrays("zscore normalized tar",
-                                               tar_np, np.squeeze(expected_tar),
-                                               atol=1e-5, rtol=1e-4))
+                self.assertTrue(
+                    compare_arrays("zscore normalized inp", inp_np, np.squeeze(expected_inp), atol=1e-5, rtol=1e-4)
+                )
+                self.assertTrue(
+                    compare_arrays("zscore normalized tar", tar_np, np.squeeze(expected_tar), atol=1e-5, rtol=1e-4)
+                )
 
                 if idt > self.num_steps:
                     break
@@ -290,13 +310,17 @@ class DataLoaderBase:
         self.params.multifiles = multifiles
 
         # create dataloaders
-        valid_loader, valid_dataset, _ = get_dataloader(self.params, self.params.valid_data_path, mode="eval", device=self.device)
+        valid_loader, valid_dataset, _ = get_dataloader(
+            self.params, self.params.valid_data_path, mode="eval", device=self.device
+        )
 
         # create flipped dataloader
         params = copy.deepcopy(self.params)
         params.in_channels = params.in_channels[::-1]
         params.out_channels = params.out_channels[::-1]
-        valid_loader_flip, valid_dataset_flip, _ = get_dataloader(params, self.params.valid_data_path, mode="eval", device=self.device)
+        valid_loader_flip, valid_dataset_flip, _ = get_dataloader(
+            params, self.params.valid_data_path, mode="eval", device=self.device
+        )
 
         for idt, (token, token_flip) in enumerate(zip(valid_loader, valid_loader_flip)):
             inp, tar = token
@@ -319,14 +343,19 @@ class DataLoaderBase:
         self.params.n_history = 3
 
         # create dataloaders
-        valid_loader, valid_dataset, _ = get_dataloader(self.params, self.params.valid_data_path, mode="eval", device=self.device)
+        valid_loader, valid_dataset, _ = get_dataloader(
+            self.params, self.params.valid_data_path, mode="eval", device=self.device
+        )
 
         # do tests
         for idt, token in enumerate(valid_loader):
             self.assertEqual(len(token), 2)
             inp, tar = token
 
-            self.assertEqual(tuple(inp.shape), (self.params.batch_size, self.params.n_history + 1, NUM_CHANNELS, IMG_SIZE_H, IMG_SIZE_W))
+            self.assertEqual(
+                tuple(inp.shape),
+                (self.params.batch_size, self.params.n_history + 1, NUM_CHANNELS, IMG_SIZE_H, IMG_SIZE_W),
+            )
             self.assertEqual(tuple(tar.shape), (self.params.batch_size, 1, NUM_CHANNELS, IMG_SIZE_H, IMG_SIZE_W))
 
             if idt > self.num_steps:
@@ -341,7 +370,9 @@ class DataLoaderBase:
         self.params.n_future = 3
 
         # create dataloaders
-        train_loader, train_dataset, _ = get_dataloader(self.params, self.params.train_data_path, mode="train", device=self.device)
+        train_loader, train_dataset, _ = get_dataloader(
+            self.params, self.params.train_data_path, mode="train", device=self.device
+        )
 
         # do tests
         for idt, token in enumerate(train_loader):
@@ -349,7 +380,10 @@ class DataLoaderBase:
             inp, tar = token
 
             self.assertEqual(tuple(inp.shape), (self.params.batch_size, 1, NUM_CHANNELS, IMG_SIZE_H, IMG_SIZE_W))
-            self.assertEqual(tuple(tar.shape), (self.params.batch_size, self.params.n_future + 1, NUM_CHANNELS, IMG_SIZE_H, IMG_SIZE_W))
+            self.assertEqual(
+                tuple(tar.shape),
+                (self.params.batch_size, self.params.n_future + 1, NUM_CHANNELS, IMG_SIZE_H, IMG_SIZE_W),
+            )
 
             if idt > self.num_steps:
                 break
@@ -363,7 +397,9 @@ class DataLoaderBase:
         self.params.valid_autoreg_steps = 3
 
         # create dataloaders
-        valid_loader, valid_dataset, _ = get_dataloader(self.params, self.params.valid_data_path, mode="eval", device=self.device)
+        valid_loader, valid_dataset, _ = get_dataloader(
+            self.params, self.params.valid_data_path, mode="eval", device=self.device
+        )
 
         # do tests
         for idt, token in enumerate(valid_loader):
@@ -371,11 +407,13 @@ class DataLoaderBase:
             inp, tar = token
 
             self.assertEqual(tuple(inp.shape), (self.params.batch_size, 1, NUM_CHANNELS, IMG_SIZE_H, IMG_SIZE_W))
-            self.assertEqual(tuple(tar.shape), (self.params.batch_size, self.params.valid_autoreg_steps + 1, NUM_CHANNELS, IMG_SIZE_H, IMG_SIZE_W))
+            self.assertEqual(
+                tuple(tar.shape),
+                (self.params.batch_size, self.params.valid_autoreg_steps + 1, NUM_CHANNELS, IMG_SIZE_H, IMG_SIZE_W),
+            )
 
             if idt > self.num_steps:
                 break
-
 
     def _test_distributed(self, multifiles):
 
@@ -386,7 +424,9 @@ class DataLoaderBase:
         self.params.io_grid = [1, 2, 1]
         self.params.io_rank = [0, 1, 0]
 
-        valid_loader, valid_dataset, _ = get_dataloader(self.params, self.params.valid_data_path, mode="eval", device=self.device)
+        valid_loader, valid_dataset, _ = get_dataloader(
+            self.params, self.params.valid_data_path, mode="eval", device=self.device
+        )
 
         off_x = valid_dataset.img_local_offset_x
         off_y = valid_dataset.img_local_offset_y
@@ -438,7 +478,9 @@ class DataLoaderBase:
         self.params.io_grid = [1, 2, 1]
         self.params.io_rank = [0, 1, 0]
 
-        valid_loader, valid_dataset, _ = get_dataloader(self.params, self.params.valid_data_path, mode="eval", device=self.device)
+        valid_loader, valid_dataset, _ = get_dataloader(
+            self.params, self.params.valid_data_path, mode="eval", device=self.device
+        )
 
         off_x = valid_dataset.img_local_offset_x
         off_y = valid_dataset.img_local_offset_y
@@ -451,8 +493,26 @@ class DataLoaderBase:
             # get loader samples
             inp, tar = token
 
-            self.assertEqual(tuple(inp.shape), (self.params.batch_size, 1, NUM_CHANNELS, math.ceil(range_x / subsample), math.ceil(range_y / subsample)))
-            self.assertEqual(tuple(tar.shape), (self.params.batch_size, 1, NUM_CHANNELS, math.ceil(range_x / subsample), math.ceil(range_y / subsample)))
+            self.assertEqual(
+                tuple(inp.shape),
+                (
+                    self.params.batch_size,
+                    1,
+                    NUM_CHANNELS,
+                    math.ceil(range_x / subsample),
+                    math.ceil(range_y / subsample),
+                ),
+            )
+            self.assertEqual(
+                tuple(tar.shape),
+                (
+                    self.params.batch_size,
+                    1,
+                    NUM_CHANNELS,
+                    math.ceil(range_x / subsample),
+                    math.ceil(range_y / subsample),
+                ),
+            )
 
             # get test samples
             off = self.params.batch_size * idt
@@ -497,11 +557,15 @@ class DataLoaderBase:
         """
         params = copy.deepcopy(self.params)
         params.multifiles = False
-        params.valid_autoreg_steps = 3   # n_future=3 in eval mode
+        params.valid_autoreg_steps = 3  # n_future=3 in eval mode
         params.batch_size = 1
 
         loader, _, _ = get_dataloader(
-            params, params.train_data_path, mode="eval", device=self.device, dali_device=self.dali_device,
+            params,
+            params.train_data_path,
+            mode="eval",
+            device=self.device,
+            dali_device=self.dali_device,
         )
 
         fingerprints = []
@@ -511,19 +575,19 @@ class DataLoaderBase:
                 fingerprints.append(inp[b].cpu().numpy().tobytes())
 
         unique = len(set(fingerprints))
-        total  = len(fingerprints)
+        total = len(fingerprints)
         self.assertEqual(
-            unique, total,
-            f"{total - unique} duplicate samples in a non-shuffled DALI epoch "
-            f"(total={total}, unique={unique}).",
+            unique,
+            total,
+            f"{total - unique} duplicate samples in a non-shuffled DALI epoch " f"(total={total}, unique={unique}).",
         )
 
         expected = {
-            self._get_sample(params.train_data_path, int(idx)).tobytes()
-            for idx in loader.extsource.indices_select
+            self._get_sample(params.train_data_path, int(idx)).tobytes() for idx in loader.extsource.indices_select
         }
         self.assertEqual(
-            set(fingerprints), expected,
+            set(fingerprints),
+            expected,
             "loaded samples do not match direct HDF5 reads of indices_select",
         )
 
@@ -566,7 +630,11 @@ class DataLoaderBase:
         params.num_data_workers = num_workers
 
         loader, _, _ = get_dataloader(
-            params, params.valid_data_path, mode="eval", device=self.device, dali_device=self.dali_device,
+            params,
+            params.valid_data_path,
+            mode="eval",
+            device=self.device,
+            dali_device=self.dali_device,
         )
 
         fps = []
@@ -576,7 +644,8 @@ class DataLoaderBase:
                 fps.append(inp[b].cpu().numpy().tobytes())
 
         self.assertEqual(
-            len(set(fps)), len(fps),
+            len(set(fps)),
+            len(fps),
             f"{len(fps) - len(set(fps))} duplicates with num_data_workers={num_workers} "
             f"(total={len(fps)}, unique={len(set(fps))})",
         )
@@ -584,13 +653,12 @@ class DataLoaderBase:
 
         # ground truth: read the same indices straight from the HDF5 file
         expected = {
-            self._get_sample(params.valid_data_path, int(idx)).tobytes()
-            for idx in loader.extsource.indices_select
+            self._get_sample(params.valid_data_path, int(idx)).tobytes() for idx in loader.extsource.indices_select
         }
         self.assertEqual(
-            set(fps), expected,
-            f"loader samples at num_data_workers={num_workers} do not match "
-            f"direct HDF5 reads",
+            set(fps),
+            expected,
+            f"loader samples at num_data_workers={num_workers} do not match " f"direct HDF5 reads",
         )
 
     def _test_dali_multi_epoch_reset_state(self):
@@ -609,11 +677,15 @@ class DataLoaderBase:
         params = copy.deepcopy(self.params)
         params.multifiles = False
         params.batch_size = 1
-        params.n_train_samples = 20          # keep the test fast
+        params.n_train_samples = 20  # keep the test fast
         params.n_future = 0
 
         loader, _, _ = get_dataloader(
-            params, params.train_data_path, mode="train", device=self.device, dali_device=self.dali_device,
+            params,
+            params.train_data_path,
+            mode="train",
+            device=self.device,
+            dali_device=self.dali_device,
         )
 
         def _collect_epoch():
@@ -658,7 +730,9 @@ class TestHDF5DataLoader(DataLoaderBase, unittest.TestCase):
         cls.device = torch.device("cpu")
         cls.tmpdir = tempfile.TemporaryDirectory(dir=path)
         tmp_path = cls.tmpdir.name
-        cls.train_path, cls.num_train, cls.valid_path, cls.num_valid, cls.stats_path, cls.metadata_path, _ = init_hdf5_dataset(tmp_path)
+        cls.train_path, cls.num_train, cls.valid_path, cls.num_valid, cls.stats_path, cls.metadata_path, _ = (
+            init_hdf5_dataset(tmp_path)
+        )
 
     @classmethod
     def tearDownClass(cls):
@@ -725,7 +799,9 @@ class TestHDF5DataLoader(DataLoaderBase, unittest.TestCase):
         train_loader, _, _ = get_dataloader(self.params, self.params.train_data_path, mode="train", device=self.device)
         dhours = 24
         time1 = train_loader.dataset.get_time_at_index(10)
-        time1_comp = dt.datetime(year=2017, month=1, day=1, hour=0, minute=0, second=0, tzinfo=dt.timezone.utc) + dt.timedelta(hours=dhours * 10)
+        time1_comp = dt.datetime(
+            year=2017, month=1, day=1, hour=0, minute=0, second=0, tzinfo=dt.timezone.utc
+        ) + dt.timedelta(hours=dhours * 10)
         self.assertEqual(time1, time1_comp)
         time2 = train_loader.dataset.get_time_at_index(365)
         time2_comp = dt.datetime(year=2018, month=1, day=1, hour=0, minute=0, second=0, tzinfo=dt.timezone.utc)
@@ -735,7 +811,9 @@ class TestHDF5DataLoader(DataLoaderBase, unittest.TestCase):
         self.params.multifiles = True
         train_loader, _, _ = get_dataloader(self.params, self.params.train_data_path, mode="train", device=self.device)
         dhours = 24
-        tstamp = dt.datetime(year=2017, month=1, day=1, hour=0, minute=0, second=0, tzinfo=dt.timezone.utc) + dt.timedelta(hours=dhours * 10)
+        tstamp = dt.datetime(
+            year=2017, month=1, day=1, hour=0, minute=0, second=0, tzinfo=dt.timezone.utc
+        ) + dt.timedelta(hours=dhours * 10)
         self.assertEqual(train_loader.dataset.get_index_at_time(tstamp), 10)
         tstamp = dt.datetime(year=2018, month=1, day=1, hour=0, minute=0, second=0, tzinfo=dt.timezone.utc)
         self.assertEqual(train_loader.dataset.get_index_at_time(tstamp), 365)
@@ -758,7 +836,9 @@ class TestZarrDataLoader(DataLoaderBase, unittest.TestCase):
         cls.device = torch.device("cpu")
         cls.tmpdir = tempfile.TemporaryDirectory(dir=path)
         tmp_path = cls.tmpdir.name
-        cls.train_path, cls.num_train, cls.valid_path, cls.num_valid, cls.stats_path, cls.metadata_path, _ = init_zarr_dataset(tmp_path)
+        cls.train_path, cls.num_train, cls.valid_path, cls.num_valid, cls.stats_path, cls.metadata_path, _ = (
+            init_zarr_dataset(tmp_path)
+        )
 
     @classmethod
     def tearDownClass(cls):
@@ -808,7 +888,9 @@ class TestZarrDataLoader(DataLoaderBase, unittest.TestCase):
         train_loader, _, _ = get_dataloader(self.params, self.params.train_data_path, mode="train", device=self.device)
         dhours = 24
         time1 = train_loader.dataset.get_time_at_index(10)
-        time1_comp = dt.datetime(year=2017, month=1, day=1, hour=0, minute=0, second=0, tzinfo=dt.timezone.utc) + dt.timedelta(hours=dhours * 10)
+        time1_comp = dt.datetime(
+            year=2017, month=1, day=1, hour=0, minute=0, second=0, tzinfo=dt.timezone.utc
+        ) + dt.timedelta(hours=dhours * 10)
         self.assertEqual(time1, time1_comp)
         time2 = train_loader.dataset.get_time_at_index(365)
         time2_comp = dt.datetime(year=2018, month=1, day=1, hour=0, minute=0, second=0, tzinfo=dt.timezone.utc)
@@ -818,7 +900,9 @@ class TestZarrDataLoader(DataLoaderBase, unittest.TestCase):
         self.params.multifiles = True
         train_loader, _, _ = get_dataloader(self.params, self.params.train_data_path, mode="train", device=self.device)
         dhours = 24
-        tstamp = dt.datetime(year=2017, month=1, day=1, hour=0, minute=0, second=0, tzinfo=dt.timezone.utc) + dt.timedelta(hours=dhours * 10)
+        tstamp = dt.datetime(
+            year=2017, month=1, day=1, hour=0, minute=0, second=0, tzinfo=dt.timezone.utc
+        ) + dt.timedelta(hours=dhours * 10)
         self.assertEqual(train_loader.dataset.get_index_at_time(tstamp), 10)
         tstamp = dt.datetime(year=2018, month=1, day=1, hour=0, minute=0, second=0, tzinfo=dt.timezone.utc)
         self.assertEqual(train_loader.dataset.get_index_at_time(tstamp), 365)
@@ -842,7 +926,9 @@ class TestZarrWB2DataLoader(DataLoaderBase, unittest.TestCase):
         cls.device = torch.device("cpu")
         cls.tmpdir = tempfile.TemporaryDirectory(dir=path)
         tmp_path = cls.tmpdir.name
-        cls.train_path, cls.num_train, cls.valid_path, cls.num_valid, cls.stats_path, cls.metadata_path, _ = init_wb2_zarr_dataset(tmp_path)
+        cls.train_path, cls.num_train, cls.valid_path, cls.num_valid, cls.stats_path, cls.metadata_path, _ = (
+            init_wb2_zarr_dataset(tmp_path)
+        )
 
     @classmethod
     def tearDownClass(cls):
@@ -893,6 +979,7 @@ class TestDummyLoader(unittest.TestCase):
 
     def _make_loader(self, **overrides):
         from makani.utils.dataloaders.data_loader_dummy import DummyLoader
+
         kwargs = dict(
             location="/nonexistent",
             device=self.device,
@@ -921,20 +1008,20 @@ class TestDummyLoader(unittest.TestCase):
     def test_history_and_future_dimensions(self):
         loader = self._make_loader(n_history=2, n_future=3)
         inp, tar = next(iter(loader))
-        self.assertEqual(inp.shape[1], 3)   # n_history + 1
-        self.assertEqual(tar.shape[1], 4)   # n_future  + 1
+        self.assertEqual(inp.shape[1], 3)  # n_history + 1
+        self.assertEqual(tar.shape[1], 4)  # n_future  + 1
 
     def test_add_zenith_appends_zenith_tensors(self):
         loader = self._make_loader(add_zenith=True)
         batch = next(iter(loader))
-        self.assertEqual(len(batch), 4)     # inp, tar, inp_zen, tar_zen
+        self.assertEqual(len(batch), 4)  # inp, tar, inp_zen, tar_zen
         _, _, inp_zen, _ = batch
         self.assertEqual(tuple(inp_zen.shape), (self.batch_size, 1, 1, *self.img_shape))
 
     def test_return_timestamp_appends_time_tensors(self):
         loader = self._make_loader(return_timestamp=True)
         batch = next(iter(loader))
-        self.assertEqual(len(batch), 4)     # inp, tar, inp_time, tar_time
+        self.assertEqual(len(batch), 4)  # inp, tar, inp_time, tar_time
         _, _, inp_time, _ = batch
         self.assertEqual(tuple(inp_time.shape), (self.batch_size, 1))
         self.assertEqual(inp_time.dtype, torch.float64)
@@ -942,7 +1029,7 @@ class TestDummyLoader(unittest.TestCase):
     def test_return_target_false_yields_input_only(self):
         loader = self._make_loader(return_target=False)
         batch = next(iter(loader))
-        self.assertEqual(len(batch), 1)     # inp only
+        self.assertEqual(len(batch), 1)  # inp only
 
     def test_subsampling_factor_reduces_spatial_shape(self):
         loader = self._make_loader(subsampling_factor=2)
@@ -958,6 +1045,7 @@ class TestDummyLoader(unittest.TestCase):
         self.assertTrue((in_scale == 1).all())
         self.assertTrue((out_bias == 0).all())
         self.assertTrue((out_scale == 1).all())
+
 
 if __name__ == "__main__":
     unittest.main()

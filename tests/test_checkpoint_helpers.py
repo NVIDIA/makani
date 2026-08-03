@@ -27,12 +27,10 @@ The distributed gather/scatter round-trip is covered separately by
 
 import os
 import sys
-import time
 import unittest
 import tempfile
 from collections import OrderedDict
 
-import torch
 import torch.nn as nn
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
@@ -55,9 +53,7 @@ class TestGetLatestCheckpointVersion(unittest.TestCase):
         self.tmpdir_ctx = tempfile.TemporaryDirectory()
         self.tmpdir = self.tmpdir_ctx.name
         # Standard makani checkpoint pattern: mp_rank in name, version after _v.
-        self.path_template = os.path.join(
-            self.tmpdir, "ckpt_mp{mp_rank}_v{checkpoint_version}.tar"
-        )
+        self.path_template = os.path.join(self.tmpdir, "ckpt_mp{mp_rank}_v{checkpoint_version}.tar")
 
     def tearDown(self):
         self.tmpdir_ctx.cleanup()
@@ -196,8 +192,8 @@ class TestPrependPrefixToStateDict(unittest.TestCase):
         d = OrderedDict([("a", 1)])
         before_id = id(d)
         result = prepend_prefix_to_state_dict(d, "x.")
-        self.assertIsNone(result)             # function returns None
-        self.assertEqual(id(d), before_id)    # same object
+        self.assertIsNone(result)  # function returns None
+        self.assertEqual(id(d), before_id)  # same object
         self.assertEqual(list(d.keys()), ["x.a"])
 
     def test_metadata_keys_also_get_prefix(self):

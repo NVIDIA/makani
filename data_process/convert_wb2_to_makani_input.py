@@ -34,12 +34,19 @@ from makani.utils.dataloaders.wb2_helpers import split_convert_channel_names, gc
 from data_process.data_process_helpers import DistributedProgressBar
 
 
-def convert(input_file: str, output_dir: str, metadata_file: str, years: List[int],
-            batch_size: Optional[int]=32, entry_key: Optional[str]='fields',
-            coord_mode: Optional[str]='match',
-            force_overwrite: Optional[bool]=False, skip_missing_channels: Optional[bool]=False, 
-            impute_missing_timestamps: Optional[bool]=False, verbose: Optional[bool]=False):
-
+def convert(
+    input_file: str,
+    output_dir: str,
+    metadata_file: str,
+    years: List[int],
+    batch_size: Optional[int] = 32,
+    entry_key: Optional[str] = "fields",
+    coord_mode: Optional[str] = "match",
+    force_overwrite: Optional[bool] = False,
+    skip_missing_channels: Optional[bool] = False,
+    impute_missing_timestamps: Optional[bool] = False,
+    verbose: Optional[bool] = False,
+):
     """Function to convert ARCO-ERA5 data (used by Weatherbench 2) to makani format.
 
     This function reads all files from the input_path and generates a WB2 compatible output file which
@@ -84,7 +91,6 @@ def convert(input_file: str, output_dir: str, metadata_file: str, years: List[in
         Enable for more printing.
     """
 
-
     # get comm ranks and size
     comm = MPI.COMM_WORLD.Dup()
     comm_rank = comm.Get_rank()
@@ -96,17 +102,23 @@ def convert(input_file: str, output_dir: str, metadata_file: str, years: List[in
     # get metadata info
     metadata = None
     if comm_rank == 0:
-        with open(metadata_file, 'r') as f:
+        with open(metadata_file, "r") as f:
             metadata = json.load(f)
     metadata = comm.bcast(metadata, root=0)
     dhours = metadata["dhours"]
-    channel_names = metadata['coords']['channel']
+    channel_names = metadata["coords"]["channel"]
     chanlen = max([len(v) for v in channel_names])
-    lat = metadata['coords']["lat"]
-    lon = metadata['coords']["lon"]
+    lat = metadata["coords"]["lat"]
+    lon = metadata["coords"]["lon"]
 
     # split in surface and atmospheric channels
-    atmospheric_channel_names, atmospheric_channel_names_wb2, surface_channel_names, surface_channel_names_wb2, atmospheric_levels = split_convert_channel_names(channel_names)
+    (
+        atmospheric_channel_names,
+        atmospheric_channel_names_wb2,
+        surface_channel_names,
+        surface_channel_names_wb2,
+        atmospheric_levels,
+    ) = split_convert_channel_names(channel_names)
 
     # open cloud dataset and align to metadata grid
     storage_options = gcs_storage_options() if input_file.startswith(("gs://", "gcs://")) else {}
@@ -114,13 +126,13 @@ def convert(input_file: str, output_dir: str, metadata_file: str, years: List[in
     # some WB2 zarrs store atmospheric/surface fields as (..., longitude, latitude);
     # the rest of this routine assumes (..., latitude, longitude).
     wb2_data = wb2_data.transpose(..., "latitude", "longitude")
-    if coord_mode == 'match':
+    if coord_mode == "match":
         wb2_data = wb2_data.sel(latitude=lat, longitude=lon)
-    elif coord_mode == 'force-flip-lat':
+    elif coord_mode == "force-flip-lat":
         if comm_rank == 0:
             warnings.warn("coord_mode='force-flip-lat': flipping latitude axis without coordinate matching")
         wb2_data = wb2_data.isel(latitude=slice(None, None, -1))
-    elif coord_mode == 'force':
+    elif coord_mode == "force":
         if comm_rank == 0:
             warnings.warn("coord_mode='force': reading data as-is, assuming ordering matches metadata")
     else:
@@ -133,7 +145,7 @@ def convert(input_file: str, output_dir: str, metadata_file: str, years: List[in
         start_date = dt.datetime(year=year, day=1, month=1, tzinfo=dt.timezone.utc)
         end_date = dt.datetime(year=year, day=31, month=12, hour=23, tzinfo=dt.timezone.utc)
         hours_in_year = int((end_date - start_date).total_seconds() // 3600)
-        times = [start_date + h * dt.timedelta(hours=1) for h in range(0,hours_in_year+1,dhours)]
+        times = [start_date + h * dt.timedelta(hours=1) for h in range(0, hours_in_year + 1, dhours)]
         timelist.append(times)
         num_entries_total += len(times)
 
@@ -165,7 +177,7 @@ def convert(input_file: str, output_dir: str, metadata_file: str, years: List[in
         if comm_rank == 0:
             file_exists = os.path.isfile(ofile)
         file_exists = comm.bcast(file_exists, root=0)
-        if  file_exists and not force_overwrite:
+        if file_exists and not force_overwrite:
             if comm_rank == 0:
                 print(f"File {ofile} already exists, skipping.")
             pbar.update_counter(len(times_local))
@@ -177,7 +189,7 @@ def convert(input_file: str, output_dir: str, metadata_file: str, years: List[in
 
         # create dimension scales
         # datasets
-        f.create_dataset("valid_data", data=np.ones((len(timestamps),len(channel_names)), dtype=np.int32))
+        f.create_dataset("valid_data", data=np.ones((len(timestamps), len(channel_names)), dtype=np.int32))
         f.create_dataset("timestamp", data=timestamps)
         f.create_dataset("channel", len(channel_names), dtype=h5.string_dtype(length=chanlen))
         f["channel"][...] = channel_names
@@ -205,11 +217,11 @@ def convert(input_file: str, output_dir: str, metadata_file: str, years: List[in
             tend = tstart + len(timebatch)
 
             # surface channel variables
-            for sc,scwb2 in zip(surface_channel_names,surface_channel_names_wb2):
+            for sc, scwb2 in zip(surface_channel_names, surface_channel_names_wb2):
                 cidx = channel_names.index(sc)
                 if scwb2 not in wb2_data:
                     if skip_missing_channels:
-                        if (comm_rank == 0) and not (scwb2 in skipped_channels):
+                        if (comm_rank == 0) and scwb2 not in skipped_channels:
                             print(f"Key {scwb2} not found in dataset, skipping")
                         skipped_channels.add(scwb2)
                         continue
@@ -225,13 +237,13 @@ def convert(input_file: str, output_dir: str, metadata_file: str, years: List[in
                         raise IndexError(f"Dates {timebatch} not all found in dataset for {scwb2}.")
                     else:
                         # else:
-                        #iterate over all timestamps and impute the missing values
+                        # iterate over all timestamps and impute the missing values
                         data = np.empty((len(timebatch), len(lat), len(lon)), dtype=np.float32)
                         for tid, t in enumerate(timebatch):
                             if t not in wb2_sel["time"]:
                                 print(f"Imputing timestamp {t} for {scwb2}")
                                 data[tid, ...] = np.nan
-                                f["valid_data"][tstart+tid, cidx] = 0
+                                f["valid_data"][tstart + tid, cidx] = 0
                             else:
                                 data[tid, ...] = wb2_sel[wb2_sel["time"].isin([t])].values[...]
 
@@ -244,7 +256,7 @@ def convert(input_file: str, output_dir: str, metadata_file: str, years: List[in
             for ac, acwb2 in zip(atmospheric_channel_names, atmospheric_channel_names_wb2):
                 if acwb2 not in wb2_data:
                     if skip_missing_channels:
-                        if (comm_rank == 0) and not (acwb2 in skipped_channels):
+                        if (comm_rank == 0) and acwb2 not in skipped_channels:
                             print(f"Key {acwb2} not found in dataset, skipping")
                         skipped_channels.add(acwb2)
                         continue
@@ -262,14 +274,14 @@ def convert(input_file: str, output_dir: str, metadata_file: str, years: List[in
                         if not impute_missing_timestamps:
                             raise IndexError(f"Dates {timebatch} not all found in dataset for {acwb2}.")
                         # else:
-                        #iterate over all timestamps and impute the missing values
+                        # iterate over all timestamps and impute the missing values
                         wb2_sel = wb2_data[acwb2].sel(level=alevel)
                         data = np.empty((len(timebatch), len(lat), len(lon)), dtype=np.float32)
                         for tid, t in enumerate(timebatch):
                             if t not in wb2_sel["time"]:
                                 print(f"Imputing timestamp {t} for {acwb2}")
                                 data[tid, ...] = np.nan
-                                f["valid_data"][tstart+tid, cidx] = 0
+                                f["valid_data"][tstart + tid, cidx] = 0
                             else:
                                 data[tid, ...] = wb2_sel[wb2_sel["time"].isin([t])].values[...]
 
@@ -293,7 +305,7 @@ def convert(input_file: str, output_dir: str, metadata_file: str, years: List[in
 
     # end time
     end_time = time.perf_counter()
-    run_time = str(dt.timedelta(seconds=end_time-start_time))
+    run_time = str(dt.timedelta(seconds=end_time - start_time))
 
     if comm_rank == 0:
         print(f"All done. Run time {run_time}. Skipped channels: {list(skipped_channels)}")
@@ -305,29 +317,36 @@ def convert(input_file: str, output_dir: str, metadata_file: str, years: List[in
 
 def main(args):
     # concatenate files with timestamp information
-    convert(input_file=args.input_file,
-            output_dir=args.output_dir,
-            metadata_file=args.metadata_file,
-            years=args.years,
-            batch_size=args.batch_size,
-            coord_mode=args.coord_mode,
-            force_overwrite=args.force_overwrite,
-            skip_missing_channels=args.skip_missing_channels,
-            impute_missing_timestamps=args.impute_missing_timestamps,
-            verbose=args.verbose)
+    convert(
+        input_file=args.input_file,
+        output_dir=args.output_dir,
+        metadata_file=args.metadata_file,
+        years=args.years,
+        batch_size=args.batch_size,
+        coord_mode=args.coord_mode,
+        force_overwrite=args.force_overwrite,
+        skip_missing_channels=args.skip_missing_channels,
+        impute_missing_timestamps=args.impute_missing_timestamps,
+        verbose=args.verbose,
+    )
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
 
     # argparse
     parser = ap.ArgumentParser()
     parser.add_argument("--input_file", type=str, help="WB2 input file", required=True)
     parser.add_argument("--output_dir", type=str, help="Local directory for output files.", required=True)
     parser.add_argument("--metadata_file", type=str, help="Local file with metadata.", required=True)
-    parser.add_argument("--years", type=int, nargs='+', help="Which years to convert", required=True)
+    parser.add_argument("--years", type=int, nargs="+", help="Which years to convert", required=True)
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size for writing chunks")
-    parser.add_argument("--coord_mode", type=str, default="match", choices=["match", "force-flip-lat", "force"],
-                        help="How to align input lat/lon to metadata: match (default), force-flip-lat, force")
+    parser.add_argument(
+        "--coord_mode",
+        type=str,
+        default="match",
+        choices=["match", "force-flip-lat", "force"],
+        help="How to align input lat/lon to metadata: match (default), force-flip-lat, force",
+    )
     parser.add_argument("--skip_missing_channels", action="store_true", help="Skip missing channels and do not fail")
     parser.add_argument("--impute_missing_timestamps", action="store_true", help="Impute missing timestamps")
     parser.add_argument("--force_overwrite", action="store_true", help="Overwrite existing files")

@@ -35,7 +35,9 @@ from makani import Trainer
 
 if __name__ == "__main__":
     parser = argument_parser.get_default_argument_parser()
-    parser.add_argument("--mode", default="train", type=str, choices=["train", "test"], help="Run training or perform a test")
+    parser.add_argument(
+        "--mode", default="train", type=str, choices=["train", "test"], help="Run training or perform a test"
+    )
     # parse
     args = parser.parse_args()
 
@@ -57,7 +59,11 @@ if __name__ == "__main__":
 
     # make sure to reconfigure logger after the pytorch distributed init
     with Timer() as timer:
-        comm.init(model_parallel_sizes=params["model_parallel_sizes"], model_parallel_names=params["model_parallel_names"], verbose=False)
+        comm.init(
+            model_parallel_sizes=params["model_parallel_sizes"],
+            model_parallel_names=params["model_parallel_names"],
+            verbose=False,
+        )
     world_rank = comm.get_world_rank()
     if world_rank == 0:
         print(f"Communicators wireup time: {timer.time:.2f}s")
@@ -142,7 +148,7 @@ if __name__ == "__main__":
     if "metadata_json_path" in params:
         params, _ = parse_dataset_metadata(params["metadata_json_path"], params=params)
     else:
-        raise RuntimeError(f"Error, please specify a dataset descriptor file in json format")
+        raise RuntimeError("Error, please specify a dataset descriptor file in json format")
 
     # instantiate trainer
     trainer = Trainer(params, world_rank)
@@ -156,7 +162,12 @@ if __name__ == "__main__":
                     torch.profiler.ProfilerActivity.CPU,
                     torch.profiler.ProfilerActivity.CUDA,
                 ],
-                schedule=torch.profiler.schedule(wait=args.capture_range_start - 1, warmup=1, active=args.capture_range_stop - args.capture_range_start, repeat=1),
+                schedule=torch.profiler.schedule(
+                    wait=args.capture_range_start - 1,
+                    warmup=1,
+                    active=args.capture_range_stop - args.capture_range_start,
+                    repeat=1,
+                ),
                 on_trace_ready=trace_handler,
                 record_shapes=True,
                 profile_memory=True,
@@ -167,7 +178,9 @@ if __name__ == "__main__":
                     trainer.train(validation_profiler=profiler)
 
         elif args.capture_type == "cupti":
-            with profiling.CUDAProfiler(capture_range_start=args.capture_range_start, capture_range_stop=args.capture_range_stop, enabled=True) as profiler:
+            with profiling.CUDAProfiler(
+                capture_range_start=args.capture_range_start, capture_range_stop=args.capture_range_stop, enabled=True
+            ) as profiler:
                 with torch.autograd.profiler.emit_nvtx(enabled=True, record_shapes=False):
                     if args.capture_mode == "training":
                         trainer.train(training_profiler=profiler)

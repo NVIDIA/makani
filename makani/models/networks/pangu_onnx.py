@@ -18,8 +18,9 @@ from makani.utils.features import get_channel_groups
 
 from makani.models.onnx_wrapper import OnnxWrapper
 
+
 class PanguOnnx(OnnxWrapper):
-    '''
+    """
     An ONNX Wrapper that runs inference on the Pangu model release in https://github.com/198808xc/Pangu-Weather
     Args:
         channel_names: List containing the name of the channels/variables that are inputted in the model
@@ -27,17 +28,18 @@ class PanguOnnx(OnnxWrapper):
         channel_order_atmo: List containing the names of the atmospheric variables with the ordering that the ONNX model expects
         channel_order_PL: List containing the names of the pressure levels with the ordering that the ONNX model expects
         onnx_file: Path to the ONNX file containing the model
-    '''
-    def __init__(self,
+    """
+
+    def __init__(
+        self,
         channel_names=[],
         aux_channel_names=[],
         onnx_file=None,
         **kwargs,
     ):
-        super(PanguOnnx,self).__init__(onnx_file, **kwargs)
+        super(PanguOnnx, self).__init__(onnx_file, **kwargs)
 
         self._precompute_channel_groups(channel_names, aux_channel_names)
-
 
     def _precompute_channel_groups(
         self,
@@ -56,7 +58,9 @@ class PanguOnnx(OnnxWrapper):
 
         # make sure they are divisible. Attention! This does not guarantee that the grrouping is correct
         if len(atmo_chans) % self.n_atmo_groups:
-            raise ValueError(f"Expected number of atmospheric variables to be divisible by number of atmospheric groups but got {len(atmo_chans)} and {self.n_atmo_groups}")
+            raise ValueError(
+                f"Expected number of atmospheric variables to be divisible by number of atmospheric groups but got {len(atmo_chans)} and {self.n_atmo_groups}"
+            )
 
         self.register_buffer("atmo_channels", torch.tensor(atmo_chans, dtype=torch.long), persistent=False)
         self.register_buffer("surf_channels", torch.tensor(surf_chans, dtype=torch.long), persistent=False)
@@ -65,14 +69,16 @@ class PanguOnnx(OnnxWrapper):
 
     def prepare_input(self, input):
 
-        B,V,Lat,Long=input.shape
+        B, V, Lat, Long = input.shape
 
-        if B>1:
+        if B > 1:
             raise NotImplementedError("Not implemented yet for batch size greater than 1")
 
-        input=input.squeeze(0)
-        surface_aux_inp=input[self.surf_channels]
-        atmospheric_inp=input[self.atmo_channels].reshape(self.n_atmo_groups,self.n_atmo_chans,Lat,Long).transpose(1,0)
+        input = input.squeeze(0)
+        surface_aux_inp = input[self.surf_channels]
+        atmospheric_inp = (
+            input[self.atmo_channels].reshape(self.n_atmo_groups, self.n_atmo_chans, Lat, Long).transpose(1, 0)
+        )
 
         return surface_aux_inp, atmospheric_inp
 
@@ -83,21 +89,18 @@ class PanguOnnx(OnnxWrapper):
         This functions reverts the restructuring and concatenates the output to a single tensor.
         """
 
-        _,Lat,Long=output_surface.shape
+        _, Lat, Long = output_surface.shape
 
-        output=torch.cat([output_surface,output_atmospheric.reshape(-1,Lat,Long)],dim=0)
+        output = torch.cat([output_surface, output_atmospheric.reshape(-1, Lat, Long)], dim=0)
 
         return output.unsqueeze(0)
-
 
     def forward(self, input):
 
         surface, atmospheric = self.prepare_input(input)
 
-
-        output,output_surface=self.onnx_session_run({'input':atmospheric,'input_surface':surface})
+        output, output_surface = self.onnx_session_run({"input": atmospheric, "input_surface": surface})
 
         output = self.prepare_output(output_surface, output)
-
 
         return output

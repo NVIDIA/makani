@@ -19,7 +19,9 @@ import torch
 
 from makani.models.preprocessor_helpers import get_bias_correction, get_static_features
 
-import sys, os
+import sys
+import os
+
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from .testutils import set_seed, get_default_parameters
 
@@ -134,7 +136,7 @@ class TestGetStaticFeatures(unittest.TestCase):
         self.params.add_cos_to_grid = True
         out = get_static_features(self.params)
         self.assertGreaterEqual(out.min().item(), -1.0)
-        self.assertLessEqual(out.max().item(),  1.0)
+        self.assertLessEqual(out.max().item(), 1.0)
 
     def test_add_grid_sinusoidal_finite(self):
         """Sinusoidal grid features must be finite (no NaN or Inf)."""
@@ -154,7 +156,7 @@ class TestGetStaticFeatures(unittest.TestCase):
         self.params.add_grid = True
         self.params.gridtype = "raw"
         self.params.img_local_offset_x = 2
-        self.params.img_local_shape_x  = 4    # rows 2..5 → 4 rows
+        self.params.img_local_shape_x = 4  # rows 2..5 → 4 rows
         out = get_static_features(self.params)
         self.assertEqual(out.shape[-2], 4)
         self.assertEqual(out.shape[-1], IMG_W)
@@ -164,7 +166,7 @@ class TestGetStaticFeatures(unittest.TestCase):
         self.params.add_grid = True
         self.params.gridtype = "raw"
         self.params.img_local_offset_y = 4
-        self.params.img_local_shape_y  = 8    # cols 4..11 → 8 cols
+        self.params.img_local_shape_y = 8  # cols 4..11 → 8 cols
         out = get_static_features(self.params)
         self.assertEqual(out.shape[-2], IMG_H)
         self.assertEqual(out.shape[-1], 8)
@@ -174,7 +176,7 @@ class TestGetStaticFeatures(unittest.TestCase):
         self.params.add_grid = True
         self.params.gridtype = "raw"
         self.params.img_local_offset_x = 6
-        self.params.img_local_shape_x  = 8    # would overshoot → clamped to 2 rows
+        self.params.img_local_shape_x = 8  # would overshoot → clamped to 2 rows
         out = get_static_features(self.params)
         self.assertEqual(out.shape[-2], IMG_H - 6)
 

@@ -26,7 +26,15 @@ def split_list(lst: List[int], nchunks: int) -> List[List[int]]:
 
 
 class SortedIndexSampler(tud.Sampler[List[int]]):
-    def __init__(self, indices: List[int], maxind: int, batch_size: int, rollout_steps: int, rollout_dt: int, incomplete_rollouts: Optional[bool] = False) -> None:
+    def __init__(
+        self,
+        indices: List[int],
+        maxind: int,
+        batch_size: int,
+        rollout_steps: int,
+        rollout_dt: int,
+        incomplete_rollouts: Optional[bool] = False,
+    ) -> None:
 
         # Cap the batch size to the input length, but never below 1: ``batched(..., 0)``
         # raises in more_itertools, so empty ``indices`` would otherwise crash here.
@@ -38,7 +46,7 @@ class SortedIndexSampler(tud.Sampler[List[int]]):
         for batch in batches:
             rollout = []
             append = True
-            for s in range(0, rollout_steps+1):
+            for s in range(0, rollout_steps + 1):
                 shift = [b + rollout_dt * s for b in batch]
                 if max(shift) >= maxind:
                     append = False
@@ -120,14 +128,10 @@ def compute_inference_range(
         end_index = len(dataset) - 1
 
     if end_index <= start_index:
-        raise ValueError(
-            f"Error, start date {start_date} has to be strictly smaller than end date {end_date}"
-        )
+        raise ValueError(f"Error, start date {start_date} has to be strictly smaller than end date {end_date}")
 
     if date_step < dataset.dhours:
-        raise ValueError(
-            f"date_step {date_step} is smaller than the dataset dhours {dataset.dhours}"
-        )
+        raise ValueError(f"date_step {date_step} is smaller than the dataset dhours {dataset.dhours}")
 
     # Floor-division: a date_step that's not an exact multiple of dhours rounds down.
     # E.g. dhours=6, date_step=7 → step=1 (one-sample stride). Pinned by tests.
@@ -144,7 +148,10 @@ def translate_date_sampler_to_timedelta_sampler(sampler, date_dataset, timedelta
     iterator = iter(sampler)
     for indices in iterator:
         tstamps = [date_dataset.get_time_at_index(idx) for idx in indices]
-        timedeltas = [t - dt.datetime(year=t.year, month=1, day=1, hour=0, minute=0, second=0, tzinfo=dt.timezone.utc) for t in tstamps]
+        timedeltas = [
+            t - dt.datetime(year=t.year, month=1, day=1, hour=0, minute=0, second=0, tzinfo=dt.timezone.utc)
+            for t in tstamps
+        ]
         indexlist.append([timedelta_dataset.get_index_at_time(t) for t in timedeltas])
 
     return SimpleIndexSampler(indexlist)

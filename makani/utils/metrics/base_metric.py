@@ -46,7 +46,7 @@ def _sanitize_shapes(vals, counts, dim):
     cshape[dim] = -1
     counts = counts.reshape(cshape)
     return vals, counts
-    
+
 
 def _welford_reduction_helper(vals, counts, batch_reduction, dim):
     counts_res = torch.sum(counts, dim=dim)
@@ -109,7 +109,9 @@ class GeometricBaseMetric(nn.Module, metaclass=ABCMeta):
     def compute_counts(self, inp: torch.Tensor, weight: Optional[torch.Tensor] = None) -> torch.Tensor:
         if weight is not None:
             if self.batch_reduction == "mean":
-                raise ValueError(f"Batch reduction mode 'mean' is not supported when weights are provided. Use 'sum' instead.")
+                raise ValueError(
+                    "Batch reduction mode 'mean' is not supported when weights are provided. Use 'sum' instead."
+                )
             elif self.batch_reduction == "sum":
                 counts = torch.sum(self.quadrature(weight.to(dtype=inp.dtype)), dim=0)
             else:
@@ -127,7 +129,9 @@ class GeometricBaseMetric(nn.Module, metaclass=ABCMeta):
 
         return counts
 
-    def combine(self, vals: torch.Tensor, counts: torch.Tensor, dim: Optional[int]=0) -> Tuple[torch.Tensor, torch.Tensor]:
+    def combine(
+        self, vals: torch.Tensor, counts: torch.Tensor, dim: Optional[int] = 0
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Defines how to combine multiple metrics result using Welford.
 
@@ -168,7 +172,7 @@ class GeometricBaseMetric(nn.Module, metaclass=ABCMeta):
 
         Returns
         -------
-        vals_res : torch.Tensor 
+        vals_res : torch.Tensor
             Values with correct averaging over counts.
         """
         if self.batch_reduction == "mean":
@@ -179,4 +183,3 @@ class GeometricBaseMetric(nn.Module, metaclass=ABCMeta):
     @abstractmethod
     def forward(self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None) -> torch.Tensor:
         pass
-

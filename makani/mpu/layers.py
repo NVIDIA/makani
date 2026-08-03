@@ -50,7 +50,9 @@ class DistributedMatmul(nn.Module):
       added AFTER the reduction.
     """
 
-    def __init__(self, inp_dim, out_dim, input_format="nchw", comm_name="matmul", parallel_mode="column", bias=True, use_te=False):
+    def __init__(
+        self, inp_dim, out_dim, input_format="nchw", comm_name="matmul", parallel_mode="column", bias=True, use_te=False
+    ):
         super(DistributedMatmul, self).__init__()
 
         if parallel_mode not in ["column", "row"]:
@@ -68,19 +70,25 @@ class DistributedMatmul(nn.Module):
         if use_te and not _TE_AVAILABLE:
             import warnings
 
-            warnings.warn("use_te=True was requested but transformer_engine is not installed; falling back to the standard matmul.")
+            warnings.warn(
+                "use_te=True was requested but transformer_engine is not installed; falling back to the standard matmul."
+            )
 
         comm_size = comm.get_size(comm_name)
 
         # column shards the output dim, row shards the input dim
         if parallel_mode == "column":
             if out_dim % comm_size != 0:
-                raise ValueError(f"the output feature dim ({out_dim}) has to be evenly divisible by the matmul comm dim ({comm_size})")
+                raise ValueError(
+                    f"the output feature dim ({out_dim}) has to be evenly divisible by the matmul comm dim ({comm_size})"
+                )
             out_dim_local = out_dim // comm_size
             inp_dim_local = inp_dim
         else:
             if inp_dim % comm_size != 0:
-                raise ValueError(f"the input feature dim ({inp_dim}) has to be evenly divisible by the matmul comm dim ({comm_size})")
+                raise ValueError(
+                    f"the input feature dim ({inp_dim}) has to be evenly divisible by the matmul comm dim ({comm_size})"
+                )
             out_dim_local = out_dim
             inp_dim_local = inp_dim // comm_size
 
@@ -170,7 +178,18 @@ class DistributedMatmul(nn.Module):
 
 # distributed encoder/decoder
 class DistributedEncoderDecoder(nn.Module):
-    def __init__(self, num_layers, input_dim, output_dim, hidden_dim, act_layer, gain=1.0, input_format="nchw", comm_name="matmul", use_te=False):
+    def __init__(
+        self,
+        num_layers,
+        input_dim,
+        output_dim,
+        hidden_dim,
+        act_layer,
+        gain=1.0,
+        input_format="nchw",
+        comm_name="matmul",
+        use_te=False,
+    ):
         super(DistributedEncoderDecoder, self).__init__()
 
         self.comm_name = comm_name
@@ -192,7 +211,15 @@ class DistributedEncoderDecoder(nn.Module):
         current_dim = input_dim
         for i in range(num_layers - 1):
             encoder_modules.append(
-                DistributedMatmul(current_dim, hidden_dim, input_format=input_format, comm_name=comm_name, parallel_mode=modes[i], bias=True, use_te=use_te)
+                DistributedMatmul(
+                    current_dim,
+                    hidden_dim,
+                    input_format=input_format,
+                    comm_name=comm_name,
+                    parallel_mode=modes[i],
+                    bias=True,
+                    use_te=use_te,
+                )
             )
 
             # proper initialization
@@ -205,7 +232,17 @@ class DistributedEncoderDecoder(nn.Module):
             current_dim = hidden_dim
 
         # final layer (row-parallel, replicated output, no bias)
-        encoder_modules.append(DistributedMatmul(current_dim, output_dim, input_format=input_format, comm_name=comm_name, parallel_mode=modes[-1], bias=False, use_te=use_te))
+        encoder_modules.append(
+            DistributedMatmul(
+                current_dim,
+                output_dim,
+                input_format=input_format,
+                comm_name=comm_name,
+                parallel_mode=modes[-1],
+                bias=False,
+                use_te=use_te,
+            )
+        )
 
         # proper initialization of final layer
         scale = math.sqrt(gain / current_dim)
@@ -244,7 +281,9 @@ class DistributedMLP(nn.Module):
 
         # sanity checks:
         if (input_format == "traditional") and (drop_type == "features"):
-            raise NotImplementedError(f"Error, traditional input format and feature dropout cannot be selected simultaneously")
+            raise NotImplementedError(
+                "Error, traditional input format and feature dropout cannot be selected simultaneously"
+            )
 
         # TE GEMMs operate on the last (channel) dim. Rather than permuting
         # nchw<->nhwc around *each* matmul, when the TE path is active we build the
@@ -256,7 +295,15 @@ class DistributedMLP(nn.Module):
         matmul_format = "traditional" if self.channels_last else input_format
 
         # column-parallel: replicated input -> hidden sharded over the matmul group
-        self.fc1 = DistributedMatmul(in_features, hidden_features, input_format=matmul_format, comm_name=comm_name, parallel_mode="column", bias=True, use_te=use_te)
+        self.fc1 = DistributedMatmul(
+            in_features,
+            hidden_features,
+            input_format=matmul_format,
+            comm_name=comm_name,
+            parallel_mode="column",
+            bias=True,
+            use_te=use_te,
+        )
 
         # initialize the weights correctly
         scale = math.sqrt(2.0 / in_features)
@@ -264,7 +311,15 @@ class DistributedMLP(nn.Module):
         nn.init.constant_(self.fc1.bias, 0.0)
 
         # row-parallel: sharded hidden -> all-reduced (replicated) output
-        self.fc2 = DistributedMatmul(hidden_features, out_features, input_format=matmul_format, comm_name=comm_name, parallel_mode="row", bias=output_bias, use_te=use_te)
+        self.fc2 = DistributedMatmul(
+            hidden_features,
+            out_features,
+            input_format=matmul_format,
+            comm_name=comm_name,
+            parallel_mode="row",
+            bias=output_bias,
+            use_te=use_te,
+        )
 
         # gain factor for the output determines the scaling of the output init
         scale = math.sqrt(gain / hidden_features)
@@ -315,6 +370,7 @@ class DistributedMLP(nn.Module):
             return self._checkpoint_forward(x)
         else:
             return self.fwd(x)
+
 
 # Stochastic MLP needs comm datastructure
 class StochasticMLP(nn.Module):
@@ -367,7 +423,9 @@ class StochasticMLP(nn.Module):
 
         # sanity checks
         if (input_format == "traditional") and (drop_type == "features"):
-            raise NotImplementedError(f"Error, traditional input format and feature dropout cannot be selected simultaneously")
+            raise NotImplementedError(
+                "Error, traditional input format and feature dropout cannot be selected simultaneously"
+            )
 
         # output layer
         if input_format == "nchw":
@@ -450,8 +508,17 @@ class StochasticMLP(nn.Module):
         else:
             return self.fwd(x)
 
+
 class DistributedPatchEmbed(nn.Module):
-    def __init__(self, img_size=(224, 224), patch_size=(16, 16), in_chans=3, embed_dim=768, input_is_matmul_parallel=False, output_is_matmul_parallel=True):
+    def __init__(
+        self,
+        img_size=(224, 224),
+        patch_size=(16, 16),
+        in_chans=3,
+        embed_dim=768,
+        input_is_matmul_parallel=False,
+        output_is_matmul_parallel=True,
+    ):
         super().__init__()
 
         # store params
@@ -464,7 +531,9 @@ class DistributedPatchEmbed(nn.Module):
 
         # compute parameters
         if (img_size[1] // patch_size[1]) % spatial_comm_size != 0:
-            raise ValueError(f"the spatial comm size ({spatial_comm_size}) must evenly divide patched W ({img_size[1] // patch_size[1]})")
+            raise ValueError(
+                f"the spatial comm size ({spatial_comm_size}) must evenly divide patched W ({img_size[1] // patch_size[1]})"
+            )
         num_patches = ((img_size[1] // patch_size[1]) // spatial_comm_size) * (img_size[0] // patch_size[0])
         self.img_size = (img_size[0], img_size[1] // spatial_comm_size)
         self.patch_size = patch_size
@@ -473,7 +542,9 @@ class DistributedPatchEmbed(nn.Module):
         # get effective embedding size:
         if self.output_parallel:
             if embed_dim % matmul_comm_size != 0:
-                raise ValueError(f"the embed_dim ({embed_dim}) needs to be divisible by matmul_parallel_size ({matmul_comm_size})")
+                raise ValueError(
+                    f"the embed_dim ({embed_dim}) needs to be divisible by matmul_parallel_size ({matmul_comm_size})"
+                )
             out_chans_local = embed_dim // matmul_comm_size
         else:
             out_chans_local = embed_dim
@@ -526,18 +597,24 @@ class DistributedAttention(nn.Module):
         self.num_heads = num_heads
 
         if num_heads % comm.get_size(comm_name) != 0:
-            raise ValueError(f"heads ({num_heads}) are not evenly split across model ranks ({comm.get_size(comm_name)})")
+            raise ValueError(
+                f"heads ({num_heads}) are not evenly split across model ranks ({comm.get_size(comm_name)})"
+            )
         self.num_heads_local = num_heads // comm.get_size(comm_name)
         self.head_dim = dim // self.num_heads
 
         self.comm_name = comm_name
 
         # column-parallel qkv (heads sharded over the matmul group) -> row-parallel proj
-        self.qkv = DistributedMatmul(dim, dim * 3, input_format, comm_name=comm_name, parallel_mode="column", bias=qkv_bias, use_te=use_te)
+        self.qkv = DistributedMatmul(
+            dim, dim * 3, input_format, comm_name=comm_name, parallel_mode="column", bias=qkv_bias, use_te=use_te
+        )
         self.q_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
         self.k_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
         self.attn_drop_rate = attn_drop_rate
-        self.proj = DistributedMatmul(dim, dim, input_format, comm_name=comm_name, parallel_mode="row", bias=False, use_te=use_te)
+        self.proj = DistributedMatmul(
+            dim, dim, input_format, comm_name=comm_name, parallel_mode="row", bias=False, use_te=use_te
+        )
         if proj_drop_rate > 0.0:
             self.proj_drop = nn.Dropout(proj_drop_rate)
         else:
@@ -617,8 +694,9 @@ class DistributedAFNO2Dv2(nn.Module):
 
         # select fft function handles
         if self.spatial_comm_size > 1:
-            self.fft_handle = distributed_rfft2.apply
-            self.ifft_handle = distributed_irfft2.apply
+            # The spatially-distributed FFT for this layer was never implemented:
+            # distributed_rfft2/distributed_irfft2 do not exist in any revision.
+            raise NotImplementedError("DistributedAFNO2Dv2 does not support spatial model parallelism.")
         else:
             self.fft_handle = torch.fft.rfft2
             self.ifft_handle = torch.fft.irfft2
@@ -640,9 +718,17 @@ class DistributedAFNO2Dv2(nn.Module):
 
         # new
         # these weights need to be synced across all spatial ranks!
-        self.w1 = nn.Parameter(self.scale * torch.randn(self.num_blocks_local, self.block_size, self.block_size * self.hidden_size_factor, 2))
-        self.b1 = nn.Parameter(self.scale * torch.randn(self.num_blocks_local, self.block_size * self.hidden_size_factor, 1, 1, 2))
-        self.w2 = nn.Parameter(self.scale * torch.randn(self.num_blocks_local, self.block_size * self.hidden_size_factor, self.block_size, 2))
+        self.w1 = nn.Parameter(
+            self.scale
+            * torch.randn(self.num_blocks_local, self.block_size, self.block_size * self.hidden_size_factor, 2)
+        )
+        self.b1 = nn.Parameter(
+            self.scale * torch.randn(self.num_blocks_local, self.block_size * self.hidden_size_factor, 1, 1, 2)
+        )
+        self.w2 = nn.Parameter(
+            self.scale
+            * torch.randn(self.num_blocks_local, self.block_size * self.hidden_size_factor, self.block_size, 2)
+        )
         self.b2 = nn.Parameter(self.scale * torch.randn(self.num_blocks_local, self.block_size, 1, 1, 2))
 
         # setting correct sharding and sharing
@@ -681,8 +767,14 @@ class DistributedAFNO2Dv2(nn.Module):
         x = torch.view_as_real(x)
         o2 = torch.zeros(x.shape, device=x.device)
 
-        o1 = F.relu(self.mult_handle(x[:, :, :, total_modes - kept_modes : total_modes + kept_modes, :kept_modes, :], self.w1, self.b1))
-        o2[:, :, :, total_modes - kept_modes : total_modes + kept_modes, :kept_modes, :] = self.mult_handle(o1, self.w2, self.b2)
+        o1 = F.relu(
+            self.mult_handle(
+                x[:, :, :, total_modes - kept_modes : total_modes + kept_modes, :kept_modes, :], self.w1, self.b1
+            )
+        )
+        o2[:, :, :, total_modes - kept_modes : total_modes + kept_modes, :kept_modes, :] = self.mult_handle(
+            o1, self.w2, self.b2
+        )
 
         # finalize
         x = F.softshrink(o2, lambd=self.sparsity_threshold)

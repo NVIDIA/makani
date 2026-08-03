@@ -41,4 +41,5 @@ class _DistributedConfig:
     def __repr__(self):
         return f"_DistributedConfig(debug={self.debug})"
 
+
 config = _DistributedConfig()

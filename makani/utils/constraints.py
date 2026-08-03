@@ -81,7 +81,7 @@ class NonNegativeConstraint(nn.Module):
 
         if bias is not None and scale is not None:
             means = bias[0, chan_idx, 0, 0].to(torch.float32)
-            stds  = scale[0, chan_idx, 0, 0].to(torch.float32)
+            stds = scale[0, chan_idx, 0, 0].to(torch.float32)
             # offset = bias/scale; physical zero is at x_norm = -offset
             offset = (means / stds).view(1, -1, 1, 1)
             self.register_buffer("offset", offset, persistent=False)
@@ -98,9 +98,11 @@ class NonNegativeConstraint(nn.Module):
             if self.mode == "silu":
                 w = w_shifted * torch.sigmoid(w_shifted / self.eps)
             else:  # "softplus": monotonic leaky blend (no collapse-inducing negative-gradient dip),
-                   # with the constant softplus(0)=ln2 subtracted so physical zero is a fixed point
-                   # (w(0)=0), matching the eval hard-clamp floor instead of sitting ~(1-leak)*eps*ln2 above it.
-                w = self.leak * w_shifted + (1.0 - self.leak) * self.eps * (F.softplus(w_shifted / self.eps) - math.log(2.0))
+                # with the constant softplus(0)=ln2 subtracted so physical zero is a fixed point
+                # (w(0)=0), matching the eval hard-clamp floor instead of sitting ~(1-leak)*eps*ln2 above it.
+                w = self.leak * w_shifted + (1.0 - self.leak) * self.eps * (
+                    F.softplus(w_shifted / self.eps) - math.log(2.0)
+                )
             if offset is not None:
                 w = w - offset
         else:
@@ -183,8 +185,17 @@ class HydrostaticBalanceProjection(nn.Module):
                                -> A x = 0.
     """
 
-    def __init__(self, channel_names, bias=None, scale=None, p_min=50, p_max=900, strength=1.0,
-                 use_moist_air_formula=False, climatology_offset=None):
+    def __init__(
+        self,
+        channel_names,
+        bias=None,
+        scale=None,
+        p_min=50,
+        p_max=900,
+        strength=1.0,
+        use_moist_air_formula=False,
+        climatology_offset=None,
+    ):
         super().__init__()
 
         self.strength = float(strength)
@@ -326,7 +337,9 @@ def get_matching_channels_pl(channel_names, prefix1, prefix2, p_min, p_max, reve
     p2_pressures = [int(x.replace(prefix2, "")) for x in p2_chans]
 
     # check which are the common pressure levels:
-    pressures = sorted([x for x in p1_pressures if ((x in p2_pressures) and (x >= p_min) and (x <= p_max))], reverse=revert)
+    pressures = sorted(
+        [x for x in p1_pressures if ((x in p2_pressures) and (x >= p_min) and (x <= p_max))], reverse=revert
+    )
 
     # create an indexlist for z-channels
     p1_idx = [channel_names.index(f"{prefix1}{p}") for p in pressures]

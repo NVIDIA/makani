@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import math
 
 import torch.nn.functional as F
 import torch
@@ -99,7 +98,13 @@ class Block(nn.Module):
             )
         else:
             self.attn = Attention(
-                dim, input_format="traditional", num_heads=num_heads, qkv_bias=qkv_bias, attn_drop_rate=attn_drop_rate, proj_drop_rate=mlp_drop_rate, norm_layer=norm_layer
+                dim,
+                input_format="traditional",
+                num_heads=num_heads,
+                qkv_bias=qkv_bias,
+                attn_drop_rate=attn_drop_rate,
+                proj_drop_rate=mlp_drop_rate,
+                norm_layer=norm_layer,
             )
         self.drop_path = DropPath(path_drop_rate) if path_drop_rate > 0.0 else nn.Identity()
 
@@ -120,7 +125,14 @@ class Block(nn.Module):
                 comm_name=comm_name,
             )
         else:
-            self.mlp = MLP(in_features=dim, hidden_features=mlp_hidden_dim, out_features=dim, act_layer=act_layer, drop_rate=mlp_drop_rate, input_format="traditional")
+            self.mlp = MLP(
+                in_features=dim,
+                hidden_features=mlp_hidden_dim,
+                out_features=dim,
+                act_layer=act_layer,
+                drop_rate=mlp_drop_rate,
+                input_format="traditional",
+            )
 
     def forward(self, x):
         y = self.attn(self.norm1(x))
@@ -156,7 +168,9 @@ class VisionTransformer(nn.Module):
         self.out_ch = out_chans
         self.comm_name = comm_name
 
-        self.patch_embed = PatchEmbed2D(img_size=self.img_size, patch_size=patch_size, in_chans=inp_chans, embed_dim=self.embed_dim)
+        self.patch_embed = PatchEmbed2D(
+            img_size=self.img_size, patch_size=patch_size, in_chans=inp_chans, embed_dim=self.embed_dim
+        )
         num_patches = self.patch_embed.num_patches
 
         # annotate for distributed

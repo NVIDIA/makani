@@ -90,9 +90,7 @@ class TestVisualizeField(unittest.TestCase):
 
     def test_token_round_trip(self):
         tag = ("epoch_0", "u10m")
-        out_tag, img = visualize_field(
-            tag, "lambda x: x", self.pred, self.target, None, None, 1.0, 0.0, False
-        )
+        out_tag, img = visualize_field(tag, "lambda x: x", self.pred, self.target, None, None, 1.0, 0.0, False)
         self.assertEqual(out_tag, tag)
         self.assertIsInstance(img, Image.Image)
 
@@ -101,8 +99,15 @@ class TestVisualizeField(unittest.TestCase):
         # so plot_comparison must not raise (vmin == vmax edge case is tolerated by matplotlib).
         tag = ("t", "f")
         _, img = visualize_field(
-            tag, "lambda x: np.zeros_like(x)", self.pred, self.target,
-            None, None, 1.0, 0.0, False,
+            tag,
+            "lambda x: np.zeros_like(x)",
+            self.pred,
+            self.target,
+            None,
+            None,
+            1.0,
+            0.0,
+            False,
         )
         self.assertIsInstance(img, Image.Image)
 
@@ -111,8 +116,15 @@ class TestVisualizeField(unittest.TestCase):
         # whose output depends linearly on the input mean.
         tag = ("t", "f")
         _, img = visualize_field(
-            tag, "lambda x: x", self.pred, self.target,
-            None, None, scale=2.0, bias=1.0, diverging=False,
+            tag,
+            "lambda x: x",
+            self.pred,
+            self.target,
+            None,
+            None,
+            scale=2.0,
+            bias=1.0,
+            diverging=False,
         )
         self.assertIsInstance(img, Image.Image)
 
@@ -164,11 +176,13 @@ class TestResolvePlotList(unittest.TestCase):
         self.assertEqual(new_list[0]["diverging"], False)
 
     def test_multiple_placeholders_in_single_functor(self):
-        plot_list = [{
-            "name": "wind",
-            "functor": "lambda x: np.sqrt(np.square(x[{u10m}, ...]) + np.square(x[{v10m}, ...]))",
-            "diverging": False,
-        }]
+        plot_list = [
+            {
+                "name": "wind",
+                "functor": "lambda x: np.sqrt(np.square(x[{u10m}, ...]) + np.square(x[{v10m}, ...]))",
+                "diverging": False,
+            }
+        ]
         new_list, indices = resolve_plot_list(plot_list, ["u10m", "v10m", "z500"])
         self.assertEqual(indices, [0, 1])
         self.assertEqual(
@@ -305,17 +319,24 @@ class TestVisualizationWrapper(unittest.TestCase):
     def test_channel_names_rewrites_plot_list_and_slices_scale_bias(self):
         channel_names = ["u10m", "v10m", "z500", "q100", "t2m"]
         plot_list = [
-            {"name": "wind",
-             "functor": "lambda x: np.sqrt(np.square(x[{u10m}, ...]) + np.square(x[{v10m}, ...]))",
-             "diverging": False},
+            {
+                "name": "wind",
+                "functor": "lambda x: np.sqrt(np.square(x[{u10m}, ...]) + np.square(x[{v10m}, ...]))",
+                "diverging": False,
+            },
             {"name": "z500", "functor": "lambda x: x[{z500}, ...]", "diverging": False},
         ]
         scale = np.arange(len(channel_names), dtype=np.float32) + 1.0  # [1, 2, 3, 4, 5]
         bias = np.arange(len(channel_names), dtype=np.float32) * 10.0  # [0, 10, 20, 30, 40]
         wrapper = VisualizationWrapper(
-            log_to_wandb=False, path=".", prefix="test",
-            plot_list=plot_list, channel_names=channel_names,
-            scale=scale, bias=bias, num_workers=1,
+            log_to_wandb=False,
+            path=".",
+            prefix="test",
+            plot_list=plot_list,
+            channel_names=channel_names,
+            scale=scale,
+            bias=bias,
+            num_workers=1,
         )
         try:
             self.assertEqual(wrapper.channel_indices, [0, 1, 2])
@@ -339,9 +360,14 @@ class TestVisualizationWrapper(unittest.TestCase):
             cwd = os.getcwd()
             os.chdir(tmp)
             wrapper = VisualizationWrapper(
-                log_to_wandb=False, path=".", prefix="test",
-                plot_list=plot_list, channel_names=channel_names,
-                scale=1.0, bias=0.0, num_workers=1,
+                log_to_wandb=False,
+                path=".",
+                prefix="test",
+                plot_list=plot_list,
+                channel_names=channel_names,
+                scale=1.0,
+                bias=0.0,
+                num_workers=1,
             )
             try:
                 rng = np.random.default_rng(4)

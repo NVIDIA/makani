@@ -56,7 +56,9 @@ class HydrostaticBalanceLoss(GeometricBaseLoss):
             self.q_idx, _, p_tmp = get_matching_channels_pl(channel_names, "q", "t", p_min, p_max)
 
         if len(self.pressures) < 2:
-            raise ValueError("Warning, we could not find at least two pressure levels which are common among z and t and inside the specified limits")
+            raise ValueError(
+                "Warning, we could not find at least two pressure levels which are common among z and t and inside the specified limits"
+            )
 
         if self.use_moist_air_formula:
             for p1, p2 in zip(self.pressures, p_tmp):
@@ -107,7 +109,11 @@ class HydrostaticBalanceLoss(GeometricBaseLoss):
         indices = torch.as_tensor([row_indices, col_indices], dtype=torch.long)
         values = torch.as_tensor(values, dtype=torch.float32)
         with torch.sparse.check_sparse_tensor_invariants(enable=False):
-            cmat = torch.sparse_coo_tensor(indices, values, size=(len(self.t_idx) - 1, len(channel_names))).coalesce().to_dense()
+            cmat = (
+                torch.sparse_coo_tensor(indices, values, size=(len(self.t_idx) - 1, len(channel_names)))
+                .coalesce()
+                .to_dense()
+            )
 
         # register buffer
         self.register_buffer("cmat", cmat, persistent=False)
@@ -126,14 +132,18 @@ class HydrostaticBalanceLoss(GeometricBaseLoss):
         channel_weights = torch.ones(self.n_channels, dtype=torch.float32)
 
         if not channel_weight_type == "constant":
-            raise NotImplementedError(f"Error, channel_weight_type {channel_weight_type} not supported for hydrostatic loss")
+            raise NotImplementedError(
+                f"Error, channel_weight_type {channel_weight_type} not supported for hydrostatic loss"
+            )
 
         # normalize
         channel_weights = channel_weights / torch.sum(channel_weights)
 
         return channel_weights
 
-    def forward(self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor:
+    def forward(
+        self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None, **kwargs
+    ) -> torch.Tensor:
 
         ptype = prd.dtype
 
@@ -145,7 +155,9 @@ class HydrostaticBalanceLoss(GeometricBaseLoss):
             prdun = prd.to(torch.float32) * self.scale + self.bias
 
             if self.use_moist_air_formula:
-                prdun[:, self.t_idx, ...] = prdun[:, self.t_idx, ...] * (1.0 + self.q_prefact * prdun[:, self.q_idx, ...])
+                prdun[:, self.t_idx, ...] = prdun[:, self.t_idx, ...] * (
+                    1.0 + self.q_prefact * prdun[:, self.q_idx, ...]
+                )
 
             # use sparse matmul
             prdf = prdun.permute([1, 0, 2, 3])

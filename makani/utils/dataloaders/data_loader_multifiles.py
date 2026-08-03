@@ -30,7 +30,11 @@ import h5py
 import zarr
 
 # for data normalization
-from makani.utils.dataloaders.data_helpers import get_date_from_timestamp, get_timedelta_from_timestamp, get_default_aws_connector
+from makani.utils.dataloaders.data_helpers import (
+    get_date_from_timestamp,
+    get_timedelta_from_timestamp,
+    get_default_aws_connector,
+)
 
 # for grid conversion
 from makani.utils.grids import GridConverter
@@ -40,34 +44,36 @@ from torch_harmonics.distributed import compute_split_shapes
 
 
 class MultifilesDataset(Dataset):
-    def __init__(self,
-                 location: Union[str, List[str]],
-                 dt: int,
-                 in_channels: List[int],
-                 out_channels: List[int],
-                 n_history: Optional[int]=0,
-                 n_future: Optional[int]=0,
-                 add_zenith: Optional[bool]=False,
-                 data_grid_type: Optional[str]="equiangular",
-                 model_grid_type: Optional[str]="equiangular",
-                 bias: Optional[np.array]=None,
-                 scale: Optional[np.array]=None,
-                 return_timestamp: Optional[bool]=False,
-                 relative_timestamp: Optional[bool]=False,
-                 return_target: Optional[bool]=True,
-                 file_suffix: Optional[str]="h5",
-                 dataset_name: Optional[str]="fields",
-                 timestamp_name: Optional[str]="timestamp",
-                 latitude_name: Optional[str]="lat",
-                 longitude_name: Optional[str]="lon",
-                 enable_s3: Optional[bool]=False,
-                 crop_size: Optional[Tuple[int, int]]=(None, None),
-                 crop_anchor: Optional[Tuple[int, int]]=(0, 0),
-                 subsampling_factor: Optional[int]=1,
-                 io_grid: Optional[List[int]]=[1, 1, 1],
-                 io_rank: Optional[List[int]]=[0, 0, 0],
-                 enable_logging: Optional[bool]=True,
-                 **kwargs):
+    def __init__(
+        self,
+        location: Union[str, List[str]],
+        dt: int,
+        in_channels: List[int],
+        out_channels: List[int],
+        n_history: Optional[int] = 0,
+        n_future: Optional[int] = 0,
+        add_zenith: Optional[bool] = False,
+        data_grid_type: Optional[str] = "equiangular",
+        model_grid_type: Optional[str] = "equiangular",
+        bias: Optional[np.array] = None,
+        scale: Optional[np.array] = None,
+        return_timestamp: Optional[bool] = False,
+        relative_timestamp: Optional[bool] = False,
+        return_target: Optional[bool] = True,
+        file_suffix: Optional[str] = "h5",
+        dataset_name: Optional[str] = "fields",
+        timestamp_name: Optional[str] = "timestamp",
+        latitude_name: Optional[str] = "lat",
+        longitude_name: Optional[str] = "lon",
+        enable_s3: Optional[bool] = False,
+        crop_size: Optional[Tuple[int, int]] = (None, None),
+        crop_anchor: Optional[Tuple[int, int]] = (0, 0),
+        subsampling_factor: Optional[int] = 1,
+        io_grid: Optional[List[int]] = [1, 1, 1],
+        io_rank: Optional[List[int]] = [0, 0, 0],
+        enable_logging: Optional[bool] = True,
+        **kwargs,
+    ):
 
         self.location = location
         self.dt = dt
@@ -147,19 +153,25 @@ class MultifilesDataset(Dataset):
         latitude = np.array(self.lat_lon[0])
         longitude = np.array(self.lat_lon[1])
         self.lon_grid, self.lat_grid = np.meshgrid(longitude, latitude)
-        self.lat_grid_local = self.lat_grid[self.read_anchor[0] : self.read_anchor[0] + self.read_shape[0], self.read_anchor[1] : self.read_anchor[1] + self.read_shape[1]]
-        self.lon_grid_local = self.lon_grid[self.read_anchor[0] : self.read_anchor[0] + self.read_shape[0], self.read_anchor[1] : self.read_anchor[1] + self.read_shape[1]]
+        self.lat_grid_local = self.lat_grid[
+            self.read_anchor[0] : self.read_anchor[0] + self.read_shape[0],
+            self.read_anchor[1] : self.read_anchor[1] + self.read_shape[1],
+        ]
+        self.lon_grid_local = self.lon_grid[
+            self.read_anchor[0] : self.read_anchor[0] + self.read_shape[0],
+            self.read_anchor[1] : self.read_anchor[1] + self.read_shape[1],
+        ]
         self.lat_lon_local = (
             latitude[self.read_anchor[0] : self.read_anchor[0] + self.read_shape[0]].tolist(),
             longitude[self.read_anchor[1] : self.read_anchor[1] + self.read_shape[1]].tolist(),
         )
 
         # incorporate subsampling factor
-        self.lat_grid_local = self.lat_grid_local[::self.subsampling_factor, ::self.subsampling_factor]
-        self.lon_grid_local = self.lon_grid_local[::self.subsampling_factor, ::self.subsampling_factor]
+        self.lat_grid_local = self.lat_grid_local[:: self.subsampling_factor, :: self.subsampling_factor]
+        self.lon_grid_local = self.lon_grid_local[:: self.subsampling_factor, :: self.subsampling_factor]
         self.lat_lon_local = (
-            self.lat_lon_local[0][::self.subsampling_factor],
-            self.lat_lon_local[1][::self.subsampling_factor],
+            self.lat_lon_local[0][:: self.subsampling_factor],
+            self.lat_lon_local[1][:: self.subsampling_factor],
         )
 
         # grid types
@@ -210,7 +222,9 @@ class MultifilesDataset(Dataset):
         lower_order = np.argsort([x[0] for x in self.date_ranges])
         upper_order = np.argsort([x[1] for x in self.date_ranges])
         if not np.all(lower_order == upper_order):
-            raise RuntimeError("The files might have overlapping date ranges. Please make sure the individual files have disjoint ranges")
+            raise RuntimeError(
+                "The files might have overlapping date ranges. Please make sure the individual files have disjoint ranges"
+            )
         lower_order = lower_order.tolist()
 
         # sort all files according to time stamps
@@ -222,10 +236,12 @@ class MultifilesDataset(Dataset):
         self.date_ranges = [self.date_ranges[idx] for idx in lower_order]
 
         # perform a sanity check: is the deltaT between entries consistent
-        dhours_list = [int(d.total_seconds() // 3600.) for d in (self.datestamps[1:] - self.datestamps[:-1]).tolist()]
+        dhours_list = [int(d.total_seconds() // 3600.0) for d in (self.datestamps[1:] - self.datestamps[:-1]).tolist()]
 
         if min(dhours_list) != max(dhours_list):
-            raise RuntimeError("The time difference between steps is not constant, provide a dataset where this is the case")
+            raise RuntimeError(
+                "The time difference between steps is not constant, provide a dataset where this is the case"
+            )
 
         self.dhours = dhours_list[0]
 
@@ -274,7 +290,9 @@ class MultifilesDataset(Dataset):
         lower_order = np.argsort([x[0] for x in self.date_ranges])
         upper_order = np.argsort([x[1] for x in self.date_ranges])
         if not np.all(lower_order == upper_order):
-            raise RuntimeError("The files might have overlapping date ranges. Please make sure the individual files have disjoint ranges")
+            raise RuntimeError(
+                "The files might have overlapping date ranges. Please make sure the individual files have disjoint ranges"
+            )
         lower_order = lower_order.tolist()
 
         self.files_paths = [self.files_paths[idx] for idx in lower_order]
@@ -284,9 +302,11 @@ class MultifilesDataset(Dataset):
         self.datestamps = self.date_fn(self.timestamps)
         self.date_ranges = [self.date_ranges[idx] for idx in lower_order]
 
-        dhours_list = [int(d.total_seconds() // 3600.) for d in (self.datestamps[1:] - self.datestamps[:-1]).tolist()]
+        dhours_list = [int(d.total_seconds() // 3600.0) for d in (self.datestamps[1:] - self.datestamps[:-1]).tolist()]
         if min(dhours_list) != max(dhours_list):
-            raise RuntimeError("The time difference between steps is not constant, provide a dataset where this is the case")
+            raise RuntimeError(
+                "The time difference between steps is not constant, provide a dataset where this is the case"
+            )
         self.dhours = dhours_list[0]
 
     def _zarr_read_timestamps(self, group, dset):
@@ -358,10 +378,10 @@ class MultifilesDataset(Dataset):
         # create handles for datasets
         self.files = [None for x in self.files_paths]
 
-	# store earliest and latest timestamp in dataset
+        # store earliest and latest timestamp in dataset
         # we expect that all months are available per year
         self.start_date = self.datestamps[0]
-        self.end_date =	self.datestamps[-1]
+        self.end_date = self.datestamps[-1]
 
         # determine local read size:
         # sanitize the crops first
@@ -372,9 +392,13 @@ class MultifilesDataset(Dataset):
             crop_size_y = self.img_shape[1]
         self.crop_size = (crop_size_x, crop_size_y)
         if self.crop_anchor[0] + self.crop_size[0] > self.img_shape[0]:
-            raise ValueError(f"crop in dimension 0 (anchor {self.crop_anchor[0]} + size {self.crop_size[0]}) exceeds image shape {self.img_shape[0]}")
+            raise ValueError(
+                f"crop in dimension 0 (anchor {self.crop_anchor[0]} + size {self.crop_size[0]}) exceeds image shape {self.img_shape[0]}"
+            )
         if self.crop_anchor[1] + self.crop_size[1] > self.img_shape[1]:
-            raise ValueError(f"crop in dimension 1 (anchor {self.crop_anchor[1]} + size {self.crop_size[1]}) exceeds image shape {self.img_shape[1]}")
+            raise ValueError(
+                f"crop in dimension 1 (anchor {self.crop_anchor[1]} + size {self.crop_size[1]}) exceeds image shape {self.img_shape[1]}"
+            )
 
         # for x
         split_shapes_x = compute_split_shapes(self.crop_size[0], self.io_grid[0])
@@ -389,8 +413,10 @@ class MultifilesDataset(Dataset):
         # store the variables
         self.read_anchor = (read_anchor_x, read_anchor_y)
         self.read_shape = (read_shape_x, read_shape_y)
-        self.return_shape = (math.ceil(self.read_shape[0] / self.subsampling_factor), 
-                             math.ceil(self.read_shape[1] / self.subsampling_factor))
+        self.return_shape = (
+            math.ceil(self.read_shape[0] / self.subsampling_factor),
+            math.ceil(self.read_shape[1] / self.subsampling_factor),
+        )
 
         # do some sample indexing gymnastics
         self.file_offsets = list(accumulate(self.n_samples_file, operator.add))[:-1]
@@ -399,16 +425,37 @@ class MultifilesDataset(Dataset):
         self.n_samples_total = self.n_samples_available
 
         if enable_logging:
-            logging.info("Average number of samples per file: {:.1f}".format(float(self.n_samples_total) / float(len(self.files))))
             logging.info(
-                "Found data at path {}. Number of examples: {}. Full image Shape: {} x {} x {}. Read Shape: {} x {} x {}".format(
-                    self.location, self.n_samples_available, self.img_shape[0], self.img_shape[1], self.total_channels, self.read_shape[0], self.read_shape[1], self.n_in_channels
+                "Average number of samples per file: {:.1f}".format(
+                    float(self.n_samples_total) / float(len(self.files))
                 )
             )
-            logging.info(f"Dataset covers a timespan from {self.start_date} to {self.end_date} with a resolution of {self.dhours} hour(s).")
+            logging.info(
+                "Found data at path {}. Number of examples: {}. Full image Shape: {} x {} x {}. Read Shape: {} x {} x {}".format(
+                    self.location,
+                    self.n_samples_available,
+                    self.img_shape[0],
+                    self.img_shape[1],
+                    self.total_channels,
+                    self.read_shape[0],
+                    self.read_shape[1],
+                    self.n_in_channels,
+                )
+            )
+            logging.info(
+                f"Dataset covers a timespan from {self.start_date} to {self.end_date} with a resolution of {self.dhours} hour(s)."
+            )
             logging.info(f"Using a step size of {self.dhours*self.dt} hour(s) for inference.")
-            logging.info("Including {} hours of past history in training at a frequency of {} hours".format(self.dhours * self.dt * (self.n_history + 1), self.dhours * self.dt))
-            logging.info("Including {} hours of future targets in training at a frequency of {} hours".format(self.dhours * self.dt * (self.n_future + 1), self.dhours * self.dt))
+            logging.info(
+                "Including {} hours of past history in training at a frequency of {} hours".format(
+                    self.dhours * self.dt * (self.n_history + 1), self.dhours * self.dt
+                )
+            )
+            logging.info(
+                "Including {} hours of future targets in training at a frequency of {} hours".format(
+                    self.dhours * self.dt * (self.n_future + 1), self.dhours * self.dt
+                )
+            )
 
         # set properties for compatibility
         self.img_shape_x = self.img_shape[0]
@@ -425,15 +472,17 @@ class MultifilesDataset(Dataset):
         self.img_local_offset_y = self.read_anchor[1]
 
         # resampling stuff
-        self.img_shape_resampled = (math.ceil(self.img_shape[0] / self.subsampling_factor), 
-                                    math.ceil(self.img_shape[1] / self.subsampling_factor))
+        self.img_shape_resampled = (
+            math.ceil(self.img_shape[0] / self.subsampling_factor),
+            math.ceil(self.img_shape[1] / self.subsampling_factor),
+        )
         self.img_local_shape_x_resampled = self.return_shape[0]
         self.img_local_shape_y_resampled = self.return_shape[1]
         self.img_shape_x_resampled = self.img_shape_resampled[0]
         self.img_shape_y_resampled = self.img_shape_resampled[1]
 
     def _compute_timestamps(self, global_idx, offset_start, offset_end):
-        times = self.timestamps[global_idx+offset_start:global_idx+offset_end]
+        times = self.timestamps[global_idx + offset_start : global_idx + offset_end]
 
         return times
 
@@ -445,7 +494,9 @@ class MultifilesDataset(Dataset):
         times_dt = self.date_fn(times)
 
         # compute the corresponding zenith angles
-        cos_zenith = np.expand_dims(cos_zenith_angle(times_dt, self.lon_grid_local, self.lat_grid_local).astype(np.float32), axis=1)
+        cos_zenith = np.expand_dims(
+            cos_zenith_angle(times_dt, self.lon_grid_local, self.lat_grid_local).astype(np.float32), axis=1
+        )
 
         return cos_zenith
 
@@ -485,15 +536,15 @@ class MultifilesDataset(Dataset):
                 self._open_file(file_idx)
 
             data = self.files[file_idx][
-                local_idx : local_idx + 1, 
-                self.in_channels_sorted, 
-                start_x:end_x:self.subsampling_factor, 
-                start_y:end_y:self.subsampling_factor
+                local_idx : local_idx + 1,
+                self.in_channels_sorted,
+                start_x : end_x : self.subsampling_factor,
+                start_y : end_y : self.subsampling_factor,
             ]
 
             if not self.in_channels_is_sorted:
                 data = data[:, self.in_channels_unsort, :, :]
-            
+
             data_list.append(data)
 
         data = np.concatenate(data_list, axis=0)

@@ -40,7 +40,9 @@ class _HydrostaticBalanceWrapper(nn.Module):
 
         # sanity checks
         if len(self.pressures) == 0:
-            raise ValueError("Error, make sure that you have overlapping pressure levels for geopotential and temperature")
+            raise ValueError(
+                "Error, make sure that you have overlapping pressure levels for geopotential and temperature"
+            )
 
         if self.use_moist_air_formula:
             for p1, p2 in zip(self.pressures, p_tmp):
@@ -205,7 +207,9 @@ class _HydrostaticBalanceWrapper(nn.Module):
             # convert temperature to virtual temperature
             if self.use_moist_air_formula:
                 inp_un_scale = inp_un.clone()
-                inp_un_scale[:, 0, ...] = inp_un[:, 0, ...] * (1.0 + self.q_prefact * inp_un[:, len(self.z_idx) + 1, ...])
+                inp_un_scale[:, 0, ...] = inp_un[:, 0, ...] * (
+                    1.0 + self.q_prefact * inp_un[:, len(self.z_idx) + 1, ...]
+                )
             else:
                 inp_un_scale = inp_un
 
@@ -214,7 +218,9 @@ class _HydrostaticBalanceWrapper(nn.Module):
 
             # unscale temperatures if specific humidity is used
             if self.use_moist_air_formula:
-                out_un[:, self.t_idx, ...] = out_un[:, self.t_idx, ...] / (1.0 + self.q_prefact * out_un[:, self.q_idx, ...])
+                out_un[:, self.t_idx, ...] = out_un[:, self.t_idx, ...] / (
+                    1.0 + self.q_prefact * out_un[:, self.q_idx, ...]
+                )
 
             # undo normalization
             out = (out_un - self.out_bias) / self.out_scale
@@ -242,10 +248,16 @@ class ConstraintsWrapper(nn.Module):
         self.constraint_list = nn.ModuleList()
         for constraint in constraints:
             if constraint["type"] == "hydrostatic_balance":
-                self.constraint_list.append(_HydrostaticBalanceWrapper(**constraint["options"], channel_names=channel_names, bias=bias, scale=scale))
+                self.constraint_list.append(
+                    _HydrostaticBalanceWrapper(
+                        **constraint["options"], channel_names=channel_names, bias=bias, scale=scale
+                    )
+                )
                 self.N_in_channels = self.constraint_list[-1].mapping.shape[1]
             else:
-                raise NotImplementedError(f"Error, constraints different from hydrostatic balance are not yet implemented.")
+                raise NotImplementedError(
+                    "Error, constraints different from hydrostatic balance are not yet implemented."
+                )
 
     def forward(self, inp: torch.Tensor) -> torch.Tensor:
         if self.model is not None:

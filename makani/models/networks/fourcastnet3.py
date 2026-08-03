@@ -30,7 +30,7 @@ import torch_harmonics as th
 import torch_harmonics.distributed as thd
 
 # get pre-formulated layers
-#from makani.models.common import GeometricInstanceNormS2
+# from makani.models.common import GeometricInstanceNormS2
 from makani.mpu.layers import DistributedMLP
 
 # more distributed stuff
@@ -41,11 +41,13 @@ from dataclasses import dataclass
 import physicsnemo
 from physicsnemo import ModelMetaData
 
+
 # heuristic for finding theta_cutoff
 def _compute_cutoff_radius(nlat, kernel_shape, basis_type):
     theta_cutoff_factor = {"piecewise linear": 0.5, "morlet": 0.5, "harmonic": 0.5, "zernike": math.sqrt(2.0)}
 
     return (kernel_shape[0] + 1) * theta_cutoff_factor[basis_type] * math.pi / float(nlat - 1)
+
 
 # commenting out torch.compile due to long intiial compile times
 # @torch.compile
@@ -70,19 +72,27 @@ def _get_norm_layer_handle(
     # pick norm layer
     if normalization_layer == "layer_norm":
         from makani.mpu.layer_norm import DistributedLayerNorm
-        norm_layer_handle = partial(DistributedLayerNorm, normalized_shape=(embed_dim), elementwise_affine=True, eps=1e-6)
+
+        norm_layer_handle = partial(
+            DistributedLayerNorm, normalized_shape=(embed_dim), elementwise_affine=True, eps=1e-6
+        )
     elif normalization_layer == "instance_norm":
         if comm.get_size("spatial") > 1:
             from makani.mpu.layer_norm import DistributedInstanceNorm2d
+
             norm_layer_handle = partial(DistributedInstanceNorm2d, num_features=embed_dim, eps=1e-6, affine=True)
         else:
-            norm_layer_handle = partial(nn.InstanceNorm2d, num_features=embed_dim, eps=1e-6, affine=True, track_running_stats=False)
+            norm_layer_handle = partial(
+                nn.InstanceNorm2d, num_features=embed_dim, eps=1e-6, affine=True, track_running_stats=False
+            )
     elif normalization_layer == "instance_norm_s2":
         if comm.get_size("spatial") > 1:
             from makani.mpu.layer_norm import DistributedGeometricInstanceNormS2
+
             norm_layer_handle = DistributedGeometricInstanceNormS2
         else:
             from makani.models.common import GeometricInstanceNormS2
+
             norm_layer_handle = GeometricInstanceNormS2
         norm_layer_handle = partial(
             norm_layer_handle,
@@ -112,7 +122,7 @@ class DiscreteContinuousEncoder(nn.Module):
         grid_out="equiangular",
         inp_chans=2,
         out_chans=2,
-        kernel_shape=(3,3),
+        kernel_shape=(3, 3),
         basis_type="harmonic",
         basis_norm_mode="mean",
         use_mlp=False,
@@ -127,7 +137,9 @@ class DiscreteContinuousEncoder(nn.Module):
         theta_cutoff = _compute_cutoff_radius(nlat=inp_shape[0], kernel_shape=kernel_shape, basis_type=basis_type)
 
         # set up local convolution
-        conv_handle = thd.DistributedDiscreteContinuousConvS2 if comm.get_size("spatial") > 1 else th.DiscreteContinuousConvS2
+        conv_handle = (
+            thd.DistributedDiscreteContinuousConvS2 if comm.get_size("spatial") > 1 else th.DiscreteContinuousConvS2
+        )
         self.conv = conv_handle(
             inp_chans,
             out_chans,
@@ -165,7 +177,7 @@ class DiscreteContinuousEncoder(nn.Module):
             )
 
     def forward(self, x):
-        
+
         # convolution
         x = self.conv(x)
 
@@ -201,7 +213,13 @@ class DiscreteContinuousDecoder(nn.Module):
 
         if use_mlp:
             self.mlp = EncoderDecoder(
-                num_layers=1, input_dim=inp_chans, output_dim=inp_chans, hidden_dim=int(mlp_ratio * inp_chans), act_layer=activation_function, input_format="nchw", gain=2.0
+                num_layers=1,
+                input_dim=inp_chans,
+                output_dim=inp_chans,
+                hidden_dim=int(mlp_ratio * inp_chans),
+                act_layer=activation_function,
+                input_format="nchw",
+                gain=2.0,
             )
 
             self.act = activation_function()
@@ -232,7 +250,9 @@ class DiscreteContinuousDecoder(nn.Module):
         theta_cutoff = _compute_cutoff_radius(nlat=out_shape[0], kernel_shape=kernel_shape, basis_type=basis_type)
 
         # set up DISCO convolution
-        conv_handle = thd.DistributedDiscreteContinuousConvS2 if comm.get_size("spatial") > 1 else th.DiscreteContinuousConvS2
+        conv_handle = (
+            thd.DistributedDiscreteContinuousConvS2 if comm.get_size("spatial") > 1 else th.DiscreteContinuousConvS2
+        )
         self.conv = conv_handle(
             inp_chans,
             out_chans,
@@ -309,9 +329,13 @@ class NeuralOperatorBlock(nn.Module):
         if conv_type == "local":
 
             # heuristic for finding theta_cutoff
-            theta_cutoff = 2 * _compute_cutoff_radius(nlat=self.inp_shape[0], kernel_shape=kernel_shape, basis_type=basis_type)
+            theta_cutoff = 2 * _compute_cutoff_radius(
+                nlat=self.inp_shape[0], kernel_shape=kernel_shape, basis_type=basis_type
+            )
 
-            conv_handle = thd.DistributedDiscreteContinuousConvS2 if comm.get_size("spatial") > 1 else th.DiscreteContinuousConvS2
+            conv_handle = (
+                thd.DistributedDiscreteContinuousConvS2 if comm.get_size("spatial") > 1 else th.DiscreteContinuousConvS2
+            )
             self.local_conv = conv_handle(
                 inp_chans,
                 inp_chans,
@@ -495,7 +519,9 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
 
         # currently doesn't support neither history nor future:
         if n_history != 0:
-            raise ValueError(f"this model currently does not support history, expected n_history == 0 but got {n_history}")
+            raise ValueError(
+                f"this model currently does not support history, expected n_history == 0 but got {n_history}"
+            )
 
         # compute the downscaled image size
         self.h = int(self.inp_shape[0] // scale_factor)
@@ -619,7 +645,6 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         self.pos_drop = nn.Dropout(p=pos_drop_rate) if pos_drop_rate > 0.0 else nn.Identity()
         dpr = [x.item() for x in torch.linspace(0, path_drop_rate, num_layers)]
 
-
         # Internal NO blocks
         self.blocks = nn.ModuleList([])
         for i in range(num_layers):
@@ -675,7 +700,6 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
                 _mask = torch.zeros(self.n_out_chans, dtype=torch.bool)
                 _mask[water_chans] = True
                 self.register_buffer("water_channel_mask", _mask.view(1, -1, 1, 1), persistent=False)
-        
 
         # freeze the encoder/decoder
         if freeze_encoder:
@@ -694,7 +718,6 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
             frozen_params = self.blocks.parameters()
             for param in frozen_params:
                 param.requires_grad = False
-
 
     @torch.compiler.disable(recursive=False)
     def _init_spectral_transforms(
@@ -731,7 +754,6 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         self.sht = sht_handle(self.h, self.w, lmax=modes_lat, mmax=modes_lon, grid=sht_grid_type).float()
         self.isht = isht_handle(self.h, self.w, lmax=modes_lat, mmax=modes_lon, grid=sht_grid_type).float()
 
-
     @torch.compiler.disable(recursive=True)
     def _precompute_channel_groups(
         self,
@@ -744,7 +766,9 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
 
         # get_channel_groups now returns dyn/stat aux separately; the legacy network
         # only knows about a single combined "aux" channel set, so merge them here.
-        atmo_chans, surf_chans, dyn_aux_chans, stat_aux_chans, pressure_lvls = get_channel_groups(channel_names, aux_channel_names)
+        atmo_chans, surf_chans, dyn_aux_chans, stat_aux_chans, pressure_lvls = get_channel_groups(
+            channel_names, aux_channel_names
+        )
         aux_chans = dyn_aux_chans + stat_aux_chans
 
         # compute how many channel groups will be kept internally
@@ -753,7 +777,9 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
 
         # make sure they are divisible. Attention! This does not guarantee that the grrouping is correct
         if len(atmo_chans) % self.n_atmo_groups:
-            raise ValueError(f"Expected number of atmospheric variables to be divisible by number of atmospheric groups but got {len(atmo_chans)} and {self.n_atmo_groups}")
+            raise ValueError(
+                f"Expected number of atmospheric variables to be divisible by number of atmospheric groups but got {len(atmo_chans)} and {self.n_atmo_groups}"
+            )
 
         self.register_buffer("atmo_channels", torch.LongTensor(atmo_chans), persistent=False)
         self.register_buffer("surf_channels", torch.LongTensor(surf_chans), persistent=False)
@@ -806,7 +832,9 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
 
         batchdims = x.shape[:-3]
 
-        x_atmo = x[..., : (self.n_atmo_groups * self.atmo_embed_dim), :, :].reshape(-1, self.atmo_embed_dim, *x.shape[-2:])
+        x_atmo = x[..., : (self.n_atmo_groups * self.atmo_embed_dim), :, :].reshape(
+            -1, self.atmo_embed_dim, *x.shape[-2:]
+        )
         x_atmo = self.atmo_decoder(x_atmo)
         x_out = torch.zeros(*batchdims, self.n_out_chans, *x_atmo.shape[-2:], dtype=x.dtype, device=x.device)
         x_out[..., self.atmo_channels, :, :] = x_atmo.reshape(*batchdims, -1, *x_atmo.shape[-2:])
@@ -909,6 +937,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         x = self.clamp_water_channels(x)
 
         return x
+
 
 # this part exposes the model to modulus by constructing modulus Modules
 @dataclass

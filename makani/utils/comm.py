@@ -108,10 +108,16 @@ def cleanup():
         _DM.cleanup()
         _DM = None
     return
-    
+
 
 # initialization routine
-def init(model_parallel_sizes=[1, 1, 1], model_parallel_names=["h", "w", "matmul"], data_parallel_sizes=[1, -1], data_parallel_names=["ensemble", "batch"], verbose=False):
+def init(
+    model_parallel_sizes=[1, 1, 1],
+    model_parallel_names=["h", "w", "matmul"],
+    data_parallel_sizes=[1, -1],
+    data_parallel_names=["ensemble", "batch"],
+    verbose=False,
+):
 
     # call basic init first
     DistributedManager.initialize()

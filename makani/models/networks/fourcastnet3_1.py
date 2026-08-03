@@ -15,7 +15,6 @@
 
 import math
 from functools import partial
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -23,7 +22,14 @@ import torch.amp as amp
 from torch.utils.checkpoint import checkpoint
 
 # helpers
-from makani.models.common import DropPath, LayerScale, MLP, SpectralConv, LearnablePositionEmbedding, ConstantImputation, MLPImputation, EncoderDecoder
+from makani.models.common import (
+    DropPath,
+    LayerScale,
+    MLP,
+    SpectralConv,
+    LearnablePositionEmbedding,
+    MLPImputation,
+)
 from makani.utils.features import get_water_channels, get_channel_groups
 from makani.utils.grids import compute_spherical_bandlimit
 
@@ -32,7 +38,7 @@ import torch_harmonics as th
 import torch_harmonics.distributed as thd
 
 # get pre-formulated layers
-#from makani.models.common import GeometricInstanceNormS2
+# from makani.models.common import GeometricInstanceNormS2
 from makani.mpu.layers import DistributedMLP
 
 # more distributed stuff
@@ -43,10 +49,12 @@ from dataclasses import dataclass
 import physicsnemo
 from physicsnemo import ModelMetaData
 
+
 # heuristic for finding theta_cutoff
 def _compute_cutoff_radius(lmax, kernel_shape, basis_type):
     margin_factor = {"piecewise linear": 1.0, "morlet": 1.0, "harmonic": 1.0, "zernike": 1.0, "fourier-bessel": 1.5}
     return margin_factor[basis_type] * kernel_shape[0] * math.pi / float(lmax)
+
 
 @torch.compile
 def _soft_clamp(x: torch.Tensor, offset: float = 0.0):
@@ -55,10 +63,12 @@ def _soft_clamp(x: torch.Tensor, offset: float = 0.0):
     y = torch.where(x >= 0.5, x - 0.25, y)
     return y
 
+
 # heper function to be able to pass Sin as an activation function
 class Sin(nn.Module):
     def forward(self, x):
         return torch.sin(x)
+
 
 @torch.compiler.disable(recursive=True)
 def _get_norm_layer_handle(
@@ -74,19 +84,27 @@ def _get_norm_layer_handle(
     # pick norm layer
     if normalization_layer == "layer_norm":
         from makani.mpu.layer_norm import DistributedLayerNorm
-        norm_layer_handle = partial(DistributedLayerNorm, normalized_shape=(embed_dim), elementwise_affine=True, eps=1e-6)
+
+        norm_layer_handle = partial(
+            DistributedLayerNorm, normalized_shape=(embed_dim), elementwise_affine=True, eps=1e-6
+        )
     elif normalization_layer == "instance_norm":
         if comm.get_size("spatial") > 1:
             from makani.mpu.layer_norm import DistributedInstanceNorm2d
+
             norm_layer_handle = partial(DistributedInstanceNorm2d, num_features=embed_dim, eps=1e-6, affine=True)
         else:
-            norm_layer_handle = partial(nn.InstanceNorm2d, num_features=embed_dim, eps=1e-6, affine=True, track_running_stats=False)
+            norm_layer_handle = partial(
+                nn.InstanceNorm2d, num_features=embed_dim, eps=1e-6, affine=True, track_running_stats=False
+            )
     elif normalization_layer == "instance_norm_s2":
         if comm.get_size("spatial") > 1:
             from makani.mpu.layer_norm import DistributedGeometricInstanceNormS2
+
             norm_layer_handle = DistributedGeometricInstanceNormS2
         else:
             from makani.models.common import GeometricInstanceNormS2
+
             norm_layer_handle = GeometricInstanceNormS2
         norm_layer_handle = partial(
             norm_layer_handle,
@@ -115,7 +133,7 @@ class DiscreteContinuousEncoder(nn.Module):
         grid_out="equiangular",
         inp_chans=2,
         out_chans=2,
-        kernel_shape=(3,3),
+        kernel_shape=(3, 3),
         basis_type="harmonic",
         basis_norm_mode="nodal",
         lmax=240,
@@ -129,7 +147,9 @@ class DiscreteContinuousEncoder(nn.Module):
         theta_cutoff = _compute_cutoff_radius(lmax=lmax, kernel_shape=kernel_shape, basis_type=basis_type)
 
         # set up local convolution
-        conv_handle = thd.DistributedDiscreteContinuousConvS2 if comm.get_size("spatial") > 1 else th.DiscreteContinuousConvS2
+        conv_handle = (
+            thd.DistributedDiscreteContinuousConvS2 if comm.get_size("spatial") > 1 else th.DiscreteContinuousConvS2
+        )
         self.conv = conv_handle(
             inp_chans,
             out_chans,
@@ -206,7 +226,9 @@ class DiscreteContinuousDecoder(nn.Module):
         theta_cutoff = _compute_cutoff_radius(lmax=lmax, kernel_shape=kernel_shape, basis_type=basis_type)
 
         # set up DISCO convolution
-        conv_handle = thd.DistributedDiscreteContinuousConvS2 if comm.get_size("spatial") > 1 else th.DiscreteContinuousConvS2
+        conv_handle = (
+            thd.DistributedDiscreteContinuousConvS2 if comm.get_size("spatial") > 1 else th.DiscreteContinuousConvS2
+        )
         self.conv = conv_handle(
             inp_chans,
             out_chans,
@@ -239,6 +261,7 @@ class DiscreteContinuousDecoder(nn.Module):
         x = self.conv(res)
 
         return x
+
 
 class NeuralOperatorBlock(nn.Module):
     def __init__(
@@ -281,7 +304,9 @@ class NeuralOperatorBlock(nn.Module):
             # heuristic for finding theta_cutoff
             theta_cutoff = _compute_cutoff_radius(lmax=lmax, kernel_shape=kernel_shape, basis_type=basis_type)
 
-            conv_handle = thd.DistributedDiscreteContinuousConvS2 if comm.get_size("spatial") > 1 else th.DiscreteContinuousConvS2
+            conv_handle = (
+                thd.DistributedDiscreteContinuousConvS2 if comm.get_size("spatial") > 1 else th.DiscreteContinuousConvS2
+            )
             self.local_conv = conv_handle(
                 inp_chans,
                 inp_chans if use_mlp else out_chans,
@@ -553,7 +578,6 @@ class AtmoSphericNeuralOperatorNet31(nn.Module):
                 fused=fused,
             )
 
-
         # decoder for the atmospheric and surface variables
         self.decoder = DiscreteContinuousDecoder(
             inp_shape=(self.h, self.w),
@@ -574,12 +598,13 @@ class AtmoSphericNeuralOperatorNet31(nn.Module):
 
         # position embedding
         if self.pos_embed_dim > 0:
-            self.pos_embed = LearnablePositionEmbedding(img_shape=(self.h, self.w), grid=sht_grid_type, num_chans=self.pos_embed_dim, embed_type="lat")
+            self.pos_embed = LearnablePositionEmbedding(
+                img_shape=(self.h, self.w), grid=sht_grid_type, num_chans=self.pos_embed_dim, embed_type="lat"
+            )
 
         # dropout
         self.pos_drop = nn.Dropout(p=pos_drop_rate) if pos_drop_rate > 0.0 else nn.Identity()
         dpr = [x.item() for x in torch.linspace(0, path_drop_rate, num_layers)]
-
 
         # Internal NO blocks
         self.blocks = nn.ModuleList([])
@@ -636,7 +661,6 @@ class AtmoSphericNeuralOperatorNet31(nn.Module):
             for param in frozen_params:
                 param.requires_grad = False
 
-
     @torch.compiler.disable(recursive=False)
     def _init_spectral_transforms(
         self,
@@ -671,7 +695,6 @@ class AtmoSphericNeuralOperatorNet31(nn.Module):
         self.sht = sht_handle(self.h, self.w, lmax=self.lmax, mmax=self.lmax, grid=sht_grid_type).float()
         self.isht = isht_handle(self.h, self.w, lmax=self.lmax, mmax=self.lmax, grid=sht_grid_type).float()
 
-
     @torch.compiler.disable(recursive=True)
     def _precompute_channel_groups(
         self,
@@ -683,7 +706,9 @@ class AtmoSphericNeuralOperatorNet31(nn.Module):
         group the channels appropriately into atmospheric pressure levels and surface variables
         """
 
-        atmo_chans, surf_chans, dyn_aux_chans, stat_aux_chans, pressure_lvls = get_channel_groups(channel_names, aux_channel_names)
+        atmo_chans, surf_chans, dyn_aux_chans, stat_aux_chans, pressure_lvls = get_channel_groups(
+            channel_names, aux_channel_names
+        )
         sst_chans = [channel_names.index("sst")] if "sst" in channel_names else []
         lsml_chans = [len(channel_names) + aux_channel_names.index("xlsml")] if "xlsml" in aux_channel_names else []
 
@@ -692,25 +717,27 @@ class AtmoSphericNeuralOperatorNet31(nn.Module):
         self.n_atmo_chans = len(atmo_chans) // self.n_atmo_groups
         self.n_surf_chans = len(surf_chans)
         self.n_dyn_aux_chans = len(dyn_aux_chans)
-        self.n_stat_aux_chans= len(stat_aux_chans)
+        self.n_stat_aux_chans = len(stat_aux_chans)
         self.n_aux_chans = self.n_dyn_aux_chans * (n_history + 1) + self.n_stat_aux_chans
 
         # make sure they are divisible. Attention! This does not guarantee that the grrouping is correct
         if len(atmo_chans) % self.n_atmo_groups:
-            raise ValueError(f"Expected number of atmospheric variables to be divisible by number of atmospheric groups but got {len(atmo_chans)} and {self.n_atmo_groups}")
+            raise ValueError(
+                f"Expected number of atmospheric variables to be divisible by number of atmospheric groups but got {len(atmo_chans)} and {self.n_atmo_groups}"
+            )
 
         # if history is included, adapt the channel lists to include the offsets
         n_dyn_chans = len(atmo_chans) + len(surf_chans) + len(dyn_aux_chans)
         atmo_chans_in = atmo_chans.copy()
         surf_chans_in = surf_chans.copy()
         sst_chans_in = sst_chans.copy()
-        for ih in range(1, n_history+1):
-            atmo_chans_in += [(c + ih*n_dyn_chans) for c in atmo_chans]
-            surf_chans_in += [(c + ih*n_dyn_chans) for c in surf_chans]
-            sst_chans_in  += [(c + ih*n_dyn_chans) for c in sst_chans]
-            dyn_aux_chans += [(c + ih*n_dyn_chans) for c in dyn_aux_chans]
+        for ih in range(1, n_history + 1):
+            atmo_chans_in += [(c + ih * n_dyn_chans) for c in atmo_chans]
+            surf_chans_in += [(c + ih * n_dyn_chans) for c in surf_chans]
+            sst_chans_in += [(c + ih * n_dyn_chans) for c in sst_chans]
+            dyn_aux_chans += [(c + ih * n_dyn_chans) for c in dyn_aux_chans]
         # account for the history offset in the static aux channels
-        stat_aux_chans = [c + n_history*n_dyn_chans for c in stat_aux_chans]
+        stat_aux_chans = [c + n_history * n_dyn_chans for c in stat_aux_chans]
 
         self.register_buffer("atmo_channels_in", torch.tensor(atmo_chans_in, dtype=torch.long), persistent=False)
         self.register_buffer("atmo_channels_out", torch.tensor(atmo_chans, dtype=torch.long), persistent=False)
@@ -721,8 +748,12 @@ class AtmoSphericNeuralOperatorNet31(nn.Module):
         self.register_buffer("dyn_aux_channels", torch.tensor(dyn_aux_chans, dtype=torch.long), persistent=False)
         self.register_buffer("stat_aux_channels", torch.tensor(stat_aux_chans, dtype=torch.long), persistent=False)
         self.register_buffer("land_mask_channels", torch.tensor(lsml_chans, dtype=torch.long), persistent=False)
-        self.register_buffer("in_channels", torch.tensor(surf_chans_in + atmo_chans_in, dtype=torch.long), persistent=False)
-        self.register_buffer("aux_channels", torch.tensor(dyn_aux_chans + stat_aux_chans, dtype=torch.long), persistent=False)
+        self.register_buffer(
+            "in_channels", torch.tensor(surf_chans_in + atmo_chans_in, dtype=torch.long), persistent=False
+        )
+        self.register_buffer(
+            "aux_channels", torch.tensor(dyn_aux_chans + stat_aux_chans, dtype=torch.long), persistent=False
+        )
         self.register_buffer("pred_channels", torch.tensor(surf_chans + atmo_chans, dtype=torch.long), persistent=False)
 
         return
@@ -858,6 +889,7 @@ class AtmoSphericNeuralOperatorNet31(nn.Module):
         x = self.clamp_water_channels(x)
 
         return x
+
 
 # this part exposes the model to modulus by constructing modulus Modules
 @dataclass

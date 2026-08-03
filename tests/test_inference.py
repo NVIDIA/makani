@@ -85,8 +85,14 @@ class TestSortedIndexSampler(unittest.TestCase):
         self.assertEqual(
             list(sampler),
             [
-                [0, 100], [6, 106], [12, 112], [18, 118],   # batch 1, 4 timesteps
-                [200], [206], [212], [218],                  # batch 2, 4 timesteps
+                [0, 100],
+                [6, 106],
+                [12, 112],
+                [18, 118],  # batch 1, 4 timesteps
+                [200],
+                [206],
+                [212],
+                [218],  # batch 2, 4 timesteps
             ],
         )
         self.assertEqual(len(sampler), 8)
@@ -253,9 +259,9 @@ class TestTranslateDateSamplerToTimedeltaSampler(unittest.TestCase):
 
         out = list(translate_date_sampler_to_timedelta_sampler(src, date_ds, td_ds))
 
-        td0 = dt.timedelta(days=1, hours=12)            # Jan 2 12:00 of 2017
+        td0 = dt.timedelta(days=1, hours=12)  # Jan 2 12:00 of 2017
         td1 = dt.timedelta(days=31 + 28 + 31 + 30 + 31 + 30)  # Jul 1 of 2018 (non-leap)
-        self.assertEqual(td1, dt.timedelta(days=181))   # sanity
+        self.assertEqual(td1, dt.timedelta(days=181))  # sanity
 
         self.assertEqual(out, [[td_ds._lookup[td0], td_ds._lookup[td1]]])
 
@@ -336,31 +342,40 @@ class TestComputeInferenceRange(unittest.TestCase):
 
     def test_both_dates_none_uses_full_range(self):
         ds, dates = self._make_dataset(
-            start=dt.datetime(2017, 1, 1, tzinfo=dt.timezone.utc), count=10, dhours=6,
+            start=dt.datetime(2017, 1, 1, tzinfo=dt.timezone.utc),
+            count=10,
+            dhours=6,
         )
         start_idx, end_idx, step, sd, ed = compute_inference_range(ds, None, None, date_step=6)
         self.assertEqual(start_idx, 0)
-        self.assertEqual(end_idx, 9)         # len-1
-        self.assertEqual(step, 1)            # 6 // 6
+        self.assertEqual(end_idx, 9)  # len-1
+        self.assertEqual(step, 1)  # 6 // 6
         self.assertEqual(sd, dates[0])
         self.assertEqual(ed, dates[-1])
 
     def test_explicit_dates_resolve_to_indices(self):
         ds, dates = self._make_dataset(
-            start=dt.datetime(2017, 1, 1, tzinfo=dt.timezone.utc), count=20, dhours=6,
+            start=dt.datetime(2017, 1, 1, tzinfo=dt.timezone.utc),
+            count=20,
+            dhours=6,
         )
         start_idx, end_idx, step, sd, ed = compute_inference_range(
-            ds, start_date=dates[3], end_date=dates[15], date_step=12,
+            ds,
+            start_date=dates[3],
+            end_date=dates[15],
+            date_step=12,
         )
         self.assertEqual(start_idx, 3)
         self.assertEqual(end_idx, 15)
-        self.assertEqual(step, 2)            # 12 // 6
+        self.assertEqual(step, 2)  # 12 // 6
         self.assertEqual(sd, dates[3])
         self.assertEqual(ed, dates[15])
 
     def test_only_start_given(self):
         ds, dates = self._make_dataset(
-            start=dt.datetime(2017, 1, 1, tzinfo=dt.timezone.utc), count=10, dhours=6,
+            start=dt.datetime(2017, 1, 1, tzinfo=dt.timezone.utc),
+            count=10,
+            dhours=6,
         )
         start_idx, end_idx, _, _, _ = compute_inference_range(ds, dates[2], None, date_step=6)
         self.assertEqual(start_idx, 2)
@@ -368,7 +383,9 @@ class TestComputeInferenceRange(unittest.TestCase):
 
     def test_only_end_given(self):
         ds, dates = self._make_dataset(
-            start=dt.datetime(2017, 1, 1, tzinfo=dt.timezone.utc), count=10, dhours=6,
+            start=dt.datetime(2017, 1, 1, tzinfo=dt.timezone.utc),
+            count=10,
+            dhours=6,
         )
         start_idx, end_idx, _, _, _ = compute_inference_range(ds, None, dates[5], date_step=6)
         self.assertEqual(start_idx, 0)
@@ -376,7 +393,9 @@ class TestComputeInferenceRange(unittest.TestCase):
 
     def test_inverted_range_raises_value_error(self):
         ds, dates = self._make_dataset(
-            start=dt.datetime(2017, 1, 1, tzinfo=dt.timezone.utc), count=10, dhours=6,
+            start=dt.datetime(2017, 1, 1, tzinfo=dt.timezone.utc),
+            count=10,
+            dhours=6,
         )
         with self.assertRaises(ValueError):
             compute_inference_range(ds, start_date=dates[7], end_date=dates[3], date_step=6)
@@ -384,22 +403,28 @@ class TestComputeInferenceRange(unittest.TestCase):
     def test_equal_range_raises_value_error(self):
         # ``end_index <= start_index`` raises — equal indices count as empty range
         ds, dates = self._make_dataset(
-            start=dt.datetime(2017, 1, 1, tzinfo=dt.timezone.utc), count=10, dhours=6,
+            start=dt.datetime(2017, 1, 1, tzinfo=dt.timezone.utc),
+            count=10,
+            dhours=6,
         )
         with self.assertRaises(ValueError):
             compute_inference_range(ds, start_date=dates[4], end_date=dates[4], date_step=6)
 
     def test_step_smaller_than_dhours_raises_value_error(self):
         ds, _ = self._make_dataset(
-            start=dt.datetime(2017, 1, 1, tzinfo=dt.timezone.utc), count=10, dhours=6,
+            start=dt.datetime(2017, 1, 1, tzinfo=dt.timezone.utc),
+            count=10,
+            dhours=6,
         )
         with self.assertRaises(ValueError):
-            compute_inference_range(ds, None, None, date_step=3)   # 3 < 6
+            compute_inference_range(ds, None, None, date_step=3)  # 3 < 6
 
     def test_step_equal_to_dhours_is_allowed(self):
         # Boundary of the validation: date_step == dhours → step == 1
         ds, _ = self._make_dataset(
-            start=dt.datetime(2017, 1, 1, tzinfo=dt.timezone.utc), count=10, dhours=6,
+            start=dt.datetime(2017, 1, 1, tzinfo=dt.timezone.utc),
+            count=10,
+            dhours=6,
         )
         _, _, step, _, _ = compute_inference_range(ds, None, None, date_step=6)
         self.assertEqual(step, 1)
@@ -409,17 +434,21 @@ class TestComputeInferenceRange(unittest.TestCase):
         # and date_step=7, step=1 (i.e. user requested ~7h cadence but got 6h).
         # If a future change rounds up or raises, this test will surface it.
         ds, _ = self._make_dataset(
-            start=dt.datetime(2017, 1, 1, tzinfo=dt.timezone.utc), count=10, dhours=6,
+            start=dt.datetime(2017, 1, 1, tzinfo=dt.timezone.utc),
+            count=10,
+            dhours=6,
         )
         _, _, step, _, _ = compute_inference_range(ds, None, None, date_step=7)
         self.assertEqual(step, 1)
 
         _, _, step2, _, _ = compute_inference_range(ds, None, None, date_step=13)
-        self.assertEqual(step2, 2)   # 13 // 6 = 2 (i.e. ~12h actual cadence)
+        self.assertEqual(step2, 2)  # 13 // 6 = 2 (i.e. ~12h actual cadence)
 
     def test_start_date_out_of_range_raises_index_error(self):
         ds, _ = self._make_dataset(
-            start=dt.datetime(2017, 1, 1, tzinfo=dt.timezone.utc), count=10, dhours=6,
+            start=dt.datetime(2017, 1, 1, tzinfo=dt.timezone.utc),
+            count=10,
+            dhours=6,
         )
         # A date that doesn't exist in the dataset (off-grid by 1 hour)
         bad = dt.datetime(2017, 1, 1, 1, tzinfo=dt.timezone.utc)
@@ -428,7 +457,9 @@ class TestComputeInferenceRange(unittest.TestCase):
 
     def test_end_date_out_of_range_raises_index_error(self):
         ds, _ = self._make_dataset(
-            start=dt.datetime(2017, 1, 1, tzinfo=dt.timezone.utc), count=10, dhours=6,
+            start=dt.datetime(2017, 1, 1, tzinfo=dt.timezone.utc),
+            count=10,
+            dhours=6,
         )
         # Date past the dataset's last sample
         bad = dt.datetime(2018, 1, 1, tzinfo=dt.timezone.utc)
@@ -441,7 +472,9 @@ class TestComputeInferenceRange(unittest.TestCase):
         # input dates verbatim. (Not strongly testable here because the fake
         # dataset only allows exact-match lookups; this test pins the contract.)
         ds, dates = self._make_dataset(
-            start=dt.datetime(2017, 1, 1, tzinfo=dt.timezone.utc), count=10, dhours=6,
+            start=dt.datetime(2017, 1, 1, tzinfo=dt.timezone.utc),
+            count=10,
+            dhours=6,
         )
         _, _, _, sd, ed = compute_inference_range(ds, dates[2], dates[7], date_step=6)
         # Returned datetimes are obtained via get_time_at_index, not just echoed
@@ -449,7 +482,6 @@ class TestComputeInferenceRange(unittest.TestCase):
         self.assertEqual(ed, dates[7])
         # Identity check: ``ds.get_time_at_index(start_idx) is sd`` (same object)
         self.assertIs(sd, ds.get_time_at_index(2))
-
 
 
 if __name__ == "__main__":

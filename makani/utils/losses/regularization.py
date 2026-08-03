@@ -18,14 +18,13 @@ from typing import Optional, Tuple, List
 import math
 
 import torch
-import torch.nn as nn
 from torch import amp
 
 from makani.utils.losses.base_loss import GeometricBaseLoss, SpectralBaseLoss, LossType
 from makani.utils import comm
 
 # distributed stuff
-from torch_harmonics.distributed import compute_split_shapes, split_tensor_along_dim
+from torch_harmonics.distributed import split_tensor_along_dim
 from makani.mpu.mappings import scatter_to_parallel_region, reduce_from_parallel_region, distributed_transpose
 
 
@@ -57,7 +56,9 @@ class DriftRegularization(GeometricBaseLoss):
 
         self.p = p
         self.spatial_distributed = comm.is_distributed("spatial") and spatial_distributed
-        self.ensemble_distributed = ensemble_distributed and comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1)
+        self.ensemble_distributed = (
+            ensemble_distributed and comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1)
+        )
 
     @property
     def type(self):
@@ -69,7 +70,7 @@ class DriftRegularization(GeometricBaseLoss):
             tar = tar.unsqueeze(1)
 
         # compute difference between the means output has dims
-        loss = torch.abs(self.quadrature(prd) -  self.quadrature(tar)).pow(self.p)
+        loss = torch.abs(self.quadrature(prd) - self.quadrature(tar)).pow(self.p)
 
         # if ensemble
         if prd.dim() == 5:
@@ -78,6 +79,7 @@ class DriftRegularization(GeometricBaseLoss):
                 loss = reduce_from_parallel_region(loss, "ensemble") / float(comm.get_size("ensemble"))
 
         return loss
+
 
 class SpectralRegularization(SpectralBaseLoss):
     """
@@ -114,7 +116,9 @@ class SpectralRegularization(SpectralBaseLoss):
         )
 
         self.spatial_distributed = spatial_distributed and comm.is_distributed("spatial")
-        self.ensemble_distributed = ensemble_distributed and comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1)
+        self.ensemble_distributed = (
+            ensemble_distributed and comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1)
+        )
         self.eps = eps
         self.logarithmic = logarithmic
 
@@ -142,7 +146,13 @@ class SpectralRegularization(SpectralBaseLoss):
     def type(self):
         return LossType.Probabilistic
 
-    def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, ensemble_weights: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor:
+    def forward(
+        self,
+        forecasts: torch.Tensor,
+        observations: torch.Tensor,
+        ensemble_weights: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> torch.Tensor:
 
         # sanity checks
         if forecasts.dim() == 5:
@@ -262,7 +272,9 @@ class CoherenceRegularization(SpectralBaseLoss):
         )
 
         self.spatial_distributed = spatial_distributed and comm.is_distributed("spatial")
-        self.ensemble_distributed = ensemble_distributed and comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1)
+        self.ensemble_distributed = (
+            ensemble_distributed and comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1)
+        )
         self.ensemble_coherence_weight = ensemble_coherence_weight
         self.eps = eps
 
@@ -276,7 +288,9 @@ class CoherenceRegularization(SpectralBaseLoss):
         # truncation. Only the lower edge needs an explicit mask.
         self.lmin = lmin if lmin is not None else 0
         if self.lmin >= self.sht.lmax:
-            raise ValueError(f"Error, lmin ({self.lmin}) must be smaller than the SHT truncation lmax ({self.sht.lmax}), otherwise the band is empty.")
+            raise ValueError(
+                f"Error, lmin ({self.lmin}) must be smaller than the SHT truncation lmax ({self.sht.lmax}), otherwise the band is empty."
+            )
 
         # m-summation weights: 1 for m=0, 2 for m>0, 0 for m>l
         ls = torch.arange(self.sht.lmax).reshape(-1, 1)
@@ -310,7 +324,13 @@ class CoherenceRegularization(SpectralBaseLoss):
     def type(self):
         return LossType.Probabilistic
 
-    def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, spatial_weights: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor:
+    def forward(
+        self,
+        forecasts: torch.Tensor,
+        observations: torch.Tensor,
+        spatial_weights: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> torch.Tensor:
         if forecasts.dim() != 5:
             raise ValueError(f"Error, forecasts expected 5 dims, got {forecasts.dim()}.")
 
@@ -325,7 +345,9 @@ class CoherenceRegularization(SpectralBaseLoss):
         forecasts = torch.moveaxis(forecasts, 1, 0)
         if self.ensemble_distributed:
             ensemble_shapes = [forecasts.shape[0] for _ in range(comm.get_size("ensemble"))]
-            forecasts = distributed_transpose(forecasts, (-1, 0), ensemble_shapes, "ensemble")        # for correct spatial reduction we need to do the same with spatial weights
+            forecasts = distributed_transpose(
+                forecasts, (-1, 0), ensemble_shapes, "ensemble"
+            )  # for correct spatial reduction we need to do the same with spatial weights
 
         # also split observations along m for the ensemble-distributed transpose
         observations = observations.unsqueeze(0)

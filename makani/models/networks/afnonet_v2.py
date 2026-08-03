@@ -40,7 +40,15 @@ def compl_mul_add_fwd_c(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 
 
 class AFNO2D(nn.Module):
-    def __init__(self, hidden_size, num_blocks=8, sparsity_threshold=0.0, hard_thresholding_fraction=1, hidden_size_factor=1, use_complex_kernels=False):
+    def __init__(
+        self,
+        hidden_size,
+        num_blocks=8,
+        sparsity_threshold=0.0,
+        hard_thresholding_fraction=1,
+        hidden_size_factor=1,
+        use_complex_kernels=False,
+    ):
         super(AFNO2D, self).__init__()
         if hidden_size % num_blocks != 0:
             raise ValueError(f"hidden_size {hidden_size} should be divisble by num_blocks {num_blocks}")
@@ -55,9 +63,13 @@ class AFNO2D(nn.Module):
         self.mult_handle = compl_mul_add_fwd_c if use_complex_kernels else compl_mul_add_fwd
 
         # new
-        self.w1 = nn.Parameter(self.scale * torch.randn(self.num_blocks, self.block_size, self.block_size * self.hidden_size_factor, 2))
+        self.w1 = nn.Parameter(
+            self.scale * torch.randn(self.num_blocks, self.block_size, self.block_size * self.hidden_size_factor, 2)
+        )
         self.b1 = nn.Parameter(self.scale * torch.randn(1, self.num_blocks * self.block_size, 1, 1))
-        self.w2 = nn.Parameter(self.scale * torch.randn(self.num_blocks, self.block_size * self.hidden_size_factor, self.block_size, 2))
+        self.w2 = nn.Parameter(
+            self.scale * torch.randn(self.num_blocks, self.block_size * self.hidden_size_factor, self.block_size, 2)
+        )
         # self.b2 = nn.Parameter(self.scale * torch.randn(self.num_blocks, self.block_size, 1, 1, 2))
 
         # self.act = nn.ReLU()
@@ -147,20 +159,30 @@ class Block(nn.Module):
 
         else:
             if verbose:
-                print(f"Got skip_fno={skip_fno}, not using any skip around FNO -- use linear or identity to change this.")
+                print(
+                    f"Got skip_fno={skip_fno}, not using any skip around FNO -- use linear or identity to change this."
+                )
         self.skip_fno = skip_fno
 
         self.nested_skip_fno = nested_skip_fno
 
         # filter
-        self.filter = AFNO2D(dim, num_blocks, sparsity_threshold, hard_thresholding_fraction, use_complex_kernels=use_complex_kernels)
+        self.filter = AFNO2D(
+            dim, num_blocks, sparsity_threshold, hard_thresholding_fraction, use_complex_kernels=use_complex_kernels
+        )
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
         # norm layer
         self.norm2 = norm_layer()  # ((h,w))
 
         mlp_hidden_dim = int(dim * mlp_ratio)
-        self.mlp = MLP(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop_rate=drop, checkpointing=(checkpointing_level>=2))
+        self.mlp = MLP(
+            in_features=dim,
+            hidden_features=mlp_hidden_dim,
+            act_layer=act_layer,
+            drop_rate=drop,
+            checkpointing=(checkpointing_level >= 2),
+        )
 
     def forward(self, x):
         residual = x
@@ -214,9 +236,13 @@ class AdaptiveFourierNeuralOperatorNet(nn.Module):
         if len(patch_size) != 2:
             raise ValueError(f"Expected patch_size to have two entries but got {patch_size} instead")
         if not ((self.img_size[0] % self.patch_size[0] == 0) and (self.img_size[1] % self.patch_size[1] == 0)):
-            raise ValueError(f"the patch size {self.patch_size} does not divide the image dimensions {self.img_size} evenly.")
+            raise ValueError(
+                f"the patch size {self.patch_size} does not divide the image dimensions {self.img_size} evenly."
+            )
 
-        self.patch_embed = PatchEmbed2D(img_size=self.img_size, patch_size=self.patch_size, in_chans=self.inp_chans, embed_dim=self.embed_dim)
+        self.patch_embed = PatchEmbed2D(
+            img_size=self.img_size, patch_size=self.patch_size, in_chans=self.inp_chans, embed_dim=self.embed_dim
+        )
         num_patches = self.patch_embed.num_patches
 
         self.pos_embed = nn.Parameter(torch.zeros(1, embed_dim, num_patches))
@@ -232,7 +258,9 @@ class AdaptiveFourierNeuralOperatorNet(nn.Module):
         if normalization_layer == "layer_norm":
             norm_layer = partial(nn.LayerNorm, normalized_shape=(self.h, self.w), eps=1e-6)
         elif normalization_layer == "instance_norm":
-            norm_layer = partial(nn.InstanceNorm2d, num_features=embed_dim, eps=1e-6, affine=True, track_running_stats=False)
+            norm_layer = partial(
+                nn.InstanceNorm2d, num_features=embed_dim, eps=1e-6, affine=True, track_running_stats=False
+            )
         else:
             raise NotImplementedError(f"Error, normalization {normalization_layer} not implemented.")
 

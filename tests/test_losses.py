@@ -42,7 +42,11 @@ from makani.utils.losses import (
     LpEnergyScoreLoss,
     SpectralL2EnergyScoreLoss,
 )
-from makani.utils.losses.energy_score import SobolevEnergyScoreLoss, SpectralCoherenceLoss, CorrectedSpectralL2EnergyScoreLoss
+from makani.utils.losses.energy_score import (
+    SobolevEnergyScoreLoss,
+    SpectralCoherenceLoss,
+    CorrectedSpectralL2EnergyScoreLoss,
+)
 from makani.utils.losses.crps_loss import KernelScoreLoss
 from makani.utils.losses.base_loss import _compute_channel_weighting_helper
 
@@ -149,11 +153,15 @@ def _rand_ensemble(ensemble=5, batch=_BATCH, channels=_NUM_CH, requires_grad=Fal
 # GaussianMMDLoss excluded: the unbiased U-statistic MMD² can be negative
 #   (e.g., all E members = obs with E=5 gives mmd² = (3-E)/(E-1) = -0.5).
 _COMMON_NONNEG = [
-    ("geometric_l2",), ("geometric_l1",),
-    ("spectral_l2",), ("spectral_h1",),
+    ("geometric_l2",),
+    ("geometric_l1",),
+    ("spectral_l2",),
+    ("spectral_h1",),
     ("drift_regularization",),
-    ("crps_cdf",), ("crps_gauss",),
-    ("crps_pwm",), ("crps_naive_skillspread",),
+    ("crps_cdf",),
+    ("crps_gauss",),
+    ("crps_pwm",),
+    ("crps_naive_skillspread",),
 ]
 
 # Losses expected to be (near) zero when prd perfectly matches tar.
@@ -163,21 +171,29 @@ _COMMON_NONNEG = [
 # crps_gauss included: with sigma clamped to eps the residual ≈ eps * 0.23 ≈ 2e-6,
 #   well within atol=1e-4.
 _COMMON_ZERO_PERFECT = [
-    ("geometric_l2",), ("geometric_l1",),
-    ("spectral_l2",), ("spectral_h1",),
+    ("geometric_l2",),
+    ("geometric_l1",),
+    ("spectral_l2",),
+    ("spectral_h1",),
     ("drift_regularization",),
-    ("crps_cdf",), ("crps_gauss",),
-    ("crps_pwm",), ("crps_naive_skillspread",),
+    ("crps_cdf",),
+    ("crps_gauss",),
+    ("crps_pwm",),
+    ("crps_naive_skillspread",),
 ]
 
 # All losses participate in the batch-size independence test.
 # GaussianMMDLoss is tested with squared=True to avoid sqrt of potentially negative mmd².
 _COMMON_BATCHSIZE = [
-    ("geometric_l2",), ("geometric_l1",),
-    ("spectral_l2",), ("spectral_h1",),
+    ("geometric_l2",),
+    ("geometric_l1",),
+    ("spectral_l2",),
+    ("spectral_h1",),
     ("drift_regularization",),
-    ("crps_cdf",), ("crps_gauss",),
-    ("crps_pwm",), ("crps_naive_skillspread",),
+    ("crps_cdf",),
+    ("crps_gauss",),
+    ("crps_pwm",),
+    ("crps_naive_skillspread",),
     ("nll",),
     ("mmd",),
 ]
@@ -213,17 +229,22 @@ class TestLossCommon(unittest.TestCase):
         if name == "drift_regularization":
             return DriftRegularization(**_GEOM_KWARGS)
         if name == "crps_cdf":
-            return CRPSLoss(**_GEOM_KWARGS, crps_type="cdf",
-                                    spatial_distributed=False, ensemble_distributed=False)
+            return CRPSLoss(**_GEOM_KWARGS, crps_type="cdf", spatial_distributed=False, ensemble_distributed=False)
         if name == "crps_gauss":
-            return CRPSLoss(**_GEOM_KWARGS, crps_type="gauss",
-                                    spatial_distributed=False, ensemble_distributed=False, eps=1e-5)
+            return CRPSLoss(
+                **_GEOM_KWARGS, crps_type="gauss", spatial_distributed=False, ensemble_distributed=False, eps=1e-5
+            )
         if name == "crps_pwm":
-            return CRPSLoss(**_GEOM_KWARGS, crps_type="probability weighted moment",
-                                    spatial_distributed=False, ensemble_distributed=False)
+            return CRPSLoss(
+                **_GEOM_KWARGS,
+                crps_type="probability weighted moment",
+                spatial_distributed=False,
+                ensemble_distributed=False,
+            )
         if name == "crps_naive_skillspread":
-            return CRPSLoss(**_GEOM_KWARGS, crps_type="naive skillspread",
-                                    spatial_distributed=False, ensemble_distributed=False)
+            return CRPSLoss(
+                **_GEOM_KWARGS, crps_type="naive skillspread", spatial_distributed=False, ensemble_distributed=False
+            )
         if name == "nll":
             return EnsembleNLLLoss(**_GEOM_KWARGS)
         if name == "mmd":
@@ -275,8 +296,8 @@ class TestLossCommon(unittest.TestCase):
         fn = self._make(name)
         prd, tar = self._make_prd_tar(name)
 
-        loss_single = fn(prd[:1], tar[:1])   # (1, C)
-        loss_batch  = fn(prd,     tar)        # (B, C)
+        loss_single = fn(prd[:1], tar[:1])  # (1, C)
+        loss_batch = fn(prd, tar)  # (B, C)
 
         self.assertTrue(
             compare_tensors(f"{name} batchsize", loss_single[0], loss_batch[0], verbose=verbose),
@@ -295,10 +316,12 @@ class TestGeometricLpLoss(unittest.TestCase):
     def test_squared_flag_consistency(self, verbose=False):
         """For p=2, loss(squared=False)^2 must equal loss(squared=True)."""
         fn_unsq = GeometricLpLoss(**_GEOM_KWARGS, p=2.0, squared=False)
-        fn_sq   = GeometricLpLoss(**_GEOM_KWARGS, p=2.0, squared=True)
+        fn_sq = GeometricLpLoss(**_GEOM_KWARGS, p=2.0, squared=True)
         prd, tar = _rand(), _rand()
         self.assertTrue(
-            compare_tensors("squared flag", fn_unsq(prd, tar) ** 2, fn_sq(prd, tar), atol=1e-5, rtol=1e-4, verbose=verbose),
+            compare_tensors(
+                "squared flag", fn_unsq(prd, tar) ** 2, fn_sq(prd, tar), atol=1e-5, rtol=1e-4, verbose=verbose
+            ),
         )
 
     @parameterized.expand([(1.0,), (2.0,), (4.0,)])
@@ -328,11 +351,12 @@ class TestGeometricLpLoss(unittest.TestCase):
     def test_squared_flag_general(self, p, verbose=False):
         """For arbitrary p: loss(squared=False)^p must equal loss(squared=True)."""
         fn_unsq = GeometricLpLoss(**_GEOM_KWARGS, p=p, squared=False)
-        fn_sq   = GeometricLpLoss(**_GEOM_KWARGS, p=p, squared=True)
+        fn_sq = GeometricLpLoss(**_GEOM_KWARGS, p=p, squared=True)
         prd, tar = _rand(), _rand()
         self.assertTrue(
-            compare_tensors(f"squared flag p={p}", fn_unsq(prd, tar) ** p, fn_sq(prd, tar),
-                            atol=1e-4, rtol=1e-3, verbose=verbose),
+            compare_tensors(
+                f"squared flag p={p}", fn_unsq(prd, tar) ** p, fn_sq(prd, tar), atol=1e-4, rtol=1e-3, verbose=verbose
+            ),
         )
 
     @parameterized.expand([(1.0,), (2.0,), (4.0,)])
@@ -343,18 +367,19 @@ class TestGeometricLpLoss(unittest.TestCase):
         """
         fn = GeometricLpLoss(**_GEOM_KWARGS, p=p, relative=True, squared=False)
         set_seed(333)
-        tar = _rand() + 2.0   # shift away from zero to keep denominator well-conditioned
+        tar = _rand() + 2.0  # shift away from zero to keep denominator well-conditioned
         prd = 2.0 * tar
         loss = fn(prd, tar)
         self.assertTrue(
-            compare_tensors(f"relative L{p} double-target", loss, torch.ones_like(loss),
-                            atol=1e-4, rtol=1e-4, verbose=verbose),
+            compare_tensors(
+                f"relative L{p} double-target", loss, torch.ones_like(loss), atol=1e-4, rtol=1e-4, verbose=verbose
+            ),
         )
 
     @parameterized.expand([(1.0,), (4.0,)])
     def test_gradient_flow(self, p):
         """abs() mode must produce finite, non-NaN gradients for p=1 and p=4."""
-        fn  = GeometricLpLoss(**_GEOM_KWARGS, p=p, squared=False)
+        fn = GeometricLpLoss(**_GEOM_KWARGS, p=p, squared=False)
         prd = _rand(requires_grad=True)
         tar = _rand()
         fn(prd, tar).sum().backward()
@@ -372,7 +397,7 @@ class TestSpectralLpLoss(unittest.TestCase):
     def test_squared_flag_consistency(self, verbose=False):
         """loss(squared=False)^2 must equal loss(squared=True)."""
         fn_unsq = SpectralLpLoss(**_SPEC_KWARGS, squared=False)
-        fn_sq   = SpectralLpLoss(**_SPEC_KWARGS, squared=True)
+        fn_sq = SpectralLpLoss(**_SPEC_KWARGS, squared=True)
         prd, tar = _rand(), _rand()
         self.assertTrue(
             compare_tensors("squared", fn_unsq(prd, tar) ** 2, fn_sq(prd, tar), atol=1e-5, rtol=1e-4, verbose=verbose),
@@ -408,7 +433,7 @@ class TestSpectralH1Loss(unittest.TestCase):
 
     def test_squared_flag_consistency(self, verbose=False):
         fn_unsq = SpectralH1Loss(**_SPEC_KWARGS, squared=False)
-        fn_sq   = SpectralH1Loss(**_SPEC_KWARGS, squared=True)
+        fn_sq = SpectralH1Loss(**_SPEC_KWARGS, squared=True)
         prd, tar = _rand(), _rand()
         self.assertTrue(
             compare_tensors("squared", fn_unsq(prd, tar) ** 2, fn_sq(prd, tar), atol=1e-5, rtol=1e-4, verbose=verbose),
@@ -441,8 +466,7 @@ class TestSpectralH1Loss(unittest.TestCase):
         expected = float(l_test * (l_test + 1)) * l2_val
         self.assertTrue(
             compare_tensors("parseval H1", h1_val, expected, atol=1e-3, rtol=0.05, verbose=verbose),
-            f"Expected H1 = l(l+1)·L²: h1={h1_val.mean().item():.4f}, "
-            f"l(l+1)*l2={expected.mean().item():.4f}",
+            f"Expected H1 = l(l+1)·L²: h1={h1_val.mean().item():.4f}, " f"l(l+1)*l2={expected.mean().item():.4f}",
         )
 
     def test_constant_difference_has_zero_h1_seminorm(self, verbose=False):
@@ -466,16 +490,17 @@ class TestSpectralH1Loss(unittest.TestCase):
         LAT, LON = torch.meshgrid(lat, lon, indexing="ij")
 
         smooth = torch.sin(LAT).expand(_BATCH, _NUM_CH, -1, -1).clone()
-        rough  = (torch.sin(8 * LAT) * torch.cos(8 * LON)).expand(_BATCH, _NUM_CH, -1, -1).clone()
+        rough = (torch.sin(8 * LAT) * torch.cos(8 * LON)).expand(_BATCH, _NUM_CH, -1, -1).clone()
 
         # normalise to same Frobenius norm so only frequency content differs
         rough = rough * smooth.norm() / rough.norm().clamp(min=1e-6)
 
         tar = torch.zeros_like(smooth)
         h1_smooth = fn(smooth, tar).mean().item()
-        h1_rough  = fn(rough,  tar).mean().item()
+        h1_rough = fn(rough, tar).mean().item()
         self.assertGreater(
-            h1_rough, h1_smooth,
+            h1_rough,
+            h1_smooth,
             f"Rough H1 ({h1_rough:.4f}) should exceed smooth H1 ({h1_smooth:.4f})",
         )
 
@@ -500,7 +525,7 @@ class TestSpectralRelativeLoss(unittest.TestCase):
     # --- zero on perfect prediction ---
 
     def test_l2_zero_on_perfect_prediction(self, verbose=False):
-        fn  = self._make(SpectralLpLoss)
+        fn = self._make(SpectralLpLoss)
         tar = _rand()
         loss = fn(tar.clone(), tar)
         self.assertTrue(
@@ -508,7 +533,7 @@ class TestSpectralRelativeLoss(unittest.TestCase):
         )
 
     def test_h1_zero_on_perfect_prediction(self, verbose=False):
-        fn  = self._make(SpectralH1Loss)
+        fn = self._make(SpectralH1Loss)
         tar = _rand()
         loss = fn(tar.clone(), tar)
         self.assertTrue(
@@ -518,7 +543,7 @@ class TestSpectralRelativeLoss(unittest.TestCase):
     # --- unity when prd = 2 * tar  (||2t - t|| = ||t||, so ratio = 1) ---
 
     def test_l2_unity_when_prd_equals_twice_tar(self, verbose=False):
-        fn  = self._make(SpectralLpLoss)
+        fn = self._make(SpectralLpLoss)
         tar = _rand()
         loss = fn(2.0 * tar, tar)
         self.assertTrue(
@@ -526,7 +551,7 @@ class TestSpectralRelativeLoss(unittest.TestCase):
         )
 
     def test_h1_unity_when_prd_equals_twice_tar(self, verbose=False):
-        fn  = self._make(SpectralH1Loss)
+        fn = self._make(SpectralH1Loss)
         tar = _rand()
         loss = fn(2.0 * tar, tar)
         self.assertTrue(
@@ -538,43 +563,52 @@ class TestSpectralRelativeLoss(unittest.TestCase):
     def test_l2_squared_flag_consistency(self, verbose=False):
         """rel(squared=False)² must equal rel(squared=True)."""
         fn_unsq = self._make(SpectralLpLoss, squared=False)
-        fn_sq   = self._make(SpectralLpLoss, squared=True)
+        fn_sq = self._make(SpectralLpLoss, squared=True)
         prd, tar = _rand(), _rand()
         self.assertTrue(
-            compare_tensors("l2 rel squared", fn_unsq(prd, tar) ** 2, fn_sq(prd, tar), atol=1e-5, rtol=1e-4, verbose=verbose),
+            compare_tensors(
+                "l2 rel squared", fn_unsq(prd, tar) ** 2, fn_sq(prd, tar), atol=1e-5, rtol=1e-4, verbose=verbose
+            ),
         )
 
     def test_h1_squared_flag_consistency(self, verbose=False):
         fn_unsq = self._make(SpectralH1Loss, squared=False)
-        fn_sq   = self._make(SpectralH1Loss, squared=True)
+        fn_sq = self._make(SpectralH1Loss, squared=True)
         prd, tar = _rand(), _rand()
         self.assertTrue(
-            compare_tensors("h1 rel squared", fn_unsq(prd, tar) ** 2, fn_sq(prd, tar), atol=1e-5, rtol=1e-4, verbose=verbose),
+            compare_tensors(
+                "h1 rel squared", fn_unsq(prd, tar) ** 2, fn_sq(prd, tar), atol=1e-5, rtol=1e-4, verbose=verbose
+            ),
         )
 
     # --- larger error → larger relative loss ---
 
     def test_l2_monotone_in_error(self):
         """A prediction farther from the target must have a larger relative loss."""
-        fn  = self._make(SpectralLpLoss)
+        fn = self._make(SpectralLpLoss)
         set_seed(333)
         tar = _rand()
         noise = torch.randn_like(tar)
         loss_small = fn(tar + 0.1 * noise, tar).mean().item()
         loss_large = fn(tar + 2.0 * noise, tar).mean().item()
-        self.assertLess(loss_small, loss_large,
-                        f"L2 rel: small-error loss {loss_small:.4f} should be < large-error {loss_large:.4f}")
+        self.assertLess(
+            loss_small,
+            loss_large,
+            f"L2 rel: small-error loss {loss_small:.4f} should be < large-error {loss_large:.4f}",
+        )
 
     def test_h1_monotone_in_error(self):
-        fn  = self._make(SpectralH1Loss)
+        fn = self._make(SpectralH1Loss)
         set_seed(333)
         tar = _rand()
         noise = torch.randn_like(tar)
         loss_small = fn(tar + 0.1 * noise, tar).mean().item()
         loss_large = fn(tar + 2.0 * noise, tar).mean().item()
-        self.assertLess(loss_small, loss_large,
-                        f"H1 rel: small-error loss {loss_small:.4f} should be < large-error {loss_large:.4f}")
-
+        self.assertLess(
+            loss_small,
+            loss_large,
+            f"H1 rel: small-error loss {loss_small:.4f} should be < large-error {loss_large:.4f}",
+        )
 
 
 # ===========================================================================
@@ -592,7 +626,7 @@ class TestSpectralAMSELoss(unittest.TestCase):
         fn = self._fn()
         tar = _rand()
         loss_perfect = fn(tar, tar).sum().item()
-        loss_2x      = fn(2.0 * tar, tar).sum().item()
+        loss_2x = fn(2.0 * tar, tar).sum().item()
         self.assertGreater(loss_2x, loss_perfect + 1e-4)
 
     def test_phase_difference_penalized(self):
@@ -649,7 +683,9 @@ class TestDriftRegularization(unittest.TestCase):
         prd = tar + c
         loss = fn(prd, tar)
         self.assertTrue(
-            compare_tensors(f"drift scale p={p}", loss, torch.full_like(loss, c ** p), atol=1e-5, rtol=1e-4, verbose=verbose),
+            compare_tensors(
+                f"drift scale p={p}", loss, torch.full_like(loss, c**p), atol=1e-5, rtol=1e-4, verbose=verbose
+            ),
         )
 
     def test_ensemble_dim_handled(self, verbose=False):
@@ -666,7 +702,9 @@ class TestDriftRegularization(unittest.TestCase):
         loss = fn(prd, tar)
         expected_mean = biases.mean().item()
         self.assertTrue(
-            compare_tensors("ensemble drift", loss, torch.full_like(loss, expected_mean), atol=1e-5, rtol=1e-4, verbose=verbose),
+            compare_tensors(
+                "ensemble drift", loss, torch.full_like(loss, expected_mean), atol=1e-5, rtol=1e-4, verbose=verbose
+            ),
         )
 
 
@@ -695,7 +733,7 @@ class TestEnsembleNLLLoss(unittest.TestCase):
     def test_batch_independence(self, verbose=False):
         fn = self._fn()
         E = 5
-        fc1  = torch.randn(1, E, _NUM_CH, _IMG_H, _IMG_W)
+        fc1 = torch.randn(1, E, _NUM_CH, _IMG_H, _IMG_W)
         obs1 = torch.randn(1, _NUM_CH, _IMG_H, _IMG_W)
         loss1 = fn(fc1, obs1)
         loss4 = fn(fc1.repeat(4, 1, 1, 1, 1), obs1.repeat(4, 1, 1, 1))
@@ -716,12 +754,13 @@ class TestEnsembleNLLLoss(unittest.TestCase):
         obs = torch.ones(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
 
         fc_good = obs.unsqueeze(1) + sigma * torch.randn(_BATCH, E, _NUM_CH, _IMG_H, _IMG_W)
-        fc_bad  = (2.0 * obs).unsqueeze(1) + sigma * torch.randn(_BATCH, E, _NUM_CH, _IMG_H, _IMG_W)
+        fc_bad = (2.0 * obs).unsqueeze(1) + sigma * torch.randn(_BATCH, E, _NUM_CH, _IMG_H, _IMG_W)
 
         nll_good = fn(fc_good, obs).mean().item()
-        nll_bad  = fn(fc_bad,  obs).mean().item()
+        nll_bad = fn(fc_bad, obs).mean().item()
         self.assertLess(
-            nll_good, nll_bad,
+            nll_good,
+            nll_bad,
             f"Centred NLL ({nll_good:.4f}) should be < biased NLL ({nll_bad:.4f})",
         )
 
@@ -740,7 +779,8 @@ class TestEnsembleNLLLoss(unittest.TestCase):
         nll_tight = fn(fc_tight, obs).mean().item()
         nll_loose = fn(fc_loose, obs).mean().item()
         self.assertGreater(
-            nll_loose, nll_tight,
+            nll_loose,
+            nll_tight,
             f"Loose NLL ({nll_loose:.4f}) should exceed tight NLL ({nll_tight:.4f})",
         )
 
@@ -763,13 +803,13 @@ class TestGaussianMMDLoss(unittest.TestCase):
 
     def test_squared_flag_consistency(self, verbose=False):
         """For a wide ensemble where mmd² > 0, sqrt(mmd²) must equal the unsquared loss."""
-        fn_sq   = GaussianMMDLoss(**_GEOM_KWARGS, squared=True)
+        fn_sq = GaussianMMDLoss(**_GEOM_KWARGS, squared=True)
         fn_unsq = GaussianMMDLoss(**_GEOM_KWARGS, squared=False)
         # use a large-offset ensemble so that k(y_m, obs) ≈ 0 → mmd² > 0
         obs = torch.zeros(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
-        fc  = obs.unsqueeze(1) + 10.0 * torch.randn(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W)
-        mmd2   = fn_sq(fc, obs)
-        mmd    = fn_unsq(fc, obs)
+        fc = obs.unsqueeze(1) + 10.0 * torch.randn(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W)
+        mmd2 = fn_sq(fc, obs)
+        mmd = fn_unsq(fc, obs)
         self.assertTrue(
             compare_tensors("squared flag", torch.sqrt(mmd2), mmd, atol=1e-5, rtol=1e-4, verbose=verbose),
         )
@@ -782,18 +822,19 @@ class TestGaussianMMDLoss(unittest.TestCase):
         set_seed(333)
         noise = torch.randn(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W)
         fc_tight = obs.unsqueeze(1) + 0.01 * noise
-        fc_wide  = obs.unsqueeze(1) + 10.0 * noise
+        fc_wide = obs.unsqueeze(1) + 10.0 * noise
         score_tight = fn(fc_tight, obs).mean().item()
-        score_wide  = fn(fc_wide,  obs).mean().item()
+        score_wide = fn(fc_wide, obs).mean().item()
         self.assertGreater(
-            score_tight, score_wide,
+            score_tight,
+            score_wide,
             f"Tight score ({score_tight:.4f}) should be > wide score ({score_wide:.4f})",
         )
 
     def test_backward(self):
         """Gradients through the double-loop MMD kernel must be finite and free of NaNs."""
         fn = GaussianMMDLoss(**_GEOM_KWARGS, squared=True)
-        fc  = torch.randn(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W, requires_grad=True)
+        fc = torch.randn(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W, requires_grad=True)
         obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
         fn(fc, obs).sum().backward()
         self.assertIsNotNone(fc.grad)
@@ -806,7 +847,7 @@ class TestGaussianMMDLoss(unittest.TestCase):
         must equal 1 (squared=True) or 1 (squared=False, sqrt(1)=1)."""
         fn = GaussianMMDLoss(**_GEOM_KWARGS, squared=True)
         obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
-        fc  = obs.unsqueeze(1)  # E=1, all members = obs
+        fc = obs.unsqueeze(1)  # E=1, all members = obs
         loss = fn(fc, obs)
         self.assertTrue(
             compare_tensors("e1 perfect", loss, torch.ones_like(loss), atol=1e-5, verbose=verbose),
@@ -901,8 +942,8 @@ class TestSpectralLossWeighted(unittest.TestCase):
     @staticmethod
     def _make(loss_type):
         return {
-            "l2":   SpectralLpLoss(**_SPEC_KWARGS, squared=True),
-            "h1":   SpectralH1Loss(**_SPEC_KWARGS, squared=True),
+            "l2": SpectralLpLoss(**_SPEC_KWARGS, squared=True),
+            "h1": SpectralH1Loss(**_SPEC_KWARGS, squared=True),
         }[loss_type]
 
     @parameterized.expand([("l2",), ("h1",)])
@@ -943,9 +984,11 @@ class TestSpectralLossWeighted(unittest.TestCase):
         loss_dc = fn(field, tar, wgt).mean().item()
 
         self.assertLess(
-            loss_dc, loss_full,
+            loss_dc,
+            loss_full,
             f"DC-only loss ({loss_dc:.4f}) should be < full-spectrum loss ({loss_full:.4f})",
         )
+
 
 # ===========================================================================
 @parameterized_class(("device", "compile"), [(d, c) for (d,) in _devices for c in _compile_opts])
@@ -965,11 +1008,9 @@ class TestLossHandler(unittest.TestCase):
         cls.time_diff_stds_path = os.path.join(tmp_path, "time_diff_stds.npy")
         np.save(cls.time_diff_stds_path, np.ones((1, params.N_out_channels, 1, 1), dtype=np.float64))
 
-
     @classmethod
     def tearDownClass(cls):
         cls.tmpdir.cleanup()
-
 
     def setUp(self):
 
@@ -1001,7 +1042,6 @@ class TestLossHandler(unittest.TestCase):
         # set paths
         self.params.time_diff_stds_path = self.time_diff_stds_path
 
-
     @parameterized.expand(_loss_params)
     def test_loss(self, losses, uncertainty_weighting=False):
         """
@@ -1029,7 +1069,6 @@ class TestLossHandler(unittest.TestCase):
         # backward pass and check gradients are not None
         out.backward()
 
-
     @parameterized.expand(_loss_params)
     def test_loss_batchsize_independence(self, losses, uncertainty_weighting=False, verbose=False):
         """
@@ -1056,7 +1095,6 @@ class TestLossHandler(unittest.TestCase):
         out2 = loss_obj(tar2, inp2)
 
         self.assertTrue(compare_tensors("loss", out, out2, verbose=verbose))
-
 
     @parameterized.expand(_loss_weighted_params)
     def test_loss_weighted(self, losses, uncertainty_weighting=False, verbose=False):
@@ -1088,7 +1126,6 @@ class TestLossHandler(unittest.TestCase):
 
         self.assertTrue(compare_tensors("loss", out, out_weighted, verbose=verbose))
 
-
     @parameterized.expand(_loss_weighted_params)
     def test_loss_multistep(self, losses, uncertainty_weighting=False, verbose=False):
         """
@@ -1099,7 +1136,12 @@ class TestLossHandler(unittest.TestCase):
         self.params.losses = losses
         self.params.uncertainty_weighting = uncertainty_weighting
 
-        shape = (self.params.batch_size, (self.params.n_future + 1) * self.params.N_out_channels, self.params.img_shape_x, self.params.img_shape_y)
+        shape = (
+            self.params.batch_size,
+            (self.params.n_future + 1) * self.params.N_out_channels,
+            self.params.img_shape_x,
+            self.params.img_shape_y,
+        )
 
         # test initialization of loss object (self.compile selects the eager vs torch.compile path)
         loss_obj = LossHandler(self.params, compile=self.compile)
@@ -1159,7 +1201,12 @@ class TestLossHandler(unittest.TestCase):
             out = loss_obj(tar, inp)
 
         # generate simulated dataset
-        data = torch.arange(num_samples).float().reshape(1, 1, -1).repeat(self.params.batch_size, self.params.N_out_channels, 1)
+        data = (
+            torch.arange(num_samples)
+            .float()
+            .reshape(1, 1, -1)
+            .repeat(self.params.batch_size, self.params.N_out_channels, 1)
+        )
         expected_var, expected_mean = torch.var_mean(data, correction=0, dim=(0, -1))
 
         var, mean = loss_obj.get_running_stats()
@@ -1175,13 +1222,15 @@ class TestLossHandler(unittest.TestCase):
     # "balanced", "linear", "last", "last-n-1", "custom" are all currently dead.
     # ------------------------------------------------------------------
 
-    @parameterized.expand([
-        ("constant",),
-        ("balanced",),
-        ("linear",),
-        ("last",),
-        ("last-n-1",),
-    ])
+    @parameterized.expand(
+        [
+            ("constant",),
+            ("balanced",),
+            ("linear",),
+            ("last",),
+            ("last-n-1",),
+        ]
+    )
     def test_multistep_weight_mode(self, weight_type):
         """Each multistep weight mode must build, forward, and backward without error.
         Also asserts the computed multistep_weight buffer has the expected length
@@ -1190,8 +1239,12 @@ class TestLossHandler(unittest.TestCase):
         self.params.losses = [{"type": "l2", "channel_weights": "constant"}]
         self.params.multistep = {"weight_type": weight_type}
 
-        shape = (self.params.batch_size, (self.params.n_future + 1) * self.params.N_out_channels,
-                 self.params.img_shape_x, self.params.img_shape_y)
+        shape = (
+            self.params.batch_size,
+            (self.params.n_future + 1) * self.params.N_out_channels,
+            self.params.img_shape_x,
+            self.params.img_shape_y,
+        )
 
         # self.compile selects the eager vs torch.compile path
         loss_obj = LossHandler(self.params, compile=self.compile)
@@ -1220,9 +1273,7 @@ class TestLossHandler(unittest.TestCase):
         # the user-supplied weights — pull out the per-step values
         ncw = loss_obj.channel_weights.shape[1]
         per_step = loss_obj.multistep_weight.reshape(self.params.n_future + 1, ncw)[:, 0]
-        self.assertTrue(
-            compare_tensors("custom multistep weights", per_step, torch.tensor([0.1, 0.3, 0.6]))
-        )
+        self.assertTrue(compare_tensors("custom multistep weights", per_step, torch.tensor([0.1, 0.3, 0.6])))
 
     def test_multistep_weight_custom_wrong_length_raises(self):
         """custom weights must match n_future + 1 — validated in _compute_multistep_weight."""
@@ -1257,16 +1308,14 @@ class TestLossHandler(unittest.TestCase):
         which becomes ||tar - inp|| under tendency, making the loss differ.
         """
         self.params.losses = [
-            {"type": "l2", "channel_weights": "constant", "tendency": True,
-             "parameters": {"relative": True}},
+            {"type": "l2", "channel_weights": "constant", "tendency": True, "parameters": {"relative": True}},
         ]
         loss_obj = LossHandler(self.params)
 
-        shape = (self.params.batch_size, self.params.N_out_channels,
-                 self.params.img_shape_x, self.params.img_shape_y)
+        shape = (self.params.batch_size, self.params.N_out_channels, self.params.img_shape_x, self.params.img_shape_y)
         prd = torch.randn(*shape)
         tar = torch.randn(*shape)
-        inp = torch.randn(*shape)   # non-zero, so the tendency transform is non-trivial
+        inp = torch.randn(*shape)  # non-zero, so the tendency transform is non-trivial
 
         # without inp, the tendency branch is skipped (inp is None) — falls back to relative L2 on (prd, tar)
         out_no_inp = loss_obj(prd, tar)
@@ -1282,32 +1331,30 @@ class TestLossHandler(unittest.TestCase):
         """When inp is exactly zero the tendency-transformed (prd - 0) is just prd,
         so the loss must equal the no-tendency loss. Sanity check on the formula."""
         self.params.losses = [
-            {"type": "l2", "channel_weights": "constant", "tendency": True,
-             "parameters": {"relative": True}},
+            {"type": "l2", "channel_weights": "constant", "tendency": True, "parameters": {"relative": True}},
         ]
         loss_obj = LossHandler(self.params)
 
-        shape = (self.params.batch_size, self.params.N_out_channels,
-                 self.params.img_shape_x, self.params.img_shape_y)
+        shape = (self.params.batch_size, self.params.N_out_channels, self.params.img_shape_x, self.params.img_shape_y)
         prd = torch.randn(*shape)
         tar = torch.randn(*shape)
         inp_zero = torch.zeros(*shape)
 
         out_no_inp = loss_obj(prd, tar)
         out_inp_zero = loss_obj(prd, tar, inp=inp_zero)
-        self.assertTrue(
-            compare_tensors("tendency w/ zero inp", out_no_inp, out_inp_zero, verbose=verbose)
-        )
+        self.assertTrue(compare_tensors("tendency w/ zero inp", out_no_inp, out_inp_zero, verbose=verbose))
 
     # ------------------------------------------------------------------
     # random_slice_loss path — loss.py:330-349
     # Mixes channels through a random orthonormal matrix before computing the loss.
     # ------------------------------------------------------------------
 
-    @parameterized.expand([
-        ("random_slice_loss",),         # mixes channels via a random orthonormal slice BEFORE the loss
-        ("randomized_loss_weights",),   # multiplies per-channel weights by a random mask AFTER the loss
-    ])
+    @parameterized.expand(
+        [
+            ("random_slice_loss",),  # mixes channels via a random orthonormal slice BEFORE the loss
+            ("randomized_loss_weights",),  # multiplies per-channel weights by a random mask AFTER the loss
+        ]
+    )
     def test_loss_modifier_flag(self, flag_name):
         """Both random-channel modifier flags must run end-to-end without crashing
         and produce a finite scalar with finite gradients. They exercise different
@@ -1317,8 +1364,7 @@ class TestLossHandler(unittest.TestCase):
 
         loss_obj = LossHandler(self.params)
 
-        shape = (self.params.batch_size, self.params.N_out_channels,
-                 self.params.img_shape_x, self.params.img_shape_y)
+        shape = (self.params.batch_size, self.params.N_out_channels, self.params.img_shape_x, self.params.img_shape_y)
         inp = torch.randn(*shape, requires_grad=True)
         tar = torch.randn(*shape)
         out = loss_obj(tar, inp)
@@ -1341,8 +1387,7 @@ class TestLossHandler(unittest.TestCase):
         loss_obj = LossHandler(self.params, track_running_stats=True)
         loss_obj.train()
 
-        shape = (self.params.batch_size, self.params.N_out_channels,
-                 self.params.img_shape_x, self.params.img_shape_y)
+        shape = (self.params.batch_size, self.params.N_out_channels, self.params.img_shape_x, self.params.img_shape_y)
 
         # warm up past the 100-batch gate that swaps from ones-like to running mean
         for _ in range(105):
@@ -1365,24 +1410,24 @@ class TestLossHandler(unittest.TestCase):
         loss_obj = LossHandler(self.params, track_running_stats=True)
         loss_obj.train()
 
-        shape = (self.params.batch_size, self.params.N_out_channels,
-                 self.params.img_shape_x, self.params.img_shape_y)
+        shape = (self.params.batch_size, self.params.N_out_channels, self.params.img_shape_x, self.params.img_shape_y)
 
         # warm up — populate running stats
         for _ in range(5):
             loss_obj(torch.randn(*shape), torch.randn(*shape))
-        self.assertGreater(loss_obj.num_batches_tracked.item(), 0,
-                           "warm-up failed to populate running stats")
+        self.assertGreater(loss_obj.num_batches_tracked.item(), 0, "warm-up failed to populate running stats")
 
         # reset and verify each buffer is restored to its initial state
         loss_obj.reset_running_stats()
         self.assertTrue(
-            compare_tensors("running_mean reset", loss_obj.running_mean,
-                            torch.zeros_like(loss_obj.running_mean), verbose=verbose)
+            compare_tensors(
+                "running_mean reset", loss_obj.running_mean, torch.zeros_like(loss_obj.running_mean), verbose=verbose
+            )
         )
         self.assertTrue(
-            compare_tensors("running_var reset", loss_obj.running_var,
-                            torch.ones_like(loss_obj.running_var), verbose=verbose)
+            compare_tensors(
+                "running_var reset", loss_obj.running_var, torch.ones_like(loss_obj.running_var), verbose=verbose
+            )
         )
         self.assertEqual(loss_obj.num_batches_tracked.item(), 0)
 
@@ -1394,20 +1439,31 @@ class TestLossHandler(unittest.TestCase):
         """random_slice_loss with 5-D prd reshapes to (B*E, ...) for the conv2d
         and reshapes back. Use a probabilistic loss (ensemble_crps) so the
         ensemble dim is preserved through the loss dispatch."""
-        self.params.losses = [{
-            "type": "ensemble_crps",
-            "channel_weights": "constant",
-            "parameters": {"crps_type": "skillspread"},
-        }]
+        self.params.losses = [
+            {
+                "type": "ensemble_crps",
+                "channel_weights": "constant",
+                "parameters": {"crps_type": "skillspread"},
+            }
+        ]
         self.params.random_slice_loss = True
 
         loss_obj = LossHandler(self.params)
 
         E = 5
-        shape_5d = (self.params.batch_size, E, self.params.N_out_channels,
-                    self.params.img_shape_x, self.params.img_shape_y)
-        shape_4d = (self.params.batch_size, self.params.N_out_channels,
-                    self.params.img_shape_x, self.params.img_shape_y)
+        shape_5d = (
+            self.params.batch_size,
+            E,
+            self.params.N_out_channels,
+            self.params.img_shape_x,
+            self.params.img_shape_y,
+        )
+        shape_4d = (
+            self.params.batch_size,
+            self.params.N_out_channels,
+            self.params.img_shape_x,
+            self.params.img_shape_y,
+        )
         prd = torch.randn(*shape_5d, requires_grad=True)
         tar = torch.randn(*shape_4d)
 
@@ -1427,19 +1483,30 @@ class TestLossHandler(unittest.TestCase):
         actual loss value is invariant under the tendency transform for proper-score
         ensemble losses (CRPS depends on differences only), so we don't check value
         change here — covering the code line is the goal."""
-        self.params.losses = [{
-            "type": "ensemble_crps",
-            "channel_weights": "constant",
-            "tendency": True,
-            "parameters": {"crps_type": "skillspread"},
-        }]
+        self.params.losses = [
+            {
+                "type": "ensemble_crps",
+                "channel_weights": "constant",
+                "tendency": True,
+                "parameters": {"crps_type": "skillspread"},
+            }
+        ]
         loss_obj = LossHandler(self.params)
 
         E = 5
-        shape_5d = (self.params.batch_size, E, self.params.N_out_channels,
-                    self.params.img_shape_x, self.params.img_shape_y)
-        shape_4d = (self.params.batch_size, self.params.N_out_channels,
-                    self.params.img_shape_x, self.params.img_shape_y)
+        shape_5d = (
+            self.params.batch_size,
+            E,
+            self.params.N_out_channels,
+            self.params.img_shape_x,
+            self.params.img_shape_y,
+        )
+        shape_4d = (
+            self.params.batch_size,
+            self.params.N_out_channels,
+            self.params.img_shape_x,
+            self.params.img_shape_y,
+        )
 
         prd = torch.randn(*shape_5d, requires_grad=True)
         tar = torch.randn(*shape_4d)
@@ -1462,18 +1529,14 @@ class TestLossHandler(unittest.TestCase):
         default when the kwarg dict doesn't have weight_type."""
         self.params.n_future = 2
         self.params.losses = [{"type": "l2", "channel_weights": "constant"}]
-        self.params.multistep = {}      # no weight_type → defaults to constant
+        self.params.multistep = {}  # no weight_type → defaults to constant
 
         loss_obj = LossHandler(self.params)
 
         # constant mode: each step weighted 1/(n_future+1) before tiling over channels
         ncw = loss_obj.channel_weights.shape[1]
-        expected = torch.full(
-            ((self.params.n_future + 1) * ncw,), 1.0 / (self.params.n_future + 1)
-        )
-        self.assertTrue(
-            compare_tensors("default multistep_weight", loss_obj.multistep_weight, expected)
-        )
+        expected = torch.full(((self.params.n_future + 1) * ncw,), 1.0 / (self.params.n_future + 1))
+        self.assertTrue(compare_tensors("default multistep_weight", loss_obj.multistep_weight, expected))
 
     # ------------------------------------------------------------------
     # channel_weights given as a Python list — loss.py:160-164
@@ -1485,7 +1548,7 @@ class TestLossHandler(unittest.TestCase):
         """A list-valued channel_weights bypasses the named-string branch and is
         loaded directly. Must be nested (shape (1, N)) so the assert at
         loss.py:164 passes."""
-        custom = [[0.1, 0.2, 0.3, 0.4, 0.5]]   # nested → shape (1, 5) for N=5
+        custom = [[0.1, 0.2, 0.3, 0.4, 0.5]]  # nested → shape (1, 5) for N=5
         self.params.losses = [{"type": "l2", "channel_weights": custom}]
         loss_obj = LossHandler(self.params)
 
@@ -1496,7 +1559,8 @@ class TestLossHandler(unittest.TestCase):
         self.assertTrue(
             compare_tensors(
                 "list channel_weights",
-                loss_obj.channel_weights, torch.tensor(custom, dtype=torch.float32),
+                loss_obj.channel_weights,
+                torch.tensor(custom, dtype=torch.float32),
             )
         )
 
@@ -1575,10 +1639,8 @@ class TestComputeChannelWeightingHelper(unittest.TestCase):
         names = ["u10m", "t2m", "z500"]
         scale = torch.tensor([2.0, 0.5, 4.0])
         chw_no_scale = _compute_channel_weighting_helper(names, "constant")
-        chw_scaled   = _compute_channel_weighting_helper(names, "constant", time_diff_scale=scale)
-        self.assertTrue(
-            compare_tensors("time_diff_scale", chw_scaled, chw_no_scale * scale, atol=1e-7)
-        )
+        chw_scaled = _compute_channel_weighting_helper(names, "constant", time_diff_scale=scale)
+        self.assertTrue(compare_tensors("time_diff_scale", chw_scaled, chw_no_scale * scale, atol=1e-7))
 
 
 # ===========================================================================
@@ -1623,18 +1685,18 @@ class TestCRPSLossExtended(unittest.TestCase):
 
     def test_wrong_forecast_dims_raises(self):
         """4-D forecasts tensor must raise ValueError (5-D expected)."""
-        fn  = self._fn()
-        fc  = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)   # missing ensemble dim
+        fn = self._fn()
+        fc = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)  # missing ensemble dim
         obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
         with self.assertRaises(ValueError):
             fn(fc, obs)
 
     def test_spatial_weight_dim_mismatch_raises(self):
         """spatial_weights with fewer dims than observations must raise ValueError."""
-        fn  = self._fn()
-        fc  = torch.randn(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W)
+        fn = self._fn()
+        fc = torch.randn(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W)
         obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
-        bad_wgt = torch.ones(_NUM_CH, _IMG_H, _IMG_W)   # 3-D; observations are 4-D
+        bad_wgt = torch.ones(_NUM_CH, _IMG_H, _IMG_W)  # 3-D; observations are 4-D
         with self.assertRaises(ValueError):
             fn(fc, obs, spatial_weights=bad_wgt)
 
@@ -1642,10 +1704,10 @@ class TestCRPSLossExtended(unittest.TestCase):
 
     def test_cdf_with_custom_ensemble_weights_produces_finite_output(self):
         """CDF kernel must execute without error when ensemble_weights is provided."""
-        E  = self._E
+        E = self._E
         ew = torch.ones(E)
         fn = self._fn("cdf", ensemble_weights=ew)
-        fc  = torch.randn(_BATCH, E, _NUM_CH, _IMG_H, _IMG_W)
+        fc = torch.randn(_BATCH, E, _NUM_CH, _IMG_H, _IMG_W)
         obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
         out = fn(fc, obs)
         self.assertEqual(tuple(out.shape), (_BATCH, _NUM_CH))
@@ -1655,10 +1717,10 @@ class TestCRPSLossExtended(unittest.TestCase):
 
     def test_skillspread_with_ensemble_weights_raises(self):
         """skillspread kernel does not support custom ensemble_weights."""
-        E  = self._E
+        E = self._E
         ew = torch.ones(E)
         fn = self._fn("skillspread", ensemble_weights=ew)
-        fc  = torch.randn(_BATCH, E, _NUM_CH, _IMG_H, _IMG_W)
+        fc = torch.randn(_BATCH, E, _NUM_CH, _IMG_H, _IMG_W)
         obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
         with self.assertRaises(NotImplementedError):
             fn(fc, obs)
@@ -1667,10 +1729,10 @@ class TestCRPSLossExtended(unittest.TestCase):
 
     def test_gauss_with_ensemble_weights_raises_nameerror(self):
         """Known bug: gauss branch references undefined `idx` when ensemble_weights is set."""
-        E  = self._E
+        E = self._E
         ew = torch.ones(E)
         fn = self._fn("gauss", ensemble_weights=ew)
-        fc  = torch.randn(_BATCH, E, _NUM_CH, _IMG_H, _IMG_W)
+        fc = torch.randn(_BATCH, E, _NUM_CH, _IMG_H, _IMG_W)
         obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
         with self.assertRaises(NameError):
             fn(fc, obs)
@@ -1680,8 +1742,8 @@ class TestCRPSLossExtended(unittest.TestCase):
     def test_unknown_crps_type_raises_in_forward(self):
         """Unknown crps_type must raise ValueError in forward."""
         fn = self._fn("cdf")
-        fn.crps_type = "bogus"   # bypass __init__ guard; trigger the forward-time check
-        fc  = torch.randn(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W)
+        fn.crps_type = "bogus"  # bypass __init__ guard; trigger the forward-time check
+        fc = torch.randn(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W)
         obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
         with self.assertRaises(ValueError):
             fn(fc, obs)
@@ -1690,20 +1752,22 @@ class TestCRPSLossExtended(unittest.TestCase):
 
     def test_skillspread_alpha0_matches_properscoring(self, verbose=False):
         """crps_skillspread(alpha=0.0) is the biased CRPS and must match properscoring."""
-        E  = self._E
+        E = self._E
         fn = self._fn("skillspread", alpha=0.0)
         set_seed(333)
-        fc  = torch.randn(_BATCH, E, _NUM_CH, _IMG_H, _IMG_W)
+        fc = torch.randn(_BATCH, E, _NUM_CH, _IMG_H, _IMG_W)
         obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
         result = fn(fc, obs).cpu().numpy()
 
-        fc_np  = fc.cpu().numpy()
+        fc_np = fc.cpu().numpy()
         obs_np = obs.cpu().numpy()
         result_proper = crps_ensemble(obs_np, fc_np, weights=None, issorted=False, axis=1)
         quad_weight_arr = fn.quadrature.quad_weight.cpu().numpy()
         result_proper = np.sum(result_proper * quad_weight_arr, axis=(2, 3))
 
-        self.assertTrue(compare_arrays("skillspread vs properscoring", result, result_proper, atol=1e-5, verbose=verbose))
+        self.assertTrue(
+            compare_arrays("skillspread vs properscoring", result, result_proper, atol=1e-5, verbose=verbose)
+        )
 
     # ------ CDF == skillspread(alpha=0) exactly for all ensemble sizes ------
 
@@ -1711,15 +1775,17 @@ class TestCRPSLossExtended(unittest.TestCase):
     def test_cdf_equals_skillspread_alpha0(self, ensemble_size, verbose=False):
         """CDF CRPS and skillspread(alpha=0) are the same formula; they must agree
         up to float32 rounding for every ensemble size, including E=2."""
-        fn_cdf   = self._fn("cdf")
+        fn_cdf = self._fn("cdf")
         fn_skill = self._fn("skillspread", alpha=0.0)
         set_seed(333)
-        fc  = torch.randn(_BATCH, ensemble_size, _NUM_CH, _IMG_H, _IMG_W)
+        fc = torch.randn(_BATCH, ensemble_size, _NUM_CH, _IMG_H, _IMG_W)
         obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
-        result_cdf   = fn_cdf(fc, obs)
+        result_cdf = fn_cdf(fc, obs)
         result_skill = fn_skill(fc, obs)
         self.assertTrue(
-            compare_tensors("cdf vs skillspread(alpha=0)", result_cdf, result_skill, atol=1e-5, rtol=1e-4, verbose=verbose),
+            compare_tensors(
+                "cdf vs skillspread(alpha=0)", result_cdf, result_skill, atol=1e-5, rtol=1e-4, verbose=verbose
+            ),
             f"E={ensemble_size}: CDF and skillspread(alpha=0) diverged beyond float32 rounding",
         )
 
@@ -1729,10 +1795,10 @@ class TestCRPSLossExtended(unittest.TestCase):
     def test_cdf_equals_skillspread_alpha0_gradients(self, ensemble_size, verbose=False):
         """CDF and skillspread(alpha=0) compute the same function; their gradients
         w.r.t. the ensemble forecasts must agree up to float32 rounding."""
-        fn_cdf   = self._fn("cdf")
+        fn_cdf = self._fn("cdf")
         fn_skill = self._fn("skillspread", alpha=0.0)
         set_seed(333)
-        fc_cdf   = torch.randn(_BATCH, ensemble_size, _NUM_CH, _IMG_H, _IMG_W, requires_grad=True)
+        fc_cdf = torch.randn(_BATCH, ensemble_size, _NUM_CH, _IMG_H, _IMG_W, requires_grad=True)
         fc_skill = fc_cdf.detach().clone().requires_grad_(True)
         obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
 
@@ -1744,7 +1810,11 @@ class TestCRPSLossExtended(unittest.TestCase):
         self.assertTrue(
             compare_tensors(
                 f"cdf vs skillspread(alpha=0) gradients E={ensemble_size}",
-                fc_cdf.grad, fc_skill.grad, atol=1e-4, rtol=1e-3, verbose=verbose,
+                fc_cdf.grad,
+                fc_skill.grad,
+                atol=1e-4,
+                rtol=1e-3,
+                verbose=verbose,
             ),
             f"E={ensemble_size}: CDF and skillspread(alpha=0) gradients diverged",
         )
@@ -1769,14 +1839,18 @@ class TestCRPSLossExtended(unittest.TestCase):
         fn_skill = self._fn("skillspread", alpha=alpha)
         fn_naive = self._fn("naive skillspread", alpha=alpha)
         set_seed(333)
-        fc  = torch.randn(_BATCH, ensemble_size, _NUM_CH, _IMG_H, _IMG_W)
+        fc = torch.randn(_BATCH, ensemble_size, _NUM_CH, _IMG_H, _IMG_W)
         obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
         result_skill = fn_skill(fc, obs)
         result_naive = fn_naive(fc, obs)
         self.assertTrue(
             compare_tensors(
                 f"skillspread vs naive skillspread E={ensemble_size} alpha={alpha}",
-                result_skill, result_naive, atol=1e-5, rtol=1e-4, verbose=verbose,
+                result_skill,
+                result_naive,
+                atol=1e-5,
+                rtol=1e-4,
+                verbose=verbose,
             ),
             f"E={ensemble_size} alpha={alpha}: skillspread and naive skillspread diverged beyond float32 rounding",
         )
@@ -1799,7 +1873,11 @@ class TestCRPSLossExtended(unittest.TestCase):
         self.assertTrue(
             compare_tensors(
                 f"skillspread vs naive skillspread gradients E={ensemble_size} alpha={alpha}",
-                fc_skill.grad, fc_naive.grad, atol=1e-4, rtol=1e-3, verbose=verbose,
+                fc_skill.grad,
+                fc_naive.grad,
+                atol=1e-4,
+                rtol=1e-3,
+                verbose=verbose,
             ),
             f"E={ensemble_size} alpha={alpha}: skillspread and naive skillspread gradients diverged",
         )
@@ -1811,16 +1889,22 @@ class TestCRPSLossExtended(unittest.TestCase):
         requires the tail-line fix; for skillspread the antisymmetric rank
         coefficients already guarantee a zero sum, so this serves as a regression
         test for both."""
-        fn  = self._fn(crps_type, alpha=0.0) if crps_type == "skillspread" else self._fn(crps_type)
+        fn = self._fn(crps_type, alpha=0.0) if crps_type == "skillspread" else self._fn(crps_type)
         obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
-        fc  = obs.unsqueeze(1).expand(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W).clone()
+        fc = obs.unsqueeze(1).expand(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W).clone()
         fc.requires_grad_(True)
         fn(fc, obs).sum().backward()
         self.assertFalse(torch.isnan(fc.grad).any(), f"NaN in {crps_type} gradient at perfect forecast")
         self.assertFalse(torch.isinf(fc.grad).any(), f"Inf in {crps_type} gradient at perfect forecast")
         grad_sum = fc.grad.sum(dim=1)  # sum over ensemble dim → (B, C, H, W)
         self.assertTrue(
-            compare_tensors(f"{crps_type} grad ensemble sum at perfect forecast", grad_sum, torch.zeros_like(grad_sum), atol=1e-3, verbose=verbose),
+            compare_tensors(
+                f"{crps_type} grad ensemble sum at perfect forecast",
+                grad_sum,
+                torch.zeros_like(grad_sum),
+                atol=1e-3,
+                verbose=verbose,
+            ),
         )
 
     # ------ fair CRPS (alpha=1) < biased CRPS (alpha=0) for spread ensemble ------
@@ -1828,11 +1912,11 @@ class TestCRPSLossExtended(unittest.TestCase):
     def test_fair_crps_less_than_biased_for_spread_ensemble(self):
         """Fair CRPS (alpha=1) penalises ensemble spread less than biased CRPS (alpha=0)."""
         E = self._E
-        fn_fair   = self._fn("skillspread", alpha=1.0)
+        fn_fair = self._fn("skillspread", alpha=1.0)
         fn_biased = self._fn("skillspread", alpha=0.0)
         set_seed(333)
         obs = torch.zeros(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
-        fc  = torch.randn(_BATCH, E, _NUM_CH, _IMG_H, _IMG_W)
+        fc = torch.randn(_BATCH, E, _NUM_CH, _IMG_H, _IMG_W)
         self.assertLess(
             fn_fair(fc, obs).mean().item(),
             fn_biased(fc, obs).mean().item(),
@@ -1863,6 +1947,7 @@ class TestSpectralCRPSLoss(unittest.TestCase):
 
     def test_type_property(self):
         from makani.utils.losses.base_loss import LossType
+
         fn = self._fn()
         self.assertEqual(fn.type, LossType.Probabilistic)
 
@@ -1870,8 +1955,8 @@ class TestSpectralCRPSLoss(unittest.TestCase):
 
     @parameterized.expand([("cdf",), ("skillspread",), ("gauss",), ("probability weighted moment",)])
     def test_output_shape(self, crps_type):
-        fn  = self._fn(crps_type)
-        fc  = torch.randn(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W)
+        fn = self._fn(crps_type)
+        fc = torch.randn(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W)
         obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
         out = fn(fc, obs)
         self.assertEqual(tuple(out.shape), (_BATCH, _NUM_CH))
@@ -1880,8 +1965,8 @@ class TestSpectralCRPSLoss(unittest.TestCase):
 
     @parameterized.expand([("cdf",), ("skillspread",), ("gauss",), ("probability weighted moment",)])
     def test_nonneg(self, crps_type):
-        fn  = self._fn(crps_type)
-        fc  = torch.randn(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W)
+        fn = self._fn(crps_type)
+        fc = torch.randn(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W)
         obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
         out = fn(fc, obs)
         self.assertTrue(
@@ -1894,9 +1979,9 @@ class TestSpectralCRPSLoss(unittest.TestCase):
     @parameterized.expand([("cdf",), ("skillspread",), ("probability weighted moment",)])
     def test_zero_on_perfect_prediction(self, crps_type, verbose=False):
         """Perfect ensemble (all members = observation) must give zero loss."""
-        fn  = self._fn(crps_type)
+        fn = self._fn(crps_type)
         obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
-        fc  = obs.unsqueeze(1).expand(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W).clone()
+        fc = obs.unsqueeze(1).expand(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W).clone()
         out = fn(fc, obs)
         self.assertTrue(
             compare_tensors(f"spectral {crps_type} zero", out, torch.zeros_like(out), atol=1e-4, verbose=verbose),
@@ -1906,15 +1991,15 @@ class TestSpectralCRPSLoss(unittest.TestCase):
 
     def test_absolute_false_shape(self):
         """absolute=False folds real/imag into channels; output must still be (B, C)."""
-        fn  = self._fn("skillspread", absolute=False)
-        fc  = torch.randn(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W)
+        fn = self._fn("skillspread", absolute=False)
+        fc = torch.randn(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W)
         obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
         out = fn(fc, obs)
         self.assertEqual(tuple(out.shape), (_BATCH, _NUM_CH))
 
     def test_absolute_false_nonneg(self):
-        fn  = self._fn("skillspread", absolute=False)
-        fc  = torch.randn(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W)
+        fn = self._fn("skillspread", absolute=False)
+        fc = torch.randn(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W)
         obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
         out = fn(fc, obs)
         self.assertTrue((out >= -1e-6).all())
@@ -1922,10 +2007,10 @@ class TestSpectralCRPSLoss(unittest.TestCase):
     def test_absolute_true_and_false_differ(self):
         """absolute=True and absolute=False must give different numerical results.
         Note: absolute=False only works with the skillspread kernel."""
-        fn_abs  = self._fn("skillspread", absolute=True)
+        fn_abs = self._fn("skillspread", absolute=True)
         fn_real = self._fn("skillspread", absolute=False)
         set_seed(333)
-        fc  = torch.randn(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W)
+        fc = torch.randn(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W)
         obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
         self.assertFalse(compare_tensors("abs vs real skillspread", fn_abs(fc, obs), fn_real(fc, obs)))
 
@@ -1934,13 +2019,17 @@ class TestSpectralCRPSLoss(unittest.TestCase):
         ensemble both eskill and espread (computed by the naive skillspread
         kernel via abs() of complex differences) collapse to 0, so the loss
         must be (near) zero."""
-        fn  = self._fn("skillspread", absolute=False)
+        fn = self._fn("skillspread", absolute=False)
         obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
-        fc  = obs.unsqueeze(1).expand(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W).clone()
+        fc = obs.unsqueeze(1).expand(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W).clone()
         out = fn(fc, obs)
         self.assertTrue(
             compare_tensors(
-                "absolute=False zero", out, torch.zeros_like(out), atol=1e-4, verbose=verbose,
+                "absolute=False zero",
+                out,
+                torch.zeros_like(out),
+                atol=1e-4,
+                verbose=verbose,
             )
         )
 
@@ -1948,8 +2037,8 @@ class TestSpectralCRPSLoss(unittest.TestCase):
         """Gradient through the complex spectral CRPS (absolute=False path) must be
         finite — the .abs() of complex pairwise differences has a kink at zero,
         but with random inputs that's measure-zero."""
-        fn  = self._fn("skillspread", absolute=False)
-        fc  = torch.randn(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W, requires_grad=True)
+        fn = self._fn("skillspread", absolute=False)
+        fc = torch.randn(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W, requires_grad=True)
         obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
         fn(fc, obs).sum().backward()
         self.assertIsNotNone(fc.grad)
@@ -1965,11 +2054,14 @@ class TestSpectralCRPSLoss(unittest.TestCase):
         obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
         # perfect single-member ensemble: forecasts == obs after SHT,
         # so |obs - fc.squeeze(1)| in spectral space is 0 → output ≈ 0
-        fc_perfect = obs.unsqueeze(1).clone()    # (B, 1, C, H, W)
+        fc_perfect = obs.unsqueeze(1).clone()  # (B, 1, C, H, W)
         out_perfect = fn(fc_perfect, obs)
         self.assertTrue(
             compare_tensors(
-                "absolute=False E=1 zero", out_perfect, torch.zeros_like(out_perfect), atol=1e-4,
+                "absolute=False E=1 zero",
+                out_perfect,
+                torch.zeros_like(out_perfect),
+                atol=1e-4,
             )
         )
         # also assert finite on a random forecast
@@ -1980,17 +2072,17 @@ class TestSpectralCRPSLoss(unittest.TestCase):
     # ------ dim validation in forward (lines 398-403) ------
 
     def test_wrong_forecast_dims_raises(self):
-        fn  = self._fn()
-        fc  = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)   # 4-D, not 5-D
+        fn = self._fn()
+        fc = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)  # 4-D, not 5-D
         obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
         with self.assertRaises(ValueError):
             fn(fc, obs)
 
     def test_spectral_weight_dim_mismatch_raises(self):
-        fn  = self._fn()
-        fc  = torch.randn(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W)
+        fn = self._fn()
+        fc = torch.randn(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W)
         obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
-        bad_wgt = torch.ones(_NUM_CH, fn.sht.lmax, fn.sht.mmax)   # 3-D; obs are 4-D
+        bad_wgt = torch.ones(_NUM_CH, fn.sht.lmax, fn.sht.mmax)  # 3-D; obs are 4-D
         with self.assertRaises(ValueError):
             fn(fc, obs, spectral_weights=bad_wgt)
 
@@ -2001,7 +2093,7 @@ class TestSpectralCRPSLoss(unittest.TestCase):
             self._fn("cdf", alpha=0.5)
 
     def test_skillspread_with_ensemble_weights_raises(self):
-        E  = self._E
+        E = self._E
         ew = torch.ones(E)
         fn = SpectralCRPSLoss(
             **_SPEC_KWARGS,
@@ -2011,7 +2103,7 @@ class TestSpectralCRPSLoss(unittest.TestCase):
             ensemble_weights=ew,
             absolute=True,
         )
-        fc  = torch.randn(_BATCH, E, _NUM_CH, _IMG_H, _IMG_W)
+        fc = torch.randn(_BATCH, E, _NUM_CH, _IMG_H, _IMG_W)
         obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
         with self.assertRaises(NotImplementedError):
             fn(fc, obs)
@@ -2019,7 +2111,7 @@ class TestSpectralCRPSLoss(unittest.TestCase):
     def test_unknown_crps_type_raises_in_forward(self):
         fn = self._fn("cdf")
         fn.crps_type = "bogus"
-        fc  = torch.randn(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W)
+        fc = torch.randn(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W)
         obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
         with self.assertRaises(ValueError):
             fn(fc, obs)
@@ -2028,9 +2120,9 @@ class TestSpectralCRPSLoss(unittest.TestCase):
 
     def test_e1_gives_zero_for_perfect_prediction(self, verbose=False):
         """With E=1, spectral CRPS = |SHT(obs - fc)| which is 0 when obs == fc."""
-        fn  = self._fn("skillspread")
+        fn = self._fn("skillspread")
         obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
-        fc  = obs.unsqueeze(1).clone()   # (B, 1, C, H, W)
+        fc = obs.unsqueeze(1).clone()  # (B, 1, C, H, W)
         out = fn(fc, obs)
         self.assertTrue(
             compare_tensors("spectral e1 zero", out, torch.zeros_like(out), atol=1e-4, verbose=verbose),
@@ -2039,8 +2131,8 @@ class TestSpectralCRPSLoss(unittest.TestCase):
     # ------ backward pass produces finite gradients ------
 
     def test_backward_finite(self):
-        fn  = self._fn("skillspread")
-        fc  = torch.randn(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W, requires_grad=True)
+        fn = self._fn("skillspread")
+        fc = torch.randn(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W, requires_grad=True)
         obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
         fn(fc, obs).sum().backward()
         self.assertIsNotNone(fc.grad)
@@ -2050,9 +2142,9 @@ class TestSpectralCRPSLoss(unittest.TestCase):
     @parameterized.expand([("cdf",), ("skillspread",), ("probability weighted moment",)])
     def test_backward_finite_on_perfect_prediction(self, crps_type):
         """Perfect ensemble (all members == obs) must produce finite gradients."""
-        fn  = self._fn(crps_type)
+        fn = self._fn(crps_type)
         obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
-        fc  = obs.unsqueeze(1).expand(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W).clone().requires_grad_(True)
+        fc = obs.unsqueeze(1).expand(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W).clone().requires_grad_(True)
         fn(fc, obs).sum().backward()
         self.assertIsNotNone(fc.grad)
         self.assertFalse(torch.isnan(fc.grad).any(), f"NaN in {crps_type} gradient at perfect forecast")
@@ -2091,21 +2183,23 @@ class TestSobolevEnergyScoreLoss(unittest.TestCase):
         self.params.batch_size = 4
         self.params.time_diff_stds_path = self.time_diff_stds_path
 
-    @parameterized.expand([
-        # (beta, alpha, offset, fraction, channel_reduction)
-        (0.5, 1.0, 1.0, 1.0, True),
-        (1.0, 1.0, 1.0, 1.0, True),
-        (2.0, 1.0, 1.0, 1.0, True),
-        (1.0, 0.5, 1.0, 1.0, True),
-        (1.0, 2.0, 1.0, 1.0, True),
-        (1.0, 1.0, 0.5, 1.0, True),
-        (1.0, 1.0, 2.0, 1.0, True),
-        (1.0, 1.0, 1.0, 0.5, True),
-        (1.0, 1.0, 1.0, 2.0, True),
-        (1.0, 1.0, 1.0, 1.0, False),
-        (0.5, 0.5, 0.5, 0.5, True),
-        (2.0, 2.0, 2.0, 2.0, True),
-    ])
+    @parameterized.expand(
+        [
+            # (beta, alpha, offset, fraction, channel_reduction)
+            (0.5, 1.0, 1.0, 1.0, True),
+            (1.0, 1.0, 1.0, 1.0, True),
+            (2.0, 1.0, 1.0, 1.0, True),
+            (1.0, 0.5, 1.0, 1.0, True),
+            (1.0, 2.0, 1.0, 1.0, True),
+            (1.0, 1.0, 0.5, 1.0, True),
+            (1.0, 1.0, 2.0, 1.0, True),
+            (1.0, 1.0, 1.0, 0.5, True),
+            (1.0, 1.0, 1.0, 2.0, True),
+            (1.0, 1.0, 1.0, 1.0, False),
+            (0.5, 0.5, 0.5, 0.5, True),
+            (2.0, 2.0, 2.0, 2.0, True),
+        ]
+    )
     def test_sobolev_energy_score(self, beta, alpha, offset, fraction, channel_reduction):
         """
         Tests SobolevEnergyScoreLoss for different parameter combinations,
@@ -2128,7 +2222,9 @@ class TestSobolevEnergyScoreLoss(unittest.TestCase):
         ).to(self.device)
 
         for ensemble_size in [2, 6]:
-            with self.subTest(desc=f"beta={beta}, alpha={alpha}, offset={offset}, fraction={fraction}, channel_reduction={channel_reduction}, ensemble_size={ensemble_size}"):
+            with self.subTest(
+                desc=f"beta={beta}, alpha={alpha}, offset={offset}, fraction={fraction}, channel_reduction={channel_reduction}, ensemble_size={ensemble_size}"
+            ):
                 # Generate forecast tensor: (batch, ensemble, channels, lat, lon)
                 forecasts = torch.randn(
                     self.params.batch_size,
@@ -2155,8 +2251,8 @@ class TestSobolevEnergyScoreLoss(unittest.TestCase):
                 result = sobolev_loss(forecasts, observations)
 
                 # Check output is not NaN or inf
-                self.assertFalse(torch.isnan(result).any(), f"Output contains NaN values")
-                self.assertFalse(torch.isinf(result).any(), f"Output contains inf values")
+                self.assertFalse(torch.isnan(result).any(), "Output contains NaN values")
+                self.assertFalse(torch.isinf(result).any(), "Output contains inf values")
 
                 # Backward pass
                 loss = result.sum()
@@ -2164,8 +2260,8 @@ class TestSobolevEnergyScoreLoss(unittest.TestCase):
 
                 # Check gradients are not NaN or inf
                 self.assertIsNotNone(forecasts.grad, "Gradients are None")
-                self.assertFalse(torch.isnan(forecasts.grad).any(), f"Gradients contain NaN values")
-                self.assertFalse(torch.isinf(forecasts.grad).any(), f"Gradients contain inf values")
+                self.assertFalse(torch.isnan(forecasts.grad).any(), "Gradients contain NaN values")
+                self.assertFalse(torch.isinf(forecasts.grad).any(), "Gradients contain inf values")
 
     @parameterized.expand([(0.5,), (1.0,), (2.0,)])
     def test_backward_finite_on_perfect_prediction(self, beta):
@@ -2197,18 +2293,27 @@ class TestSobolevEnergyScoreLoss(unittest.TestCase):
             device=self.device,
             dtype=torch.float32,
         )
-        forecasts = observations.unsqueeze(1).expand(
-            self.params.batch_size,
-            ensemble_size,
-            self.params.N_in_channels,
-            self.params.img_shape_x,
-            self.params.img_shape_y,
-        ).clone().requires_grad_(True)
+        forecasts = (
+            observations.unsqueeze(1)
+            .expand(
+                self.params.batch_size,
+                ensemble_size,
+                self.params.N_in_channels,
+                self.params.img_shape_x,
+                self.params.img_shape_y,
+            )
+            .clone()
+            .requires_grad_(True)
+        )
 
         sobolev_loss(forecasts, observations).sum().backward()
         self.assertIsNotNone(forecasts.grad, f"Gradients are None (beta={beta})")
-        self.assertFalse(torch.isnan(forecasts.grad).any(), f"NaN in sobolev_es gradient at perfect forecast (beta={beta})")
-        self.assertFalse(torch.isinf(forecasts.grad).any(), f"Inf in sobolev_es gradient at perfect forecast (beta={beta})")
+        self.assertFalse(
+            torch.isnan(forecasts.grad).any(), f"NaN in sobolev_es gradient at perfect forecast (beta={beta})"
+        )
+        self.assertFalse(
+            torch.isinf(forecasts.grad).any(), f"Inf in sobolev_es gradient at perfect forecast (beta={beta})"
+        )
 
 
 # ===========================================================================
@@ -2316,12 +2421,12 @@ class TestLpEnergyScoreLoss(unittest.TestCase):
             eskill = (ob - fc_e).abs().pow(fn.p)
 
             espread = torch.sum(espread * fn.quad_weight_split, dim=-1)  # (E, E, B, C)
-            eskill = torch.sum(eskill * fn.quad_weight_split, dim=-1)    # (E, B, C)
+            eskill = torch.sum(eskill * fn.quad_weight_split, dim=-1)  # (E, B, C)
 
             # channel reduction happens before mask/pow — same order as the production code
             if fn.channel_reduction:
                 espread = espread.sum(dim=-1, keepdim=True)  # (E, E, B, 1)
-                eskill = eskill.sum(dim=-1, keepdim=True)    # (E, B, 1)
+                eskill = eskill.sum(dim=-1, keepdim=True)  # (E, B, 1)
 
             espread_mask = espread < fn.eps
             eskill_mask = eskill < fn.eps
@@ -2687,7 +2792,8 @@ class TestVortDivCRPSLoss(unittest.TestCase):
         loss_pert = fn(fc_pert, obs).sum().item()
 
         self.assertGreater(
-            loss_pert, loss_perfect + 1e-3,
+            loss_pert,
+            loss_perfect + 1e-3,
             f"non-wind channel perturbation did not affect the loss "
             f"(perfect={loss_perfect}, perturbed={loss_pert})",
         )
@@ -2757,7 +2863,7 @@ class TestSpectralCoherenceLoss(unittest.TestCase):
 
     def test_wrong_forecast_dims_raises(self):
         fn = self._fn()
-        fc = _rand()                # 4-D, missing ensemble dim
+        fc = _rand()  # 4-D, missing ensemble dim
         obs = _rand()
         with self.assertRaises(ValueError):
             fn(fc, obs)
@@ -2792,7 +2898,10 @@ class TestSpectralCoherenceLoss(unittest.TestCase):
         self.assertTrue(
             compare_tensors(
                 f"spectral coherence zero (relative={relative})",
-                out, torch.zeros_like(out), atol=5e-6, verbose=verbose,
+                out,
+                torch.zeros_like(out),
+                atol=5e-6,
+                verbose=verbose,
             )
         )
 
@@ -2849,10 +2958,10 @@ class TestSpectralCoherenceLoss(unittest.TestCase):
         small_noise = 0.05 * torch.randn_like(obs)
         large_noise = 0.50 * torch.randn_like(obs)
         fc_close = (obs + small_noise).unsqueeze(1).expand(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W).clone()
-        fc_far   = (obs + large_noise).unsqueeze(1).expand(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W).clone()
+        fc_far = (obs + large_noise).unsqueeze(1).expand(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W).clone()
         fn = self._fn()
         loss_close = fn(fc_close, obs).sum().item()
-        loss_far   = fn(fc_far, obs).sum().item()
+        loss_far = fn(fc_far, obs).sum().item()
         self.assertLess(loss_close, loss_far, f"closer forecast had higher loss: {loss_close} vs {loss_far}")
 
     def test_relative_flag_changes_output(self):
@@ -2935,7 +3044,7 @@ class TestCorrectedSpectralL2EnergyScoreLoss(unittest.TestCase):
 
     def test_wrong_forecast_dims_raises(self):
         fn = self._fn()
-        fc = _rand()                # 4-D, missing ensemble dim
+        fc = _rand()  # 4-D, missing ensemble dim
         obs = _rand()
         with self.assertRaises(ValueError):
             fn(fc, obs)
@@ -2965,7 +3074,10 @@ class TestCorrectedSpectralL2EnergyScoreLoss(unittest.TestCase):
         self.assertTrue(
             compare_tensors(
                 "corrected spectral L2 ES zero",
-                out, torch.zeros_like(out), atol=1e-6, verbose=verbose,
+                out,
+                torch.zeros_like(out),
+                atol=1e-6,
+                verbose=verbose,
             )
         )
 
@@ -3009,14 +3121,18 @@ class TestCorrectedSpectralL2EnergyScoreLoss(unittest.TestCase):
         fc = obs.unsqueeze(1).expand(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W).clone() + noise
 
         out_corrected = self._fn()(fc, obs)
-        out_standard  = self._fn_uncorrected()(fc, obs)
+        out_standard = self._fn_uncorrected()(fc, obs)
 
         # absolute tolerance scaled to the typical loss magnitude here (~1e-2);
         # rtol reflects the fact that ratio ≠ 1 exactly even with tiny noise
         self.assertTrue(
             compare_tensors(
                 "corrected ≈ standard at correct amplitude",
-                out_corrected, out_standard, atol=1e-4, rtol=5e-2, verbose=verbose,
+                out_corrected,
+                out_standard,
+                atol=1e-4,
+                rtol=5e-2,
+                verbose=verbose,
             ),
             f"corrected={out_corrected.tolist()} standard={out_standard.tolist()}",
         )
@@ -3045,7 +3161,7 @@ class TestCorrectedSpectralL2EnergyScoreLoss(unittest.TestCase):
         fc_inflated = k * obs.unsqueeze(1).expand(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W) + noise
 
         out_corrected = self._fn()(fc_inflated, obs)
-        out_standard  = self._fn_uncorrected()(fc_inflated, obs)
+        out_standard = self._fn_uncorrected()(fc_inflated, obs)
 
         # corrected must be strictly larger element-wise — the cheap-spread
         # protection is per (B, n_channels) and not just on the average
@@ -3066,7 +3182,7 @@ class TestCorrectedSpectralL2EnergyScoreLoss(unittest.TestCase):
         fc = _rand_ensemble(self._E)
         obs = _rand()
         out_corrected = self._fn()(fc, obs)
-        out_standard  = self._fn_uncorrected()(fc, obs)
+        out_standard = self._fn_uncorrected()(fc, obs)
         # both finite, no NaN/Inf
         self.assertTrue(torch.isfinite(out_corrected).all())
         self.assertTrue(torch.isfinite(out_standard).all())
@@ -3115,12 +3231,14 @@ class TestKernelScoreLoss(unittest.TestCase):
 
     # -- shape contract / dispatch validation --------------------------------
 
-    @parameterized.expand([
-        ("cdf",),
-        ("skillspread",),
-        ("naive skillspread",),
-        ("probability weighted moment",),
-    ])
+    @parameterized.expand(
+        [
+            ("cdf",),
+            ("skillspread",),
+            ("naive skillspread",),
+            ("probability weighted moment",),
+        ]
+    )
     def test_output_shape(self, crps_type):
         """Output must be (B, n_channels) for every crps_type."""
         fn = self._fn(crps_type)
@@ -3135,7 +3253,7 @@ class TestKernelScoreLoss(unittest.TestCase):
 
     def test_wrong_forecast_dims_raises(self):
         fn = self._fn()
-        fc = _rand()                # 4-D, missing ensemble dim
+        fc = _rand()  # 4-D, missing ensemble dim
         obs = _rand()
         with self.assertRaises(ValueError):
             fn(fc, obs)
@@ -3183,12 +3301,14 @@ class TestKernelScoreLoss(unittest.TestCase):
         self.assertFalse(torch.isnan(fc.grad).any(), "NaN in fc.grad")
         self.assertFalse(torch.isinf(fc.grad).any(), "Inf in fc.grad")
 
-    @parameterized.expand([
-        ("cdf",),
-        ("skillspread",),
-        ("naive skillspread",),
-        ("probability weighted moment",),
-    ])
+    @parameterized.expand(
+        [
+            ("cdf",),
+            ("skillspread",),
+            ("naive skillspread",),
+            ("probability weighted moment",),
+        ]
+    )
     def test_zero_on_perfect_prediction(self, crps_type, verbose=False):
         """Perfect ensemble (all members == obs): the conv applies the same
         deterministic transform to both inputs, so conv(obs) - conv(F_e) = 0
@@ -3201,16 +3321,21 @@ class TestKernelScoreLoss(unittest.TestCase):
         self.assertTrue(
             compare_tensors(
                 f"kernel score {crps_type} zero",
-                out, torch.zeros_like(out), atol=1e-4, verbose=verbose,
+                out,
+                torch.zeros_like(out),
+                atol=1e-4,
+                verbose=verbose,
             )
         )
 
-    @parameterized.expand([
-        ("cdf",),
-        ("skillspread",),
-        ("naive skillspread",),
-        ("probability weighted moment",),
-    ])
+    @parameterized.expand(
+        [
+            ("cdf",),
+            ("skillspread",),
+            ("naive skillspread",),
+            ("probability weighted moment",),
+        ]
+    )
     def test_backward_finite_on_perfect_prediction(self, crps_type):
         """Perfect ensemble must produce finite gradients across all crps_type
         branches (the eps-mask paths in each kernel must protect their respective
@@ -3231,9 +3356,7 @@ class TestKernelScoreLoss(unittest.TestCase):
         obs = _rand()
         loss_single = fn(fc[:1], obs[:1])
         loss_batch = fn(fc, obs)
-        self.assertTrue(
-            compare_tensors("kernel score batch", loss_single[0], loss_batch[0], verbose=verbose)
-        )
+        self.assertTrue(compare_tensors("kernel score batch", loss_single[0], loss_batch[0], verbose=verbose))
 
     # -- behavioural ---------------------------------------------------------
 
@@ -3247,10 +3370,10 @@ class TestKernelScoreLoss(unittest.TestCase):
         small = 0.05 * torch.randn_like(obs)
         large = 0.50 * torch.randn_like(obs)
         fc_close = (obs + small).unsqueeze(1).expand(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W).clone()
-        fc_far   = (obs + large).unsqueeze(1).expand(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W).clone()
+        fc_far = (obs + large).unsqueeze(1).expand(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W).clone()
         fn = self._fn()
         loss_close = fn(fc_close, obs).sum().item()
-        loss_far   = fn(fc_far, obs).sum().item()
+        loss_far = fn(fc_far, obs).sum().item()
         self.assertLess(loss_close, loss_far, f"closer forecast had higher loss: {loss_close} vs {loss_far}")
 
 
@@ -3292,32 +3415,44 @@ class TestEnsembleLossE1FastPath(unittest.TestCase):
 
     def _crps(self):
         return CRPSLoss(
-            **_GEOM_KWARGS, crps_type="skillspread",
-            spatial_distributed=False, ensemble_distributed=False,
+            **_GEOM_KWARGS,
+            crps_type="skillspread",
+            spatial_distributed=False,
+            ensemble_distributed=False,
         )
 
     def _spectral_crps(self):
         return SpectralCRPSLoss(
-            **_SPEC_KWARGS, crps_type="skillspread",
-            spatial_distributed=False, ensemble_distributed=False, absolute=True,
+            **_SPEC_KWARGS,
+            crps_type="skillspread",
+            spatial_distributed=False,
+            ensemble_distributed=False,
+            absolute=True,
         )
 
     def _gradient_crps(self):
         return GradientCRPSLoss(
-            **_GEOM_KWARGS, crps_type="skillspread",
-            spatial_distributed=False, ensemble_distributed=False, absolute=True,
+            **_GEOM_KWARGS,
+            crps_type="skillspread",
+            spatial_distributed=False,
+            ensemble_distributed=False,
+            absolute=True,
         )
 
     def _vortdiv_crps(self):
         return VortDivCRPSLoss(
-            **_WIND_GEOM_KWARGS, crps_type="skillspread",
-            spatial_distributed=False, ensemble_distributed=False,
+            **_WIND_GEOM_KWARGS,
+            crps_type="skillspread",
+            spatial_distributed=False,
+            ensemble_distributed=False,
         )
 
     def _kernel_score(self):
         return KernelScoreLoss(
-            **_GEOM_KWARGS, crps_type="skillspread",
-            spatial_distributed=False, ensemble_distributed=False,
+            **_GEOM_KWARGS,
+            crps_type="skillspread",
+            spatial_distributed=False,
+            ensemble_distributed=False,
         )
 
     # -- factories: the skill-minus-spread family (issue #96) ---------------
@@ -3343,8 +3478,11 @@ class TestEnsembleLossE1FastPath(unittest.TestCase):
 
     def _coherence_regularization(self):
         return CoherenceRegularization(
-            **_SPEC_KWARGS, eps=1e-16, ensemble_coherence_weight=0.5,
-            spatial_distributed=False, ensemble_distributed=False,
+            **_SPEC_KWARGS,
+            eps=1e-16,
+            ensemble_coherence_weight=0.5,
+            spatial_distributed=False,
+            ensemble_distributed=False,
         )
 
     def _gaussian_mmd(self):
@@ -3368,20 +3506,22 @@ class TestEnsembleLossE1FastPath(unittest.TestCase):
 
     # -- tests --------------------------------------------------------------
 
-    @parameterized.expand([
-        ("CRPSLoss",),
-        ("SpectralCRPSLoss",),
-        ("GradientCRPSLoss",),
-        ("VortDivCRPSLoss",),
-        ("KernelScoreLoss",),
-        ("LpEnergyScoreLoss",),
-        ("SobolevEnergyScoreLoss",),
-        ("SpectralL2EnergyScoreLoss",),
-        ("CorrectedSpectralL2EnergyScoreLoss",),
-        ("SpectralCoherenceLoss",),
-        ("CoherenceRegularization",),
-        ("GaussianMMDLoss",),
-    ])
+    @parameterized.expand(
+        [
+            ("CRPSLoss",),
+            ("SpectralCRPSLoss",),
+            ("GradientCRPSLoss",),
+            ("VortDivCRPSLoss",),
+            ("KernelScoreLoss",),
+            ("LpEnergyScoreLoss",),
+            ("SobolevEnergyScoreLoss",),
+            ("SpectralL2EnergyScoreLoss",),
+            ("CorrectedSpectralL2EnergyScoreLoss",),
+            ("SpectralCoherenceLoss",),
+            ("CoherenceRegularization",),
+            ("GaussianMMDLoss",),
+        ]
+    )
     def test_e1_output_shape_and_finite(self, name):
         """E=1 path produces (B, n_channels) and finite values."""
         builder, n_ch = self._make(name)
@@ -3393,44 +3533,52 @@ class TestEnsembleLossE1FastPath(unittest.TestCase):
         self.assertEqual(out.shape[1], fn.n_channels)
         self.assertTrue(torch.isfinite(out).all(), f"{name}: non-finite values in E=1 output")
 
-    @parameterized.expand([
-        ("CRPSLoss",),
-        ("SpectralCRPSLoss",),
-        ("GradientCRPSLoss",),
-        ("VortDivCRPSLoss",),
-        ("KernelScoreLoss",),
-        ("LpEnergyScoreLoss",),
-        ("SobolevEnergyScoreLoss",),
-        ("SpectralL2EnergyScoreLoss",),
-        ("CorrectedSpectralL2EnergyScoreLoss",),
-    ])
+    @parameterized.expand(
+        [
+            ("CRPSLoss",),
+            ("SpectralCRPSLoss",),
+            ("GradientCRPSLoss",),
+            ("VortDivCRPSLoss",),
+            ("KernelScoreLoss",),
+            ("LpEnergyScoreLoss",),
+            ("SobolevEnergyScoreLoss",),
+            ("SpectralL2EnergyScoreLoss",),
+            ("CorrectedSpectralL2EnergyScoreLoss",),
+        ]
+    )
     def test_e1_zero_on_perfect_prediction(self, name, verbose=False):
         """At E=1, fc[:,0] == obs reduces to |obs - obs| = 0; loss must be (near) zero."""
         builder, n_ch = self._make(name)
         fn = builder()
         obs = torch.randn(_BATCH, n_ch, _IMG_H, _IMG_W)
-        fc = obs.unsqueeze(1).clone()    # (B, 1, C, H, W) — single member equals obs
+        fc = obs.unsqueeze(1).clone()  # (B, 1, C, H, W) — single member equals obs
         out = fn(fc, obs)
         self.assertTrue(
             compare_tensors(
-                f"{name} E=1 zero", out, torch.zeros_like(out), atol=1e-4, verbose=verbose,
+                f"{name} E=1 zero",
+                out,
+                torch.zeros_like(out),
+                atol=1e-4,
+                verbose=verbose,
             )
         )
 
-    @parameterized.expand([
-        ("CRPSLoss",),
-        ("SpectralCRPSLoss",),
-        ("GradientCRPSLoss",),
-        ("VortDivCRPSLoss",),
-        ("KernelScoreLoss",),
-        ("LpEnergyScoreLoss",),
-        ("SobolevEnergyScoreLoss",),
-        ("SpectralL2EnergyScoreLoss",),
-        ("CorrectedSpectralL2EnergyScoreLoss",),
-        ("SpectralCoherenceLoss",),
-        ("CoherenceRegularization",),
-        ("GaussianMMDLoss",),
-    ])
+    @parameterized.expand(
+        [
+            ("CRPSLoss",),
+            ("SpectralCRPSLoss",),
+            ("GradientCRPSLoss",),
+            ("VortDivCRPSLoss",),
+            ("KernelScoreLoss",),
+            ("LpEnergyScoreLoss",),
+            ("SobolevEnergyScoreLoss",),
+            ("SpectralL2EnergyScoreLoss",),
+            ("CorrectedSpectralL2EnergyScoreLoss",),
+            ("SpectralCoherenceLoss",),
+            ("CoherenceRegularization",),
+            ("GaussianMMDLoss",),
+        ]
+    )
     def test_e1_backward_finite(self, name):
         """Gradient through the E=1 path must be finite — no NaN/Inf even though
         the loss reduces to a piecewise-linear |x| at the bottom."""
@@ -3443,14 +3591,16 @@ class TestEnsembleLossE1FastPath(unittest.TestCase):
         self.assertFalse(torch.isnan(fc.grad).any(), f"{name}: NaN grad in E=1 backward")
         self.assertFalse(torch.isinf(fc.grad).any(), f"{name}: Inf grad in E=1 backward")
 
-    @parameterized.expand([
-        ("LpEnergyScoreLoss",),
-        ("SobolevEnergyScoreLoss",),
-        ("SpectralL2EnergyScoreLoss",),
-        ("CorrectedSpectralL2EnergyScoreLoss",),
-        ("SpectralCoherenceLoss",),
-        ("CoherenceRegularization",),
-    ])
+    @parameterized.expand(
+        [
+            ("LpEnergyScoreLoss",),
+            ("SobolevEnergyScoreLoss",),
+            ("SpectralL2EnergyScoreLoss",),
+            ("CorrectedSpectralL2EnergyScoreLoss",),
+            ("SpectralCoherenceLoss",),
+            ("CoherenceRegularization",),
+        ]
+    )
     def test_e1_spread_term_vanishes(self, name, verbose=False):
         """Issue #96: at E=1 the spread is an empty sum and must contribute nothing.
 
@@ -3472,19 +3622,19 @@ class TestEnsembleLossE1FastPath(unittest.TestCase):
         out_e2 = fn(fc1.repeat(1, 2, 1, 1, 1), obs)
 
         self.assertTrue(torch.isfinite(out_e1).all(), f"{name}: non-finite E=1 output")
-        self.assertTrue(
-            compare_tensors(f"{name} E=1 vs E=2-identical", out_e1, out_e2, atol=1e-4, verbose=verbose)
-        )
+        self.assertTrue(compare_tensors(f"{name} E=1 vs E=2-identical", out_e1, out_e2, atol=1e-4, verbose=verbose))
 
-    @parameterized.expand([
-        ("LpEnergyScoreLoss",),
-        ("SobolevEnergyScoreLoss",),
-        ("SpectralL2EnergyScoreLoss",),
-        ("CorrectedSpectralL2EnergyScoreLoss",),
-        ("SpectralCoherenceLoss",),
-        ("CoherenceRegularization",),
-        ("GaussianMMDLoss",),
-    ])
+    @parameterized.expand(
+        [
+            ("LpEnergyScoreLoss",),
+            ("SobolevEnergyScoreLoss",),
+            ("SpectralL2EnergyScoreLoss",),
+            ("CorrectedSpectralL2EnergyScoreLoss",),
+            ("SpectralCoherenceLoss",),
+            ("CoherenceRegularization",),
+            ("GaussianMMDLoss",),
+        ]
+    )
     def test_e1_matches_larger_ensemble_shape(self, name):
         """The E=1 guard must not change the output contract for E > 1."""
         builder, n_ch = self._make(name)
@@ -3562,7 +3712,9 @@ class TestCoherenceRegularization(unittest.TestCase):
         """f = y is perfect coherence, so the loss must vanish."""
         obs = _rand()
         out = self._fn(eps=1e-16)(self._broadcast(obs, self._E), obs)
-        self.assertTrue(torch.allclose(out, torch.zeros_like(out), atol=1e-3), f"expected 0, got mean {out.mean().item()}")
+        self.assertTrue(
+            torch.allclose(out, torch.zeros_like(out), atol=1e-3), f"expected 0, got mean {out.mean().item()}"
+        )
 
     def test_anti_correlated_is_two(self):
         """f = -y is coherence -1, so (1 - Coh) = 2.
@@ -3573,7 +3725,9 @@ class TestCoherenceRegularization(unittest.TestCase):
         """
         obs = _rand()
         out = self._fn(eps=1e-16)(self._broadcast(obs, self._E, scale=-1.0), obs)
-        self.assertTrue(torch.allclose(out, 2.0 * torch.ones_like(out), atol=1e-3), f"expected 2, got mean {out.mean().item()}")
+        self.assertTrue(
+            torch.allclose(out, 2.0 * torch.ones_like(out), atol=1e-3), f"expected 2, got mean {out.mean().item()}"
+        )
 
     def test_uncorrelated_is_one(self):
         """Independent forecasts have zero expected coherence, so the loss ~ 1.
@@ -3599,7 +3753,10 @@ class TestCoherenceRegularization(unittest.TestCase):
         fn = self._fn(eps=1e-16)
         for scale in (0.5, 1.0, 7.0):
             out = fn(self._broadcast(obs, self._E, scale=scale), obs)
-            self.assertTrue(torch.allclose(out, torch.zeros_like(out), atol=1e-3), f"scale {scale}: expected 0, got {out.mean().item()}")
+            self.assertTrue(
+                torch.allclose(out, torch.zeros_like(out), atol=1e-3),
+                f"scale {scale}: expected 0, got {out.mean().item()}",
+            )
 
     # -- issue #95 regressions ------------------------------------------------
 
@@ -3635,7 +3792,9 @@ class TestCoherenceRegularization(unittest.TestCase):
     def test_band_mask_changes_the_loss(self):
         """Issue #95 bug 2: a different band must give a different value."""
         fc, obs = _rand_ensemble(self._E), _rand()
-        self.assertNotAlmostEqual(self._fn(lmin=0)(fc, obs).mean().item(), self._fn(lmin=8)(fc, obs).mean().item(), places=4)
+        self.assertNotAlmostEqual(
+            self._fn(lmin=0)(fc, obs).mean().item(), self._fn(lmin=8)(fc, obs).mean().item(), places=4
+        )
 
     def test_band_restricted_to_single_wavenumber(self):
         fn = self._fn(lmin=14)

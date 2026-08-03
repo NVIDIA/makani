@@ -47,7 +47,7 @@ def get_soiltype(soiltype_path):
 
 
 def get_bias_correction(bias_correction_path, output_channels):
-    """returns the bias correction from """
+    """returns the bias correction from"""
 
     with h5py.File(bias_correction_path, "r") as f:
         bias = f["mean"][0, :]
@@ -66,6 +66,10 @@ def get_copernicus_emb(copernicus_emb_path):
 
 
 if __name__ == "__main__":
+    # imported here rather than at module scope: matplotlib is an optional
+    # dependency (the "vis" extra) and is only needed by this demo block
+    import matplotlib.pyplot as plt
+
     lsm = get_land_mask("/code/utils/e5.oper.invariant.128_172_lsm.ll025sc.1979010100_1979010100.nc")
     figure = plt.figure(figsize=(10, 10))
     ax = figure.add_subplot(111)
