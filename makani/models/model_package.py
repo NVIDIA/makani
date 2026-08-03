@@ -22,7 +22,7 @@ import shutil
 import json
 import numpy as np
 import torch
-from makani.utils.YParams import ParamsBase
+from makani.utils.YParams import ParamsBase, ensure_resampled_shapes
 from makani.utils.driver import Driver
 from makani.third_party.climt.zenith_angle_v2 import cos_zenith_angle
 from makani.utils.dataloaders.data_helpers import get_data_normalization
@@ -98,6 +98,9 @@ class ModelWrapper(torch.nn.Module):
         super().__init__()
         self.model = model
         self.params = params
+        # tolerate params assembled outside load_model_package (e.g. earth2studio),
+        # which need not carry the resampled shapes
+        ensure_resampled_shapes(params)
         nlat = params.img_shape_x_resampled
         nlon = params.img_shape_y_resampled
 
@@ -222,11 +225,9 @@ def load_model_package(package, pretrained=True, device="cpu", multistep=False):
     """
     path = package.get("config.json")
     params = ParamsBase.from_json(path)
-    # ensure resampled shapes exist (set at runtime from dataset in training; missing when loading from package)
-    if not hasattr(params, "img_shape_x_resampled") or params.img_shape_x_resampled is None:
-        params.img_shape_x_resampled = params.img_shape_x
-    if not hasattr(params, "img_shape_y_resampled") or params.img_shape_y_resampled is None:
-        params.img_shape_y_resampled = params.img_shape_y
+    # resampled shapes are set at runtime from the dataset during training and are
+    # absent from packages written before resampling existed
+    ensure_resampled_shapes(params)
     LocalPackage._load_static_data(package, params)
 
     # assume we are not distributed
