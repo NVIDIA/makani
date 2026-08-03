@@ -34,7 +34,9 @@ from torch_harmonics.distributed import split_tensor_along_dim
 
 def get_latest_checkpoint_version(checkpoint_path):
     try:
-        checkpoint_path = max(glob.glob(checkpoint_path.format(mp_rank=0, checkpoint_version="*")), key=os.path.getmtime)
+        checkpoint_path = max(
+            glob.glob(checkpoint_path.format(mp_rank=0, checkpoint_version="*")), key=os.path.getmtime
+        )
         pathname, _ = os.path.splitext(checkpoint_path)
         latest_version = int(re.match(r"^.*?_v(\d{1,})$", pathname).groups()[0])
     except:
@@ -44,7 +46,7 @@ def get_latest_checkpoint_version(checkpoint_path):
     return latest_version
 
 
-def gather_model_state_dict(model: nn.Module, grads: Optional[bool]=False) -> OrderedDict:
+def gather_model_state_dict(model: nn.Module, grads: Optional[bool] = False) -> OrderedDict:
     # precondition: every rank in the model group must issue the SAME ordered
     # sequence of gather_uneven calls, otherwise the all_gather inside
     # gather_uneven deadlocks (600s NCCL timeout instead of a readable error).
@@ -95,7 +97,7 @@ def gather_model_state_dict(model: nn.Module, grads: Optional[bool]=False) -> Or
             else:
                 grad = None
 
-            state_dict[name + ".grad"] = grad            
+            state_dict[name + ".grad"] = grad
 
     return state_dict
 
@@ -120,7 +122,9 @@ def scatter_model_state_dict(model: nn.Module, state_dict: OrderedDict, strict: 
                     if (group is None) or (comm.get_size(group) == 1):
                         continue
 
-                    weight = split_tensor_along_dim(weight, dim=d, num_chunks=comm.get_size(group))[comm.get_rank(group)]
+                    weight = split_tensor_along_dim(weight, dim=d, num_chunks=comm.get_size(group))[
+                        comm.get_rank(group)
+                    ]
 
                 # update state dict
                 state_dict[name] = weight
@@ -194,7 +198,9 @@ def gather_optimizer_state_dict(model: nn.Module, optimizer: Optimizer) -> Order
     return optimizer_dict
 
 
-def scatter_optimizer_state_dict(model: nn.Module, optimizer: Optimizer, optimizer_state_dict: OrderedDict) -> OrderedDict():
+def scatter_optimizer_state_dict(
+    model: nn.Module, optimizer: Optimizer, optimizer_state_dict: OrderedDict
+) -> OrderedDict():
 
     # some sanity checks
     # if optimizer is SGD, we can just return the local dict:
@@ -202,7 +208,9 @@ def scatter_optimizer_state_dict(model: nn.Module, optimizer: Optimizer, optimiz
         return optimizer_state_dict
 
     if not (isinstance(optimizer, torch.optim.Adam) or isinstance(optimizer, torch.optim.AdamW)):
-        raise NotImplementedError("Error, only Adam and AdamW state can be restored from flexible format at the moment.")
+        raise NotImplementedError(
+            "Error, only Adam and AdamW state can be restored from flexible format at the moment."
+        )
 
     # Reconstruct the index -> param map from optimizer.param_groups (matching torch.optim's
     # packing order) so each saved state entry is split with the sharding of its true owner,
@@ -227,8 +235,12 @@ def scatter_optimizer_state_dict(model: nn.Module, optimizer: Optimizer, optimiz
                     if (group is None) or (comm.get_size(group) == 1):
                         continue
 
-                    exp_avg = split_tensor_along_dim(exp_avg, dim=d, num_chunks=comm.get_size(group))[comm.get_rank(group)]
-                    exp_avg_sq = split_tensor_along_dim(exp_avg_sq, dim=d, num_chunks=comm.get_size(group))[comm.get_rank(group)]
+                    exp_avg = split_tensor_along_dim(exp_avg, dim=d, num_chunks=comm.get_size(group))[
+                        comm.get_rank(group)
+                    ]
+                    exp_avg_sq = split_tensor_along_dim(exp_avg_sq, dim=d, num_chunks=comm.get_size(group))[
+                        comm.get_rank(group)
+                    ]
 
                 # update the state dict
                 optimizer_state_dict["state"][index]["exp_avg"] = exp_avg

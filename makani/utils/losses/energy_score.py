@@ -17,14 +17,13 @@ from typing import Optional, Tuple, List
 
 import math
 import torch
-import torch.nn as nn
 from torch import amp
 
 from makani.utils.losses.base_loss import GeometricBaseLoss, SpectralBaseLoss, LossType
 from makani.utils import comm
 
 # distributed stuff
-from torch_harmonics.distributed import compute_split_shapes, split_tensor_along_dim
+from torch_harmonics.distributed import split_tensor_along_dim
 from makani.mpu.mappings import scatter_to_parallel_region, reduce_from_parallel_region, distributed_transpose
 
 
@@ -63,7 +62,9 @@ class LpEnergyScoreLoss(GeometricBaseLoss):
         )
 
         self.spatial_distributed = comm.is_distributed("spatial") and spatial_distributed
-        self.ensemble_distributed = comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1) and ensemble_distributed
+        self.ensemble_distributed = (
+            comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1) and ensemble_distributed
+        )
         self.channel_reduction = channel_reduction
         self.alpha = alpha
         self.beta = beta
@@ -74,7 +75,9 @@ class LpEnergyScoreLoss(GeometricBaseLoss):
         # we also need a variant of the weights split in ensemble direction:
         quad_weight_split = self.quadrature.quad_weight.reshape(1, 1, -1)
         if self.ensemble_distributed:
-            quad_weight_split = split_tensor_along_dim(quad_weight_split, dim=-1, num_chunks=comm.get_size("ensemble"))[comm.get_rank("ensemble")]
+            quad_weight_split = split_tensor_along_dim(quad_weight_split, dim=-1, num_chunks=comm.get_size("ensemble"))[
+                comm.get_rank("ensemble")
+            ]
         quad_weight_split = quad_weight_split.contiguous()
         self.register_buffer("quad_weight_split", quad_weight_split, persistent=False)
 
@@ -99,7 +102,14 @@ class LpEnergyScoreLoss(GeometricBaseLoss):
             chw = super().compute_channel_weighting(channel_weight_type, time_diff_scale)
         return chw
 
-    def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, spatial_weights: Optional[torch.Tensor] = None, lead_time_step: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor:
+    def forward(
+        self,
+        forecasts: torch.Tensor,
+        observations: torch.Tensor,
+        spatial_weights: Optional[torch.Tensor] = None,
+        lead_time_step: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> torch.Tensor:
 
         # sanity checks
         if forecasts.dim() != 5:
@@ -109,7 +119,9 @@ class LpEnergyScoreLoss(GeometricBaseLoss):
         if (spatial_weights is not None) and (spatial_weights.dim() != observations.dim()):
             spdim = spatial_weights.dim()
             odim = observations.dim()
-            raise ValueError(f"the weights have to have the same number of dimensions (found {spdim}) as observations (found {odim}).")
+            raise ValueError(
+                f"the weights have to have the same number of dimensions (found {spdim}) as observations (found {odim})."
+            )
 
         # we assume the following shapes:
         # forecasts: batch, ensemble, channels, lat, lon
@@ -215,7 +227,12 @@ class LpEnergyScoreLoss(GeometricBaseLoss):
         # GaussianMMDLoss and the E=1 short-circuit in the CRPS losses.
         espread = diff.sum(dim=0)
         if num_ensemble > 1:
-            espread = espread * 2.0 * (float(num_ensemble) - 1.0 + self.alpha) / float(num_ensemble * num_ensemble * (num_ensemble - 1))
+            espread = (
+                espread
+                * 2.0
+                * (float(num_ensemble) - 1.0 + self.alpha)
+                / float(num_ensemble * num_ensemble * (num_ensemble - 1))
+            )
         else:
             espread = torch.zeros_like(espread)
 
@@ -228,7 +245,7 @@ class LpEnergyScoreLoss(GeometricBaseLoss):
             espread = espread * torch.maximum(scale, torch.ones_like(scale))
 
         # the resulting tensor should have dimension B, C which is what we return
-        loss =  eskill - 0.5 * espread
+        loss = eskill - 0.5 * espread
 
         return loss
 
@@ -271,7 +288,9 @@ class SobolevEnergyScoreLoss(SpectralBaseLoss):
         )
 
         self.spatial_distributed = spatial_distributed and comm.is_distributed("spatial")
-        self.ensemble_distributed = ensemble_distributed and comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1)
+        self.ensemble_distributed = (
+            ensemble_distributed and comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1)
+        )
         self.channel_reduction = channel_reduction
         self.alpha = alpha
         self.beta = beta
@@ -320,7 +339,13 @@ class SobolevEnergyScoreLoss(SpectralBaseLoss):
             chw = super().compute_channel_weighting(channel_weight_type, time_diff_scale)
         return chw
 
-    def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, ensemble_weights: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor:
+    def forward(
+        self,
+        forecasts: torch.Tensor,
+        observations: torch.Tensor,
+        ensemble_weights: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> torch.Tensor:
 
         # sanity checks
         if forecasts.dim() != 5:
@@ -347,7 +372,9 @@ class SobolevEnergyScoreLoss(SpectralBaseLoss):
         forecasts = forecasts.reshape(E, B, C, H * W)
         if self.ensemble_distributed:
             ensemble_shapes = [forecasts.shape[0] for _ in range(comm.get_size("ensemble"))]
-            forecasts = distributed_transpose(forecasts, (-1, 0), ensemble_shapes, "ensemble")        # for correct spatial reduction we need to do the same with spatial weights
+            forecasts = distributed_transpose(
+                forecasts, (-1, 0), ensemble_shapes, "ensemble"
+            )  # for correct spatial reduction we need to do the same with spatial weights
 
         lm_weights_split = self.lm_weights.flatten(start_dim=-2, end_dim=-1)
         if self.ensemble_distributed:
@@ -417,16 +444,20 @@ class SobolevEnergyScoreLoss(SpectralBaseLoss):
         eskill = torch.where(eskill_mask, 0.0, eskill)
         # single member: the pair sum is empty, so the spread term vanishes rather than
         # dividing 0/0. See the note in LpEnergyScoreLoss.forward.
-        espread = espread.sum(dim=(0,1))
+        espread = espread.sum(dim=(0, 1))
         if num_ensemble > 1:
-            espread = espread * (float(num_ensemble) - 1.0 + self.alpha) / float(num_ensemble * num_ensemble * (num_ensemble - 1))
+            espread = (
+                espread
+                * (float(num_ensemble) - 1.0 + self.alpha)
+                / float(num_ensemble * num_ensemble * (num_ensemble - 1))
+            )
         else:
             espread = torch.zeros_like(espread)
 
         # compute the skill term
         eskill = eskill.sum(dim=0) / float(num_ensemble)
 
-        return (eskill - 0.5 * espread)
+        return eskill - 0.5 * espread
 
 
 class SpectralL2EnergyScoreLoss(SpectralBaseLoss):
@@ -460,7 +491,9 @@ class SpectralL2EnergyScoreLoss(SpectralBaseLoss):
         )
 
         self.spatial_distributed = spatial_distributed and comm.is_distributed("spatial")
-        self.ensemble_distributed = ensemble_distributed and comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1)
+        self.ensemble_distributed = (
+            ensemble_distributed and comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1)
+        )
         self.channel_reduction = channel_reduction
         self.alpha = alpha
         self.beta = beta
@@ -487,7 +520,13 @@ class SpectralL2EnergyScoreLoss(SpectralBaseLoss):
             chw = super().compute_channel_weighting(channel_weight_type, time_diff_scale)
         return chw
 
-    def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, ensemble_weights: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor:
+    def forward(
+        self,
+        forecasts: torch.Tensor,
+        observations: torch.Tensor,
+        ensemble_weights: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> torch.Tensor:
 
         # sanity checks
         if forecasts.dim() != 5:
@@ -518,7 +557,9 @@ class SpectralL2EnergyScoreLoss(SpectralBaseLoss):
         forecasts = torch.moveaxis(forecasts, 1, 0)
         if self.ensemble_distributed:
             ensemble_shapes = [forecasts.shape[0] for _ in range(comm.get_size("ensemble"))]
-            forecasts = distributed_transpose(forecasts, (-1, 0), ensemble_shapes, "ensemble")        # for correct spatial reduction we need to do the same with spatial weights
+            forecasts = distributed_transpose(
+                forecasts, (-1, 0), ensemble_shapes, "ensemble"
+            )  # for correct spatial reduction we need to do the same with spatial weights
 
         lm_weights_split = self.lm_weights
         if self.ensemble_distributed:
@@ -588,15 +629,19 @@ class SpectralL2EnergyScoreLoss(SpectralBaseLoss):
         # now we have reduced everything and need to sum appropriately (B, C, H)
         # single member: the pair sum is empty, so the spread term vanishes rather than
         # dividing 0/0. See the note in LpEnergyScoreLoss.forward.
-        espread = espread.sum(dim=(0,1))
+        espread = espread.sum(dim=(0, 1))
         if num_ensemble > 1:
-            espread = espread * (float(num_ensemble) - 1.0 + self.alpha) / float(num_ensemble * num_ensemble * (num_ensemble - 1))
+            espread = (
+                espread
+                * (float(num_ensemble) - 1.0 + self.alpha)
+                / float(num_ensemble * num_ensemble * (num_ensemble - 1))
+            )
         else:
             espread = torch.zeros_like(espread)
         eskill = eskill.sum(dim=0) / float(num_ensemble)
 
         # we now have the loss per wavenumber, which we can normalize
-        loss = (eskill - 0.5 * espread)
+        loss = eskill - 0.5 * espread
 
         # we need to do the spatial averaging manually since
         loss = loss.sum(dim=-1)
@@ -638,7 +683,9 @@ class SpectralCoherenceLoss(SpectralBaseLoss):
 
         self.relative = relative
         self.spatial_distributed = spatial_distributed and comm.is_distributed("spatial")
-        self.ensemble_distributed = ensemble_distributed and comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1)
+        self.ensemble_distributed = (
+            ensemble_distributed and comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1)
+        )
         self.channel_reduction = channel_reduction
         self.eps = eps
 
@@ -682,7 +729,13 @@ class SpectralCoherenceLoss(SpectralBaseLoss):
             chw = super().compute_channel_weighting(channel_weight_type, time_diff_scale)
         return chw
 
-    def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, ensemble_weights: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor:
+    def forward(
+        self,
+        forecasts: torch.Tensor,
+        observations: torch.Tensor,
+        ensemble_weights: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> torch.Tensor:
 
         # sanity checks
         if forecasts.dim() != 5:
@@ -690,7 +743,6 @@ class SpectralCoherenceLoss(SpectralBaseLoss):
 
         # get the data type before stripping amp types
         dtype = forecasts.dtype
-
 
         # before anything else compute the transform
         # as the CDF definition doesn't generalize well to more than one-dimensional variables, we treat complex and imaginary part as the same
@@ -709,7 +761,9 @@ class SpectralCoherenceLoss(SpectralBaseLoss):
         forecasts = torch.moveaxis(forecasts, 1, 0)
         if self.ensemble_distributed:
             ensemble_shapes = [forecasts.shape[0] for _ in range(comm.get_size("ensemble"))]
-            forecasts = distributed_transpose(forecasts, (-1, 0), ensemble_shapes, "ensemble")        # for correct spatial reduction we need to do the same with spatial weights
+            forecasts = distributed_transpose(
+                forecasts, (-1, 0), ensemble_shapes, "ensemble"
+            )  # for correct spatial reduction we need to do the same with spatial weights
 
         lm_weights_split = self.lm_weights
         if self.ensemble_distributed:
@@ -735,9 +789,10 @@ class SpectralCoherenceLoss(SpectralBaseLoss):
             psd_forecasts = reduce_from_parallel_region(psd_forecasts, "w")
             psd_observations = reduce_from_parallel_region(psd_observations, "w")
 
-
         # compute coherence between forecasts and observations
-        coherence_forecasts = (lm_weights_split * (forecasts.unsqueeze(0).conj() * forecasts.unsqueeze(1)).real).sum(dim=-1)
+        coherence_forecasts = (lm_weights_split * (forecasts.unsqueeze(0).conj() * forecasts.unsqueeze(1)).real).sum(
+            dim=-1
+        )
         coherence_observations = (lm_weights_split * (forecasts.conj() * observations).real).sum(dim=-1)
 
         # reduce over ensemble parallel region and m spatial dimensions
@@ -751,7 +806,9 @@ class SpectralCoherenceLoss(SpectralBaseLoss):
 
         # divide the coherence by the product of the norms (with epsilon for numerical stability)
         coherence_observations = coherence_observations / torch.sqrt(psd_forecasts * psd_observations + self.eps)
-        coherence_forecasts = coherence_forecasts / torch.sqrt(psd_forecasts.unsqueeze(0) * psd_forecasts.unsqueeze(1) + self.eps)
+        coherence_forecasts = coherence_forecasts / torch.sqrt(
+            psd_forecasts.unsqueeze(0) * psd_forecasts.unsqueeze(1) + self.eps
+        )
 
         # compute the error in the power spectral density
         psd_skill = (psd_forecasts - psd_observations).square()
@@ -763,7 +820,13 @@ class SpectralCoherenceLoss(SpectralBaseLoss):
         coherence_skill = (1.0 - coherence_observations).sum(dim=0) / float(num_ensemble)
 
         # mask the diagonal of coherence_spread with 0.0
-        coherence_spread = torch.where(torch.eye(num_ensemble, device=coherence_forecasts.device).bool().reshape(num_ensemble, num_ensemble, 1, 1, 1), 0.0, 1.0 - coherence_forecasts)
+        coherence_spread = torch.where(
+            torch.eye(num_ensemble, device=coherence_forecasts.device)
+            .bool()
+            .reshape(num_ensemble, num_ensemble, 1, 1, 1),
+            0.0,
+            1.0 - coherence_forecasts,
+        )
         # single member: only the diagonal exists and it is masked out, so the spread is
         # an empty sum. Guard the 1/(N (N-1)) normalization. See LpEnergyScoreLoss.forward.
         coherence_spread = coherence_spread.sum(dim=(0, 1))
@@ -790,6 +853,7 @@ class SpectralCoherenceLoss(SpectralBaseLoss):
             loss = loss.sum(dim=-1, keepdim=True)
 
         return loss
+
 
 class CorrectedSpectralL2EnergyScoreLoss(SpectralBaseLoss):
     """
@@ -832,7 +896,9 @@ class CorrectedSpectralL2EnergyScoreLoss(SpectralBaseLoss):
         )
 
         self.spatial_distributed = spatial_distributed and comm.is_distributed("spatial")
-        self.ensemble_distributed = ensemble_distributed and comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1)
+        self.ensemble_distributed = (
+            ensemble_distributed and comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1)
+        )
         self.channel_reduction = channel_reduction
         self.alpha = alpha
         self.beta = beta
@@ -852,12 +918,20 @@ class CorrectedSpectralL2EnergyScoreLoss(SpectralBaseLoss):
         return 1 if self.channel_reduction else len(self.channel_names)
 
     @torch.compiler.disable(recursive=False)
-    def compute_channel_weighting(self, channel_weight_type: str, time_diff_scale: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def compute_channel_weighting(
+        self, channel_weight_type: str, time_diff_scale: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         if self.channel_reduction:
             return torch.ones(1, dtype=torch.float32)
         return super().compute_channel_weighting(channel_weight_type, time_diff_scale)
 
-    def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, ensemble_weights: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor:
+    def forward(
+        self,
+        forecasts: torch.Tensor,
+        observations: torch.Tensor,
+        ensemble_weights: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> torch.Tensor:
         if forecasts.dim() != 5:
             raise ValueError(f"Error, forecasts tensor expected to have 5 dimensions but found {forecasts.dim()}.")
 
@@ -946,7 +1020,11 @@ class CorrectedSpectralL2EnergyScoreLoss(SpectralBaseLoss):
         # dividing 0/0. See the note in LpEnergyScoreLoss.forward.
         espread = espread.sum(dim=(0, 1))
         if num_ensemble > 1:
-            espread = espread * (float(num_ensemble) - 1.0 + self.alpha) / float(num_ensemble * num_ensemble * (num_ensemble - 1))
+            espread = (
+                espread
+                * (float(num_ensemble) - 1.0 + self.alpha)
+                / float(num_ensemble * num_ensemble * (num_ensemble - 1))
+            )
         else:
             espread = torch.zeros_like(espread)
         eskill = eskill.sum(dim=0) / float(num_ensemble)

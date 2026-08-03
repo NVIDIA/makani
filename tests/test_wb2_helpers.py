@@ -29,6 +29,7 @@ from makani.utils.dataloaders.wb2_helpers import (
 # 1. Mapping table sanity checks
 # ===========================================================================
 
+
 class TestMappingTables(unittest.TestCase):
 
     def test_surface_variables_non_empty(self):
@@ -47,8 +48,8 @@ class TestMappingTables(unittest.TestCase):
 
     def test_known_surface_mappings(self):
         self.assertEqual(surface_variables["u10m"], "10m_u_component_of_wind")
-        self.assertEqual(surface_variables["t2m"],  "2m_temperature")
-        self.assertEqual(surface_variables["msl"],  "mean_sea_level_pressure")
+        self.assertEqual(surface_variables["t2m"], "2m_temperature")
+        self.assertEqual(surface_variables["msl"], "mean_sea_level_pressure")
 
     def test_known_atmospheric_mappings(self):
         self.assertEqual(atmospheric_variables["z"], "geopotential")
@@ -60,6 +61,7 @@ class TestMappingTables(unittest.TestCase):
 # 2. build_wb2_channel_map
 # ===========================================================================
 
+
 class TestBuildWb2ChannelMap(unittest.TestCase):
 
     # ---- correct mappings --------------------------------------------------
@@ -70,15 +72,18 @@ class TestBuildWb2ChannelMap(unittest.TestCase):
 
     def test_multiple_surface_channels(self):
         result = build_wb2_channel_map(["u10m", "t2m", "msl"])
-        self.assertEqual(result, [
-            ("10m_u_component_of_wind", None),
-            ("2m_temperature", None),
-            ("mean_sea_level_pressure", None),
-        ])
+        self.assertEqual(
+            result,
+            [
+                ("10m_u_component_of_wind", None),
+                ("2m_temperature", None),
+                ("mean_sea_level_pressure", None),
+            ],
+        )
 
     def test_single_atmospheric_channel(self):
         result = build_wb2_channel_map(["z500"], level_values=[100, 500, 850])
-        self.assertEqual(result, [("geopotential", 1)])   # 500 is at index 1
+        self.assertEqual(result, [("geopotential", 1)])  # 500 is at index 1
 
     def test_atmospheric_level_index_matches_position(self):
         levels = [50, 100, 200, 500, 850, 1000]
@@ -90,12 +95,15 @@ class TestBuildWb2ChannelMap(unittest.TestCase):
             ["u10m", "t2m", "z500", "u850"],
             level_values=[500, 850],
         )
-        self.assertEqual(result, [
-            ("10m_u_component_of_wind", None),
-            ("2m_temperature", None),
-            ("geopotential", 0),          # 500 at index 0
-            ("u_component_of_wind", 1),   # 850 at index 1
-        ])
+        self.assertEqual(
+            result,
+            [
+                ("10m_u_component_of_wind", None),
+                ("2m_temperature", None),
+                ("geopotential", 0),  # 500 at index 0
+                ("u_component_of_wind", 1),  # 850 at index 1
+            ],
+        )
 
     def test_d2_treated_as_surface_not_atmospheric(self):
         # "d2" ends with a digit but must be treated as a surface variable
@@ -159,35 +167,36 @@ class TestBuildWb2ChannelMap(unittest.TestCase):
 # 3. split_convert_channel_names
 # ===========================================================================
 
+
 class TestSplitConvertChannelNames(unittest.TestCase):
 
     def test_mixed_channels_split_correctly(self):
         # balanced grid: same variables (z, u) at each level (500, 850)
         channels = ["u10m", "t2m", "z500", "u500", "z850", "u850"]
         atm_names, atm_wb2, surf_names, surf_wb2, levels = split_convert_channel_names(channels)
-        self.assertIn("z",   atm_names)
-        self.assertIn("u",   atm_names)
+        self.assertIn("z", atm_names)
+        self.assertIn("u", atm_names)
         self.assertNotIn("t2m", atm_names)
-        self.assertIn("geopotential",        atm_wb2)
+        self.assertIn("geopotential", atm_wb2)
         self.assertIn("u_component_of_wind", atm_wb2)
         self.assertIn("u10m", surf_names)
-        self.assertIn("t2m",  surf_names)
-        self.assertIn(500,  levels)
-        self.assertIn(850,  levels)
+        self.assertIn("t2m", surf_names)
+        self.assertIn(500, levels)
+        self.assertIn(850, levels)
 
     def test_surface_only(self):
         atm_names, atm_wb2, surf_names, surf_wb2, levels = split_convert_channel_names(["u10m", "t2m"])
         self.assertEqual(atm_names, [])
-        self.assertEqual(atm_wb2,   [])
-        self.assertEqual(levels,    [])
+        self.assertEqual(atm_wb2, [])
+        self.assertEqual(levels, [])
         self.assertIn("u10m", surf_names)
-        self.assertIn("t2m",  surf_names)
+        self.assertIn("t2m", surf_names)
         self.assertIn("10m_u_component_of_wind", surf_wb2)
 
     def test_atmospheric_only(self):
         atm_names, atm_wb2, surf_names, surf_wb2, levels = split_convert_channel_names(["z500", "t500", "u500"])
         self.assertEqual(surf_names, [])
-        self.assertEqual(surf_wb2,   [])
+        self.assertEqual(surf_wb2, [])
         self.assertIn("z", atm_names)
         self.assertEqual(levels, [500])
 
@@ -201,9 +210,7 @@ class TestSplitConvertChannelNames(unittest.TestCase):
         self.assertEqual(atm_names.count("z"), 1)
 
     def test_output_lengths_match(self):
-        atm_names, atm_wb2, surf_names, surf_wb2, _ = split_convert_channel_names(
-            ["u10m", "t2m", "z500", "u500"]
-        )
+        atm_names, atm_wb2, surf_names, surf_wb2, _ = split_convert_channel_names(["u10m", "t2m", "z500", "u500"])
         self.assertEqual(len(atm_names), len(atm_wb2))
         self.assertEqual(len(surf_names), len(surf_wb2))
 

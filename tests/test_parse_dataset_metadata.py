@@ -23,29 +23,30 @@ import numpy as np
 from makani.utils.parse_dataset_metada import parse_dataset_metadata
 
 import sys
+
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from .testutils import get_default_parameters, init_dataset_metadata
 
 _CH_NAMES = ["u10m", "t2m", "u500", "z500", "t500"]
-_IMG_H    = 32
-_IMG_W    = 64
-_DHOURS   = 6
-_H5_PATH  = "fields"
+_IMG_H = 32
+_IMG_W = 64
+_DHOURS = 6
+_H5_PATH = "fields"
 
 
 class TestParseDatasetMetadata(unittest.TestCase):
 
     def setUp(self):
         self._tmpdir = tempfile.TemporaryDirectory()
-        self.tmpdir  = self._tmpdir.name
+        self.tmpdir = self._tmpdir.name
 
         self.params = get_default_parameters()
         # ParamsBase: __setitem__ updates both the internal dict AND the
         # attribute, so parse_dataset_metadata can reach them via params["key"].
         # Plain attribute assignment (params.x = v) only sets the attribute and
         # leaves params["x"] broken, so we always use dict-style here.
-        self.params["img_shape_x"]   = _IMG_H
-        self.params["img_shape_y"]   = _IMG_W
+        self.params["img_shape_x"] = _IMG_H
+        self.params["img_shape_y"] = _IMG_W
         self.params["channel_names"] = _CH_NAMES
 
         # Standard fixture used by most tests.
@@ -187,7 +188,7 @@ class TestParseDatasetMetadata(unittest.TestCase):
         """["u10m", "z500"] → indices [0, 3] in the dataset."""
         self.params["channel_names"] = ["u10m", "z500"]
         params, _ = parse_dataset_metadata(self.metadata_path, self.params)
-        self.assertEqual(params["in_channels"],  [0, 3])
+        self.assertEqual(params["in_channels"], [0, 3])
         self.assertEqual(params["out_channels"], [0, 3])
 
     def test_in_channels_always_equals_out_channels(self):
@@ -262,7 +263,7 @@ class TestParseDatasetMetadata(unittest.TestCase):
             parse_dataset_metadata("/nonexistent/data.json", self.params)
 
     def test_unknown_channel_raises_value_error(self):
-        self.params["channel_names"] = ["u10m", "pressure_500"]   # pressure_500 not in dataset
+        self.params["channel_names"] = ["u10m", "pressure_500"]  # pressure_500 not in dataset
         with self.assertRaises(ValueError):
             parse_dataset_metadata(self.metadata_path, self.params)
 

@@ -16,6 +16,7 @@
 import math
 import numpy as np
 import sys
+
 if sys.version_info >= (3, 12):
     from typing import override
 else:
@@ -29,7 +30,7 @@ import torch_harmonics as th
 import torch_harmonics.distributed as thd
 
 from makani.utils import comm
-from torch_harmonics.distributed import split_tensor_along_dim, compute_split_shapes
+from torch_harmonics.distributed import split_tensor_along_dim
 
 
 class BaseNoiseS2(nn.Module):
@@ -241,7 +242,15 @@ class IsotropicGaussianRandomFieldS2(BaseNoiseS2):
         learnable : bool, default is False
             Parameter which enables learnable Gaussian noise
         """
-        super().__init__(img_shape=img_shape, batch_size=batch_size, num_channels=num_channels, num_time_steps=num_time_steps, grid_type=grid_type, seed=seed, reflect=reflect)
+        super().__init__(
+            img_shape=img_shape,
+            batch_size=batch_size,
+            num_channels=num_channels,
+            num_time_steps=num_time_steps,
+            grid_type=grid_type,
+            seed=seed,
+            reflect=reflect,
+        )
 
         # stash config for extra_repr
         self.sigma = sigma
@@ -252,7 +261,7 @@ class IsotropicGaussianRandomFieldS2(BaseNoiseS2):
             alpha = float(alpha)
 
         # Compute ls, angular power spectrum and sigma_l:
-        ls = torch.arange(self.lmax).reshape(-1 ,1)
+        ls = torch.arange(self.lmax).reshape(-1, 1)
         ms = torch.arange(self.mmax)
         power_spectrum = torch.pow(2 * ls + 1, -alpha)
         norm_factor = torch.sum((2 * ls + 1) * power_spectrum / 4.0 / math.pi)
@@ -282,10 +291,7 @@ class IsotropicGaussianRandomFieldS2(BaseNoiseS2):
         return False
 
     def extra_repr(self):
-        return (
-            super().extra_repr()
-            + f", sigma={self.sigma}, alpha={self.alpha}, learnable={self.learnable}"
-        )
+        return super().extra_repr() + f", sigma={self.sigma}, alpha={self.alpha}, learnable={self.learnable}"
 
     # run eager: the noise field is complex-valued (torch.complex + inverse SHT), and
     # inductor's Triton backend has no mapping for complex dtypes (KeyError: 'complex64'
@@ -350,7 +356,7 @@ class DiffusionNoiseS2(BaseNoiseS2):
         grid_type="equiangular",
         seed=333,
         reflect=False,
-        learnable =False,
+        learnable=False,
         **kwargs,
     ):
         r"""
@@ -378,7 +384,15 @@ class DiffusionNoiseS2(BaseNoiseS2):
         learnable : bool, default is False
             Parameter which enables learnable Diffusion noise
         """
-        super().__init__(img_shape=img_shape, batch_size=batch_size, num_channels=num_channels, num_time_steps=num_time_steps, grid_type=grid_type, seed=seed, reflect=reflect)
+        super().__init__(
+            img_shape=img_shape,
+            batch_size=batch_size,
+            num_channels=num_channels,
+            num_time_steps=num_time_steps,
+            grid_type=grid_type,
+            seed=seed,
+            reflect=reflect,
+        )
 
         # stash config for extra_repr (store originals before processing into tensors below)
         self.sigma = sigma
@@ -406,7 +420,9 @@ class DiffusionNoiseS2(BaseNoiseS2):
             if len(lambd.shape) != 1:
                 raise ValueError(f"expected lambd to be a 1D tensor, got shape {tuple(lambd.shape)}")
             if lambd.shape[0] != num_channels:
-                raise ValueError(f"expected lambd to have {num_channels} entries (one per channel), got {lambd.shape[0]}")
+                raise ValueError(
+                    f"expected lambd to have {num_channels} entries (one per channel), got {lambd.shape[0]}"
+                )
         else:
             lambd = torch.as_tensor([lambd]).repeat(num_channels)
         lambd = lambd.reshape(self.num_channels, 1)
@@ -455,7 +471,7 @@ class DiffusionNoiseS2(BaseNoiseS2):
         #            [phi^3, phi^2, phi, 1]
         if self.num_time_steps > 1:
             if learnable:
-                raise NotImplementedError(f"num_time_steps>1 learnable diffusion noise not supported")
+                raise NotImplementedError("num_time_steps>1 learnable diffusion noise not supported")
 
             discount = []
             phi_flat = self.phi.reshape(-1)
@@ -473,8 +489,7 @@ class DiffusionNoiseS2(BaseNoiseS2):
 
     def extra_repr(self):
         return (
-            super().extra_repr()
-            + f", sigma={self.sigma}, kT={self.kT}, lambd={self.lambd}, learnable={self.learnable}"
+            super().extra_repr() + f", sigma={self.sigma}, kT={self.kT}, lambd={self.lambd}, learnable={self.learnable}"
         )
 
     # this routine generates a noise sample for a single time step and updates the state accordingly, by appending the last time step
@@ -492,7 +507,8 @@ class DiffusionNoiseS2(BaseNoiseS2):
                     B = self.state.shape[0]
                     eta_l = torch.empty(
                         (B, 1, self.num_channels, self.lmax_local, self.mmax_local, 2),
-                        dtype=self.state.dtype, device=self.state.device,
+                        dtype=self.state.dtype,
+                        device=self.state.device,
                     )
                 if self.state.is_cuda:
                     eta_l.normal_(mean=0.0, std=1.0, generator=self.rng_gpu)
@@ -606,8 +622,7 @@ class DummyNoiseS2(BaseNoiseS2):
         """
 
         if mode not in ("constant_zero", "constant_random"):
-            raise ValueError(f"DummyNoiseS2: unknown mode '{mode}'. "
-                             f"Expected 'constant_zero' or 'constant_random'.")
+            raise ValueError(f"DummyNoiseS2: unknown mode '{mode}'. " f"Expected 'constant_zero' or 'constant_random'.")
 
         self.mode = mode
 

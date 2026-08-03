@@ -17,6 +17,7 @@ import torch
 from typing import Optional
 from contextlib import contextmanager
 
+
 @contextmanager
 def rng_context(cpu_rng: torch.Generator, device_rng: Optional[torch.Generator] = None):
     """

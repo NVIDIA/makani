@@ -15,7 +15,6 @@
 
 from typing import Union, Tuple
 
-import numpy as np
 
 import torch
 import torch.nn as nn
@@ -54,7 +53,10 @@ class Preprocessor2D(nn.Module):
         if self.history_normalization_mode == "exponential":
             self.history_normalization_decay = params.history_normalization_decay
             # inverse ordering, since first element is oldest
-            history_normalization_weights = torch.exp((-self.history_normalization_decay) * torch.arange(start=self.n_history, end=-1, step=-1, dtype=torch.float32))
+            history_normalization_weights = torch.exp(
+                (-self.history_normalization_decay)
+                * torch.arange(start=self.n_history, end=-1, step=-1, dtype=torch.float32)
+            )
             history_normalization_weights = history_normalization_weights / torch.sum(history_normalization_weights)
             history_normalization_weights = torch.reshape(history_normalization_weights, (1, -1, 1, 1, 1))
         elif self.history_normalization_mode == "mean":
@@ -70,7 +72,7 @@ class Preprocessor2D(nn.Module):
                 crop_shape=None,
                 crop_offset=(0, 0),
                 normalize=True,
-                distributed=True
+                distributed=True,
             )
 
         self.history_mean = None
@@ -115,8 +117,13 @@ class Preprocessor2D(nn.Module):
                 # here, ranks (0,1), (2,3), ... should map to the same eff rank, since they only differ by reflection but should otherwise get the
                 # same seed
                 ensemble_eff_rank = comm.get_rank("ensemble") // 2
-                reflect = (comm.get_rank("ensemble") % 2 == 0)
-                self.noise_base_seed = 333 + comm.get_rank("model") + comm.get_size("model") * ensemble_eff_rank + comm.get_size("model") * comm.get_size("ensemble") * comm.get_rank("batch")
+                reflect = comm.get_rank("ensemble") % 2 == 0
+                self.noise_base_seed = (
+                    333
+                    + comm.get_rank("model")
+                    + comm.get_size("model") * ensemble_eff_rank
+                    + comm.get_size("model") * comm.get_size("ensemble") * comm.get_rank("batch")
+                )
 
             if "type" not in noise_params:
                 raise ValueError("Error, please specify an input noise type")
@@ -153,7 +160,7 @@ class Preprocessor2D(nn.Module):
                     lmax=noise_lmax,
                     seed=self.noise_base_seed,
                     reflect=reflect,
-                    learnable=noise_params.get("learnable", False)
+                    learnable=noise_params.get("learnable", False),
                 )
             elif noise_params["type"] == "white":
                 from makani.models.noise import IsotropicGaussianRandomFieldS2
@@ -169,7 +176,7 @@ class Preprocessor2D(nn.Module):
                     lmax=noise_lmax,
                     seed=self.noise_base_seed,
                     reflect=reflect,
-                    learnable=noise_params.get("learnable", False)
+                    learnable=noise_params.get("learnable", False),
                 )
             elif noise_params["type"] == "dummy":
                 from makani.models.noise import DummyNoiseS2
@@ -238,14 +245,18 @@ class Preprocessor2D(nn.Module):
                     if self.n_history == 0:
                         self.unpredicted_inp_train.copy_(utar)
                     else:
-                        self.unpredicted_inp_train.copy_(torch.cat([self.unpredicted_inp_train[:, 1:, :, :, :], utar], dim=1))
+                        self.unpredicted_inp_train.copy_(
+                            torch.cat([self.unpredicted_inp_train[:, 1:, :, :, :], utar], dim=1)
+                        )
             else:
                 if (self.unpredicted_tar_eval is not None) and (step < self.unpredicted_tar_eval.shape[1]):
                     utar = self.unpredicted_tar_eval[:, step : (step + 1), :, :, :]
                     if self.n_history == 0:
                         self.unpredicted_inp_eval.copy_(utar)
                     else:
-                        self.unpredicted_inp_eval.copy_(torch.cat([self.unpredicted_inp_eval[:, 1:, :, :, :], utar], dim=1))
+                        self.unpredicted_inp_eval.copy_(
+                            torch.cat([self.unpredicted_inp_eval[:, 1:, :, :, :], utar], dim=1)
+                        )
 
         if self.n_history > 0:
             # this is more complicated
@@ -334,7 +345,9 @@ class Preprocessor2D(nn.Module):
             self.history_diff_mean = torch.mean(self.quadrature(xr[:, 1:, ...] - xr[:, 0:-1, ...]), dim=(1, 2))
 
             # time difference std
-            self.history_diff_var = torch.mean(self.quadrature(torch.square((xr[:, 1:, ...] - xr[:, 0:-1, ...]) - self.history_diff_mean)), dim=(1, 2))
+            self.history_diff_var = torch.mean(
+                self.quadrature(torch.square((xr[:, 1:, ...] - xr[:, 0:-1, ...]) - self.history_diff_mean)), dim=(1, 2)
+            )
 
             # time difference stds
             self.history_diff_mean = copy_to_parallel_region(self.history_diff_mean, "spatial")
@@ -356,7 +369,11 @@ class Preprocessor2D(nn.Module):
             self.history_mean = self.history_mean.reshape(b_, 1, c_, 1, 1)
 
             # compute std: (B, T, C, H, W) - (B, 1, C, 1, 1) broadcasts correctly
-            self.history_std = torch.sum(self.quadrature(torch.square(xr - self.history_mean) * self.history_normalization_weights), dim=1, keepdim=True)
+            self.history_std = torch.sum(
+                self.quadrature(torch.square(xr - self.history_mean) * self.history_normalization_weights),
+                dim=1,
+                keepdim=True,
+            )
             self.history_std = torch.sqrt(self.history_std.reshape(b_, 1, c_, 1, 1))
 
             # squeeze T dim → (B, C, 1, 1); spatial singletons broadcast in history_normalize
@@ -493,7 +510,7 @@ class Preprocessor2D(nn.Module):
         else:
             return None
 
-    def set_rng(self, reset = True, seed=333):
+    def set_rng(self, reset=True, seed=333):
         if hasattr(self, "input_noise"):
             self.input_noise.set_rng(seed)
             if reset:
@@ -544,7 +561,12 @@ class Preprocessor2D(nn.Module):
         """
         if hasattr(self, "input_noise"):
             current_batch = self.input_noise.state.shape[0]
-            if (batch_size is not None) and (not replace_state) and (current_batch != batch_size) and self.input_noise.is_stateful():
+            if (
+                (batch_size is not None)
+                and (not replace_state)
+                and (current_batch != batch_size)
+                and self.input_noise.is_stateful()
+            ):
                 raise RuntimeError(
                     f"update_internal_state: refusing to resize the stochastic noise state from "
                     f"batch {current_batch} to {batch_size} while continuing an autoregressive "
@@ -606,6 +628,7 @@ class Preprocessor2D(nn.Module):
         if hasattr(self, "bias_correction"):
             inp = inp - self.bias_correction
         return inp
+
 
 def get_preprocessor(params):
     return Preprocessor2D(params)

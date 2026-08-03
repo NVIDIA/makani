@@ -59,7 +59,9 @@ def sync_params(model, mode="broadcast"):
                 # tlist = [torch.empty_like(param_real) for x in range(comm.get_size(comm_group))]
                 # tlist[comm.get_rank(comm_group)] = param_real
                 # gather all weights in the comm group
-                dist.broadcast(param_real, src=comm.get_root(comm_group), group=comm.get_group(comm_group), async_op=False)
+                dist.broadcast(
+                    param_real, src=comm.get_root(comm_group), group=comm.get_group(comm_group), async_op=False
+                )
                 # use weight of rank 0
                 # important to use copy here otherwise the handle gets detaches from the optimizer
                 if is_complex:
@@ -69,7 +71,12 @@ def sync_params(model, mode="broadcast"):
             elif mode == "mean":
                 is_complex = param.is_complex()
                 if is_complex:
-                    dist.all_reduce(torch.view_as_real(param), op=dist.ReduceOp.AVG, group=comm.get_group(comm_group), async_op=False)
+                    dist.all_reduce(
+                        torch.view_as_real(param),
+                        op=dist.ReduceOp.AVG,
+                        group=comm.get_group(comm_group),
+                        async_op=False,
+                    )
                 else:
                     dist.all_reduce(param, op=dist.ReduceOp.AVG, group=comm.get_group(comm_group), async_op=False)
             else:

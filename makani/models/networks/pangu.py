@@ -16,7 +16,6 @@
 import torch
 import torch.nn as nn
 import math
-import sys
 import numpy as np
 from collections.abc import Sequence
 
@@ -36,6 +35,7 @@ from makani.utils import features
 from torch.utils.checkpoint import checkpoint
 
 ### Helpers: Sliding window attention and earth positional bias #####
+
 
 def get_earth_position_index(window_size, ndim=3):
     """
@@ -95,6 +95,7 @@ def get_earth_position_index(window_size, ndim=3):
 
     return position_index
 
+
 def get_pad3d(input_resolution, window_size):
     """
     Args:
@@ -107,9 +108,7 @@ def get_pad3d(input_resolution, window_size):
     Pl, Lat, Lon = input_resolution
     win_pl, win_lat, win_lon = window_size
 
-    padding_left = (
-        padding_right
-    ) = padding_top = padding_bottom = padding_front = padding_back = 0
+    padding_left = padding_right = padding_top = padding_bottom = padding_front = padding_back = 0
     pl_remainder = Pl % win_pl
     lat_remainder = Lat % win_lat
     lon_remainder = Lon % win_lon
@@ -136,6 +135,7 @@ def get_pad3d(input_resolution, window_size):
         padding_back,
     )
 
+
 def get_pad2d(input_resolution, window_size):
     """
     Args:
@@ -149,6 +149,7 @@ def get_pad2d(input_resolution, window_size):
     window_size = [2] + list(window_size)
     padding = get_pad3d(input_resolution, window_size)
     return padding[:4]
+
 
 def crop2d(x: torch.Tensor, resolution):
     """
@@ -166,9 +167,8 @@ def crop2d(x: torch.Tensor, resolution):
     padding_left = lon_pad // 2
     padding_right = lon_pad - padding_left
 
-    return x[
-        :, :, padding_top : Lat - padding_bottom, padding_left : Lon - padding_right
-    ]
+    return x[:, :, padding_top : Lat - padding_bottom, padding_left : Lon - padding_right]
+
 
 def crop3d(x: torch.Tensor, resolution):
     """
@@ -197,6 +197,7 @@ def crop3d(x: torch.Tensor, resolution):
         padding_left : Lon - padding_right,
     ]
 
+
 def window_partition(x: torch.Tensor, window_size, ndim=3):
     """
     Args:
@@ -210,9 +211,7 @@ def window_partition(x: torch.Tensor, window_size, ndim=3):
     if ndim == 3:
         B, Pl, Lat, Lon, C = x.shape
         win_pl, win_lat, win_lon = window_size
-        x = x.view(
-            B, Pl // win_pl, win_pl, Lat // win_lat, win_lat, Lon // win_lon, win_lon, C
-        )
+        x = x.view(B, Pl // win_pl, win_pl, Lat // win_lat, win_lat, Lon // win_lon, win_lon, C)
         windows = (
             x.permute(0, 5, 1, 3, 2, 4, 6, 7)
             .contiguous()
@@ -223,12 +222,9 @@ def window_partition(x: torch.Tensor, window_size, ndim=3):
         B, Lat, Lon, C = x.shape
         win_lat, win_lon = window_size
         x = x.view(B, Lat // win_lat, win_lat, Lon // win_lon, win_lon, C)
-        windows = (
-            x.permute(0, 3, 1, 2, 4, 5)
-            .contiguous()
-            .view(-1, (Lat // win_lat), win_lat, win_lon, C)
-        )
+        windows = x.permute(0, 3, 1, 2, 4, 5).contiguous().view(-1, (Lat // win_lat), win_lat, win_lon, C)
         return windows
+
 
 def window_reverse(windows, window_size, Pl=1, Lat=1, Lon=1, ndim=3):
     """
@@ -264,6 +260,7 @@ def window_reverse(windows, window_size, Pl=1, Lat=1, Lon=1, ndim=3):
         x = windows.view(B, Lon // win_lon, Lat // win_lat, win_lat, win_lon, -1)
         x = x.permute(0, 2, 3, 1, 4, 5).reshape(B, Lat, Lon, -1)
         return x
+
 
 def get_shift_window_mask(input_resolution, window_size, shift_size, ndim=3):
     """
@@ -330,16 +327,14 @@ def get_shift_window_mask(input_resolution, window_size, shift_size, ndim=3):
         win_total = win_pl * win_lat * win_lon
     elif ndim == 2:
         win_total = win_lat * win_lon
-    mask_windows = mask_windows.view(
-        mask_windows.shape[0], mask_windows.shape[1], win_total
-    )
+    mask_windows = mask_windows.view(mask_windows.shape[0], mask_windows.shape[1], win_total)
     attn_mask = mask_windows.unsqueeze(2) - mask_windows.unsqueeze(3)
-    attn_mask = attn_mask.masked_fill(attn_mask != 0, float(-100.0)).masked_fill(
-        attn_mask == 0, float(0.0)
-    )
+    attn_mask = attn_mask.masked_fill(attn_mask != 0, float(-100.0)).masked_fill(attn_mask == 0, float(0.0))
     return attn_mask
 
+
 ###############
+
 
 class EarthAttention3D(nn.Module):
     """
@@ -379,24 +374,18 @@ class EarthAttention3D(nn.Module):
         self.use_sdpa = use_sdpa
         self.attn_drop = attn_drop
 
-        self.type_of_windows = (input_resolution[0] // window_size[0]) * (
-            input_resolution[1] // window_size[1]
-        )
+        self.type_of_windows = (input_resolution[0] // window_size[0]) * (input_resolution[1] // window_size[1])
         self.num_lon = input_resolution[2] // window_size[2]
 
         self.earth_position_bias_table = nn.Parameter(
             torch.zeros(
-                (window_size[0] ** 2)
-                * (window_size[1] ** 2)
-                * (window_size[2] * 2 - 1),
+                (window_size[0] ** 2) * (window_size[1] ** 2) * (window_size[2] * 2 - 1),
                 self.type_of_windows,
                 num_heads,
             )
         )  # Wpl**2 * Wlat**2 * Wlon*2-1, Npl//Wpl * Nlat//Wlat, nH
 
-        earth_position_index = get_earth_position_index(
-            window_size
-        )  # Wpl*Wlat*Wlon, Wpl*Wlat*Wlon
+        earth_position_index = get_earth_position_index(window_size)  # Wpl*Wlat*Wlon, Wpl*Wlat*Wlon
         self.register_buffer("earth_position_index", earth_position_index, persistent=False)
 
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
@@ -404,9 +393,7 @@ class EarthAttention3D(nn.Module):
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
-        self.earth_position_bias_table = nn.init.trunc_normal_(
-            self.earth_position_bias_table, std=0.02
-        )
+        self.earth_position_bias_table = nn.init.trunc_normal_(self.earth_position_bias_table, std=0.02)
         self.softmax = nn.Softmax(dim=-1)
 
     def calculate_attn(self, q, k):
@@ -422,9 +409,7 @@ class EarthAttention3D(nn.Module):
         return x
 
     def extract_earth_pos_bias(self):
-        earth_position_bias = self.earth_position_bias_table[
-            self.earth_position_index.view(-1)
-        ].view(
+        earth_position_bias = self.earth_position_bias_table[self.earth_position_index.view(-1)].view(
             self.window_size[0] * self.window_size[1] * self.window_size[2],
             self.window_size[0] * self.window_size[1] * self.window_size[2],
             self.type_of_windows,
@@ -438,9 +423,7 @@ class EarthAttention3D(nn.Module):
 
     def apply_mask(self, attn, mask, B_, nW_, N):
         nLon = mask.shape[0]
-        attn = attn.view(
-            B_ // nLon, nLon, self.num_heads, nW_, N, N
-        ) + mask.unsqueeze(1).unsqueeze(0)
+        attn = attn.view(B_ // nLon, nLon, self.num_heads, nW_, N, N) + mask.unsqueeze(1).unsqueeze(0)
         attn = attn.view(-1, self.num_heads, nW_, N, N)
         attn = self.softmax(attn)
 
@@ -454,11 +437,7 @@ class EarthAttention3D(nn.Module):
         """
 
         B_, nW_, N, C = x.shape
-        qkv = (
-            self.qkv(x)
-            .reshape(B_, nW_, N, 3, self.num_heads, C // self.num_heads)
-            .permute(3, 0, 4, 1, 2, 5)
-        )
+        qkv = self.qkv(x).reshape(B_, nW_, N, 3, self.num_heads, C // self.num_heads).permute(3, 0, 4, 1, 2, 5)
         q, k, v = qkv[0], qkv[1], qkv[2]
 
         earth_position_bias = self.extract_earth_pos_bias()
@@ -466,7 +445,7 @@ class EarthAttention3D(nn.Module):
         if not self.use_sdpa:
             q_new = q * self.scale
 
-            attn = self.calculate_attn(q_new,k)
+            attn = self.calculate_attn(q_new, k)
 
             attn = self.add_earth_pos_bias(attn, earth_position_bias)
 
@@ -483,7 +462,7 @@ class EarthAttention3D(nn.Module):
             if mask is not None:
                 bias = mask.unsqueeze(1).unsqueeze(0) + earth_position_bias.unsqueeze(0).unsqueeze(0)
                 # squeeze the bias if needed in dim 2
-                #bias = bias.squeeze(2)
+                # bias = bias.squeeze(2)
             else:
                 bias = earth_position_bias.unsqueeze(0)
 
@@ -493,7 +472,9 @@ class EarthAttention3D(nn.Module):
             k = k.view(B_ // nLon, nLon, k.shape[1], k.shape[2], k.shape[3], k.shape[4])
             v = v.view(B_ // nLon, nLon, v.shape[1], v.shape[2], v.shape[3], v.shape[4])
             ####
-            x = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=bias, scale=self.scale, dropout_p=self.attn_drop)
+            x = torch.nn.functional.scaled_dot_product_attention(
+                q, k, v, attn_mask=bias, scale=self.scale, dropout_p=self.attn_drop
+            )
             x = x.permute(0, 1, 3, 4, 2, 5).reshape(B_, nW_, N, C)
 
         # projection
@@ -501,6 +482,7 @@ class EarthAttention3D(nn.Module):
         x = self.proj_drop(x)
 
         return x
+
 
 class Transformer3DBlock(nn.Module):
     """
@@ -579,7 +561,7 @@ class Transformer3DBlock(nn.Module):
             act_layer=act_layer,
             input_format="traditional",
             drop_rate=drop,
-            checkpointing=(checkpointing_level>=2),
+            checkpointing=(checkpointing_level >= 2),
         )
 
         shift_pl, shift_lat, shift_lon = self.shift_size
@@ -610,9 +592,7 @@ class Transformer3DBlock(nn.Module):
 
         shift_pl, shift_lat, shift_lon = self.shift_size
         if self.roll:
-            shifted_x = torch.roll(
-                x, shifts=(-shift_pl, -shift_lat, -shift_lat), dims=(1, 2, 3)
-            )
+            shifted_x = torch.roll(x, shifts=(-shift_pl, -shift_lat, -shift_lat), dims=(1, 2, 3))
             x_windows = window_partition(shifted_x, self.window_size)
             # B*num_lon, num_pl*num_lat, win_pl, win_lat, win_lon, C
         else:
@@ -621,9 +601,7 @@ class Transformer3DBlock(nn.Module):
             # B*num_lon, num_pl*num_lat, win_pl, win_lat, win_lon, C
 
         win_pl, win_lat, win_lon = self.window_size
-        x_windows = x_windows.view(
-            x_windows.shape[0], x_windows.shape[1], win_pl * win_lat * win_lon, C
-        )
+        x_windows = x_windows.view(x_windows.shape[0], x_windows.shape[1], win_pl * win_lat * win_lon, C)
         # B*num_lon, num_pl*num_lat, win_pl*win_lat*win_lon, C
 
         if self.checkpointing_level > 0:
@@ -633,28 +611,18 @@ class Transformer3DBlock(nn.Module):
                 x_windows, mask=self.attn_mask
             )  # B*num_lon, num_pl*num_lat, win_pl*win_lat*win_lon, C
 
-        attn_windows = attn_windows.view(
-            attn_windows.shape[0], attn_windows.shape[1], win_pl, win_lat, win_lon, C
-        )
+        attn_windows = attn_windows.view(attn_windows.shape[0], attn_windows.shape[1], win_pl, win_lat, win_lon, C)
 
         if self.roll:
-            shifted_x = window_reverse(
-                attn_windows, self.window_size, Pl=Pl_pad, Lat=Lat_pad, Lon=Lon_pad
-            )
+            shifted_x = window_reverse(attn_windows, self.window_size, Pl=Pl_pad, Lat=Lat_pad, Lon=Lon_pad)
             # B * Pl * Lat * Lon * C
-            x = torch.roll(
-                shifted_x, shifts=(shift_pl, shift_lat, shift_lon), dims=(1, 2, 3)
-            )
+            x = torch.roll(shifted_x, shifts=(shift_pl, shift_lat, shift_lon), dims=(1, 2, 3))
         else:
-            shifted_x = window_reverse(
-                attn_windows, self.window_size, Pl=Pl_pad, Lat=Lat_pad, Lon=Lon_pad
-            )
+            shifted_x = window_reverse(attn_windows, self.window_size, Pl=Pl_pad, Lat=Lat_pad, Lon=Lon_pad)
             x = shifted_x
 
         # crop, end pad
-        x = crop3d(x.permute(0, 4, 1, 2, 3), self.input_resolution).permute(
-            0, 2, 3, 4, 1
-        )
+        x = crop3d(x.permute(0, 4, 1, 2, 3), self.input_resolution).permute(0, 2, 3, 4, 1)
 
         x = x.reshape(B, Pl * Lat * Lon, C)
         x = shortcut + self.drop_path(x)
@@ -662,6 +630,7 @@ class Transformer3DBlock(nn.Module):
         x = x + self.drop_path(self.mlp(self.norm2(x)))
 
         return x
+
 
 class FuserLayer(nn.Module):
     """Revise from WeatherLearn https://github.com/lizhuoq/WeatherLearn
@@ -711,7 +680,7 @@ class FuserLayer(nn.Module):
                     input_resolution=input_resolution,
                     num_heads=num_heads,
                     window_size=window_size,
-                    #shift_size=(0, 0, 0) if i % 2 == 0 else None,
+                    # shift_size=(0, 0, 0) if i % 2 == 0 else None,
                     shift_size=[0 if i % 2 == 0 else w // 2 for w in window_size],
                     mlp_ratio=mlp_ratio,
                     qkv_bias=qkv_bias,
@@ -731,23 +700,25 @@ class FuserLayer(nn.Module):
             x = blk(x)
         return x
 
+
 class Pangu(nn.Module):
-    """ Pangu-Weather implementation as in Bi et al.; Pangu-Weather: A 3D High-Resolution Model for Fast and Accurate Global Weather Forecast
+    """Pangu-Weather implementation as in Bi et al.; Pangu-Weather: A 3D High-Resolution Model for Fast and Accurate Global Weather Forecast
     - https://arxiv.org/abs/2211.02556
     """
 
-    def __init__(self,
-        inp_shape=(721,1440),
-        out_shape=(721,1440),
+    def __init__(
+        self,
+        inp_shape=(721, 1440),
+        out_shape=(721, 1440),
         grid_in="equiangular",
         grid_out="equiangular",
         inp_chans=5,
         out_chans=5,
-        patch_size=(2,8,8),
+        patch_size=(2, 8, 8),
         embed_dim=8,
-        depth_layers=(1,1,1,1),
-        num_heads=(1,1,1,1),
-        window_size=(2,6,12),
+        depth_layers=(1, 1, 1, 1),
+        num_heads=(1, 1, 1, 1),
+        window_size=(2, 6, 12),
         num_surface=2,
         num_atmospheric=3,
         num_levels=1,
@@ -777,7 +748,7 @@ class Pangu(nn.Module):
         # Add static channels to surface
         self.num_aux = len(self.aux_channel_names)
         N_total_surface = self.num_aux + self.num_surface
-        self.has_surface = (N_total_surface > 0)
+        self.has_surface = N_total_surface > 0
 
         # compute static permutations to extract
         self._precompute_channel_groups(self.channel_names, self.aux_channel_names)
@@ -816,7 +787,7 @@ class Pangu(nn.Module):
             num_heads=num_heads[0],
             window_size=window_size,
             drop_path=drop_path[:2],
-            checkpointing_level=self.checkpointing_level
+            checkpointing_level=self.checkpointing_level,
         )
 
         patched_inp_shape_downsample = (
@@ -838,7 +809,7 @@ class Pangu(nn.Module):
             num_heads=num_heads[1],
             window_size=window_size,
             drop_path=drop_path[2:],
-            checkpointing_level=self.checkpointing_level
+            checkpointing_level=self.checkpointing_level,
         )
 
         self.layer3 = FuserLayer(
@@ -848,12 +819,10 @@ class Pangu(nn.Module):
             num_heads=num_heads[2],
             window_size=window_size,
             drop_path=drop_path[2:],
-            checkpointing_level=self.checkpointing_level
+            checkpointing_level=self.checkpointing_level,
         )
 
-        self.upsample = UpSample3D(
-            embed_dim * 2, embed_dim, patched_inp_shape_downsample, patched_inp_shape
-        )
+        self.upsample = UpSample3D(embed_dim * 2, embed_dim, patched_inp_shape_downsample, patched_inp_shape)
 
         self.layer4 = FuserLayer(
             dim=embed_dim,
@@ -862,12 +831,10 @@ class Pangu(nn.Module):
             num_heads=num_heads[3],
             window_size=window_size,
             drop_path=drop_path[:2],
-            checkpointing_level=self.checkpointing_level
+            checkpointing_level=self.checkpointing_level,
         )
 
-        self.patchrecovery2d = PatchRecovery2D(
-            self.inp_shape, patch_size[1:], 2 * embed_dim, num_surface
-        )
+        self.patchrecovery2d = PatchRecovery2D(self.inp_shape, patch_size[1:], 2 * embed_dim, num_surface)
         self.patchrecovery3d = PatchRecovery3D(
             (num_levels, self.inp_shape[0], self.inp_shape[1]), patch_size, 2 * embed_dim, num_atmospheric
         )
@@ -881,7 +848,9 @@ class Pangu(nn.Module):
         Group the channels appropriately into atmospheric pressure levels and surface variables
         """
 
-        atmo_chans, surf_chans, dyn_aux_chans, stat_aux_chans, pressure_lvls = features.get_channel_groups(channel_names, aux_channel_names)
+        atmo_chans, surf_chans, dyn_aux_chans, stat_aux_chans, pressure_lvls = features.get_channel_groups(
+            channel_names, aux_channel_names
+        )
         aux_chans = dyn_aux_chans + stat_aux_chans
 
         # compute how many channel groups will be kept internally
@@ -890,7 +859,9 @@ class Pangu(nn.Module):
 
         # make sure they are divisible. Attention! This does not guarantee that the grrouping is correct
         if len(atmo_chans) % self.n_atmo_groups:
-            raise ValueError(f"Expected number of atmospheric variables to be divisible by number of atmospheric groups but got {len(atmo_chans)} and {self.n_atmo_groups}")
+            raise ValueError(
+                f"Expected number of atmospheric variables to be divisible by number of atmospheric groups but got {len(atmo_chans)} and {self.n_atmo_groups}"
+            )
 
         self.register_buffer("atmo_channels", torch.tensor(atmo_chans, dtype=torch.long), persistent=False)
         self.register_buffer("surf_channels", torch.tensor(surf_chans, dtype=torch.long), persistent=False)
@@ -904,12 +875,11 @@ class Pangu(nn.Module):
         # build it once here as index buffers instead of recomputing numpy ops
         # (np.unique / sorted) on every forward -- those would graph-break under
         # torch.compile.
-        levels = np.unique([value[1:] for value in channel_names[self.num_surface:]]).tolist()
+        levels = np.unique([value[1:] for value in channel_names[self.num_surface :]]).tolist()
         levels = sorted(levels, key=lambda x: int(x))
         if len(levels) != self.num_levels:
             raise ValueError(
-                f"Expected {self.num_levels} pressure levels from channel_names but parsed "
-                f"{len(levels)}: {levels}"
+                f"Expected {self.num_levels} pressure levels from channel_names but parsed " f"{len(levels)}: {levels}"
             )
         level_dict = {level: [idx for idx, value in enumerate(channel_names) if value[1:] == level] for level in levels}
 
@@ -951,8 +921,12 @@ class Pangu(nn.Module):
         # Flatten & reorder the output atmospheric back to the original channel order
         # using the precomputed permutation buffer (vectorized scatter; no numpy and
         # no Python loop in the forward path).
-        flattened_atmospheric = output_atmospheric.reshape(output_atmospheric.shape[0], -1, output_atmospheric.shape[3], output_atmospheric.shape[4])
-        reordered_atmospheric = torch.cat([torch.zeros_like(output_surface), torch.zeros_like(flattened_atmospheric)], dim=1)
+        flattened_atmospheric = output_atmospheric.reshape(
+            output_atmospheric.shape[0], -1, output_atmospheric.shape[3], output_atmospheric.shape[4]
+        )
+        reordered_atmospheric = torch.cat(
+            [torch.zeros_like(output_surface), torch.zeros_like(flattened_atmospheric)], dim=1
+        )
         reordered_atmospheric[:, self.reordered_ids, :, :] = flattened_atmospheric
 
         # Append the surface output, this has not been reordered.

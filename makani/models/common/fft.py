@@ -37,7 +37,7 @@ class RealFFT1(nn.Module):
         self.lmax = min(lmax or self.nlon // 2 + 1, self.nlon // 2 + 1)
         self.mmax = min(mmax or self.nlon // 2 + 1, self.lmax)
 
-    def forward(self, x: torch.Tensor, norm: Optional[str]="ortho") -> torch.Tensor:
+    def forward(self, x: torch.Tensor, norm: Optional[str] = "ortho") -> torch.Tensor:
         y = self.fft_handle(x, n=self.nlon, dim=-1, norm=norm)
 
         # mode truncation
@@ -61,7 +61,7 @@ class InverseRealFFT1(nn.Module):
         self.lmax = min(lmax or self.nlon // 2 + 1, self.nlon // 2 + 1)
         self.mmax = min(mmax or self.nlon // 2 + 1, self.lmax)
 
-    def forward(self, x: torch.Tensor, norm: Optional[str]="ortho") -> torch.Tensor:
+    def forward(self, x: torch.Tensor, norm: Optional[str] = "ortho") -> torch.Tensor:
         # implicit padding
         y = self.ifft_handle(x, n=self.nlon, dim=-1, norm=norm)
 
@@ -91,7 +91,7 @@ class RealFFT2(nn.Module):
         self.lmax_high = math.ceil(self.lmax / 2)
         self.lmax_low = math.floor(self.lmax / 2)
 
-    def forward(self, x: torch.Tensor, norm: Optional[str]="ortho") -> torch.Tensor:
+    def forward(self, x: torch.Tensor, norm: Optional[str] = "ortho") -> torch.Tensor:
         y = self.fft_handle(x, s=(self.nlat, self.nlon), dim=(-2, -1), norm=norm)
 
         if self.truncate:
@@ -123,7 +123,7 @@ class InverseRealFFT2(nn.Module):
         self.lmax_high = math.ceil(self.lmax / 2)
         self.lmax_low = math.floor(self.lmax / 2)
 
-    def forward(self, x: torch.Tensor, norm: Optional[str]="ortho") -> torch.Tensor:
+    def forward(self, x: torch.Tensor, norm: Optional[str] = "ortho") -> torch.Tensor:
         # truncation is implicit but better do it manually
         xt = x[..., : self.mmax]
 

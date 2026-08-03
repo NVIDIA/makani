@@ -27,14 +27,38 @@ from makani.utils import comm
 # loss stuff
 from makani.utils.dataloaders.data_helpers import get_data_normalization
 from makani.utils.losses import LossType
-from makani.utils.metrics.functions import GeometricL1, GeometricRMSE, GeometricACC, GeometricSpread, GeometricSSR, GeometricCRPS, GeometricRankHistogram, Quadrature
+from makani.utils.metrics.functions import (
+    GeometricL1,
+    GeometricRMSE,
+    GeometricACC,
+    GeometricSpread,
+    GeometricSSR,
+    GeometricCRPS,
+    GeometricRankHistogram,
+    Quadrature,
+)
 import torch.distributed as dist
 from torch_harmonics.distributed import compute_split_shapes
 from makani.mpu.mappings import gather_from_parallel_region, reduce_from_parallel_region
 
 
 class MetricRollout:
-    def __init__(self, metric_name, metric_channels, metric_handle, channel_names, num_rollout_steps, dtphys, device, aux_shape=None, aux_shape_finalized=None, scale=None, mask_target_nan=True, integrate=False, report_metric=True):
+    def __init__(
+        self,
+        metric_name,
+        metric_channels,
+        metric_handle,
+        channel_names,
+        num_rollout_steps,
+        dtphys,
+        device,
+        aux_shape=None,
+        aux_shape_finalized=None,
+        scale=None,
+        mask_target_nan=True,
+        integrate=False,
+        report_metric=True,
+    ):
 
         # store members
         self.metric_name = metric_name
@@ -55,10 +79,10 @@ class MetricRollout:
         # instantiate handle
         self.metric_func = metric_handle().to(self.device)
         self.metric_type = self.metric_func.type
-        #self.metric_func = torch.compile(self.metric_func, mode="max-autotune-no-cudagraphs")
+        # self.metric_func = torch.compile(self.metric_func, mode="max-autotune-no-cudagraphs")
 
         if self.metric_func.batch_reduction == "none":
-            raise ValueError(f"Batch reduction mode 'none' is not supported for rollout handlers")
+            raise ValueError("Batch reduction mode 'none' is not supported for rollout handlers")
 
         # get mapping from channels to all channels
         self.channel_mask = [channel_names.index(c) for c in metric_channels]
@@ -82,17 +106,21 @@ class MetricRollout:
         pin_memory = self.device.type == "cuda"
 
         if self.aux_shape_finalized is None:
-            data_shape_finalized  = (self.num_rollout_steps, self.num_channels)
-            integral_shape = (self.num_channels)
+            data_shape_finalized = (self.num_rollout_steps, self.num_channels)
+            integral_shape = self.num_channels
         else:
             data_shape_finalized = (self.num_rollout_steps, self.num_channels, *self.aux_shape_finalized)
             integral_shape = (self.num_channels, *self.aux_shape_finalized)
 
-        self.rollout_curve_cpu = torch.zeros(data_shape_finalized, dtype=torch.float32, device="cpu", pin_memory=pin_memory)
+        self.rollout_curve_cpu = torch.zeros(
+            data_shape_finalized, dtype=torch.float32, device="cpu", pin_memory=pin_memory
+        )
 
         if self.integrate:
             self.rollout_integral = torch.zeros(integral_shape, dtype=torch.float32, device=self.device)
-            self.rollout_integral_cpu = torch.zeros(integral_shape, dtype=torch.float32, device="cpu", pin_memory=pin_memory)
+            self.rollout_integral_cpu = torch.zeros(
+                integral_shape, dtype=torch.float32, device="cpu", pin_memory=pin_memory
+            )
             self.simpquad = Quadrature(self.num_rollout_steps - 1, 1.0 / float(self.num_rollout_steps), self.device)
 
     @property
@@ -165,11 +193,15 @@ class MetricRollout:
                 # values
                 vallist = [torch.empty_like(self.rollout_curve) for _ in range(comm.get_size("batch"))]
                 vallist[comm.get_rank("batch")] = self.rollout_curve
-                valreq = dist.all_gather(vallist, self.rollout_curve, group=comm.get_group("batch"), async_op=non_blocking)
+                valreq = dist.all_gather(
+                    vallist, self.rollout_curve, group=comm.get_group("batch"), async_op=non_blocking
+                )
                 # counter
                 countlist = [torch.empty_like(self.rollout_counter) for _ in range(comm.get_size("batch"))]
                 countlist[comm.get_rank("batch")] = self.rollout_counter
-                countreq = dist.all_gather(countlist, self.rollout_counter, group=comm.get_group("batch"), async_op=non_blocking)
+                countreq = dist.all_gather(
+                    countlist, self.rollout_counter, group=comm.get_group("batch"), async_op=non_blocking
+                )
                 if valreq is not None:
                     valreq.wait()
                 if countreq is not None:
@@ -207,7 +239,9 @@ class MetricRollout:
             if self.integrate:
                 rollout_integral_arr = self.rollout_integral_cpu.numpy()
                 for idx, var_name in enumerate(self.metric_channels):
-                    log[f"{self.metric_name} AUC {var_name}({self.num_rollout_steps * self.dtphys})"] = rollout_integral_arr[idx]
+                    log[f"{self.metric_name} AUC {var_name}({self.num_rollout_steps * self.dtphys})"] = (
+                        rollout_integral_arr[idx]
+                    )
 
         report = log
 
@@ -216,7 +250,9 @@ class MetricRollout:
                 table_data = []
                 for d in range(0, self.num_rollout_steps):
                     for idx, var_name in enumerate(self.metric_channels):
-                        table_data.append([self.metric_name, var_name, (d + 1) * self.dtphys, rollout_curve_arr[d, idx]])
+                        table_data.append(
+                            [self.metric_name, var_name, (d + 1) * self.dtphys, rollout_curve_arr[d, idx]]
+                        )
 
                 report = (log, table_data)
             else:
@@ -257,7 +293,7 @@ class MetricsHandler:
 
         # set a stream
         if self.device.type == "cuda":
-            self.stream = torch.Stream(device='cuda')
+            self.stream = torch.Stream(device="cuda")
         else:
             self.stream = None
 
@@ -277,7 +313,7 @@ class MetricsHandler:
         # split channels not supported atm
         self.split_data_channels = params.split_data_channels
         if self.split_data_channels:
-            raise NotImplementedError(f"Error, split_data_channels is not supported")
+            raise NotImplementedError("Error, split_data_channels is not supported")
 
         # load normalization term:
         bias, scale = get_data_normalization(params)
@@ -314,7 +350,9 @@ class MetricsHandler:
             if grid_type == "equiangular":
                 grid_type = "weatherbench2"
             else:
-                raise ValueError(f"weatherbench2 compatibility only supported on equiangular grids. Got {grid_type} instead")
+                raise ValueError(
+                    f"weatherbench2 compatibility only supported on equiangular grids. Got {grid_type} instead"
+                )
 
         # set up handles
         self.metric_handles = []
@@ -537,8 +575,8 @@ class MetricsHandler:
                     num_rollout_steps=self.num_rollout_steps,
                     dtphys=self.dtxdh,
                     device=self.device,
-                    aux_shape=(ens_size+1,),
-                    aux_shape_finalized=(ens_size+1,),
+                    aux_shape=(ens_size + 1,),
+                    aux_shape_finalized=(ens_size + 1,),
                     integrate=False,
                     mask_target_nan=self.mask_target_nan,
                     report_metric=False,
@@ -588,7 +626,9 @@ class MetricsHandler:
         if prediction.dim() == 5:
             prediction_mean = torch.mean(prediction, dim=1)
             if self.ensemble_distributed:
-                prediction_mean = reduce_from_parallel_region(prediction_mean, "ensemble") / float(comm.get_size("ensemble"))
+                prediction_mean = reduce_from_parallel_region(prediction_mean, "ensemble") / float(
+                    comm.get_size("ensemble")
+                )
         else:
             prediction_mean = prediction
             prediction = prediction.unsqueeze(1)
@@ -624,7 +664,9 @@ class MetricsHandler:
             with torch.cuda.stream(self.stream):
 
                 if dist.is_initialized():
-                    req = dist.all_reduce(self.valid_buffer, op=dist.ReduceOp.SUM, group=comm.get_group("batch"), async_op=True)
+                    req = dist.all_reduce(
+                        self.valid_buffer, op=dist.ReduceOp.SUM, group=comm.get_group("batch"), async_op=True
+                    )
                     req.wait()
 
                 for handle in self.metric_handles:
@@ -662,7 +704,9 @@ class MetricsHandler:
                 table_data += tmptable
 
             # add table
-            logs["metrics"]["rollouts"] = wandb.Table(data=table_data, columns=["metric type", "variable name", "time [h]", "value"])
+            logs["metrics"]["rollouts"] = wandb.Table(
+                data=table_data, columns=["metric type", "variable name", "time [h]", "value"]
+            )
 
         self.logs = logs
 
@@ -686,7 +730,9 @@ class MetricsHandler:
             # make dimension scales
             dset = handle_group.create_dataset("channel", data=handle.metric_channels)
             dset.make_scale("channel")
-            dset = handle_group.create_dataset("lead_time", data=handle.dtphys * torch.arange(1, handle.num_rollout_steps+1).numpy())
+            dset = handle_group.create_dataset(
+                "lead_time", data=handle.dtphys * torch.arange(1, handle.num_rollout_steps + 1).numpy()
+            )
             dset.make_scale("lead_time")
 
             # annotate

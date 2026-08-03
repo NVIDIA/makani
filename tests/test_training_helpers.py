@@ -17,9 +17,16 @@ import unittest
 import torch
 import torch.nn as nn
 
-from makani.utils.training.training_helpers import clip_grads, _compute_total_grad_norm, normalize_weights, get_parameter_groups
+from makani.utils.training.training_helpers import (
+    clip_grads,
+    _compute_total_grad_norm,
+    normalize_weights,
+    get_parameter_groups,
+)
 
-import sys, os
+import sys
+import os
+
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from .testutils import set_seed, disable_tf32
 
@@ -197,7 +204,7 @@ class TestNormalizeWeights(unittest.TestCase):
         # after normalization the parameter should be a positive scalar multiple
         # of the original — compare unit vectors to avoid dividing by zero
         unit_before = original / original.norm()
-        unit_after  = p.data / p.data.norm()
+        unit_after = p.data / p.data.norm()
         self.assertTrue(torch.allclose(unit_after, unit_before, atol=1e-5))
 
     def test_complex_params_supported(self):
@@ -225,12 +232,12 @@ class _WeirdNorm(nn.Module):
 class _ParamGroupNet(nn.Module):
     def __init__(self):
         super().__init__()
-        self.lin = nn.Linear(8, 8)                                   # weight(2D)->decay, bias(1D)->no_decay
-        self.conv = nn.Conv2d(4, 4, 1)                               # weight(4D)->decay, bias(1D)->no_decay
-        self.ln = nn.LayerNorm(8)                                    # weight/bias -> no_decay (module type)
-        self.wnorm = _WeirdNorm(4)                                   # 2D gain -> no_decay only via module type
-        self.expanded_bias = nn.Parameter(torch.zeros(1, 4, 1, 1))   # 4D bias -> no_decay BY NAME
-        self.plain_weight = nn.Parameter(torch.randn(8, 8))          # 2D weight -> decay
+        self.lin = nn.Linear(8, 8)  # weight(2D)->decay, bias(1D)->no_decay
+        self.conv = nn.Conv2d(4, 4, 1)  # weight(4D)->decay, bias(1D)->no_decay
+        self.ln = nn.LayerNorm(8)  # weight/bias -> no_decay (module type)
+        self.wnorm = _WeirdNorm(4)  # 2D gain -> no_decay only via module type
+        self.expanded_bias = nn.Parameter(torch.zeros(1, 4, 1, 1))  # 4D bias -> no_decay BY NAME
+        self.plain_weight = nn.Parameter(torch.randn(8, 8))  # 2D weight -> decay
 
     def forward(self, x):
         return x
@@ -268,8 +275,7 @@ class TestParameterGroups(unittest.TestCase):
 
         # biases (incl. the 4-D expanded one) and all norm affine params (incl. the
         # 2-D weird-norm gain) are excluded from weight decay
-        for nm in ("lin.bias", "conv.bias", "expanded_bias",
-                   "ln.weight", "ln.bias", "wnorm.weight", "wnorm.bias"):
+        for nm in ("lin.bias", "conv.bias", "expanded_bias", "ln.weight", "ln.bias", "wnorm.weight", "wnorm.bias"):
             self.assertIn(id(named[nm]), no_decay_ids, f"{nm} should be in the no-decay group")
 
         # partition is exact: every param classified once, no overlap

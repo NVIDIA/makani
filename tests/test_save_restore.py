@@ -56,7 +56,7 @@ class TestSaveRestore(unittest.TestCase):
     def test_get_latest_checkpoint_version(self):
 
         def create_empty(filename):
-            with open(filename, 'w') as fp:
+            with open(filename, "w") as fp:
                 pass
 
         with tempfile.TemporaryDirectory() as tempdir:
@@ -80,23 +80,28 @@ class TestSaveRestore(unittest.TestCase):
         version = get_latest_checkpoint_version("checkpoint_mp0.tar")
         self.assertTrue(version == 0)
 
-
     @parameterized.expand(["legacy", "flexible"])
     def test_save_restore(self, checkpoint_mode, verbose=False):
         """
         Tests initialization of all the models and the forward and backward pass
         """
 
-        model = MLP(self.params.N_in_channels,
-                    hidden_features=2*self.params.N_in_channels,
-                    out_features=self.params.N_out_channels,
-                    act_layer=nn.GELU,
-                    output_bias=True,
-                    input_format="nchw",
-                    drop_rate=0.0,
+        model = MLP(
+            self.params.N_in_channels,
+            hidden_features=2 * self.params.N_in_channels,
+            out_features=self.params.N_out_channels,
+            act_layer=nn.GELU,
+            output_bias=True,
+            input_format="nchw",
+            drop_rate=0.0,
         )
 
-        inp_shape = (self.params.batch_size, self.params.N_in_channels, self.params.img_shape_x, self.params.img_shape_y)
+        inp_shape = (
+            self.params.batch_size,
+            self.params.N_in_channels,
+            self.params.img_shape_x,
+            self.params.img_shape_y,
+        )
 
         # prepare some dummy data
         inp = torch.randn(*inp_shape)
@@ -110,11 +115,7 @@ class TestSaveRestore(unittest.TestCase):
             checkpoint_path = os.path.join(tempdir, "ckpt.tar")
 
             # store checkpoint
-            Driver.save_checkpoint(
-                checkpoint_path,
-                model=model,
-                checkpoint_mode=checkpoint_mode
-            )
+            Driver.save_checkpoint(checkpoint_path, model=model, checkpoint_mode=checkpoint_mode)
 
             # scramble model
             with torch.no_grad():
@@ -129,7 +130,7 @@ class TestSaveRestore(unittest.TestCase):
                 optimizer=None,
                 scheduler=None,
                 counters=None,
-                checkpoint_mode=checkpoint_mode
+                checkpoint_mode=checkpoint_mode,
             )
 
         # do forward pass

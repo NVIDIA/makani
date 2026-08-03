@@ -15,8 +15,11 @@
 
 from typing import Union, List
 
+
 class AWSConnector(object):
-    def __init__(self, aws_access_key_id, aws_secret_access_key, aws_region_name, aws_endpoint_url, aws_session_token=None):
+    def __init__(
+        self, aws_access_key_id, aws_secret_access_key, aws_region_name, aws_endpoint_url, aws_session_token=None
+    ):
         self.aws_access_key_id = aws_access_key_id
         self.aws_secret_access_key = aws_secret_access_key
         self.aws_region_name = aws_region_name
@@ -27,7 +30,10 @@ class AWSConnector(object):
 
         self.s3_resource = boto3.resource("s3")
         self.s3_session = boto3.Session(
-            aws_access_key_id=self.aws_access_key_id, aws_secret_access_key=self.aws_secret_access_key, region_name=self.aws_region_name, aws_session_token=self.aws_session_token
+            aws_access_key_id=self.aws_access_key_id,
+            aws_secret_access_key=self.aws_secret_access_key,
+            region_name=self.aws_region_name,
+            aws_session_token=self.aws_session_token,
         )
         self.s3_client = self.s3_session.client("s3", endpoint_url=self.aws_endpoint_url)
 

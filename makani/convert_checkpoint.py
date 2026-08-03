@@ -50,7 +50,7 @@ def parse_comm_grid(checkpoints):
         for cname in comm_dict:
             current_crank[cname] = comm_dict[cname]["rank"]
 
-            if not cname in comm_dims:
+            if cname not in comm_dims:
                 comm_dims[cname] = comm_dict[cname]["size"]
 
         file_comm_ranks[key] = current_crank
@@ -89,10 +89,20 @@ def consolidate_checkpoints(input_path, output_path, checkpoint_version=0):
     else:
         checkpoint_template = os.path.basename(params.checkpoint_path)
 
-    print(os.path.join(input_path, "training_checkpoints", checkpoint_template).format(mp_rank="*", checkpoint_version=checkpoint_version))
+    print(
+        os.path.join(input_path, "training_checkpoints", checkpoint_template).format(
+            mp_rank="*", checkpoint_version=checkpoint_version
+        )
+    )
 
     # check for the first checkpoint
-    checkpoint_paths = sorted(glob.glob(os.path.join(input_path, "training_checkpoints", checkpoint_template).format(mp_rank="*", checkpoint_version=checkpoint_version)))
+    checkpoint_paths = sorted(
+        glob.glob(
+            os.path.join(input_path, "training_checkpoints", checkpoint_template).format(
+                mp_rank="*", checkpoint_version=checkpoint_version
+            )
+        )
+    )
 
     print(checkpoint_paths)
 
@@ -159,17 +169,23 @@ def consolidate_checkpoints(input_path, output_path, checkpoint_version=0):
             # iterate over all the files and copy the range for each of the split shapes into the consolidated tensor
             for cfile in model_states.keys():
                 cranks = [comm_ranks[cfile][cdim] if cdim is not None else 0 for cdim in p.sharded_dims_mp]
-                idx_ranges = tuple(slice(split_shapes[idd][crank], split_shapes[idd][crank + 1]) for idd, crank in enumerate(cranks))
+                idx_ranges = tuple(
+                    slice(split_shapes[idd][crank], split_shapes[idd][crank + 1]) for idd, crank in enumerate(cranks)
+                )
                 gathered_state_dict[pname][idx_ranges] = model_states[cfile][pname]
 
-    print(f"Loading model using the consolidated checkpoint")
+    print("Loading model using the consolidated checkpoint")
     # finally, load the gathered state dict
     model.load_state_dict(gathered_state_dict, strict=True)
 
     # save the model
     print(f"Saving checkpoint in flexible format to {output_path}")
     os.makedirs(output_path, exist_ok=True)
-    Driver.save_checkpoint(os.path.join(output_path, checkpoint_template).format(mp_rank=0, checkpoint_version=checkpoint_version), model=model, checkpoint_mode="flexible")
+    Driver.save_checkpoint(
+        os.path.join(output_path, checkpoint_template).format(mp_rank=0, checkpoint_version=checkpoint_version),
+        model=model,
+        checkpoint_mode="flexible",
+    )
 
 
 def average_checkpoints(input_path, output_path):
@@ -216,7 +232,6 @@ def average_checkpoints(input_path, output_path):
     torch.save(store_dict, checkpoint_output_path)
 
 
-
 def strip_module(input_path):
     """
     Conversion routine for stripping 'module' from the state dict of the model. This overwrites the original checkpoint.
@@ -253,10 +268,20 @@ Example::
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(usage=help_str)
-    parser.add_argument("--input", nargs="+", help="Root directory where the checkpoint and parameters file are stored.", required=True)
+    parser.add_argument(
+        "--input", nargs="+", help="Root directory where the checkpoint and parameters file are stored.", required=True
+    )
     parser.add_argument("--output", help="Target location to save the collected checkpoint.", required=False)
-    parser.add_argument("--mode", default="consolidate", type=str, choices=["consolidate", "strip_module", "average"], help="Specify how the checkpoints should be modified.")
-    parser.add_argument("--checkpoint_version", default="0", type=str, help="Select checkpoint version. Only relevant for conversion")
+    parser.add_argument(
+        "--mode",
+        default="consolidate",
+        type=str,
+        choices=["consolidate", "strip_module", "average"],
+        help="Specify how the checkpoints should be modified.",
+    )
+    parser.add_argument(
+        "--checkpoint_version", default="0", type=str, help="Select checkpoint version. Only relevant for conversion"
+    )
     args = parser.parse_args()
 
     print(f"Running convert_checkpoint in {args.mode} mode")

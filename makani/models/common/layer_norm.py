@@ -62,7 +62,7 @@ class GeometricInstanceNormS2(nn.Module):
             crop_shape=crop_shape,
             crop_offset=crop_offset,
             normalize=True,
-            distributed=False
+            distributed=False,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -85,7 +85,9 @@ class GeometricInstanceNormS2(nn.Module):
             # normalize (and affine) in fp32 for numerical stability, matching the
             # behaviour of PyTorch's native (autocast-fp32) norm ops
             if self.affine:
-                xf = _normalize_transform_kernel(xf, mean, var, self.weight.reshape(-1, 1, 1), self.bias.reshape(-1, 1, 1), self.eps)
+                xf = _normalize_transform_kernel(
+                    xf, mean, var, self.weight.reshape(-1, 1, 1), self.bias.reshape(-1, 1, 1), self.eps
+                )
             else:
                 xf = _normalize_kernel(xf, mean, var, self.eps)
 

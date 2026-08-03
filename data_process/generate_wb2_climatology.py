@@ -27,9 +27,13 @@ from mpi4py import MPI
 from makani.utils.dataloaders.wb2_helpers import split_convert_channel_names, gcs_storage_options
 
 
-def generate_wb2_climatology(metadata_file: str, input_climatology: str, mask_output_file: str, climatology_output_file: str,
-                             verbose: Optional[bool]=False):
-    
+def generate_wb2_climatology(
+    metadata_file: str,
+    input_climatology: str,
+    mask_output_file: str,
+    climatology_output_file: str,
+    verbose: Optional[bool] = False,
+):
     """Function to generate a ground profile mask and climatology compatible with Weatherbench 2.
 
     Weatherbench 2 uses a climatology computed on sliding windows. Additionally, it creates a mask labeling points where the
@@ -50,7 +54,7 @@ def generate_wb2_climatology(metadata_file: str, input_climatology: str, mask_ou
         coords: this is a dictionary which contains two lists, latitude and longitude coordinates in degrees as well as channel names.
         Example: coords = dict(lat=[-90.0, ..., 90.], lon=[0, ..., 360], channel=["t2m", "u500", "v500", ...])
         Note that the number of entries in coords["lat"] has to match dimension -2 of the dataset, and coords["lon"] dimension -1.
-        The length of the channel names has to match dimension -3 (or dimension 1, which is the same) of the dataset. 
+        The length of the channel names has to match dimension -3 (or dimension 1, which is the same) of the dataset.
     input_climatology : str
         Fully qualified name of the gcs location of the climatology input file. For example:
         gs://weatherbench2/datasets/era5-hourly-climatology/1990-2019_6h_1440x721.zarr
@@ -72,16 +76,22 @@ def generate_wb2_climatology(metadata_file: str, input_climatology: str, mask_ou
 
     metadata = None
     if comm_rank == 0:
-        with open(metadata_file, 'r') as f:
+        with open(metadata_file, "r") as f:
             metadata = json.load(f)
     metadata = comm.bcast(metadata, root=0)
 
     # read channel names
-    channel_names = metadata['coords']['channel']
+    channel_names = metadata["coords"]["channel"]
 
     # split in surface and atmospheric channels
-    atmospheric_channel_names, atmospheric_channel_names_wb2, surface_channel_names, surface_channel_names_wb2, atmospheric_levels = split_convert_channel_names(channel_names)
-    
+    (
+        atmospheric_channel_names,
+        atmospheric_channel_names_wb2,
+        surface_channel_names,
+        surface_channel_names_wb2,
+        atmospheric_levels,
+    ) = split_convert_channel_names(channel_names)
+
     # open zarr file and load the above_ground mask:
     storage_options = gcs_storage_options() if input_climatology.startswith(("gs://", "gcs://")) else {}
     clim = xr.open_zarr(input_climatology, storage_options=storage_options)
@@ -94,8 +104,10 @@ def generate_wb2_climatology(metadata_file: str, input_climatology: str, mask_ou
     # make sure levels are present
     mask_levels_list = above_ground.level.values.tolist()
     for level in atmospheric_levels:
-        if not level in mask_levels_list:
-            raise RuntimeError(f"Error, level {level} is not in the climatology levels. Available levels {mask_levels_list}")
+        if level not in mask_levels_list:
+            raise RuntimeError(
+                f"Error, level {level} is not in the climatology levels. Available levels {mask_levels_list}"
+            )
     mask_levels = above_ground.loc[:, :, atmospheric_levels, :, :]
 
     # check if the grid matches
@@ -105,14 +117,18 @@ def generate_wb2_climatology(metadata_file: str, input_climatology: str, mask_ou
     mask_lon = mask_levels.longitude.values
 
     if not np.allclose(metadata_lat, mask_lat):
-        raise RuntimeError(f"Error, the latitudes from the metadata file and from the climatology do not match. Climatology grid: {mask_lat}, data grid: {metadata_lat}")
+        raise RuntimeError(
+            f"Error, the latitudes from the metadata file and from the climatology do not match. Climatology grid: {mask_lat}, data grid: {metadata_lat}"
+        )
 
     if not np.allclose(metadata_lon, mask_lon):
-        raise RuntimeError(f"Error, the longitudes from the metadata file and from the climatology do not match. Climatology grid: {mask_lon}, data grid: {metadata_lon}")
-    
+        raise RuntimeError(
+            f"Error, the longitudes from the metadata file and from the climatology do not match. Climatology grid: {mask_lon}, data grid: {metadata_lon}"
+        )
+
     # reshape mask array and prepare input
-    T,D,L,H,W = mask_levels.shape
-    DT = D*T
+    T, D, L, H, W = mask_levels.shape
+    DT = D * T
 
     # split time steps by rank
     Dloc = (D + comm_size - 1) // comm_size
@@ -134,17 +150,18 @@ def generate_wb2_climatology(metadata_file: str, input_climatology: str, mask_ou
     timestamps = np.array([dt.timedelta(hours=t).total_seconds() for t in timestamps.tolist()], dtype=np.float64)
     # channel names
     chanlen = max([len(v) for v in channel_names])
-    
 
     if verbose:
-        print(f"{comm_rank}: file={input_climatology}, DT={D*T}, DTstart={DTstart}, DTend={DTend}, Dstart={Dstart}, Dend={Dend}, Dloc={Dloc}")
-    
+        print(
+            f"{comm_rank}: file={input_climatology}, DT={D*T}, DTstart={DTstart}, DTend={DTend}, Dstart={Dstart}, Dend={Dend}, Dloc={Dloc}"
+        )
+
     # store mask data
     if mask_output_file is not None:
 
         if comm_rank == 0:
             print("Storing masks")
-        
+
         with h5.File(mask_output_file, "w", driver="mpio", comm=comm) as f:
 
             # create dataset
@@ -175,28 +192,28 @@ def generate_wb2_climatology(metadata_file: str, input_climatology: str, mask_ou
             f["fields"].dims[1].attach_scale(f["channel"])
             f["fields"].dims[2].attach_scale(f["lat"])
             f["fields"].dims[3].attach_scale(f["lon"])
-            
+
             # now iterate over all levels and then write the corresponding variables
             for alevel in tqdm(atmospheric_levels):
-                data = mask_levels.sel(level=alevel).isel(dayofyear=slice(Dstart,Dend)).values
+                data = mask_levels.sel(level=alevel).isel(dayofyear=slice(Dstart, Dend)).values
                 # transpose and reshape
-                data = data.transpose(1,0,2,3).reshape(Dloc*T,H,W)
+                data = data.transpose(1, 0, 2, 3).reshape(Dloc * T, H, W)
                 for prefix in atmospheric_channel_names:
                     varname = prefix + str(alevel)
                     cidx = channel_names.index(varname)
                     dset[DTstart:DTend, cidx, ...] = data[...]
     else:
         if comm_rank == 0:
-            print(f"No mask file specified, skipping")
+            print("No mask file specified, skipping")
 
     # store climatology
     if climatology_output_file is not None:
-        
+
         if comm_rank == 0:
             print("Storing climatology")
-            
+
         with h5.File(climatology_output_file, "w", driver="mpio", comm=comm) as f:
-        
+
             # create dataset
             dset = f.create_dataset("fields", [DT, len(channel_names), H, W], dtype="f4")
 
@@ -227,15 +244,15 @@ def generate_wb2_climatology(metadata_file: str, input_climatology: str, mask_ou
             f["fields"].dims[3].attach_scale(f["lon"])
 
             # surface channels
-            for sc,scwb2 in zip(surface_channel_names,surface_channel_names_wb2):
+            for sc, scwb2 in zip(surface_channel_names, surface_channel_names_wb2):
                 cidx = channel_names.index(sc)
                 if scwb2 not in clim:
                     if comm_rank == 0:
                         print(f"Key {scwb2} not found in dataset, skipping")
                     continue
-                data = clim[scwb2].isel(dayofyear=slice(Dstart,Dend)).values
+                data = clim[scwb2].isel(dayofyear=slice(Dstart, Dend)).values
                 # transpose and reshape
-                data = data.transpose(1,0,2,3).reshape(Dloc*T,H,W)
+                data = data.transpose(1, 0, 2, 3).reshape(Dloc * T, H, W)
                 dset[DTstart:DTend, cidx, ...] = data[...]
 
             # create atmospheric channels
@@ -246,18 +263,17 @@ def generate_wb2_climatology(metadata_file: str, input_climatology: str, mask_ou
                         if comm_rank == 0:
                             print(f"Key {acwb2} not found in dataset, skipping")
                         continue
-                    data = clim[acwb2].sel(level=alevel).isel(dayofyear=slice(Dstart,Dend)).values
+                    data = clim[acwb2].sel(level=alevel).isel(dayofyear=slice(Dstart, Dend)).values
                     # transpose and reshape
-                    data = data.transpose(1,0,2,3).reshape(Dloc*T,H,W)
+                    data = data.transpose(1, 0, 2, 3).reshape(Dloc * T, H, W)
                     dset[DTstart:DTend, cidx, ...] = data[...]
     else:
         if comm_rank == 0:
-            print(f"No climatology file specified, skipping")
-                    
+            print("No climatology file specified, skipping")
 
     # wait for everybody to finish
     comm.Barrier()
-    
+
     # close xarray
     clim.close()
 
@@ -265,7 +281,13 @@ def generate_wb2_climatology(metadata_file: str, input_climatology: str, mask_ou
 
 
 def main(args):
-    generate_wb2_climatology(args.metadata_file, args.input_climatology, args.mask_output_file, args.climatology_output_file, verbose=args.verbose)
+    generate_wb2_climatology(
+        args.metadata_file,
+        args.input_climatology,
+        args.mask_output_file,
+        args.climatology_output_file,
+        verbose=args.verbose,
+    )
 
     return
 
@@ -273,11 +295,27 @@ def main(args):
 if __name__ == "__main__":
     # argparse
     parser = ap.ArgumentParser()
-    parser.add_argument("--input_climatology", type=str, default="gs://weatherbench2/datasets/era5-hourly-climatology/1990-2019_6h_1440x721.zarr",
-                        help="Input climatology in zarr format.")
-    parser.add_argument("--metadata_file", type=str, help="File containing dataset metadata used during training.", required=True)
-    parser.add_argument("--mask_output_file", type=str, default=None, help="Filename for the mask file in HDF5 format, including full path.")
-    parser.add_argument("--climatology_output_file", type=str, default=None, help="Filename for the climatology file in HDF5 format, including full path.")
+    parser.add_argument(
+        "--input_climatology",
+        type=str,
+        default="gs://weatherbench2/datasets/era5-hourly-climatology/1990-2019_6h_1440x721.zarr",
+        help="Input climatology in zarr format.",
+    )
+    parser.add_argument(
+        "--metadata_file", type=str, help="File containing dataset metadata used during training.", required=True
+    )
+    parser.add_argument(
+        "--mask_output_file",
+        type=str,
+        default=None,
+        help="Filename for the mask file in HDF5 format, including full path.",
+    )
+    parser.add_argument(
+        "--climatology_output_file",
+        type=str,
+        default=None,
+        help="Filename for the climatology file in HDF5 format, including full path.",
+    )
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 

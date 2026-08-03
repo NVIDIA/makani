@@ -31,10 +31,15 @@ import unittest
 from parameterized import parameterized
 from importlib.metadata import entry_points
 
+
 class TestEntryPoints(unittest.TestCase):
 
     def setUp(self):
-        self.model_entry_points = {entry_point.name: entry_point for entry_point in entry_points(group="physicsnemo.models") if not entry_point.value.startswith("physicsnemo.experimental.models")}
+        self.model_entry_points = {
+            entry_point.name: entry_point
+            for entry_point in entry_points(group="physicsnemo.models")
+            if not entry_point.value.startswith("physicsnemo.experimental.models")
+        }
 
     @parameterized.expand(["SFNO"])
     def test_model_entry_points(self, model_name):
@@ -55,5 +60,6 @@ class TestEntryPoints(unittest.TestCase):
         with self.subTest(desc="model is not None"):
             self.assertIsNotNone(model)
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     unittest.main()

@@ -118,13 +118,19 @@ class StochasticInterpolantWrapper(nn.Module):
     [1] Chen et al.; Probabilistic forecasting with stochastic interpolants and Follmer Processes
     """
 
-    def __init__(self, params, model_handle, noise_epsilon=1.0, use_foellmer=False, antithetic_sampling=False, seed=333, **kwargs):
+    def __init__(
+        self, params, model_handle, noise_epsilon=1.0, use_foellmer=False, antithetic_sampling=False, seed=333, **kwargs
+    ):
         super().__init__()
 
         if params.n_history != 0:
-            raise ValueError(f"this model currently does not support history, expected n_history == 0 but got {params.n_history}")
+            raise ValueError(
+                f"this model currently does not support history, expected n_history == 0 but got {params.n_history}"
+            )
         if params.n_future != 0:
-            raise ValueError(f"this model currently does not support future steps, expected n_future == 0 but got {params.n_future}")
+            raise ValueError(
+                f"this model currently does not support future steps, expected n_future == 0 but got {params.n_future}"
+            )
 
         # get the preprocessor
         self.preprocessor = Preprocessor2D(params)
@@ -135,15 +141,28 @@ class StochasticInterpolantWrapper(nn.Module):
         n_dynamic_channels = params.N_dynamic_channels
 
         if n_pred_chans != params.N_out_channels:
-            raise ValueError(f"expected N_in_predicted_channels ({n_pred_chans}) to match N_out_channels ({params.N_out_channels})")
+            raise ValueError(
+                f"expected N_in_predicted_channels ({n_pred_chans}) to match N_out_channels ({params.N_out_channels})"
+            )
 
         # TODO: check if the model is actually deterministic first before wrapping it
         if params.get("time_aware", False):
-            self.model = TimeAwareInterpolationWrapper(model_handle, n_pred_chans, n_static_channels, n_dynamic_channels)
+            self.model = TimeAwareInterpolationWrapper(
+                model_handle, n_pred_chans, n_static_channels, n_dynamic_channels
+            )
         else:
-            self.model = InterpolationWrapper(model_handle, n_pred_chans, n_static_channels=params.N_static_channels, n_dynamic_channels=params.N_dynamic_channels)
+            self.model = InterpolationWrapper(
+                model_handle,
+                n_pred_chans,
+                n_static_channels=params.N_static_channels,
+                n_dynamic_channels=params.N_dynamic_channels,
+            )
 
-        seed_off = comm.get_rank("model") + comm.get_size("model") * comm.get_rank("batch") + comm.get_size("model") * comm.get_size("batch") * comm.get_rank("ensemble")
+        seed_off = (
+            comm.get_rank("model")
+            + comm.get_size("model") * comm.get_rank("batch")
+            + comm.get_size("model") * comm.get_size("batch") * comm.get_rank("ensemble")
+        )
         self.noise_module = IGRF(
             (params.img_crop_shape_x, params.img_crop_shape_y),
             params.batch_size,
@@ -152,7 +171,7 @@ class StochasticInterpolantWrapper(nn.Module):
             sigma=1.0,
             alpha=0.0,
             grid_type=params.data_grid_type,
-            seed=seed+seed_off,
+            seed=seed + seed_off,
         )
 
         self.use_foellmer = use_foellmer
@@ -160,10 +179,10 @@ class StochasticInterpolantWrapper(nn.Module):
 
         # set rng:
         self.rng_cpu = torch.Generator(device=torch.device("cpu"))
-        self.rng_cpu.manual_seed(seed+333+seed_off)
+        self.rng_cpu.manual_seed(seed + 333 + seed_off)
         if torch.cuda.is_available():
             self.rng_gpu = torch.Generator(device=torch.device(f"cuda:{comm.get_local_rank()}"))
-            self.rng_gpu.manual_seed(seed+333+seed_off)
+            self.rng_gpu.manual_seed(seed + 333 + seed_off)
 
         self.noise_epsilon = noise_epsilon
 
@@ -178,7 +197,6 @@ class StochasticInterpolantWrapper(nn.Module):
         # note that in the original paper, the sqrt(s) term was not taken a derivative of
         self.dgamma_fn = lambda s: torch.sqrt(s) * self.dsigma_fn(s)
 
-        
     def get_internal_rng(self, gpu=True):
         if gpu:
             return self.noise_module.rng_gpu
@@ -189,7 +207,9 @@ class StochasticInterpolantWrapper(nn.Module):
     # @torch.compile
     def gsq_fn(self, s: torch.Tensor, foellmer=False) -> torch.Tensor:
         if foellmer:
-            term1 = 2.0 * torch.square(self.sigma_fn(s)) * torch.where(s > 0, s * self.dbeta_fn(s) / self.beta_fn(s), 2.0)
+            term1 = (
+                2.0 * torch.square(self.sigma_fn(s)) * torch.where(s > 0, s * self.dbeta_fn(s) / self.beta_fn(s), 2.0)
+            )
             term2 = 2.0 * s * self.sigma_fn(s) * self.dsigma_fn(s)
             result = torch.abs(term1 - term2 - torch.square(self.sigma_fn(s)))
         else:
@@ -219,7 +239,9 @@ class StochasticInterpolantWrapper(nn.Module):
         sr = s.reshape([s.shape[0], s.shape[1]] + [1 for _ in ishape[2:]])
         return self.dalpha_fn(sr) * x0 + self.dbeta_fn(sr) * x1 + self.dgamma_fn(sr) * noise
 
-    def stochastic_path(self, x0: torch.Tensor, x1: torch.Tensor, noise: torch.Tensor, s: torch.Tensor, return_derivative=True):
+    def stochastic_path(
+        self, x0: torch.Tensor, x1: torch.Tensor, noise: torch.Tensor, s: torch.Tensor, return_derivative=True
+    ):
         """returns I and R"""
 
         # get interpolant
@@ -232,12 +254,18 @@ class StochasticInterpolantWrapper(nn.Module):
             return interp
 
     # @torch.compile
-    def _compute_bhat(self, x: torch.Tensor, x0: torch.Tensor, xu: torch.Tensor, static: torch.Tensor, s: torch.Tensor, foellmer=False) -> torch.Tensor:
+    def _compute_bhat(
+        self, x: torch.Tensor, x0: torch.Tensor, xu: torch.Tensor, static: torch.Tensor, s: torch.Tensor, foellmer=False
+    ) -> torch.Tensor:
         b = self.model(x0, x, xu, static, s)
         if foellmer:
             ishape = x0.shape
             sr = s.reshape([s.shape[0]] + [1 for _ in ishape[1:]])
-            correction = 0.5 * (self.gsq_fn(sr, foellmer=self.use_foellmer) - torch.square(self.sigma_fn(sr))) * self.dlog_rho(x, x0, b, sr)
+            correction = (
+                0.5
+                * (self.gsq_fn(sr, foellmer=self.use_foellmer) - torch.square(self.sigma_fn(sr)))
+                * self.dlog_rho(x, x0, b, sr)
+            )
             b = b + correction
 
         return b
