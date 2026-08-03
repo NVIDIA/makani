@@ -52,8 +52,13 @@ import numpy as np
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from .testutils import (
     H5_PATH,
-    NUM_CHANNELS, IMG_SIZE_H, IMG_SIZE_W, CHANNEL_NAMES,
-    NUM_SAMPLES_PER_YEAR, TRAIN_YEARS, DHOURS,
+    NUM_CHANNELS,
+    IMG_SIZE_H,
+    IMG_SIZE_W,
+    CHANNEL_NAMES,
+    NUM_SAMPLES_PER_YEAR,
+    TRAIN_YEARS,
+    DHOURS,
     init_hdf5_dataset,
     init_zarr_dataset,
     init_wb2_zarr_dataset,
@@ -63,21 +68,18 @@ from .testutils import (
 # ---------------------------------------------------------------------------
 # Dataset parameters — derived from testutils constants, not hardcoded
 # ---------------------------------------------------------------------------
-_N_CH       = NUM_CHANNELS
-_IMG_H      = IMG_SIZE_H
-_IMG_W      = IMG_SIZE_W
+_N_CH = NUM_CHANNELS
+_IMG_H = IMG_SIZE_H
+_IMG_W = IMG_SIZE_W
 _N_PER_YEAR = NUM_SAMPLES_PER_YEAR
-_DHOURS     = DHOURS
-_YEARS      = TRAIN_YEARS
-_N_TOTAL    = len(_YEARS) * _N_PER_YEAR
+_DHOURS = DHOURS
+_YEARS = TRAIN_YEARS
+_N_TOTAL = len(_YEARS) * _N_PER_YEAR
 
 # Boundary timestamp = exactly sample 24 of the first training year.
 # lookback_hours = DHOURS*(n_future+1) = DHOURS*1, so the exclusion window
 # is [sample_24_time - DHOURS, sample_24_time), which contains sample 23.
-_BOUNDARY_DT = (
-    dt.datetime(_YEARS[0], 1, 1, tzinfo=dt.timezone.utc)
-    + dt.timedelta(hours=24 * _DHOURS)   # sample 24
-)
+_BOUNDARY_DT = dt.datetime(_YEARS[0], 1, 1, tzinfo=dt.timezone.utc) + dt.timedelta(hours=24 * _DHOURS)  # sample 24
 _BOUNDARY_TS = _BOUNDARY_DT.isoformat()
 
 
@@ -87,14 +89,15 @@ _BOUNDARY_TS = _BOUNDARY_DT.isoformat()
 class _SampleInfo:
     def __init__(self, idx_in_epoch=0, epoch_idx=0, iteration=0):
         self.idx_in_epoch = idx_in_epoch
-        self.epoch_idx    = epoch_idx
-        self.iteration    = iteration
+        self.epoch_idx = epoch_idx
+        self.iteration = iteration
 
 
 # ---------------------------------------------------------------------------
 # Distinctive-channel datasets (for channel-reordering test only)
 # Channel c has the constant value (c+1.0) so reordering can be verified.
 # ---------------------------------------------------------------------------
+
 
 def _distinctive_year_arrays(year):
     """Return (data, timestamps) arrays for one year of distinctive-channel data."""
@@ -122,6 +125,7 @@ def _make_distinctive_dir(root):
 def _make_distinctive_zarr_dir(root):
     """Per-year zarr directory with distinctive-channel data (makani flat format)."""
     import zarr
+
     os.makedirs(root, exist_ok=True)
     for year in _YEARS:
         data, timestamps = _distinctive_year_arrays(year)
@@ -135,8 +139,10 @@ def _make_distinctive_zarr_dir(root):
 
 def _make_distinctive_zarr_wb2_dir(root):
     """Per-year WB2-layout zarr directory with distinctive-channel data."""
-    import zarr, re
+    import zarr
+    import re
     from makani.utils.dataloaders.wb2_helpers import surface_variables, atmospheric_variables
+
     os.makedirs(root, exist_ok=True)
 
     # parse CHANNEL_NAMES to determine variable layout
@@ -144,7 +150,7 @@ def _make_distinctive_zarr_wb2_dir(root):
     for ch_idx, ch_name in enumerate(CHANNEL_NAMES):
         m = re.search(r"[0-9]{1,4}$", ch_name)
         if m and ch_name != "d2":
-            wb2n = atmospheric_variables[ch_name[:m.start()]]
+            wb2n = atmospheric_variables[ch_name[: m.start()]]
             atm_vars.setdefault(wb2n, {})[int(m.group())] = ch_idx
         else:
             surf_vars[surface_variables[ch_name]] = ch_idx
@@ -158,9 +164,7 @@ def _make_distinctive_zarr_wb2_dir(root):
         store_path = os.path.join(root, f"{year}.zarr")
         g = zarr.open_group(store_path, mode="w")
 
-        times_ns = np.array(
-            [np.datetime64(int(ts * 1e9), "ns") for ts in timestamps]
-        )
+        times_ns = np.array([np.datetime64(int(ts * 1e9), "ns") for ts in timestamps])
         g.create_array("time", data=times_ns)
         g.create_array("latitude", data=np.linspace(90, -90, _IMG_H, endpoint=True, dtype=np.float32))
         g.create_array("longitude", data=np.linspace(0, 360, _IMG_W, endpoint=False, dtype=np.float32))
@@ -200,12 +204,13 @@ def _make_distinctive_concat(root):
 # ES factory helpers
 # ---------------------------------------------------------------------------
 
+
 def _default_kwargs(location):
     return dict(
         location=location,
         max_samples=None,
         samples_per_epoch=None,
-        train=False,            # no shuffle → deterministic
+        train=False,  # no shuffle → deterministic
         batch_size=1,
         dt=1,
         dhours=_DHOURS,
@@ -233,6 +238,7 @@ def _default_kwargs(location):
 def _make_general_es(location, **overrides):
     """Build a GeneralES and simulate __setstate__ (set file-handle methods)."""
     from makani.utils.dataloaders.dali_es_helper_2d import GeneralES
+
     kw = _default_kwargs(location)
     kw.update(overrides)
     es = GeneralES(**kw)
@@ -252,12 +258,13 @@ def _make_general_es(location, **overrides):
 def _make_concat_es(file_path, **overrides):
     """Build a GeneralConcatES and simulate __setstate__ (open file handles)."""
     from makani.utils.dataloaders.dali_es_helper_concat_2d import GeneralConcatES
+
     kw = _default_kwargs(file_path)
     kw.update(overrides)
     es = GeneralConcatES(**kw)
     # replicate what __setstate__ does: open the file and install data handle
     es.vfile = h5py.File(es.file_path, "r", driver=es.file_driver)
-    es.dset  = es.vfile[es.dataset_name]
+    es.dset = es.vfile[es.dataset_name]
     es.get_data_handle = es._get_data_h5
     return es
 
@@ -270,14 +277,15 @@ def _ts_to_posix(t):
     (slices of self.timestamps).  This helper handles both.
     """
     try:
-        return float(t.timestamp())   # datetime path
+        return float(t.timestamp())  # datetime path
     except AttributeError:
-        return float(t)               # float / np.float64 path
+        return float(t)  # float / np.float64 path
 
 
 # ===========================================================================
 # Shared test logic (mixin)
 # ===========================================================================
+
 
 class _BaseESTests:
     """
@@ -323,14 +331,14 @@ class _BaseESTests:
     def test_n_history_adds_input_timesteps(self):
         es = self._make(n_history=2)
         inp, _tar = self._call0(es)
-        self.assertEqual(inp.shape[0], 3)   # n_history + 1
+        self.assertEqual(inp.shape[0], 3)  # n_history + 1
 
     # ---- 3. n_future ----------------------------------------------------
 
     def test_n_future_adds_target_timesteps(self):
         es = self._make(n_future=2)
         _inp, tar = self._call0(es)
-        self.assertEqual(tar.shape[0], 3)   # n_future + 1
+        self.assertEqual(tar.shape[0], 3)  # n_future + 1
 
     # ---- 4. subsampling -------------------------------------------------
 
@@ -350,13 +358,11 @@ class _BaseESTests:
         """ES subsampling == slicing the full-res sample every S pixels."""
         S = 2
         es_full = self._make()
-        es_sub  = self._make(subsampling_factor=S)
+        es_sub = self._make(subsampling_factor=S)
         inp_full, tar_full = self._call0(es_full)
-        inp_sub,  tar_sub  = self._call0(es_sub)
-        self.assertTrue(compare_arrays(
-            "subsampled inp", inp_sub, inp_full[:, :, ::S, ::S], verbose=verbose))
-        self.assertTrue(compare_arrays(
-            "subsampled tar", tar_sub, tar_full[:, :, ::S, ::S], verbose=verbose))
+        inp_sub, tar_sub = self._call0(es_sub)
+        self.assertTrue(compare_arrays("subsampled inp", inp_sub, inp_full[:, :, ::S, ::S], verbose=verbose))
+        self.assertTrue(compare_arrays("subsampled tar", tar_sub, tar_full[:, :, ::S, ::S], verbose=verbose))
 
     # ---- 5. spatial crop ------------------------------------------------
 
@@ -368,7 +374,7 @@ class _BaseESTests:
         self.assertEqual(tar.shape, (1, _N_CH, crop_h, crop_w))
 
     def test_spatial_crop_with_nonzero_anchor(self):
-        crop_h, crop_w     = _IMG_H // 2, _IMG_W // 2
+        crop_h, crop_w = _IMG_H // 2, _IMG_W // 2
         anchor_h, anchor_w = 4, 8
         es = self._make(crop_size=[crop_h, crop_w], crop_anchor=[anchor_h, anchor_w])
         inp, _tar = self._call0(es)
@@ -381,31 +387,33 @@ class _BaseESTests:
         es_crop = self._make(crop_size=[crop_h, crop_w], crop_anchor=[0, 0])
         inp_full, tar_full = self._call0(es_full)
         inp_crop, tar_crop = self._call0(es_crop)
-        self.assertTrue(compare_arrays(
-            "cropped inp", inp_crop, inp_full[:, :, :crop_h, :crop_w], verbose=verbose))
-        self.assertTrue(compare_arrays(
-            "cropped tar", tar_crop, tar_full[:, :, :crop_h, :crop_w], verbose=verbose))
+        self.assertTrue(compare_arrays("cropped inp", inp_crop, inp_full[:, :, :crop_h, :crop_w], verbose=verbose))
+        self.assertTrue(compare_arrays("cropped tar", tar_crop, tar_full[:, :, :crop_h, :crop_w], verbose=verbose))
 
     def test_crop_with_anchor_matches_manual_crop(self, verbose=False):
         """ES crop with nonzero anchor == slicing full-res at the anchor offset."""
-        crop_h, crop_w     = _IMG_H // 2, _IMG_W // 2
+        crop_h, crop_w = _IMG_H // 2, _IMG_W // 2
         anchor_h, anchor_w = 4, 8
         es_full = self._make()
         es_crop = self._make(crop_size=[crop_h, crop_w], crop_anchor=[anchor_h, anchor_w])
         inp_full, tar_full = self._call0(es_full)
         inp_crop, tar_crop = self._call0(es_crop)
-        self.assertTrue(compare_arrays(
-            "anchored crop inp",
-            inp_crop,
-            inp_full[:, :, anchor_h:anchor_h + crop_h, anchor_w:anchor_w + crop_w],
-            verbose=verbose,
-        ))
-        self.assertTrue(compare_arrays(
-            "anchored crop tar",
-            tar_crop,
-            tar_full[:, :, anchor_h:anchor_h + crop_h, anchor_w:anchor_w + crop_w],
-            verbose=verbose,
-        ))
+        self.assertTrue(
+            compare_arrays(
+                "anchored crop inp",
+                inp_crop,
+                inp_full[:, :, anchor_h : anchor_h + crop_h, anchor_w : anchor_w + crop_w],
+                verbose=verbose,
+            )
+        )
+        self.assertTrue(
+            compare_arrays(
+                "anchored crop tar",
+                tar_crop,
+                tar_full[:, :, anchor_h : anchor_h + crop_h, anchor_w : anchor_w + crop_w],
+                verbose=verbose,
+            )
+        )
 
     # ---- 6. temporal window consistency ---------------------------------
 
@@ -425,7 +433,7 @@ class _BaseESTests:
         N_HIST, N_FUT = 1, 3
 
         es_window = self._make(n_history=N_HIST, n_future=N_FUT)
-        es_single = self._make()   # n_history=0, n_future=0
+        es_single = self._make()  # n_history=0, n_future=0
 
         inp_win, tar_win = self._call0(es_window)
 
@@ -434,16 +442,26 @@ class _BaseESTests:
         singles = []
         for k in range(n_frames):
             inp_k, _ = es_single(_SampleInfo(idx_in_epoch=k, epoch_idx=0, iteration=0))
-            singles.append(inp_k[0])   # shape (n_ch, H, W) — copy returned by _reorder_channels
+            singles.append(inp_k[0])  # shape (n_ch, H, W) — copy returned by _reorder_channels
 
         for t in range(N_HIST + 1):
-            self.assertTrue(compare_arrays(
-                f"inp t={t}", inp_win[t], singles[t], verbose=verbose,
-            ))
+            self.assertTrue(
+                compare_arrays(
+                    f"inp t={t}",
+                    inp_win[t],
+                    singles[t],
+                    verbose=verbose,
+                )
+            )
         for t in range(N_FUT + 1):
-            self.assertTrue(compare_arrays(
-                f"tar t={t}", tar_win[t], singles[N_HIST + 1 + t], verbose=verbose,
-            ))
+            self.assertTrue(
+                compare_arrays(
+                    f"tar t={t}",
+                    tar_win[t],
+                    singles[N_HIST + 1 + t],
+                    verbose=verbose,
+                )
+            )
 
     # ---- 7. channel subset ----------------------------------------------
 
@@ -474,9 +492,7 @@ class _BaseESTests:
         expected = np.empty((len(sel), _IMG_H, _IMG_W), dtype=np.float32)
         for pos, val in enumerate(vals):
             expected[pos] = val
-        self.assertTrue(
-            compare_arrays("unsorted channel reorder", inp[0], expected, verbose=verbose)
-        )
+        self.assertTrue(compare_arrays("unsorted channel reorder", inp[0], expected, verbose=verbose))
 
     # ---- 7b. unsorted out_channels reordered ----------------------------
 
@@ -495,16 +511,14 @@ class _BaseESTests:
         expected = np.empty((len(sel), _IMG_H, _IMG_W), dtype=np.float32)
         for pos, val in enumerate(vals):
             expected[pos] = val
-        self.assertTrue(
-            compare_arrays("unsorted out_channel reorder", tar[0], expected, verbose=verbose)
-        )
+        self.assertTrue(compare_arrays("unsorted out_channel reorder", tar[0], expected, verbose=verbose))
 
     # ---- 8. zenith angle ------------------------------------------------
 
     def test_zenith_angle_appended(self):
         es = self._make(zenith_angle=True)
         result = self._call0(es)
-        self.assertEqual(len(result), 4)          # inp, tar, zen_inp, zen_tar
+        self.assertEqual(len(result), 4)  # inp, tar, zen_inp, zen_tar
         zen_inp, zen_tar = result[2], result[3]
         self.assertEqual(zen_inp.shape, (1, 1, _IMG_H, _IMG_W))
         self.assertEqual(zen_tar.shape, (1, 1, _IMG_H, _IMG_W))
@@ -522,21 +536,21 @@ class _BaseESTests:
     def test_return_timestamp_appended(self):
         es = self._make(return_timestamp=True)
         result = self._call0(es)
-        self.assertEqual(len(result), 4)    # inp, tar, inp_time, tar_time
-        self.assertEqual(len(result[2]), 1) # n_history + 1
-        self.assertEqual(len(result[3]), 1) # n_future + 1
+        self.assertEqual(len(result), 4)  # inp, tar, inp_time, tar_time
+        self.assertEqual(len(result[2]), 1)  # n_history + 1
+        self.assertEqual(len(result[3]), 1)  # n_future + 1
 
     def test_return_timestamp_n_history(self):
         es = self._make(return_timestamp=True, n_history=2)
         result = self._call0(es)
-        self.assertEqual(len(result[2]), 3) # n_history + 1 = 3
+        self.assertEqual(len(result[2]), 3)  # n_history + 1 = 3
 
     # ---- 10. zenith + timestamp combined --------------------------------
 
     def test_zenith_and_timestamp_both_appended(self):
         es = self._make(zenith_angle=True, return_timestamp=True)
         result = self._call0(es)
-        self.assertEqual(len(result), 6)   # inp, tar, zen_inp, zen_tar, inp_t, tar_t
+        self.assertEqual(len(result), 6)  # inp, tar, zen_inp, zen_tar, inp_t, tar_t
 
     # ---- 11. pickle round-trip ------------------------------------------
 
@@ -551,7 +565,8 @@ class _BaseESTests:
         output as a freshly constructed (worker-state) ES.
         """
         import pickle
-        es_ref      = self._make()             # worker-process state (our simulation)
+
+        es_ref = self._make()  # worker-process state (our simulation)
         es_restored = pickle.loads(pickle.dumps(self._make_for_pickle()))
 
         inp_ref, tar_ref = self._call0(es_ref)
@@ -574,7 +589,7 @@ class _BaseESTests:
     def test_max_samples_limits_dataset(self):
         """max_samples caps the usable sample count."""
         max_s = 50
-        es_full   = self._make()
+        es_full = self._make()
         es_capped = self._make(max_samples=max_s)
         self.assertLess(es_capped.n_samples_total, es_full.n_samples_total)
         self.assertLessEqual(es_capped.n_samples_total, max_s)
@@ -610,16 +625,16 @@ class _BaseESTests:
         """
         N_SAMPLES = 50
         EPOCH_LEN = 10
-        N_EPOCHS  = N_SAMPLES // EPOCH_LEN   # 5 full epochs = 1 cycle
+        N_EPOCHS = N_SAMPLES // EPOCH_LEN  # 5 full epochs = 1 cycle
 
         es = self._make(
             train=True,
-            max_samples=N_SAMPLES + 1,       # +1: samples_end = (N+1) - 1 = N
+            max_samples=N_SAMPLES + 1,  # +1: samples_end = (N+1) - 1 = N
             samples_per_epoch=EPOCH_LEN,
             batch_size=1,
             return_timestamp=True,
         )
-        self.assertEqual(es.n_samples_total,     N_SAMPLES)
+        self.assertEqual(es.n_samples_total, N_SAMPLES)
         self.assertEqual(es.num_steps_per_epoch, EPOCH_LEN)
 
         loaded_ts = []
@@ -627,22 +642,26 @@ class _BaseESTests:
         for epoch_idx in range(N_EPOCHS):
             # --- normal steps for this epoch ---
             for step in range(EPOCH_LEN):
-                result = es(_SampleInfo(
-                    idx_in_epoch=step,
-                    epoch_idx=epoch_idx,
-                    iteration=step,          # iteration resets to 0 each epoch
-                ))
-                inp_time = result[2]         # (inp, tar, inp_time, tar_time)
+                result = es(
+                    _SampleInfo(
+                        idx_in_epoch=step,
+                        epoch_idx=epoch_idx,
+                        iteration=step,  # iteration resets to 0 each epoch
+                    )
+                )
+                inp_time = result[2]  # (inp, tar, inp_time, tar_time)
                 loaded_ts.append(_ts_to_posix(inp_time[0]))
 
             # --- StopIteration fires when iteration reaches EPOCH_LEN ---
             with self.subTest(desc=f"StopIteration epoch {epoch_idx}"):
                 with self.assertRaises(StopIteration):
-                    es(_SampleInfo(
-                        idx_in_epoch=0,
-                        epoch_idx=epoch_idx,
-                        iteration=EPOCH_LEN,
-                    ))
+                    es(
+                        _SampleInfo(
+                            idx_in_epoch=0,
+                            epoch_idx=epoch_idx,
+                            iteration=EPOCH_LEN,
+                        )
+                    )
 
         # 1. Correct total count
         with self.subTest(desc="total samples loaded"):
@@ -663,14 +682,14 @@ class _BaseESTests:
           1. each independently cover every valid sample exactly once, and
           2. use different permutations (cycle seed is base_seed + cycle_idx).
         """
-        N_SAMPLES          = 50
-        EPOCH_LEN          = 10
-        N_EPOCHS_PER_CYCLE = N_SAMPLES // EPOCH_LEN   # 5
-        N_CYCLES           = 2
+        N_SAMPLES = 50
+        EPOCH_LEN = 10
+        N_EPOCHS_PER_CYCLE = N_SAMPLES // EPOCH_LEN  # 5
+        N_CYCLES = 2
 
         es = self._make(
             train=True,
-            max_samples=N_SAMPLES + 1,       # samples_end = (N+1) - 1 = N
+            max_samples=N_SAMPLES + 1,  # samples_end = (N+1) - 1 = N
             samples_per_epoch=EPOCH_LEN,
             batch_size=1,
             return_timestamp=True,
@@ -682,11 +701,13 @@ class _BaseESTests:
             for epoch_in_cycle in range(N_EPOCHS_PER_CYCLE):
                 epoch_idx = cycle * N_EPOCHS_PER_CYCLE + epoch_in_cycle
                 for step in range(EPOCH_LEN):
-                    result = es(_SampleInfo(
-                        idx_in_epoch=step,
-                        epoch_idx=epoch_idx,
-                        iteration=step,
-                    ))
+                    result = es(
+                        _SampleInfo(
+                            idx_in_epoch=step,
+                            epoch_idx=epoch_idx,
+                            iteration=step,
+                        )
+                    )
                     cycle_ts.append(_ts_to_posix(result[2][0]))
             per_cycle_ts.append(cycle_ts)
 
@@ -713,8 +734,8 @@ class _BaseESTests:
           - the remaining 6 are the start of cycle 1 (distinct permutation).
         """
         N_SAMPLES = 50
-        EPOCH_LEN = 7                    # 50 % 7 != 0
-        N_EPOCHS  = 8                    # 56 total steps
+        EPOCH_LEN = 7  # 50 % 7 != 0
+        N_EPOCHS = 8  # 56 total steps
 
         es = self._make(
             train=True,
@@ -723,17 +744,19 @@ class _BaseESTests:
             batch_size=1,
             return_timestamp=True,
         )
-        self.assertEqual(es.n_samples_total,     N_SAMPLES)
+        self.assertEqual(es.n_samples_total, N_SAMPLES)
         self.assertEqual(es.num_steps_per_epoch, EPOCH_LEN)
 
         all_ts = []
         for epoch_idx in range(N_EPOCHS):
             for step in range(EPOCH_LEN):
-                result = es(_SampleInfo(
-                    idx_in_epoch=step,
-                    epoch_idx=epoch_idx,
-                    iteration=step,
-                ))
+                result = es(
+                    _SampleInfo(
+                        idx_in_epoch=step,
+                        epoch_idx=epoch_idx,
+                        iteration=step,
+                    )
+                )
                 all_ts.append(_ts_to_posix(result[2][0]))
 
         expected = {_ts_to_posix(ts) for ts in es.timestamps[es.indices_select]}
@@ -767,9 +790,9 @@ class _BaseESTests:
         Boundary at 2017-01-25T00:00:00Z puts sample-23 of 2017 inside the
         lookback window [2017-01-24, 2017-01-25), excluding exactly 1 index.
         """
-        es_plain    = self._make()
+        es_plain = self._make()
         es_boundary = self._make(timestamp_boundary_list=[_BOUNDARY_TS])
-        self.assertEqual(es_plain.n_samples_total,    self.expected_n_valid)
+        self.assertEqual(es_plain.n_samples_total, self.expected_n_valid)
         self.assertEqual(es_boundary.n_samples_total, self.expected_n_valid_with_boundary)
 
     def test_empty_boundary_list_unchanged(self):
@@ -807,9 +830,13 @@ class _BaseESTests:
 
                 fps = set()
                 for step in range(es.num_steps_per_epoch):
-                    inp, _tar = es(_SampleInfo(
-                        idx_in_epoch=step, epoch_idx=0, iteration=step,
-                    ))
+                    inp, _tar = es(
+                        _SampleInfo(
+                            idx_in_epoch=step,
+                            epoch_idx=0,
+                            iteration=step,
+                        )
+                    )
                     # inp has shape (n_history+1, C, H, W); the last (t=0)
                     # frame is unique per sample_idx and is cheaper to hash
                     # than the full window.
@@ -820,6 +847,7 @@ class _BaseESTests:
 # ===========================================================================
 # Concrete test classes
 # ===========================================================================
+
 
 class TestGeneralES(_BaseESTests, unittest.TestCase):
     """Tests for GeneralES (directory of per-year HDF5 files).
@@ -837,8 +865,7 @@ class TestGeneralES(_BaseESTests, unittest.TestCase):
         self._tmpdir = tempfile.TemporaryDirectory()
         self._train_path, *_ = init_hdf5_dataset(self._tmpdir.name)
         # small distinctive-channel dataset for the reordering test
-        self._dc_path = _make_distinctive_dir(
-            os.path.join(self._tmpdir.name, "dc"))
+        self._dc_path = _make_distinctive_dir(os.path.join(self._tmpdir.name, "dc"))
 
     def tearDown(self):
         self._tmpdir.cleanup()
@@ -852,8 +879,9 @@ class TestGeneralES(_BaseESTests, unittest.TestCase):
     def _make_for_pickle(self, **overrides):
         """Main-process state: __init__ done, no file handles, no buffers."""
         from makani.utils.dataloaders.dali_es_helper_2d import GeneralES
+
         kw = _default_kwargs(self._train_path)
-        kw["is_parallel"] = True   # buffers not yet allocated; __setstate__ will do it
+        kw["is_parallel"] = True  # buffers not yet allocated; __setstate__ will do it
         kw.update(overrides)
         return GeneralES(**kw)
 
@@ -892,8 +920,9 @@ class TestGeneralConcatES(_BaseESTests, unittest.TestCase):
     def _make_for_pickle(self, **overrides):
         """Main-process state: __init__ done, vfile=None, no buffers."""
         from makani.utils.dataloaders.dali_es_helper_concat_2d import GeneralConcatES
+
         kw = _default_kwargs(self._file)
-        kw["is_parallel"] = True   # buffers not yet allocated; __setstate__ will do it
+        kw["is_parallel"] = True  # buffers not yet allocated; __setstate__ will do it
         kw.update(overrides)
         return GeneralConcatES(**kw)
 
@@ -903,6 +932,7 @@ class TestGeneralConcatES(_BaseESTests, unittest.TestCase):
 
     def test_s3_raises_not_implemented(self):
         from makani.utils.dataloaders.dali_es_helper_concat_2d import GeneralConcatES
+
         kw = _default_kwargs(self._file)
         kw["enable_s3"] = True
         with self.assertRaises(NotImplementedError):
@@ -924,8 +954,7 @@ class TestGeneralZarrES(_BaseESTests, unittest.TestCase):
     def setUp(self):
         self._tmpdir = tempfile.TemporaryDirectory()
         self._train_path, *_ = init_zarr_dataset(self._tmpdir.name)
-        self._dc_path = _make_distinctive_zarr_dir(
-            os.path.join(self._tmpdir.name, "dc_zarr"))
+        self._dc_path = _make_distinctive_zarr_dir(os.path.join(self._tmpdir.name, "dc_zarr"))
 
     def tearDown(self):
         self._tmpdir.cleanup()
@@ -938,6 +967,7 @@ class TestGeneralZarrES(_BaseESTests, unittest.TestCase):
 
     def _make_for_pickle(self, **overrides):
         from makani.utils.dataloaders.dali_es_helper_2d import GeneralES
+
         kw = _default_kwargs(self._train_path)
         kw["is_parallel"] = True
         kw.update(overrides)
@@ -960,8 +990,7 @@ class TestGeneralZarrWB2ES(_BaseESTests, unittest.TestCase):
     def setUp(self):
         self._tmpdir = tempfile.TemporaryDirectory()
         self._train_path, *_ = init_wb2_zarr_dataset(self._tmpdir.name)
-        self._dc_path = _make_distinctive_zarr_wb2_dir(
-            os.path.join(self._tmpdir.name, "dc_zarr_wb2"))
+        self._dc_path = _make_distinctive_zarr_wb2_dir(os.path.join(self._tmpdir.name, "dc_zarr_wb2"))
 
     def tearDown(self):
         self._tmpdir.cleanup()
@@ -978,6 +1007,7 @@ class TestGeneralZarrWB2ES(_BaseESTests, unittest.TestCase):
 
     def _make_for_pickle(self, **overrides):
         from makani.utils.dataloaders.dali_es_helper_2d import GeneralES
+
         kw = _default_kwargs(self._train_path)
         kw["is_parallel"] = True
         kw["channel_names"] = list(CHANNEL_NAMES)

@@ -130,8 +130,14 @@ class NeuralOperatorBlock(nn.Module):
 
         # determine some shapes
         if comm.get_size("spatial") > 1:
-            self.input_shape_loc = (forward_transform.lat_shapes[comm.get_rank("h")], forward_transform.lon_shapes[comm.get_rank("w")])
-            self.output_shape_loc = (inverse_transform.lat_shapes[comm.get_rank("h")], inverse_transform.lon_shapes[comm.get_rank("w")])
+            self.input_shape_loc = (
+                forward_transform.lat_shapes[comm.get_rank("h")],
+                forward_transform.lon_shapes[comm.get_rank("w")],
+            )
+            self.output_shape_loc = (
+                inverse_transform.lat_shapes[comm.get_rank("h")],
+                inverse_transform.lon_shapes[comm.get_rank("w")],
+            )
         else:
             self.input_shape_loc = (forward_transform.nlat, forward_transform.nlon)
             self.output_shape_loc = (inverse_transform.nlat, inverse_transform.nlon)
@@ -205,7 +211,7 @@ class NeuralOperatorBlock(nn.Module):
                 drop_rate=mlp_drop_rate,
                 drop_type="features",
                 comm_name=comm_feature_name,
-                checkpointing=(checkpointing_level>=2),
+                checkpointing=(checkpointing_level >= 2),
                 gain=gain_factor,
             )
 
@@ -302,7 +308,9 @@ class SphericalFourierNeuralOperatorNet(nn.Module):
         self.w = int(self.inp_shape[1] // scale_factor)
 
         # initialize spectral transforms
-        self._init_spectral_transforms(spectral_transform, model_grid_type, sht_grid_type, hard_thresholding_fraction, max_modes)
+        self._init_spectral_transforms(
+            spectral_transform, model_grid_type, sht_grid_type, hard_thresholding_fraction, max_modes
+        )
 
         # determine activation function
         if activation_function == "relu":
@@ -341,16 +349,22 @@ class SphericalFourierNeuralOperatorNet(nn.Module):
 
         # pick norm layer
         if normalization_layer == "layer_norm":
-            norm_layer_inp = partial(DistributedLayerNorm, normalized_shape=(embed_dim), elementwise_affine=True, eps=1e-6)
+            norm_layer_inp = partial(
+                DistributedLayerNorm, normalized_shape=(embed_dim), elementwise_affine=True, eps=1e-6
+            )
             norm_layer_out = norm_layer_mid = norm_layer_inp
         elif normalization_layer == "instance_norm":
             if comm.get_size("spatial") > 1:
                 norm_layer_inp = partial(DistributedInstanceNorm2d, num_features=embed_dim, eps=1e-6, affine=True)
             else:
-                norm_layer_inp = partial(nn.InstanceNorm2d, num_features=embed_dim, eps=1e-6, affine=True, track_running_stats=False)
+                norm_layer_inp = partial(
+                    nn.InstanceNorm2d, num_features=embed_dim, eps=1e-6, affine=True, track_running_stats=False
+                )
             norm_layer_out = norm_layer_mid = norm_layer_inp
         elif normalization_layer == "instance_norm_s2":
-            norm_layer_handle = DistributedGeometricInstanceNormS2 if comm.get_size("spatial") > 1 else GeometricInstanceNormS2
+            norm_layer_handle = (
+                DistributedGeometricInstanceNormS2 if comm.get_size("spatial") > 1 else GeometricInstanceNormS2
+            )
             norm_layer_inp = partial(
                 norm_layer_handle,
                 img_shape=(self.h, self.w),
@@ -549,8 +563,14 @@ class SphericalFourierNeuralOperatorNet(nn.Module):
 
         # use the SHT/FFT to compute the local, downscaled grid dimensions
         if comm.get_size("spatial") > 1:
-            self.inp_shape_loc = (self.trans_down.lat_shapes[comm.get_rank("h")], self.trans_down.lon_shapes[comm.get_rank("w")])
-            self.out_shape_loc = (self.itrans_up.lat_shapes[comm.get_rank("h")], self.itrans_up.lon_shapes[comm.get_rank("w")])
+            self.inp_shape_loc = (
+                self.trans_down.lat_shapes[comm.get_rank("h")],
+                self.trans_down.lon_shapes[comm.get_rank("w")],
+            )
+            self.out_shape_loc = (
+                self.itrans_up.lat_shapes[comm.get_rank("h")],
+                self.itrans_up.lon_shapes[comm.get_rank("w")],
+            )
             self.h_loc = self.itrans.lat_shapes[comm.get_rank("h")]
             self.w_loc = self.itrans.lon_shapes[comm.get_rank("w")]
         else:
@@ -599,7 +619,9 @@ class SphericalFourierNeuralOperatorNet(nn.Module):
 
         if hasattr(self, "pos_embed"):
             if self.pos_embed.type == "frequency":
-                pos_embed = torch.stack([self.pos_embed[0], nn.functional.pad(self.pos_embed[1], (1, 0), "constant", 0)], dim=-1)
+                pos_embed = torch.stack(
+                    [self.pos_embed[0], nn.functional.pad(self.pos_embed[1], (1, 0), "constant", 0)], dim=-1
+                )
                 with amp.autocast(device_type="cuda", enabled=False):
                     pos_embed = self.itrans_up(torch.view_as_complex(pos_embed))
             else:

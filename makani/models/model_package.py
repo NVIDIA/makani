@@ -34,7 +34,6 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-
 class LocalPackage:
     """
     Implements the modulus Package interface.
@@ -112,7 +111,7 @@ class ModelWrapper(torch.nn.Module):
 
         # configure lons
         if "lon" in self.params:
-            self.lons =	np.asarray(self.params.lon)
+            self.lons = np.asarray(self.params.lon)
         else:
             self.lons = np.linspace(0, 360, nlon, endpoint=False)
 
@@ -244,9 +243,7 @@ class ModelWrapper(torch.nn.Module):
             FCN3 does; ``MultiStepWrapper`` and ``ConstraintsWrapper`` do not).
         """
         if not hasattr(self.model, "encode_process"):
-            raise NotImplementedError(
-                f"{type(self.model).__name__} does not expose encode_process()."
-            )
+            raise NotImplementedError(f"{type(self.model).__name__} does not expose encode_process().")
         x = self._prepare_input(x, time, normalized_data)
         return self.model.encode_process(x, replace_state=replace_state)
 
@@ -396,7 +393,6 @@ def load_time_loop(package, device=None, time_step_hours=None):
 
     from earth2mip.networks import Inference
     from earth2mip.grid import equiangular_lat_lon_grid
-    from physicsnemo.distributed.manager import DistributedManager
 
     config = package.get("config.json")
     params = ParamsBase.from_json(config)
@@ -416,7 +412,9 @@ def load_time_loop(package, device=None, time_step_hours=None):
     shape = (params.img_crop_shape_x, params.img_crop_shape_y)
 
     # TODO: insert a check to see if the grid e2mip computes is the same that makani uses
-    grid = equiangular_lat_lon_grid(nlat=params.img_crop_shape_x, nlon=params.img_crop_shape_y, includes_south_pole=True)
+    grid = equiangular_lat_lon_grid(
+        nlat=params.img_crop_shape_x, nlon=params.img_crop_shape_y, includes_south_pole=True
+    )
 
     if time_step_hours is None:
         hour = datetime.timedelta(hours=1)

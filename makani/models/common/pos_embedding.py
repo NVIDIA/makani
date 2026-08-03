@@ -21,6 +21,7 @@ import torch.nn as nn
 from makani.utils import comm
 from torch_harmonics.distributed import compute_split_shapes
 
+
 class PositionEmbedding(nn.Module, metaclass=abc.ABCMeta):
     """
     Abstract base class for position embeddings.
@@ -47,6 +48,7 @@ class PositionEmbedding(nn.Module, metaclass=abc.ABCMeta):
     def forward(self):
 
         return self.position_embeddings
+
 
 class LearnablePositionEmbedding(PositionEmbedding):
     """
@@ -85,7 +87,9 @@ class LearnablePositionEmbedding(PositionEmbedding):
             self.local_shape_w = img_shape[1]
 
         if embed_type == "latlon":
-            self.position_embeddings = nn.Parameter(torch.zeros(1, self.num_chans, self.local_shape_h, self.local_shape_w))
+            self.position_embeddings = nn.Parameter(
+                torch.zeros(1, self.num_chans, self.local_shape_h, self.local_shape_w)
+            )
             self.position_embeddings.is_shared_mp = []
             self.position_embeddings.sharded_dims_mp = [None, None, "h", "w"]
         elif embed_type == "lat":
@@ -96,4 +100,4 @@ class LearnablePositionEmbedding(PositionEmbedding):
             raise ValueError(f"Unknown learnable position embedding type {embed_type}")
 
     def forward(self):
-        return self.position_embeddings.expand(-1,-1,self.local_shape_h, self.local_shape_w)
+        return self.position_embeddings.expand(-1, -1, self.local_shape_h, self.local_shape_w)

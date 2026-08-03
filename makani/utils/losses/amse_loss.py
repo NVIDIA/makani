@@ -52,7 +52,9 @@ class SpectralAMSELoss(SpectralBaseLoss):
         )
         self.eps = eps
 
-    def forward(self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor:
+    def forward(
+        self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None, **kwargs
+    ) -> torch.Tensor:
 
         # compute the sht
         ptype = prd.dtype

@@ -156,8 +156,12 @@ class AutocastManager:
     @contextlib.contextmanager
     def __call__(self):
         with contextlib.ExitStack() as stack:
-            stack.enter_context(amp.autocast(device_type=self.device_type, enabled=self.amp_enabled, dtype=self.amp_dtype))
+            stack.enter_context(
+                amp.autocast(device_type=self.device_type, enabled=self.amp_enabled, dtype=self.amp_dtype)
+            )
             if self.fp8_enabled:
                 te = get_te()
-                stack.enter_context(te.fp8_autocast(enabled=True, fp8_recipe=self._fp8_recipe, fp8_group=self.fp8_group))
+                stack.enter_context(
+                    te.fp8_autocast(enabled=True, fp8_recipe=self._fp8_recipe, fp8_group=self.fp8_group)
+                )
             yield

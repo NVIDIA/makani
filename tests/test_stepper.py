@@ -15,6 +15,7 @@
 
 import sys
 import os
+
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 import unittest
@@ -45,12 +46,12 @@ class _ScaleModel(nn.Module):
         self.scale = nn.Parameter(torch.tensor(scale, dtype=torch.float32))
 
     def forward(self, x):
-        return self.scale * x[..., -self.n_out_chans:, :, :]
+        return self.scale * x[..., -self.n_out_chans :, :, :]
 
 
 class _StagedScaleModel(_ScaleModel):
     def encode_process(self, x):
-        return self.scale * x[..., -self.n_out_chans:, :, :]
+        return self.scale * x[..., -self.n_out_chans :, :, :]
 
 
 class TestStepper(unittest.TestCase):
@@ -95,7 +96,7 @@ class TestStepper(unittest.TestCase):
         out = wrapper(inp)
         self.assertEqual(out.shape, (self.B, self.C, self.H, self.W))
         # only the most-recent timestep slice is consumed by the dummy model
-        self.assertTrue(compare_tensors("single_step_with_history", out, 2.0 * inp[:, -self.C:], verbose=False))
+        self.assertTrue(compare_tensors("single_step_with_history", out, 2.0 * inp[:, -self.C :], verbose=False))
 
     def test_single_step_encode_process_uses_forward_preprocessing(self):
         # encode_process must agree with forward on everything up to the decoder.
@@ -173,9 +174,9 @@ class TestStepper(unittest.TestCase):
         # k-th block must equal 2^(k+1) * (last-C slice of inp): each step scales
         # the previous prediction by 2, and append_history places that prediction
         # at the most-recent position for the next call
-        last = inp[:, -self.C:]
+        last = inp[:, -self.C :]
         for k in range(n_future + 1):
-            block = out[:, k * self.C:(k + 1) * self.C]
+            block = out[:, k * self.C : (k + 1) * self.C]
             self.assertTrue(
                 compare_tensors(
                     f"multistep_train_step_{k}_h{n_history}",
@@ -255,7 +256,7 @@ class TestStepper(unittest.TestCase):
         bchw = self.B * self.C * self.H * self.W
         scale = 2.0
         expected_off = (1.0 + 2.0 * scale + 3.0 * scale * scale) * bchw
-        expected_on  = (1.0 + scale + scale * scale) * bchw
+        expected_on = (1.0 + scale + scale * scale) * bchw
 
         g_off = wrapper_off.model.scale.grad.item()
         g_on = wrapper_on.model.scale.grad.item()

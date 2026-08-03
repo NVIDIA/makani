@@ -20,7 +20,6 @@ import torch.amp as amp
 from torch.utils.checkpoint import checkpoint
 
 from functools import partial
-from itertools import groupby
 
 # helpers
 from makani.models.common import DropPath, LayerScale, MLP, EncoderDecoder, SpectralConv
@@ -38,7 +37,8 @@ from makani.mpu.layers import DistributedMLP
 from makani.utils import comm
 
 # layer normalization
-from makani.mpu.layer_norm import DistributedInstanceNorm2d, DistributedLayerNorm
+from makani.mpu.layer_norm import DistributedInstanceNorm2d, DistributedLayerNorm, DistributedGeometricInstanceNormS2
+
 
 # heuristic for finding theta_cutoff
 def _compute_cutoff_radius(nlat, kernel_shape, basis_type):
@@ -56,7 +56,7 @@ class DiscreteContinuousEncoder(nn.Module):
         grid_out="equiangular",
         inp_chans=2,
         out_chans=2,
-        kernel_shape=(3,3),
+        kernel_shape=(3, 3),
         basis_type="harmonic",
         basis_norm_mode="mean",
         use_mlp=False,
@@ -71,7 +71,9 @@ class DiscreteContinuousEncoder(nn.Module):
         theta_cutoff = _compute_cutoff_radius(nlat=inp_shape[0], kernel_shape=kernel_shape, basis_type=basis_type)
 
         # set up local convolution
-        conv_handle = thd.DistributedDiscreteContinuousConvS2 if comm.get_size("spatial") > 1 else th.DiscreteContinuousConvS2
+        conv_handle = (
+            thd.DistributedDiscreteContinuousConvS2 if comm.get_size("spatial") > 1 else th.DiscreteContinuousConvS2
+        )
         self.conv = conv_handle(
             inp_chans,
             out_chans,
@@ -145,7 +147,13 @@ class DiscreteContinuousDecoder(nn.Module):
 
         if use_mlp:
             self.mlp = EncoderDecoder(
-                num_layers=1, input_dim=inp_chans, output_dim=inp_chans, hidden_dim=int(mlp_ratio * inp_chans), act_layer=activation_function, input_format="nchw", gain=2.0
+                num_layers=1,
+                input_dim=inp_chans,
+                output_dim=inp_chans,
+                hidden_dim=int(mlp_ratio * inp_chans),
+                act_layer=activation_function,
+                input_format="nchw",
+                gain=2.0,
             )
 
             self.act = activation_function()
@@ -176,7 +184,9 @@ class DiscreteContinuousDecoder(nn.Module):
         theta_cutoff = _compute_cutoff_radius(nlat=out_shape[0], kernel_shape=kernel_shape, basis_type=basis_type)
 
         # set up DISCO convolution
-        conv_handle = thd.DistributedDiscreteContinuousConvS2 if comm.get_size("spatial") > 1 else th.DiscreteContinuousConvS2
+        conv_handle = (
+            thd.DistributedDiscreteContinuousConvS2 if comm.get_size("spatial") > 1 else th.DiscreteContinuousConvS2
+        )
         self.conv = conv_handle(
             inp_chans,
             out_chans,
@@ -252,7 +262,9 @@ class NeuralOperatorBlock(nn.Module):
         # disco convolution layer
         if conv_type == "local":
 
-            conv_handle = thd.DistributedDiscreteContinuousConvS2 if comm.get_size("spatial") > 1 else th.DiscreteContinuousConvS2
+            conv_handle = (
+                thd.DistributedDiscreteContinuousConvS2 if comm.get_size("spatial") > 1 else th.DiscreteContinuousConvS2
+            )
             self.local_conv = conv_handle(
                 inp_chans,
                 inp_chans,
@@ -305,7 +317,7 @@ class NeuralOperatorBlock(nn.Module):
                 act_layer=act_layer,
                 drop_rate=mlp_drop_rate,
                 drop_type="features",
-                checkpointing=(checkpointing_level>=2),
+                checkpointing=(checkpointing_level >= 2),
                 gain=gain_factor,
             )
 
@@ -466,7 +478,9 @@ class SphericalNeuralOperatorNet(nn.Module):
         dpr = [x.item() for x in torch.linspace(0, path_drop_rate, num_layers)]
 
         # get the handle for the normalization layer
-        norm_layer = self._get_norm_layer_handle(self.h, self.w, embed_dim, normalization_layer=normalization_layer, sht_grid_type=sht_grid_type)
+        norm_layer = self._get_norm_layer_handle(
+            self.h, self.w, embed_dim, normalization_layer=normalization_layer, sht_grid_type=sht_grid_type
+        )
 
         # FNO blocks
         self.blocks = nn.ModuleList([])
@@ -599,14 +613,20 @@ class SphericalNeuralOperatorNet(nn.Module):
         """
         # pick norm layer
         if normalization_layer == "layer_norm":
-            norm_layer_handle = partial(DistributedLayerNorm, normalized_shape=(embed_dim), elementwise_affine=True, eps=1e-6)
+            norm_layer_handle = partial(
+                DistributedLayerNorm, normalized_shape=(embed_dim), elementwise_affine=True, eps=1e-6
+            )
         elif normalization_layer == "instance_norm":
             if comm.get_size("spatial") > 1:
                 norm_layer_handle = partial(DistributedInstanceNorm2d, num_features=embed_dim, eps=1e-6, affine=True)
             else:
-                norm_layer_handle = partial(nn.InstanceNorm2d, num_features=embed_dim, eps=1e-6, affine=True, track_running_stats=False)
+                norm_layer_handle = partial(
+                    nn.InstanceNorm2d, num_features=embed_dim, eps=1e-6, affine=True, track_running_stats=False
+                )
         elif normalization_layer == "instance_norm_s2":
-            norm_layer_handle = DistributedGeometricInstanceNormS2 if comm.get_size("spatial") > 1 else GeometricInstanceNormS2
+            norm_layer_handle = (
+                DistributedGeometricInstanceNormS2 if comm.get_size("spatial") > 1 else GeometricInstanceNormS2
+            )
             norm_layer_handle = partial(
                 norm_layer_handle,
                 img_shape=(h, w),
@@ -623,13 +643,6 @@ class SphericalNeuralOperatorNet(nn.Module):
             raise NotImplementedError(f"Error, normalization {normalization_layer} not implemented.")
 
         return norm_layer_handle
-
-        def _get_slices(lst):
-            for a, b in groupby(enumerate(lst), lambda pair: pair[1] - pair[0]):
-                b = list(b)
-                yield slice(b[0][1], b[-1][1] + 1)
-
-        self.water_chans = list(_get_slices(water_chans))
 
     def _forward_features(self, x):
         for blk in self.blocks:

@@ -31,6 +31,7 @@ IMG_SIZE_H = 64
 IMG_SIZE_W = 128
 CHANNEL_NAMES = ["u10m", "t2m", "u500", "z500", "t500"]
 
+
 def get_default_parameters():
 
     # instantiate parameters
@@ -151,7 +152,9 @@ def _init_grid(cls):
     thd.init(cls.h_group, cls.w_group)
 
     if cls.world_rank == 0:
-        print(f"Running distributed tests on grid H x W x E = {cls.grid_size_h} x {cls.grid_size_w} x {cls.grid_size_e}")
+        print(
+            f"Running distributed tests on grid H x W x E = {cls.grid_size_h} x {cls.grid_size_w} x {cls.grid_size_e}"
+        )
 
     # make sure every rank finishes setup together
     sync_and_barrier()

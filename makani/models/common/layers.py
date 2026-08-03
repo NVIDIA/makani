@@ -45,6 +45,7 @@ def drop_path(x: torch.Tensor, drop_prob: float = 0.0, training: bool = False) -
     output = x.div(keep_prob) * random_tensor
     return output
 
+
 class DropPath(nn.Module):
     """Drop paths (Stochastic Depth) per sample  (when applied in main path of residual blocks)."""
 
@@ -94,7 +95,16 @@ class LayerScale(nn.Module):
 
 
 class PatchEmbed2D(nn.Module):
-    def __init__(self, img_size=(224, 224), patch_size=(16, 16), in_chans=3, embed_dim=768, padding=False, flatten=True, norm_layer=None):
+    def __init__(
+        self,
+        img_size=(224, 224),
+        patch_size=(16, 16),
+        in_chans=3,
+        embed_dim=768,
+        padding=False,
+        flatten=True,
+        norm_layer=None,
+    ):
         super().__init__()
         self.red_img_size = ((img_size[0] // patch_size[0]), (img_size[1] // patch_size[1]))
         self.num_patches = self.red_img_size[0] * self.red_img_size[1]
@@ -103,7 +113,7 @@ class PatchEmbed2D(nn.Module):
         self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size, bias=True)
         self.proj.weight.is_shared_mp = ["spatial"]
         self.proj.bias.is_shared_mp = ["spatial"]
-        self.padding=padding
+        self.padding = padding
         self.flatten = flatten
 
         if norm_layer is not None:
@@ -123,9 +133,7 @@ class PatchEmbed2D(nn.Module):
                 w_pad = self.patch_size[1] - w_remainder
                 padding_left = w_pad // 2
                 padding_right = int(w_pad - padding_left)
-            self.pad = nn.ZeroPad2d(
-                (padding_left, padding_right, padding_top, padding_bottom)
-            )
+            self.pad = nn.ZeroPad2d((padding_left, padding_right, padding_top, padding_bottom))
 
     def forward(self, x):
         # gather input
@@ -143,6 +151,7 @@ class PatchEmbed2D(nn.Module):
             x = x.flatten(2)
         return x
 
+
 class PatchEmbed3D(nn.Module):
     """
     Revise from WeatherLearn https://github.com/lizhuoq/WeatherLearn
@@ -159,14 +168,12 @@ class PatchEmbed3D(nn.Module):
     def __init__(self, img_size, patch_size, in_chans, embed_dim, padding=False, norm_layer=None):
         super().__init__()
         self.img_size = img_size
-        self.padding=padding
+        self.padding = padding
         level, height, width = img_size
 
         if self.padding:
             l_patch_size, h_patch_size, w_patch_size = patch_size
-            padding_left = (
-                padding_right
-            ) = padding_top = padding_bottom = padding_front = padding_back = 0
+            padding_left = padding_right = padding_top = padding_bottom = padding_front = padding_back = 0
 
             l_remainder = level % l_patch_size
             h_remainder = height % h_patch_size
@@ -196,9 +203,7 @@ class PatchEmbed3D(nn.Module):
                 )
             )
         # proj
-        self.proj = nn.Conv3d(
-            in_chans, embed_dim, kernel_size=patch_size, stride=patch_size
-        )
+        self.proj = nn.Conv3d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
         if norm_layer is not None:
             self.norm = norm_layer(embed_dim)
         else:
@@ -212,6 +217,7 @@ class PatchEmbed3D(nn.Module):
         if self.norm:
             x = self.norm(x.permute(0, 2, 3, 4, 1)).permute(0, 4, 1, 2, 3)
         return x
+
 
 class PatchRecovery2D(nn.Module):
     """
@@ -243,9 +249,8 @@ class PatchRecovery2D(nn.Module):
         padding_left = w_pad // 2
         padding_right = int(w_pad - padding_left)
 
-        return output[
-            :, :, padding_top : H - padding_bottom, padding_left : W - padding_right
-        ]
+        return output[:, :, padding_top : H - padding_bottom, padding_left : W - padding_right]
+
 
 class PatchRecovery3D(nn.Module):
     """
@@ -288,6 +293,7 @@ class PatchRecovery3D(nn.Module):
             padding_top : Lat - padding_bottom,
             padding_left : Lon - padding_right,
         ]
+
 
 class EncoderDecoder(nn.Module):
     def __init__(
@@ -350,6 +356,7 @@ class EncoderDecoder(nn.Module):
     def forward(self, x):
         return self.fwd(x)
 
+
 class MLP(nn.Module):
     def __init__(
         self,
@@ -375,11 +382,15 @@ class MLP(nn.Module):
         # only use transformer engine if it was requested and is actually available
         self.use_te = use_te and _TE_AVAILABLE
         if use_te and not _TE_AVAILABLE:
-            warnings.warn("use_te=True was requested but transformer_engine is not installed; falling back to the standard MLP.")
+            warnings.warn(
+                "use_te=True was requested but transformer_engine is not installed; falling back to the standard MLP."
+            )
 
         # sanity checks
         if (input_format == "traditional") and (drop_type == "features"):
-            raise NotImplementedError(f"Error, traditional input format and feature dropout cannot be selected simultaneously")
+            raise NotImplementedError(
+                "Error, traditional input format and feature dropout cannot be selected simultaneously"
+            )
 
         # transformer engine linears operate on the last (channel) dimension; for
         # nchw inputs we transpose to channels-last around the GEMMs (see forward).
@@ -482,6 +493,7 @@ class MLP(nn.Module):
         else:
             return self.fwd(x)
 
+
 class UpSample2D(nn.Module):
     """
     Revise from WeatherLearn https://github.com/lizhuoq/WeatherLearn
@@ -511,8 +523,14 @@ class UpSample2D(nn.Module):
             B, N, C = x.shape
         else:
             B, N_lat, N_lon, C = x.shape
-            torch._check(N_lat == self.input_resolution[0], lambda: f"Input shape {x.shape} does not match expected input resolution {self.input_resolution}.")
-            torch._check(N_lon == self.input_resolution[1], lambda: f"Input shape {x.shape} does not match expected input resolution {self.input_resolution}.")
+            torch._check(
+                N_lat == self.input_resolution[0],
+                lambda: f"Input shape {x.shape} does not match expected input resolution {self.input_resolution}.",
+            )
+            torch._check(
+                N_lon == self.input_resolution[1],
+                lambda: f"Input shape {x.shape} does not match expected input resolution {self.input_resolution}.",
+            )
         in_lat, in_lon = self.input_resolution
         out_lat, out_lon = self.output_resolution
 
@@ -529,14 +547,13 @@ class UpSample2D(nn.Module):
         pad_left = pad_w // 2
         pad_right = pad_w - pad_left
 
-        x = x[
-            :, pad_top : 2 * in_lat - pad_bottom, pad_left : 2 * in_lon - pad_right, :
-        ]
+        x = x[:, pad_top : 2 * in_lat - pad_bottom, pad_left : 2 * in_lon - pad_right, :]
         x = x.reshape(x.shape[0], x.shape[1] * x.shape[2], x.shape[3])
         x = self.norm(x)
         x = self.linear2(x)
         x = x.reshape(B, out_lat, out_lon, -1)
         return x
+
 
 class DownSample2D(nn.Module):
     """
@@ -579,8 +596,14 @@ class DownSample2D(nn.Module):
             x = x.reshape(B, in_lat, in_lon, C)
         else:
             B, N_lat, N_lon, C = x.shape
-            torch._check(N_lat == in_lat, lambda: f"Input shape {x.shape} does not match expected input resolution {self.input_resolution}.")
-            torch._check(N_lon == in_lon, lambda: f"Input shape {x.shape} does not match expected input resolution {self.input_resolution}.")
+            torch._check(
+                N_lat == in_lat,
+                lambda: f"Input shape {x.shape} does not match expected input resolution {self.input_resolution}.",
+            )
+            torch._check(
+                N_lon == in_lon,
+                lambda: f"Input shape {x.shape} does not match expected input resolution {self.input_resolution}.",
+            )
 
         # Padding the input to facilitate downsampling
         x = self.pad(x.permute(0, -1, 1, 2)).permute(0, 2, 3, 1)
@@ -591,6 +614,7 @@ class DownSample2D(nn.Module):
         x = self.linear(x)
         x = x.reshape(B, out_lat, out_lon, -1)
         return x
+
 
 class UpSample3D(nn.Module):
     """
@@ -623,9 +647,7 @@ class UpSample3D(nn.Module):
         out_pl, out_lat, out_lon = self.output_resolution
 
         x = self.linear1(x)
-        x = x.reshape(B, in_pl, in_lat, in_lon, 2, 2, C // 2).permute(
-            0, 1, 2, 4, 3, 5, 6
-        )
+        x = x.reshape(B, in_pl, in_lat, in_lon, 2, 2, C // 2).permute(0, 1, 2, 4, 3, 5, 6)
         x = x.reshape(B, in_pl, in_lat * 2, in_lon * 2, -1)
 
         pad_h = in_lat * 2 - out_lat
@@ -648,6 +670,7 @@ class UpSample3D(nn.Module):
         x = self.norm(x)
         x = self.linear2(x)
         return x
+
 
 class DownSample3D(nn.Module):
     """
@@ -682,9 +705,7 @@ class DownSample3D(nn.Module):
 
         pad_front = pad_back = 0
 
-        self.pad = nn.ZeroPad3d(
-            (pad_left, pad_right, pad_top, pad_bottom, pad_front, pad_back)
-        )
+        self.pad = nn.ZeroPad3d((pad_left, pad_right, pad_top, pad_bottom, pad_front, pad_back))
 
     def forward(self, x):
         B, N, C = x.shape

@@ -24,11 +24,16 @@ import argparse as ap
 # MPI
 from mpi4py import MPI
 
-def transfer_channels(input_file: str, output_file: str, channels: List[str],
-                      batch_size: Optional[int]=32, entry_key: Optional[str]='fields',
-                      verbose: Optional[bool]=False):
-    
-    """Function to transfer channels from one input file to the other. 
+
+def transfer_channels(
+    input_file: str,
+    output_file: str,
+    channels: List[str],
+    batch_size: Optional[int] = 32,
+    entry_key: Optional[str] = "fields",
+    verbose: Optional[bool] = False,
+):
+    """Function to transfer channels from one input file to the other.
 
     This function reads corresponding channels from the input_file and copies them to the corresponding slot
     in the output file.
@@ -48,7 +53,7 @@ def transfer_channels(input_file: str, output_file: str, channels: List[str],
         Batch size in which the samples are processed. This does not have any effect on the statistics (besides small numerical changes because of order of operations), but
         is merely a performance setting. Bigger batches are more efficient but require more memory.
     entry_key: str
-        This is the HDF5 dataset name of the data in the files. Defaults to "fields".  
+        This is the HDF5 dataset name of the data in the files. Defaults to "fields".
     verbose : bool
         Enable for more printing.
     """
@@ -57,7 +62,7 @@ def transfer_channels(input_file: str, output_file: str, channels: List[str],
     comm = MPI.COMM_WORLD.Dup()
     comm_rank = comm.Get_rank()
     comm_size = comm.Get_size()
-    
+
     # timer
     start_time = time.perf_counter()
 
@@ -67,11 +72,11 @@ def transfer_channels(input_file: str, output_file: str, channels: List[str],
     channels_in = None
     channels_out = None
     if comm_rank == 0:
-        with h5.File(input_file, 'r') as f:
+        with h5.File(input_file, "r") as f:
             num_entries_total_in = f[entry_key].shape[0]
             channels_in = [x.decode() for x in f["channel"][...].tolist()]
 
-        with h5.File(output_file, 'r') as f:
+        with h5.File(output_file, "r") as f:
             num_entries_total_out = f[entry_key].shape[0]
             channels_out = [x.decode() for x in f["channel"][...].tolist()]
 
@@ -81,10 +86,12 @@ def transfer_channels(input_file: str, output_file: str, channels: List[str],
     channels_out = comm.bcast(channels_out)
 
     if num_entries_total_in != num_entries_total_out:
-        raise IndexError(f"Files {input_file} and {output_file} are using a different number of samples ({num_entries_total_in} vs {num_entries_total_out}).")
+        raise IndexError(
+            f"Files {input_file} and {output_file} are using a different number of samples ({num_entries_total_in} vs {num_entries_total_out})."
+        )
 
     num_entries_total = num_entries_total_in
-            
+
     # set up progressbar
     if comm_rank == 0:
         pbar = tqdm(total=num_entries_total)
@@ -101,7 +108,7 @@ def transfer_channels(input_file: str, output_file: str, channels: List[str],
     # open files
     fin = h5.File(input_file, "r", driver="mpio", comm=comm)
     fout = h5.File(output_file, "a", driver="mpio", comm=comm)
-    
+
     # do loop over channels
     num_entries_current = 0
     for idc, channel in enumerate(channels):
@@ -109,7 +116,7 @@ def transfer_channels(input_file: str, output_file: str, channels: List[str],
         # find channel index in files
         cidx_in = channels_in.index(channel)
         cidx_out = channels_out.index(channel)
-        
+
         # populate fields
         for entries in batched(num_entries_list, batch_size):
             entries = list(entries)
@@ -126,14 +133,14 @@ def transfer_channels(input_file: str, output_file: str, channels: List[str],
 
     # we need to wait here
     comm.Barrier()
-    
+
     # close file
     fin.close()
     fout.close()
-        
+
     # end time
     end_time = time.perf_counter()
-    run_time = str(dt.timedelta(seconds=end_time-start_time))
+    run_time = str(dt.timedelta(seconds=end_time - start_time))
 
     if comm_rank == 0:
         pbar.close()
@@ -146,22 +153,30 @@ def transfer_channels(input_file: str, output_file: str, channels: List[str],
 
 def main(args):
     # concatenate files with timestamp information
-    transfer_channels(input_file=args.input_file,
-                      output_file=args.output_file,
-                      channels=args.channels,
-                      batch_size=args.batch_size,
-                      verbose=args.verbose)
+    transfer_channels(
+        input_file=args.input_file,
+        output_file=args.output_file,
+        channels=args.channels,
+        batch_size=args.batch_size,
+        verbose=args.verbose,
+    )
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
 
     # argparse
     parser = ap.ArgumentParser()
     parser.add_argument("--input_file", type=str, help="makani input file", required=True)
     parser.add_argument("--output_file", type=str, help="File to which channels will be written", required=True)
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size for writing chunks")
-    parser.add_argument("--channels", default=[], nargs="+", type=str, help="Channels to be copied from input to output. Must be specified as a list.")
+    parser.add_argument(
+        "--channels",
+        default=[],
+        nargs="+",
+        type=str,
+        help="Channels to be copied from input to output. Must be specified as a list.",
+    )
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
-    
+
     main(args)

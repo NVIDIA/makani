@@ -52,3 +52,24 @@ def _contract_dense_pytorch(x, weight, separable=False, operator_type="diagonal"
             raise ValueError(f"Unknown operator type {operator_type}")
 
     return x.contiguous()
+
+
+# Dense channel-mixing contractions used by SpectralAttention. These were dropped
+# in e59c2f4 while the call sites in spectral_convolution.py kept referencing
+# them, leaving SpectralAttention unconstructible (NameError) for both of its
+# operator types. Restored verbatim from the pre-e59c2f4 networks/contractions.py.
+# Note these are ungrouped, unlike the _contract_* helpers above.
+def compl_mul2d_fwd(ac: torch.Tensor, bc: torch.Tensor) -> torch.Tensor:
+    return torch.einsum("bixy,io->boxy", ac, bc)
+
+
+def compl_muladd2d_fwd(ac: torch.Tensor, bc: torch.Tensor, cc: torch.Tensor) -> torch.Tensor:
+    return compl_mul2d_fwd(ac, bc) + cc
+
+
+def compl_exp_mul2d_fwd(ac: torch.Tensor, bc: torch.Tensor) -> torch.Tensor:
+    return torch.einsum("bixy,xio->boxy", ac, bc)
+
+
+def compl_exp_muladd2d_fwd(ac: torch.Tensor, bc: torch.Tensor, cc: torch.Tensor) -> torch.Tensor:
+    return compl_exp_mul2d_fwd(ac, bc) + cc

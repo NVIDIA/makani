@@ -23,7 +23,13 @@ from torch import amp
 # import convenience functions for factorized tensors
 from makani.utils import comm
 from makani.models.common import ComplexReLU
-from makani.models.common.contractions import _contract_dense_pytorch
+from makani.models.common.contractions import (
+    _contract_dense_pytorch,
+    compl_mul2d_fwd,
+    compl_muladd2d_fwd,
+    compl_exp_mul2d_fwd,
+    compl_exp_muladd2d_fwd,
+)
 
 import torch_harmonics.distributed as thd
 
@@ -35,7 +41,18 @@ class SpectralConv(nn.Module):
     domain via the RealFFT2 and InverseRealFFT2 wrappers.
     """
 
-    def __init__(self, forward_transform, inverse_transform, in_channels, out_channels, num_groups=1, operator_type="dhconv", separable=False, bias=False, gain=1.0):
+    def __init__(
+        self,
+        forward_transform,
+        inverse_transform,
+        in_channels,
+        out_channels,
+        num_groups=1,
+        operator_type="dhconv",
+        separable=False,
+        bias=False,
+        gain=1.0,
+    ):
         super().__init__()
 
         if in_channels % num_groups != 0:
@@ -53,7 +70,9 @@ class SpectralConv(nn.Module):
         self.modes_lat = self.inverse_transform.lmax
         self.modes_lon = self.inverse_transform.mmax
 
-        self.scale_residual = (self.forward_transform.nlat != self.inverse_transform.nlat) or (self.forward_transform.nlon != self.inverse_transform.nlon)
+        self.scale_residual = (self.forward_transform.nlat != self.inverse_transform.nlat) or (
+            self.forward_transform.nlon != self.inverse_transform.nlon
+        )
         if hasattr(self.forward_transform, "grid"):
             self.scale_residual = self.scale_residual or (self.forward_transform.grid != self.inverse_transform.grid)
 
@@ -62,9 +81,13 @@ class SpectralConv(nn.Module):
         self.separable = separable
 
         if self.inverse_transform.lmax != self.modes_lat:
-            raise ValueError(f"inverse transform lmax ({self.inverse_transform.lmax}) must match modes_lat ({self.modes_lat})")
+            raise ValueError(
+                f"inverse transform lmax ({self.inverse_transform.lmax}) must match modes_lat ({self.modes_lat})"
+            )
         if self.inverse_transform.mmax != self.modes_lon:
-            raise ValueError(f"inverse transform mmax ({self.inverse_transform.mmax}) must match modes_lon ({self.modes_lon})")
+            raise ValueError(
+                f"inverse transform mmax ({self.inverse_transform.mmax}) must match modes_lon ({self.modes_lon})"
+            )
 
         weight_shape = [num_groups, in_channels // num_groups]
 
@@ -189,9 +212,13 @@ class SpectralAttention(nn.Module):
         )
 
         if inverse_transform.lmax != self.modes_lat:
-            raise ValueError(f"inverse transform lmax ({inverse_transform.lmax}) must match modes_lat ({self.modes_lat})")
+            raise ValueError(
+                f"inverse transform lmax ({inverse_transform.lmax}) must match modes_lat ({self.modes_lat})"
+            )
         if inverse_transform.mmax != self.modes_lon:
-            raise ValueError(f"inverse transform mmax ({inverse_transform.mmax}) must match modes_lon ({self.modes_lon})")
+            raise ValueError(
+                f"inverse transform mmax ({inverse_transform.mmax}) must match modes_lon ({self.modes_lon})"
+            )
 
         hidden_size = int(hidden_size_factor * self.in_channels)
 
@@ -211,11 +238,15 @@ class SpectralAttention(nn.Module):
             self.wout = nn.Parameter(scale * torch.randn(hidden_size, self.out_channels, dtype=torch.complex64))
 
             if bias:
-                self.b = nn.ParameterList([scale * torch.randn(hidden_size, 1, 1, dtype=torch.complex64) for _ in range(self.spectral_layers)])
+                self.b = nn.ParameterList(
+                    [scale * torch.randn(hidden_size, 1, 1, dtype=torch.complex64) for _ in range(self.spectral_layers)]
+                )
 
             self.activations = nn.ModuleList([])
             for l in range(0, self.spectral_layers):
-                self.activations.append(ComplexReLU(mode=complex_activation, bias_shape=(hidden_size, 1, 1), scale=scale))
+                self.activations.append(
+                    ComplexReLU(mode=complex_activation, bias_shape=(hidden_size, 1, 1), scale=scale)
+                )
 
         elif operator_type == "l-dependant":
             self.mul_add_handle = compl_exp_muladd2d_fwd
@@ -230,14 +261,20 @@ class SpectralAttention(nn.Module):
             self.w = nn.ParameterList(w)
 
             if bias:
-                self.b = nn.ParameterList([scale * torch.randn(hidden_size, 1, 1, dtype=torch.complex64) for _ in range(self.spectral_layers)])
+                self.b = nn.ParameterList(
+                    [scale * torch.randn(hidden_size, 1, 1, dtype=torch.complex64) for _ in range(self.spectral_layers)]
+                )
 
             scale = math.sqrt(gain / float(in_channels))
-            self.wout = nn.Parameter(scale * torch.randn(self.modes_lat, hidden_size, self.out_channels, dtype=torch.complex64))
+            self.wout = nn.Parameter(
+                scale * torch.randn(self.modes_lat, hidden_size, self.out_channels, dtype=torch.complex64)
+            )
 
             self.activations = nn.ModuleList([])
             for l in range(0, self.spectral_layers):
-                self.activations.append(ComplexReLU(mode=complex_activation, bias_shape=(hidden_size, 1, 1), scale=scale))
+                self.activations.append(
+                    ComplexReLU(mode=complex_activation, bias_shape=(hidden_size, 1, 1), scale=scale)
+                )
 
         else:
             raise ValueError("Unknown operator type")

@@ -23,6 +23,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 
+
 def mask_data(data):
     # check for NaNs and return a FP valued mask where
     # valid_mask = 1 for data which are valid (not NaN) and 0 otherwise.
@@ -47,7 +48,7 @@ def allgather_dict(stats, group):
 
     # iterate over full dict
     for varname, substats in stats.items():
-        for k,v in substats.items():
+        for k, v in substats.items():
             if isinstance(v, torch.Tensor):
                 vcont = v.contiguous()
                 v_gather = [torch.empty_like(vcont) for _ in range(dist.get_world_size(group))]
@@ -68,7 +69,7 @@ def send_recv_dict(stats, src_rank, dst_rank, group):
     stats_recv = {varname: {} for varname in stats.keys()}
     count = 0
     for varname, substats in stats.items():
-        for k,v in substats.items():
+        for k, v in substats.items():
             if isinstance(v, torch.Tensor):
                 # send/recv
                 tag = src_rank + group_size * count
@@ -107,14 +108,14 @@ def binary_reduce(stats, group, device):
     crank = dist.get_rank(group)
 
     # check for power of two
-    assert((csize & (csize-1) == 0) and csize != 0)
+    assert (csize & (csize - 1) == 0) and csize != 0
 
     # how many steps do we need:
-    nsteps = int(math.log(csize,2))
+    nsteps = int(math.log(csize, 2))
 
     # init step 1
-    recv_ranks = range(0,csize,2)
-    send_ranks = range(1,csize,2)
+    recv_ranks = range(0, csize, 2)
+    send_ranks = range(1, csize, 2)
 
     for step in range(nsteps):
         for rrank, srank in zip(recv_ranks, send_ranks):
@@ -126,7 +127,7 @@ def binary_reduce(stats, group, device):
         dist.barrier(group=group, device_ids=[device.index])
 
         # shrink the list
-        if (step < nsteps-1):
+        if step < nsteps - 1:
             recv_ranks = recv_ranks[0::2]
             send_ranks = recv_ranks[1::2]
 
@@ -168,18 +169,13 @@ def welford_combine(stats1, stats2):
             delta = mean_b - mean_a
 
             values = torch.stack(
-                [
-                    (mean_a * n_a + mean_b * n_b) / n_ab,
-                    m2_a + m2_b + delta * delta * n_a * n_b / n_ab
-                ], dim=0
+                [(mean_a * n_a + mean_b * n_b) / n_ab, m2_a + m2_b + delta * delta * n_a * n_b / n_ab], dim=0
             ).contiguous()
 
         if reshape:
             n_ab = n_ab.reshape(-1)
 
-        stats[k] = {"counts": n_ab,
-                    "type": s_a["type"],
-                    "values": values}
+        stats[k] = {"counts": n_ab, "type": s_a["type"], "values": values}
 
     return stats
 
@@ -198,7 +194,9 @@ def get_wind_channels(channel_names):
             error = True
 
     if error:
-        raise ValueError("Error, cannot group wind channels together because not all pairs of wind channels are in the dataset.")
+        raise ValueError(
+            "Error, cannot group wind channels together because not all pairs of wind channels are in the dataset."
+        )
 
     # find the indices of the channels in the original channel names:
     uchannels = [channel_names.index(u) for u in u_variables]

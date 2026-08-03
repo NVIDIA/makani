@@ -54,14 +54,21 @@ _LOSS_REGISTRY = {
 }
 
 
-
 class LossHandler(nn.Module):
     """
     Wrapper class that will handle computing losses. Each loss term returns a vector of losses,
     which in the end gets weighted and aggregated.
     """
 
-    def __init__(self, params, track_running_stats: bool = False, seed: int = 0, eps: float = 1e-6, compile: bool = True, **kwargs):
+    def __init__(
+        self,
+        params,
+        track_running_stats: bool = False,
+        seed: int = 0,
+        eps: float = 1e-6,
+        compile: bool = True,
+        **kwargs,
+    ):
         super().__init__()
 
         self.rank = comm.get_rank("matmul")
@@ -184,7 +191,9 @@ class LossHandler(nn.Module):
                 if time_diff_scale is not None:
                     chw = chw * time_diff_scale
                 if chw.shape[1] != loss_fn.n_channels:
-                    raise ValueError(f"expected channel weights to have {loss_fn.n_channels} channels, but got {chw.shape[1]}")
+                    raise ValueError(
+                        f"expected channel weights to have {loss_fn.n_channels} channels, but got {chw.shape[1]}"
+                    )
             else:
                 chw = loss_fn.compute_channel_weighting(channel_weight_type, time_diff_scale=time_diff_scale)
 
@@ -240,7 +249,11 @@ class LossHandler(nn.Module):
             multistep_weight = torch.ones(self.n_future + 1, dtype=torch.float32) / float(self.n_future + 1)
         elif weight_type == "balanced":
             # this tries to balance the loss contributions from each step, accounting for the fact that the n-th gets backpropagated n times
-            multistep_weight = 2.0 * torch.arange(1, self.n_future + 2, dtype=torch.float32) / float((self.n_future + 2) * (self.n_future + 1))
+            multistep_weight = (
+                2.0
+                * torch.arange(1, self.n_future + 2, dtype=torch.float32)
+                / float((self.n_future + 2) * (self.n_future + 1))
+            )
         elif weight_type == "linear":
             # linear weighting factor for the case of multistep training
             multistep_weight = torch.arange(1, self.n_future + 2, dtype=torch.float32) / float(self.n_future + 1)
@@ -256,7 +269,9 @@ class LossHandler(nn.Module):
             # custom weighting factor for the case of multistep training
             multistep_weight = torch.as_tensor(kwargs["weights"], dtype=torch.float32)
             if multistep_weight.shape[0] != self.n_future + 1:
-                raise ValueError(f"Number of multistep weights ({multistep_weight.shape[0]}) must match n_future+1 ({self.n_future + 1})")
+                raise ValueError(
+                    f"Number of multistep weights ({multistep_weight.shape[0]}) must match n_future+1 ({self.n_future + 1})"
+                )
         else:
             raise ValueError(f"Unknown multistep loss weight type: {weight_type}")
 
@@ -298,7 +313,9 @@ class LossHandler(nn.Module):
 
             # use Welford's algorithm to accumulate the batch mean and variance into the running
             delta = mean - self.running_mean
-            self.running_var += m2 + delta**2 * self.num_batches_tracked * num_batches / (self.num_batches_tracked + num_batches)
+            self.running_var += m2 + delta**2 * self.num_batches_tracked * num_batches / (
+                self.num_batches_tracked + num_batches
+            )
             self.running_mean += delta * num_batches / (self.num_batches_tracked + num_batches)
 
             # update the current num_batches_tracked
@@ -390,7 +407,9 @@ class LossHandler(nn.Module):
                 n_pred_channels = prdm.shape[1]
                 n_inp_channels = inp_state.shape[1]
                 if n_pred_channels != n_inp_channels:
-                    raise ValueError(f"Channel mismatch: prediction has {n_pred_channels} channels but input has {n_inp_channels} channels")
+                    raise ValueError(
+                        f"Channel mismatch: prediction has {n_pred_channels} channels but input has {n_inp_channels} channels"
+                    )
 
             # transform predictions and targets to tendency space
             # this allows ANY loss function to compute tendency-based metrics
@@ -415,10 +434,16 @@ class LossHandler(nn.Module):
             if self.n_future > 0:
                 ncw = lfn.n_channels
                 # step index per channel: [0,...,0, 1,...,1, ..., n_future,...,n_future], ncw per step
-                lead_time_step = torch.arange(0, self.n_future + 1, dtype=torch.long, device=prd.device).repeat_interleave(ncw)
+                lead_time_step = torch.arange(
+                    0, self.n_future + 1, dtype=torch.long, device=prd.device
+                ).repeat_interleave(ncw)
             else:
                 lead_time_step = None
-            kwargs_step = {"lead_time_step": lead_time_step, "training_progress": training_progress, "n_future": self.n_future}
+            kwargs_step = {
+                "lead_time_step": lead_time_step,
+                "training_progress": training_progress,
+                "n_future": self.n_future,
+            }
             if loss_type == LossType.Deterministic:
                 if requires_inp:
                     loss_vals.append(lfn(prdm_tendency, tar_tendency, wgt, **kwargs_step))

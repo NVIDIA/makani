@@ -53,24 +53,22 @@ def resolve_plot_list(plot_list, channel_names):
     channel_indices = []
     for name in ordered_refs:
         if name not in channel_names:
-            raise ValueError(
-                f"functor references channel {name!r} which is not in channel_names"
-            )
+            raise ValueError(f"functor references channel {name!r} which is not in channel_names")
         channel_indices.append(channel_names.index(name))
 
     new_plot_list = []
     for item in plot_list:
         new_item = dict(item)
-        new_item["functor"] = _PLACEHOLDER_RE.sub(
-            lambda m: str(stripped_index[m.group(1)]), item["functor"]
-        )
+        new_item["functor"] = _PLACEHOLDER_RE.sub(lambda m: str(stripped_index[m.group(1)]), item["functor"])
         new_plot_list.append(new_item)
 
     return new_plot_list, channel_indices
 
+
 # we can run matplotlib in Agg mode in the subprocesses to save some memory overhead
 def _worker_init():
     os.environ["MPLBACKEND"] = "Agg"
+
 
 # per-process cache of (figure, pred_axes, truth_axes, pred_mesh, truth_mesh)
 # keyed on (H, W, figsize, projection, cmap). Each ProcessPoolExecutor worker
@@ -134,7 +132,9 @@ def plot_comparison(
     if len(truth.shape) != 2:
         raise ValueError(f"expected truth to be a 2D array, got shape {tuple(truth.shape)}")
     if pred.shape != truth.shape:
-        raise ValueError(f"expected pred and truth to have the same shape, got {tuple(pred.shape)} and {tuple(truth.shape)}")
+        raise ValueError(
+            f"expected pred and truth to have the same shape, got {tuple(pred.shape)} and {tuple(truth.shape)}"
+        )
 
     H, W = pred.shape
     if (lat is None) or (lon is None):
@@ -150,7 +150,13 @@ def plot_comparison(
         vmin = truth.min()
 
     fig, ax_pred, ax_truth, mesh_pred, mesh_truth = _get_or_create_figure(
-        H, W, lat, lon, figsize, projection, cmap,
+        H,
+        W,
+        lat,
+        lon,
+        figsize,
+        projection,
+        cmap,
     )
 
     mesh_pred.set_array(pred.ravel())
@@ -226,7 +232,9 @@ def _draw_progress_bar(image, progress: float, y_pos: float = 0.5, margin: int =
     return image
 
 
-def visualize_field(tag, func_string, prediction, target, lat, lon, scale, bias, diverging, progress: Optional[float] = None):
+def visualize_field(
+    tag, func_string, prediction, target, lat, lon, scale, bias, diverging, progress: Optional[float] = None
+):
     torch.cuda.nvtx.range_push("visualize_field")
 
     # get func handle:
@@ -241,7 +249,16 @@ def visualize_field(tag, func_string, prediction, target, lat, lon, scale, bias,
     targ = func_handle(targ)
 
     # generate image
-    image = plot_comparison(pred, targ, lat, lon, pred_title="Prediction", truth_title="Ground truth", projection="mollweide", diverging=diverging)
+    image = plot_comparison(
+        pred,
+        targ,
+        lat,
+        lon,
+        pred_title="Prediction",
+        truth_title="Ground truth",
+        projection="mollweide",
+        diverging=diverging,
+    )
 
     if progress is not None:
         image = _draw_progress_bar(image, progress)
@@ -254,7 +271,19 @@ def visualize_field(tag, func_string, prediction, target, lat, lon, scale, bias,
 class VisualizationWrapper(object):
     "Handles visualization during training"
 
-    def __init__(self, log_to_wandb, path, prefix, plot_list, channel_names=None, lat=None, lon=None, scale=1.0, bias=0.0, num_workers=1):
+    def __init__(
+        self,
+        log_to_wandb,
+        path,
+        prefix,
+        plot_list,
+        channel_names=None,
+        lat=None,
+        lon=None,
+        scale=1.0,
+        bias=0.0,
+        num_workers=1,
+    ):
         self.log_to_wandb = log_to_wandb
         self.generate_video = True
         self.path = path
@@ -303,7 +332,19 @@ class VisualizationWrapper(object):
             func_string = item["functor"]
             plot_diverge = item["diverging"]
             self.requests.append(
-                self.executor.submit(visualize_field, (tag, field_name), func_string, pred, tar, self.lat, self.lon, self.scale, self.bias, plot_diverge, progress=progress)
+                self.executor.submit(
+                    visualize_field,
+                    (tag, field_name),
+                    func_string,
+                    pred,
+                    tar,
+                    self.lat,
+                    self.lon,
+                    self.scale,
+                    self.bias,
+                    plot_diverge,
+                    progress=progress,
+                )
             )
 
         return

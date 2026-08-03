@@ -68,13 +68,17 @@ class EnsembleNLLLoss(GeometricBaseLoss):
         )
 
         self.spatial_distributed = spatial_distributed and comm.is_distributed("spatial")
-        self.ensemble_distributed = ensemble_distributed and comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1)
+        self.ensemble_distributed = (
+            ensemble_distributed and comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1)
+        )
         self.eps = eps
 
         # we also need a variant of the weights split in ensemble direction:
         quad_weight_split = self.quadrature.quad_weight.reshape(1, 1, -1)
         if self.ensemble_distributed:
-            quad_weight_split = split_tensor_along_dim(quad_weight_split, dim=-1, num_chunks=comm.get_size("ensemble"))[comm.get_rank("ensemble")]
+            quad_weight_split = split_tensor_along_dim(quad_weight_split, dim=-1, num_chunks=comm.get_size("ensemble"))[
+                comm.get_rank("ensemble")
+            ]
         quad_weight_split = quad_weight_split.contiguous()
         self.register_buffer("quad_weight_split", quad_weight_split, persistent=False)
 
@@ -82,7 +86,13 @@ class EnsembleNLLLoss(GeometricBaseLoss):
     def type(self):
         return LossType.Probabilistic
 
-    def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, spatial_weights: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor:
+    def forward(
+        self,
+        forecasts: torch.Tensor,
+        observations: torch.Tensor,
+        spatial_weights: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> torch.Tensor:
 
         # we assume the following shapes:
         # forecasts: batch, ensemble, channels, lat, lon

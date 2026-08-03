@@ -17,6 +17,7 @@ import os
 from functools import partial
 import torch
 
+
 def get_bias_correction(params):
     if params.get("bias_correction", None) is not None:
         from makani.utils.auxiliary_fields import get_bias_correction
@@ -52,10 +53,20 @@ def get_static_features(params):
         from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature
 
         quadrature_rule = grid_to_quadrature_rule(params.get("data_grid_type", "equiangular"))
-        crop_shape = [params.get("img_crop_shape_x", params.img_shape_x), params.get("img_crop_shape_y", params.img_shape_y)]
+        crop_shape = [
+            params.get("img_crop_shape_x", params.img_shape_x),
+            params.get("img_crop_shape_y", params.img_shape_y),
+        ]
         crop_offset = [params.get("img_crop_offset_x", 0), params.get("img_crop_offset_y", 0)]
 
-        quadrature = GridQuadrature(quadrature_rule, img_shape=params.img_shape, crop_shape=crop_shape, crop_offset=crop_offset, normalize=True, distributed=False)
+        quadrature = GridQuadrature(
+            quadrature_rule,
+            img_shape=params.img_shape,
+            crop_shape=crop_shape,
+            crop_offset=crop_offset,
+            normalize=True,
+            distributed=False,
+        )
 
         def normalize(tensor, eps=0.0):
             mean = quadrature(tensor).reshape(1, -1, 1, 1)
@@ -82,7 +93,9 @@ def get_static_features(params):
                 lon = torch.as_tensor(params.lon).to(torch.float32)
 
                 # convert grid if required
-                gconv = GridConverter(params.data_grid_type, params.model_grid_type, torch.deg2rad(lat), torch.deg2rad(lon))
+                gconv = GridConverter(
+                    params.data_grid_type, params.model_grid_type, torch.deg2rad(lat), torch.deg2rad(lon)
+                )
                 tx, ty = gconv.get_dst_coords()
                 tx = tx.to(torch.float32)
                 ty = ty.to(torch.float32)
@@ -104,7 +117,7 @@ def get_static_features(params):
                 for freq in range(1, num_freq + 1):
                     if singrid is None:
                         if add_cos:
-                            singrid =[torch.sin(grid), torch.cos(grid)]
+                            singrid = [torch.sin(grid), torch.cos(grid)]
                         else:
                             singrid = [torch.sin(grid)]
                     else:

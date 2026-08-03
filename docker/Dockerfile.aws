@@ -98,7 +98,7 @@ RUN cd /opt && git clone https://github.com/awslabs/aws-c-http.git && \
     cmake .. -DCMAKE_BUILD_TYPE=Release && \
     make -j$(nproc) && \
     make install
-    
+
 # 4. aws-c-auth
 RUN cd /opt && git clone https://github.com/awslabs/aws-c-auth.git && \
     cd aws-c-auth && \

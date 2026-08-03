@@ -29,12 +29,14 @@ def _assert_checkpoint_safe(module: nn.Module):
     their recomputed mask would diverge from the original forward and corrupt gradients.
     Fail loudly rather than train silently-wrong.
     """
-    offenders = sorted({
-        type(m).__name__
-        for m in module.modules()
-        if isinstance(getattr(m, "rng_cpu", None), torch.Generator)
-        or isinstance(getattr(m, "rng_gpu", None), torch.Generator)
-    })
+    offenders = sorted(
+        {
+            type(m).__name__
+            for m in module.modules()
+            if isinstance(getattr(m, "rng_cpu", None), torch.Generator)
+            or isinstance(getattr(m, "rng_gpu", None), torch.Generator)
+        }
+    )
     if offenders:
         raise RuntimeError(
             f"multistep_checkpoint is incompatible with modules carrying private RNG "
@@ -99,9 +101,7 @@ class SingleStepWrapper(nn.Module):
         denormalization are skipped.
         """
         if not hasattr(self.model, "encode_process"):
-            raise NotImplementedError(
-                f"{type(self.model).__name__} does not expose encode_process()."
-            )
+            raise NotImplementedError(f"{type(self.model).__name__} does not expose encode_process().")
 
         inpans = self._preprocess(inp, update_state=update_state, replace_state=replace_state)
 

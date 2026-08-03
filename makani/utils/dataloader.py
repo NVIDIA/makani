@@ -49,11 +49,17 @@ def init_distributed_io(params):
     # to simplify, the number of total IO ranks has to be 1 or equal to the model parallel size
     num_io_ranks = math.prod(params.io_grid)
     if not ((num_io_ranks == 1) or (num_io_ranks == comm.get_size("spatial"))):
-        raise ValueError(f"the total number of IO ranks ({num_io_ranks}) has to be either 1 or equal to the spatial comm size ({comm.get_size('spatial')})")
+        raise ValueError(
+            f"the total number of IO ranks ({num_io_ranks}) has to be either 1 or equal to the spatial comm size ({comm.get_size('spatial')})"
+        )
     if not ((params.io_grid[1] == comm.get_size("h")) or (params.io_grid[1] == 1)):
-        raise ValueError(f"io_grid[1] ({params.io_grid[1]}) has to be either 1 or equal to the h comm size ({comm.get_size('h')})")
+        raise ValueError(
+            f"io_grid[1] ({params.io_grid[1]}) has to be either 1 or equal to the h comm size ({comm.get_size('h')})"
+        )
     if not ((params.io_grid[2] == comm.get_size("w")) or (params.io_grid[2] == 1)):
-        raise ValueError(f"io_grid[2] ({params.io_grid[2]}) has to be either 1 or equal to the w comm size ({comm.get_size('w')})")
+        raise ValueError(
+            f"io_grid[2] ({params.io_grid[2]}) has to be either 1 or equal to the w comm size ({comm.get_size('w')})"
+        )
 
     # get io ranks (channel dim is always 1, so only h/w are sharded)
     params.io_rank = [0, 0, 0]
@@ -70,7 +76,7 @@ def get_dataloader(params, files_pattern, device, mode="train", dali_device=None
 
     if (mode == "inference") and (not params.get("multifiles", False)):
         raise NotImplementedError("Error, only multifiles dataloader is supported in inference mode.")
-    
+
     # get data normalization
     bias, scale = get_data_normalization(params)
 
@@ -84,34 +90,41 @@ def get_dataloader(params, files_pattern, device, mode="train", dali_device=None
         from makani.utils.dataloaders.data_loader_multifiles import MultifilesDataset as MultifilesDataset2D
         from torch.utils.data.distributed import DistributedSampler
 
-        dataset = MultifilesDataset2D(location=files_pattern,
-                                      dt=params.get("dt"),
-                                      in_channels=params.get("in_channels"),
-                                      out_channels=params.get("out_channels"),
-                                      n_history=params.get("n_history", 0),
-                                      n_future=(params.get("valid_autoreg_steps") if (mode == "eval") else params.get("n_future", 0)),
-                                      add_zenith=params.get("add_zenith", False),
-                                      data_grid_type=params.get("data_grid_type", "equiangular"),
-                                      model_grid_type=params.get("model_grid_type", "equiangular"),
-                                      bias=bias,
-                                      scale=scale,
-                                      crop_size=(params.get("crop_size_x", None), params.get("crop_size_y", None)),
-                                      crop_anchor=(params.get("crop_anchor_x", 0), params.get("crop_anchor_y", 0)),
-                                      subsampling_factor=params.get("subsampling_factor", 1),
-                                      return_timestamp=(True if (mode == "inference") else False),
-                                      return_target=(False if (mode == "inference") else True),
-                                      file_suffix=params.get("dataset_file_suffix", "h5"),
-                                      dataset_name=params.get("h5_path", "fields"),
-                                      timestamp_name=params.get("timestamp_name", "timestamp"),
-                                      latitude_name=params.get("latitude_name", "lat"),
-                                      longitude_name=params.get("longitude_name", "lon"),
-                                      enable_s3=params.get("enable_s3", False),
-                                      io_grid=params.get("io_grid", [1,1,1]),
-                                      io_rank=params.get("io_rank", [0,0,0]),
+        dataset = MultifilesDataset2D(
+            location=files_pattern,
+            dt=params.get("dt"),
+            in_channels=params.get("in_channels"),
+            out_channels=params.get("out_channels"),
+            n_history=params.get("n_history", 0),
+            n_future=(params.get("valid_autoreg_steps") if (mode == "eval") else params.get("n_future", 0)),
+            add_zenith=params.get("add_zenith", False),
+            data_grid_type=params.get("data_grid_type", "equiangular"),
+            model_grid_type=params.get("model_grid_type", "equiangular"),
+            bias=bias,
+            scale=scale,
+            crop_size=(params.get("crop_size_x", None), params.get("crop_size_y", None)),
+            crop_anchor=(params.get("crop_anchor_x", 0), params.get("crop_anchor_y", 0)),
+            subsampling_factor=params.get("subsampling_factor", 1),
+            return_timestamp=(True if (mode == "inference") else False),
+            return_target=(False if (mode == "inference") else True),
+            file_suffix=params.get("dataset_file_suffix", "h5"),
+            dataset_name=params.get("h5_path", "fields"),
+            timestamp_name=params.get("timestamp_name", "timestamp"),
+            latitude_name=params.get("latitude_name", "lat"),
+            longitude_name=params.get("longitude_name", "lon"),
+            enable_s3=params.get("enable_s3", False),
+            io_grid=params.get("io_grid", [1, 1, 1]),
+            io_rank=params.get("io_rank", [0, 0, 0]),
         )
-        
+
         if mode in ["train", "eval"]:
-            sampler = DistributedSampler(dataset, shuffle=(mode == "train"), num_replicas=params.data_num_shards, rank=params.data_shard_id) if (params.data_num_shards > 1) else None
+            sampler = (
+                DistributedSampler(
+                    dataset, shuffle=(mode == "train"), num_replicas=params.data_num_shards, rank=params.data_shard_id
+                )
+                if (params.data_num_shards > 1)
+                else None
+            )
             dataloader = DataLoader(
                 dataset,
                 batch_size=int(params.batch_size),
@@ -140,7 +153,7 @@ def get_dataloader(params, files_pattern, device, mode="train", dali_device=None
         img_shape = None
         if (img_shape_x is not None) and (img_shape_y is not None):
             img_shape = (img_shape_x, img_shape_y)
-        
+
         dataloader = DummyLoader(
             location=files_pattern,
             device=device,
@@ -150,8 +163,14 @@ def get_dataloader(params, files_pattern, device, mode="train", dali_device=None
             in_channels=params.get("in_channels"),
             out_channels=params.get("out_channels"),
             img_shape=img_shape,
-            max_samples=(params.get("n_train_samples", None) if (mode == "train") else params.get("n_eval_samples", None)),
-            n_samples_per_epoch=(params.get("n_train_samples_per_epoch", None) if (mode == "train") else params.get("n_eval_samples_per_epoch", None)),
+            max_samples=(
+                params.get("n_train_samples", None) if (mode == "train") else params.get("n_eval_samples", None)
+            ),
+            n_samples_per_epoch=(
+                params.get("n_train_samples_per_epoch", None)
+                if (mode == "train")
+                else params.get("n_eval_samples_per_epoch", None)
+            ),
             n_history=params.get("n_history", 0),
             n_future=(params.get("valid_autoreg_steps") if (mode == "eval") else params.get("n_future", 0)),
             add_zenith=params.get("add_zenith", False),
@@ -164,8 +183,8 @@ def get_dataloader(params, files_pattern, device, mode="train", dali_device=None
             subsampling_factor=params.get("subsampling_factor", 1),
             return_timestamp=(True if (mode == "inference") else False),
             return_target=(False if (mode == "inference") else True),
-            io_grid=params.get("io_grid", [1,1,1]),
-            io_rank=params.get("io_rank", [0,0,0]),
+            io_grid=params.get("io_grid", [1, 1, 1]),
+            io_rank=params.get("io_rank", [0, 0, 0]),
         )
 
         dataset = types.SimpleNamespace(

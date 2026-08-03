@@ -49,7 +49,6 @@ def _barrier(device):
     dist.barrier(device_ids=device_ids)
 
 
-
 class DataBuffer(object, metaclass=ABCMeta):
     r"""
     DataBuffer class used as base class for online data analysis
@@ -57,17 +56,17 @@ class DataBuffer(object, metaclass=ABCMeta):
 
     def __init__(
         self,
-	    num_rollout_steps: int,
-	    rollout_dt: int,
-	    channel_names: List[str],
-	    device: Union[str, torch.device],
+        num_rollout_steps: int,
+        rollout_dt: int,
+        channel_names: List[str],
+        device: Union[str, torch.device],
         scale: Optional[torch.Tensor] = None,
         bias: Optional[torch.Tensor] = None,
-	    output_channels: List[str] = [],
+        output_channels: List[str] = [],
         output_file: Optional[str] = None,
     ):
 
-	    # store members
+        # store members
         self.num_rollout_steps = num_rollout_steps
         self.rollout_dt = rollout_dt
         self.output_channels = output_channels
@@ -103,6 +102,7 @@ class DataBuffer(object, metaclass=ABCMeta):
             if comm.get_world_size() > 1:
                 # initialize MPI. This call is collective!
                 from mpi4py import MPI
+
                 self.mpi_comm = MPI.COMM_WORLD.Split(color=0, key=comm.get_world_rank())
             else:
                 self.mpi_comm = None
@@ -203,7 +203,9 @@ class RolloutBuffer(DataBuffer):
         enable_odirect: bool = False,
         odirect_alignment: int = 0,
     ):
-        super().__init__(num_rollout_steps, rollout_dt, channel_names, device, scale, bias, output_channels, output_file)
+        super().__init__(
+            num_rollout_steps, rollout_dt, channel_names, device, scale, bias, output_channels, output_file
+        )
 
         # O_DIRECT (HDF5 ``direct`` VFD): bypasses the host page cache. Requires an
         # output file and a non-MPI single-writer layout — the direct VFD is mutually
@@ -226,8 +228,7 @@ class RolloutBuffer(DataBuffer):
         self.streaming_mode = streaming_mode or streaming_via_size
         if self.streaming_mode and output_file is None:
             raise ValueError(
-                "streaming mode requires output_file to be set; "
-                "there is no in-memory buffer in streaming mode."
+                "streaming mode requires output_file to be set; " "there is no in-memory buffer in streaming mode."
             )
 
         # resolve buffer device (mirrors DataBuffer's str→torch.device coercion).
@@ -279,10 +280,14 @@ class RolloutBuffer(DataBuffer):
             # compute device is CUDA (it accelerates async H2D/D2H transfers).
             pin_memory = (self.buffer_device.type == "cpu") and (self.device.type == "cuda")
             local_buffer_size = (self.num_buffered_samples, self.ensemble_size, self.num_channels, *self.local_shape)
-            self.rollout_data = torch.zeros(local_buffer_size, dtype=torch.float32, device=self.buffer_device, pin_memory=pin_memory)
+            self.rollout_data = torch.zeros(
+                local_buffer_size, dtype=torch.float32, device=self.buffer_device, pin_memory=pin_memory
+            )
             # worst case (R+1 == 1) every slot is a distinct IC, so the timestamp buffer
             # is sized to the data buffer; in practice only a fraction is used per flush.
-            self.timestamp_data = torch.zeros((self.num_buffered_samples,), dtype=torch.float64, device=self.buffer_device, pin_memory=pin_memory)
+            self.timestamp_data = torch.zeros(
+                (self.num_buffered_samples,), dtype=torch.float64, device=self.buffer_device, pin_memory=pin_memory
+            )
 
         # open output_file
         self.file_handle = None
@@ -332,17 +337,29 @@ class RolloutBuffer(DataBuffer):
             self.file_handle = h5.File(output_file, "w", driver="mpio", comm=self.mpi_comm)
         elif self.enable_odirect:
             # HDF5 ``direct`` VFD: writes go through O_DIRECT, bypassing the page cache.
-            driver_kwargs = dict(alignment=self.odirect_alignment, block_size=self.odirect_alignment) if self.odirect_alignment > 0 else {}
+            driver_kwargs = (
+                dict(alignment=self.odirect_alignment, block_size=self.odirect_alignment)
+                if self.odirect_alignment > 0
+                else {}
+            )
             self.file_handle = h5.File(output_file, "w", driver="direct", **driver_kwargs)
         else:
             self.file_handle = h5.File(output_file, "w")
 
         # create hdf5 dataset
-        total_buffer_size = (self.num_samples_total, self.num_rollout_steps + 1, self.ensemble_size * comm.get_size("ensemble"), self.num_channels, *self.img_shape)
+        total_buffer_size = (
+            self.num_samples_total,
+            self.num_rollout_steps + 1,
+            self.ensemble_size * comm.get_size("ensemble"),
+            self.num_channels,
+            *self.img_shape,
+        )
         self.rollout_buffer_disk = self.file_handle.create_dataset("fields", total_buffer_size, dtype=np.float32)
 
         # create timestamps for scale
-        self.timestamp_buffer_disk = self.file_handle.create_dataset("timestamp", (self.num_samples_total), dtype=np.float64)
+        self.timestamp_buffer_disk = self.file_handle.create_dataset(
+            "timestamp", (self.num_samples_total), dtype=np.float64
+        )
         self.timestamp_buffer_disk.make_scale("timestamp")
         self.rollout_buffer_disk.dims[0].attach_scale(self.timestamp_buffer_disk)
 
@@ -442,7 +459,7 @@ class RolloutBuffer(DataBuffer):
         idt_start = chunk["idt_start"]
 
         # gather the chunk's slab from the data buffer
-        slab = self.rollout_data[start_slot:start_slot + B * idt_count]
+        slab = self.rollout_data[start_slot : start_slot + B * idt_count]
         slab = slab.reshape(idt_count, B, self.ensemble_size, self.num_channels, *self.local_shape)
         # transpose to (B, idt_count, E, C, H, W) to match the file's IC-major layout
         slab = slab.transpose(0, 1).contiguous()
@@ -608,7 +625,7 @@ class RolloutBuffer(DataBuffer):
                     if self.ts_first_ic_offset is None:
                         self.ts_first_ic_offset = self.file_offset
                     ts_slot = self.ts_buffer_offset
-                    self.timestamp_data[ts_slot:ts_slot + current_batch_size].copy_(tstamps, non_blocking=True)
+                    self.timestamp_data[ts_slot : ts_slot + current_batch_size].copy_(tstamps, non_blocking=True)
                     self.ts_buffer_offset += current_batch_size
 
                 # write the (B, E, C, H, W) tile into the flat buffer
@@ -686,7 +703,9 @@ class MeanStdBuffer(DataBuffer):
         output_channels: List[str] = [],
         output_file: Optional[str] = None,
     ):
-        super().__init__(num_rollout_steps, rollout_dt, channel_names, device, scale, bias, output_channels, output_file)
+        super().__init__(
+            num_rollout_steps, rollout_dt, channel_names, device, scale, bias, output_channels, output_file
+        )
 
         # rollout buffer on CPU has dimensions num_rollout_steps x num_channels x nlat x nlon
         pin_memory = self.device.type == "cuda"
@@ -698,7 +717,9 @@ class MeanStdBuffer(DataBuffer):
         self.variable_dims = len(variable_shape)
 
         # number of samples seen
-        self.num_samples_tracked = torch.zeros((self.num_rollout_steps, 1, *(1 for _ in range(self.variable_dims))), dtype=torch.int64, device=self.device)
+        self.num_samples_tracked = torch.zeros(
+            (self.num_rollout_steps, 1, *(1 for _ in range(self.variable_dims))), dtype=torch.int64, device=self.device
+        )
 
     def zero_buffers(self):
         """
@@ -712,7 +733,9 @@ class MeanStdBuffer(DataBuffer):
         return
 
     def _compute_stats(self, data, dim=0):
-        count = torch.tensor(data.shape[dim], dtype=torch.int64, device=self.device).reshape(1, *(1 for _ in range(self.variable_dims)))
+        count = torch.tensor(data.shape[dim], dtype=torch.int64, device=self.device).reshape(
+            1, *(1 for _ in range(self.variable_dims))
+        )
         var, mean = torch.var_mean(data, dim=dim, correction=0, keepdim=False)
         m2 = var * count
 
@@ -722,7 +745,9 @@ class MeanStdBuffer(DataBuffer):
         count_new = self.num_samples_tracked[idt] + count
         delta = mean - self.running_mean[idt]
         self.running_mean[idt, ...] += delta * float(count) / float(count_new)
-        self.running_var[idt, ...] += m2 + torch.square(delta) * float(self.num_samples_tracked[idt] * count) / float(count_new)
+        self.running_var[idt, ...] += m2 + torch.square(delta) * float(self.num_samples_tracked[idt] * count) / float(
+            count_new
+        )
         self.num_samples_tracked[idt, ...] = count_new
 
         return
@@ -781,19 +806,22 @@ class TemporalAverageBuffer(MeanStdBuffer):
     output_file: str, optional
         Outputfile to write to
     """
-    def __init__(self,
+
+    def __init__(
+        self,
         num_rollout_steps: int,
         rollout_dt: int,
-	    img_shape: Tuple[int, int],
+        img_shape: Tuple[int, int],
         local_shape: Tuple[int, int],
-	    local_offset: Tuple[int, int],
+        local_offset: Tuple[int, int],
         channel_names: List[str],
         lat_lon: Tuple[List[float], List[float]],
         device: Union[str, torch.device],
         scale: Optional[torch.Tensor] = None,
         bias: Optional[torch.Tensor] = None,
-	    output_channels: List[str] = [],
-        output_file: Optional[str] = None):
+        output_channels: List[str] = [],
+        output_file: Optional[str] = None,
+    ):
 
         super().__init__(
             num_rollout_steps=num_rollout_steps,
@@ -842,7 +870,9 @@ class TemporalAverageBuffer(MeanStdBuffer):
         leadtime.make_scale("lead_time")
         mean_data.dims[0].attach_scale(leadtime)
         std_data.dims[0].attach_scale(leadtime)
-        dts = np.arange(self.rollout_dt, (self.num_rollout_steps + 1) * self.rollout_dt, self.rollout_dt, dtype=np.float64)
+        dts = np.arange(
+            self.rollout_dt, (self.num_rollout_steps + 1) * self.rollout_dt, self.rollout_dt, dtype=np.float64
+        )
         if comm.get_world_rank() == 0:
             leadtime[:] = dts[:]
 
@@ -900,7 +930,6 @@ class TemporalAverageBuffer(MeanStdBuffer):
 
         return
 
-
     def finalize(self):
 
         _barrier(self.device)
@@ -943,7 +972,9 @@ class SpectrumAverageBuffer(MeanStdBuffer):
     output_file: str, optional
         Outputfile to write to
     """
-    def __init__(self,
+
+    def __init__(
+        self,
         num_rollout_steps: int,
         rollout_dt: int,
         img_shape: Tuple[int, int],
@@ -955,7 +986,8 @@ class SpectrumAverageBuffer(MeanStdBuffer):
         bias: Optional[torch.Tensor] = None,
         output_channels: List[str] = [],
         output_file: Optional[str] = None,
-        spatial_distributed: Optional[bool] = False):
+        spatial_distributed: Optional[bool] = False,
+    ):
 
         # instantiate SHT
         self.spatial_distributed = spatial_distributed
@@ -992,7 +1024,8 @@ class SpectrumAverageBuffer(MeanStdBuffer):
             scale=scale,
             bias=bias,
             output_channels=output_channels,
-            output_file=output_file,)
+            output_file=output_file,
+        )
 
         # move sht to device
         self.sht = self.sht.to(self.device)
@@ -1035,7 +1068,7 @@ class SpectrumAverageBuffer(MeanStdBuffer):
             spect = spect.to(dtype=dtype)
 
             # swap E and C
-            spect = spect.permute(0,2,1,3).contiguous()
+            spect = spect.permute(0, 2, 1, 3).contiguous()
 
             # compute the local variance and mean over the local batch dimension
             mean, m2, count = self._compute_stats(spect, dim=0)
@@ -1072,7 +1105,12 @@ class SpectrumAverageBuffer(MeanStdBuffer):
             file_handle = h5.File(self.output_file, "w")
 
         # create hdf5 dataset and write the data
-        data_shape = (self.num_rollout_steps, self.num_channels, self.ensemble_size * comm.get_size("ensemble") + 1, self.lmax)
+        data_shape = (
+            self.num_rollout_steps,
+            self.num_channels,
+            self.ensemble_size * comm.get_size("ensemble") + 1,
+            self.lmax,
+        )
         mean_data = file_handle.create_dataset("mean", data_shape, dtype=np.float64)
         std_data = file_handle.create_dataset("std", data_shape, dtype=np.float64)
 
@@ -1102,7 +1140,9 @@ class SpectrumAverageBuffer(MeanStdBuffer):
         leadtime.make_scale("lead_time")
         mean_data.dims[0].attach_scale(leadtime)
         std_data.dims[0].attach_scale(leadtime)
-        dts = np.arange(self.rollout_dt, (self.num_rollout_steps + 1) * self.rollout_dt, self.rollout_dt, dtype=np.float64)
+        dts = np.arange(
+            self.rollout_dt, (self.num_rollout_steps + 1) * self.rollout_dt, self.rollout_dt, dtype=np.float64
+        )
         if comm.get_world_rank() == 0:
             leadtime[:] = dts[:]
 
@@ -1132,6 +1172,7 @@ class SpectrumAverageBuffer(MeanStdBuffer):
 
         return
 
+
 class ZonalSpectrumAverageBuffer(MeanStdBuffer):
     r"""
     SpectrumAverageBuffer class handles the recording of spatial data during inference. Performs Welford reduction on the fly during inference
@@ -1157,7 +1198,9 @@ class ZonalSpectrumAverageBuffer(MeanStdBuffer):
     output_file: str, optional
         Outputfile to write to
     """
-    def __init__(self,
+
+    def __init__(
+        self,
         num_rollout_steps: int,
         rollout_dt: int,
         img_shape: Tuple[int, int],
@@ -1165,11 +1208,12 @@ class ZonalSpectrumAverageBuffer(MeanStdBuffer):
         channel_names: List[str],
         lat_lon: Tuple[List[float], List[float]],
         device: Union[str, torch.device],
-	    scale: Optional[torch.Tensor] = None,
+        scale: Optional[torch.Tensor] = None,
         bias: Optional[torch.Tensor] = None,
         output_channels: List[str] = [],
         output_file: Optional[str] = None,
-        spatial_distributed: Optional[bool] = False):
+        spatial_distributed: Optional[bool] = False,
+    ):
 
         # instantiate SHT
         self.spatial_distributed = spatial_distributed and comm.get_size("spatial") > 1
@@ -1218,7 +1262,8 @@ class ZonalSpectrumAverageBuffer(MeanStdBuffer):
             scale=scale,
             bias=bias,
             output_channels=output_channels,
-            output_file=output_file,)
+            output_file=output_file,
+        )
 
         # reshape bias and scale
         self.bias = self.bias.reshape(1, 1, -1, 1, 1)
@@ -1230,9 +1275,11 @@ class ZonalSpectrumAverageBuffer(MeanStdBuffer):
         self.lat_weights = torch.cos(torch.deg2rad(lats))
         # split the tensor in lat dim
         if self.spatial_distributed and comm.get_size("h") > 1:
-            self.lat_weights = split_tensor_along_dim(self.lat_weights, dim=0, num_chunks=comm.get_size("h"))[comm.get_rank("h")]
+            self.lat_weights = split_tensor_along_dim(self.lat_weights, dim=0, num_chunks=comm.get_size("h"))[
+                comm.get_rank("h")
+            ]
         # reshape:
-        self.lat_weights = torch.reshape(self.lat_weights, (1,1,1,-1,1))
+        self.lat_weights = torch.reshape(self.lat_weights, (1, 1, 1, -1, 1))
 
     def update(self, data, targ, idt):
         """update local buffers"""
@@ -1262,7 +1309,7 @@ class ZonalSpectrumAverageBuffer(MeanStdBuffer):
             spect = spect.to(dtype=dtype)
 
             # swap E and C
-            spect = spect.permute(0,2,1,3,4).contiguous()
+            spect = spect.permute(0, 2, 1, 3, 4).contiguous()
 
             # compute the local variance and mean over the local batch dimension
             mean, m2, count = self._compute_stats(spect, dim=0)
@@ -1299,7 +1346,13 @@ class ZonalSpectrumAverageBuffer(MeanStdBuffer):
             file_handle = h5.File(self.output_file, "w")
 
         # create hdf5 dataset and write the data
-        data_shape = (self.num_rollout_steps, self.num_channels, self.ensemble_size * comm.get_size("ensemble") + 1, self.nlat, self.mmax)
+        data_shape = (
+            self.num_rollout_steps,
+            self.num_channels,
+            self.ensemble_size * comm.get_size("ensemble") + 1,
+            self.nlat,
+            self.mmax,
+        )
         mean_data = file_handle.create_dataset("mean", data_shape, dtype=np.float64)
         std_data = file_handle.create_dataset("std", data_shape, dtype=np.float64)
 
@@ -1329,7 +1382,9 @@ class ZonalSpectrumAverageBuffer(MeanStdBuffer):
         leadtime.make_scale("lead_time")
         mean_data.dims[0].attach_scale(leadtime)
         std_data.dims[0].attach_scale(leadtime)
-        dts = np.arange(self.rollout_dt, (self.num_rollout_steps + 1) * self.rollout_dt, self.rollout_dt, dtype=np.float64)
+        dts = np.arange(
+            self.rollout_dt, (self.num_rollout_steps + 1) * self.rollout_dt, self.rollout_dt, dtype=np.float64
+        )
         if comm.get_world_rank() == 0:
             leadtime[:] = dts[:]
 
@@ -1342,7 +1397,7 @@ class ZonalSpectrumAverageBuffer(MeanStdBuffer):
         if comm.get_world_rank() == 0:
             chans[...] = self.output_channels
 
-         # create lon and lat descriptors
+        # create lon and lat descriptors
         lats = file_handle.create_dataset("lat", len(self.lat_lon[0]), dtype=np.float32)
         lats.make_scale("lat")
         mean_data.dims[3].attach_scale(lats)

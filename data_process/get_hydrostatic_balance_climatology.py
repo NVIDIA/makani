@@ -46,6 +46,7 @@ from data_process.data_process_helpers import (
     binary_reduce,
 )
 
+
 @torch.compile()
 def compute_residual(tdata, z_idx, t_idx, q_idx, coeffs, q_prefact):
     """Per-point hydrostatic-balance residual for each interior level.
@@ -81,25 +82,27 @@ def compute_residual(tdata, z_idx, t_idx, q_idx, coeffs, q_prefact):
     return dZ - coeffs.view(1, -1, 1, 1) * sumTv
 
 
-def get_file_stats(filename,
-                   file_slice,
-                   z_idx,
-                   t_idx,
-                   q_idx,
-                   coeffs,
-                   q_prefact,
-                   quadrature,
-                   fail_on_nan=False,
-                   batch_size=16,
-                   device=torch.device("cpu"),
-                   progress=None):
+def get_file_stats(
+    filename,
+    file_slice,
+    z_idx,
+    t_idx,
+    q_idx,
+    coeffs,
+    q_prefact,
+    quadrature,
+    fail_on_nan=False,
+    batch_size=16,
+    device=torch.device("cpu"),
+    progress=None,
+):
 
     stats = None
     n_interior = len(z_idx) - 1
-    with h5.File(filename, 'r') as f:
+    with h5.File(filename, "r") as f:
 
         # get dataset
-        dset = f['fields']
+        dset = f["fields"]
 
         # create batch
         slc_start = file_slice.start
@@ -133,8 +136,13 @@ def get_file_stats(filename,
             valid_count = torch.sum(quadrature(valid_mask), dim=0)
 
             # area-weighted, time-summed mean and m2 (global meanvar over time + space)
-            rmean = torch.sum(quadrature(res_masked * valid_mask), dim=0, keepdim=False).reshape(1, -1, 1, 1) / valid_count[None, :, None, None]
-            rm2 = torch.sum(quadrature(torch.square(res_masked - rmean) * valid_mask), dim=0, keepdim=False).reshape(1, -1, 1, 1)
+            rmean = (
+                torch.sum(quadrature(res_masked * valid_mask), dim=0, keepdim=False).reshape(1, -1, 1, 1)
+                / valid_count[None, :, None, None]
+            )
+            rm2 = torch.sum(quadrature(torch.square(res_masked - rmean) * valid_mask), dim=0, keepdim=False).reshape(
+                1, -1, 1, 1
+            )
 
             tmpstats = dict(
                 # spatially-resolved temporal mean of the residual (climatology field)
@@ -164,10 +172,18 @@ def get_file_stats(filename,
     return stats
 
 
-def get_hydrostatic_balance_climatology(input_path: str, output_path: str, metadata_file: str,
-                                        quadrature_rule: str, p_min: Optional[float] = None, p_max: Optional[float] = None,
-                                        use_moist_air_formula: bool = False, fail_on_nan: bool = False,
-                                        batch_size: Optional[int] = 16, reduction_group_size: Optional[int] = 8):
+def get_hydrostatic_balance_climatology(
+    input_path: str,
+    output_path: str,
+    metadata_file: str,
+    quadrature_rule: str,
+    p_min: Optional[float] = None,
+    p_max: Optional[float] = None,
+    use_moist_air_formula: bool = False,
+    fail_on_nan: bool = False,
+    batch_size: Optional[int] = 16,
+    reduction_group_size: Optional[int] = 8,
+):
     """Compute the climatology of the hydrostatic-balance residual of a makani HDF5 dataset.
 
     For every matching geopotential/temperature (and, if requested, specific-humidity) pressure
@@ -246,22 +262,22 @@ def get_hydrostatic_balance_climatology(input_path: str, output_path: str, metad
 
             num_samples = []
             for filename in filelist:
-                with h5.File(filename, 'r') as f:
-                    data_shape = f['fields'].shape
+                with h5.File(filename, "r") as f:
+                    data_shape = f["fields"].shape
                     num_samples.append(data_shape[0])
         else:
             combined_file = True
             filelist = [input_path]
-            with h5.File(filelist[0], 'r') as f:
-                data_shape = f['fields'].shape
+            with h5.File(filelist[0], "r") as f:
+                data_shape = f["fields"].shape
                 num_samples = [data_shape[0]]
 
         # open metadata file
-        with open(metadata_file, 'r') as f:
+        with open(metadata_file, "r") as f:
             metadata = json.load(f)
 
         # read channel names
-        channel_names = metadata['coords']['channel']
+        channel_names = metadata["coords"]["channel"]
 
     # communicate important information
     combined_file = comm.bcast(combined_file, root=0)
@@ -285,7 +301,8 @@ def get_hydrostatic_balance_climatology(input_path: str, output_path: str, metad
     # hydrostatic coefficients c_i (descending pressure)
     coeffs = torch.tensor(
         [0.5 * const.R_DRY_AIR * np.log(pressures[i - 1] / pressures[i]) for i in range(1, len(pressures))],
-        dtype=torch.float64, device=device,
+        dtype=torch.float64,
+        device=device,
     )
     n_interior = len(pressures) - 1
 
@@ -294,14 +311,16 @@ def get_hydrostatic_balance_climatology(input_path: str, output_path: str, metad
     height, width = (data_shape[2], data_shape[3])
 
     # quadrature: normalized to 4pi (we divide the integral by the valid area to obtain a mean)
-    quadrature = GridQuadrature(quadrature_rule, (height, width),
-                                crop_shape=None, crop_offset=(0, 0),
-                                normalize=False).to(device)
+    quadrature = GridQuadrature(
+        quadrature_rule, (height, width), crop_shape=None, crop_offset=(0, 0), normalize=False
+    ).to(device)
 
     if comm_rank == 0:
-        print(f"Found {len(filelist)} files with a total of {num_samples_total} samples. "
-              f"Computing the hydrostatic residual over {n_interior} interior levels "
-              f"(pressures {pressures}, moist={use_moist_air_formula}).")
+        print(
+            f"Found {len(filelist)} files with a total of {num_samples_total} samples. "
+            f"Computing the hydrostatic residual over {n_interior} interior levels "
+            f"(pressures {pressures}, moist={use_moist_air_formula})."
+        )
 
     # do the sharding:
     num_samples_chunk = (num_samples_total + comm_size - 1) // comm_size
@@ -327,8 +346,7 @@ def get_hydrostatic_balance_climatology(input_path: str, output_path: str, metad
             local_idx = idx - sample_offsets[file_idx]
             filename = filelist[file_idx]
             if filename in mapping:
-                mapping[filename] = (min(local_idx, mapping[filename][0]),
-                                     max(local_idx, mapping[filename][1]))
+                mapping[filename] = (min(local_idx, mapping[filename][0]), max(local_idx, mapping[filename][1]))
             else:
                 mapping[filename] = (local_idx, local_idx)
 
@@ -350,9 +368,20 @@ def get_hydrostatic_balance_climatology(input_path: str, output_path: str, metad
     progress = DistributedProgressBar(num_samples_total, comm)
     start = time.time()
     for filename, index_bounds in mapping.items():
-        tmpstats = get_file_stats(filename, slice(index_bounds[0], index_bounds[1] + 1),
-                                  z_idx, t_idx, q_idx, coeffs, q_prefact, quadrature,
-                                  fail_on_nan, batch_size, device, progress)
+        tmpstats = get_file_stats(
+            filename,
+            slice(index_bounds[0], index_bounds[1] + 1),
+            z_idx,
+            t_idx,
+            q_idx,
+            coeffs,
+            q_prefact,
+            quadrature,
+            fail_on_nan,
+            batch_size,
+            device,
+            progress,
+        )
         stats = welford_combine(stats, tmpstats)
 
     comm.Barrier()
@@ -394,10 +423,19 @@ def get_hydrostatic_balance_climatology(input_path: str, output_path: str, metad
         )
 
         # save the climatology offset b_clim and friends
-        np.save(os.path.join(output_path, 'hydrostatic_balance_means.npy'), stats["global_meanvar"]["values"][0, ...].astype(np.float32))
-        np.save(os.path.join(output_path, 'hydrostatic_balance_stds.npy'), stats["global_meanvar"]["values"][1, ...].astype(np.float32))
-        np.save(os.path.join(output_path, 'hydrostatic_balance_time_means.npy'), stats["time_means"]["values"].astype(np.float32))
-        np.save(os.path.join(output_path, 'hydrostatic_balance_pressures.npy'), np.asarray(pressures, dtype=np.float32))
+        np.save(
+            os.path.join(output_path, "hydrostatic_balance_means.npy"),
+            stats["global_meanvar"]["values"][0, ...].astype(np.float32),
+        )
+        np.save(
+            os.path.join(output_path, "hydrostatic_balance_stds.npy"),
+            stats["global_meanvar"]["values"][1, ...].astype(np.float32),
+        )
+        np.save(
+            os.path.join(output_path, "hydrostatic_balance_time_means.npy"),
+            stats["time_means"]["values"].astype(np.float32),
+        )
+        np.save(os.path.join(output_path, "hydrostatic_balance_pressures.npy"), np.asarray(pressures, dtype=np.float32))
 
         duration = time.time() - start
         print(f"Saving stats done. Duration: {duration:.2f}s", flush=True)
@@ -418,33 +456,66 @@ def get_hydrostatic_balance_climatology(input_path: str, output_path: str, metad
 
 
 def main(args):
-    get_hydrostatic_balance_climatology(input_path=args.input_path,
-                                        output_path=args.output_path,
-                                        metadata_file=args.metadata_file,
-                                        quadrature_rule=args.quadrature_rule,
-                                        p_min=args.p_min,
-                                        p_max=args.p_max,
-                                        use_moist_air_formula=args.use_moist_air_formula,
-                                        fail_on_nan=args.fail_on_nan,
-                                        batch_size=args.batch_size,
-                                        reduction_group_size=args.reduction_group_size,
-                                        )
+    get_hydrostatic_balance_climatology(
+        input_path=args.input_path,
+        output_path=args.output_path,
+        metadata_file=args.metadata_file,
+        quadrature_rule=args.quadrature_rule,
+        p_min=args.p_min,
+        p_max=args.p_max,
+        use_moist_air_formula=args.use_moist_air_formula,
+        fail_on_nan=args.fail_on_nan,
+        batch_size=args.batch_size,
+        reduction_group_size=args.reduction_group_size,
+    )
     return
 
 
 if __name__ == "__main__":
     # argparse
     parser = ap.ArgumentParser()
-    parser.add_argument("--input_path", type=str, help="Directory with input files or a virtual hdf5 file with the combined input.", required=True)
+    parser.add_argument(
+        "--input_path",
+        type=str,
+        help="Directory with input files or a virtual hdf5 file with the combined input.",
+        required=True,
+    )
     parser.add_argument("--metadata_file", type=str, help="File containing dataset metadata.", required=True)
     parser.add_argument("--output_path", type=str, help="Directory for saving stats files.", required=True)
     parser.add_argument("--reduction_group_size", type=int, default=8, help="Size of collective reduction groups.")
-    parser.add_argument("--quadrature_rule", type=str, default="naive", choices=["naive", "clenshaw-curtiss", "legendre-gauss"], help="Specify quadrature_rule for spatial averages.")
-    parser.add_argument("--p_min", type=float, default=None, help="Minimum pressure level (hPa) to include. If unspecified, includes all available levels.")
-    parser.add_argument("--p_max", type=float, default=None, help="Maximum pressure level (hPa) to include. If unspecified, includes all available levels.")
-    parser.add_argument("--use_moist_air_formula", action="store_true", help="Use virtual temperature Tv = T(1 + eps q); requires matching q pressure levels.")
-    parser.add_argument('--fail_on_nan', action='store_true', help="When computing stats, code will fail if NaN values are encountered.")
-    parser.add_argument("--batch_size", type=int, default=16, help="Batch size used for reading chunks from a file at a time to avoid OOM errors.")
+    parser.add_argument(
+        "--quadrature_rule",
+        type=str,
+        default="naive",
+        choices=["naive", "clenshaw-curtiss", "legendre-gauss"],
+        help="Specify quadrature_rule for spatial averages.",
+    )
+    parser.add_argument(
+        "--p_min",
+        type=float,
+        default=None,
+        help="Minimum pressure level (hPa) to include. If unspecified, includes all available levels.",
+    )
+    parser.add_argument(
+        "--p_max",
+        type=float,
+        default=None,
+        help="Maximum pressure level (hPa) to include. If unspecified, includes all available levels.",
+    )
+    parser.add_argument(
+        "--use_moist_air_formula",
+        action="store_true",
+        help="Use virtual temperature Tv = T(1 + eps q); requires matching q pressure levels.",
+    )
+    parser.add_argument(
+        "--fail_on_nan", action="store_true", help="When computing stats, code will fail if NaN values are encountered."
+    )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=16,
+        help="Batch size used for reading chunks from a file at a time to avoid OOM errors.",
+    )
     args = parser.parse_args()
 
     main(args)

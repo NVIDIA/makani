@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import torch
+import wandb
 from torch import nn
 import torch.distributed as dist
 from makani.utils import comm
@@ -96,10 +97,7 @@ def normalize_weights(model, eps=1e-5):
         # Group params by their MP sharding signature — same pattern as clip_grads.
         groups: dict[tuple, list] = {}
         for param in model.parameters():
-            key = tuple(
-                g for g in getattr(param, "sharded_dims_mp", [])
-                if g is not None and comm.get_size(g) > 1
-            )
+            key = tuple(g for g in getattr(param, "sharded_dims_mp", []) if g is not None and comm.get_size(g) > 1)
             groups.setdefault(key, []).append(param)
 
         for mp_groups, params in groups.items():
@@ -131,10 +129,7 @@ def _compute_total_grad_norm(model, norm_type=2.0, verbose=False):
     for name, param in model.named_parameters():
         if param.grad is None:
             continue
-        key = tuple(
-            g for g in getattr(param, "sharded_dims_mp", [])
-            if g is not None and comm.get_size(g) > 1
-        )
+        key = tuple(g for g in getattr(param, "sharded_dims_mp", []) if g is not None and comm.get_size(g) > 1)
         groups.setdefault(key, []).append(param.grad)
         param_map.setdefault(key, []).append(name)
 

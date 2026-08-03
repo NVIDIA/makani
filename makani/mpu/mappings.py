@@ -23,6 +23,7 @@ from torch_harmonics.distributed.primitives import (
     _reduce,
     _transpose,
 )
+
 # bridge so new-style autograd.Function (separate setup_context) works with
 # torch.amp.custom_fwd/custom_bwd; see makani/mpu/_amp_utils.py (pytorch#132388).
 from makani.mpu._amp_utils import _custom_setup_context
@@ -153,9 +154,7 @@ class _GatherFromParallelRegion(torch.autograd.Function):
 
     @staticmethod
     def symbolic(graph, input_, dim_, comm_id_, shapes_):
-        return _gather(
-            input_, dim_, shapes_, group=comm.get_group(comm_id_)
-        )
+        return _gather(input_, dim_, shapes_, group=comm.get_group(comm_id_))
 
     @staticmethod
     @torch.amp.custom_fwd(device_type="cuda")
@@ -211,6 +210,7 @@ def gather_from_parallel_region(input, dim, shapes, comm_id):
 def distributed_transpose(x, dims, shapes, comm_id):
     return _DistributedTranspose.apply(x, dims, shapes, comm_id)
 
+
 class gradient_print_wrapper(torch.autograd.Function):
 
     @staticmethod
@@ -230,11 +230,22 @@ class gradient_print_wrapper(torch.autograd.Function):
         print(f"Gradient stats for {msg}: min: {go.min()}, max: {go.max()}, mean: {go.mean()}")
         return go, None
 
+
 # weight gradient reduction helpers
+
 
 # handler for additional gradient reductions
 # helper for gradient reduction across channel parallel ranks
-def init_gradient_reduction_hooks(model, device, reduction_buffer_count=1, broadcast_buffers=True, find_unused_parameters=False, gradient_as_bucket_view=True, static_graph=False, verbose=None):
+def init_gradient_reduction_hooks(
+    model,
+    device,
+    reduction_buffer_count=1,
+    broadcast_buffers=True,
+    find_unused_parameters=False,
+    gradient_as_bucket_view=True,
+    static_graph=False,
+    verbose=None,
+):
     # early exit if we are not in a distributed setting:
     if not dist.is_initialized():
         return model
@@ -384,6 +395,7 @@ def init_gradient_reduction_hooks(model, device, reduction_buffer_count=1, broad
     model.register_comm_hook(state=None, hook=reduction_comm_hook)
 
     return model
+
 
 # deferred to avoid circular imports with makani.utils
 from makani.utils import comm
