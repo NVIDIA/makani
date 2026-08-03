@@ -253,18 +253,18 @@ class TestConstraints(unittest.TestCase):
         # the reconstructed temperatures must match the known profile
         with self.subTest("reconstructed temperature"):
             self.assertTrue(compare_tensors("reconstructed temperature", out[:, con.t_idx, ...], T,
-                                            atol=1e-1, rtol=1e-3, verbose=True))
+                                            atol=1e-1, rtol=1e-3, verbose=False))
         # geopotentials, aux (and humidity) pass through unchanged
         with self.subTest("geopotential passthrough"):
             self.assertTrue(compare_tensors("geopotential passthrough", out[:, con.z_idx, ...], Z,
-                                            atol=1e-2, rtol=1e-5, verbose=True))
+                                            atol=1e-2, rtol=1e-5, verbose=False))
         with self.subTest("aux passthrough"):
             self.assertTrue(compare_tensors("aux passthrough", out[:, con.aux_idx, ...], aux_vals,
-                                            atol=1e-4, rtol=1e-5, verbose=True))
+                                            atol=1e-4, rtol=1e-5, verbose=False))
         if use_moist_air_formula:
             with self.subTest("humidity passthrough"):
                 self.assertTrue(compare_tensors("humidity passthrough", out[:, con.q_idx, ...], q,
-                                                atol=1e-4, rtol=1e-5, verbose=True))
+                                                atol=1e-4, rtol=1e-5, verbose=False))
 
     @parameterized.expand([("dry", False), ("moist", True)])
     def test_hydrostatic_balance_loss_on_balanced_profile(self, _name, use_moist_air_formula):
@@ -668,7 +668,7 @@ class TestHydrostaticBalanceProjection(unittest.TestCase):
                                             use_moist_air_formula=moist).to(self.device)
         y = proj(x)
         self.assertTrue(compare_tensors("balanced fixed point", y, x,
-                                        atol=1e-2, rtol=1e-4, verbose=True))
+                                        atol=1e-2, rtol=1e-4, verbose=False))
 
     @parameterized.expand([("dry", False), ("moist", True)])
     def test_passthrough_channels_untouched(self, _name, moist):
@@ -721,13 +721,13 @@ class TestHydrostaticBalanceProjection(unittest.TestCase):
         with self.subTest("deviation linear in strength"):
             # deviation from the input is exactly half of the full correction
             self.assertTrue(compare_tensors("half correction", (x - yh), 0.5 * (x - y1),
-                                            atol=1e-4, rtol=1e-3, verbose=True))
+                                            atol=1e-4, rtol=1e-3, verbose=False))
         with self.subTest("residual scales as (1 - strength)"):
             # the residual that remains at strength 0.5 is half the input's residual
             res_in, _ = self._residual(x, names, moist, bias, scale)
             res_half, _ = self._residual(yh, names, moist, bias, scale)
             self.assertTrue(compare_tensors("residual halved", res_half, 0.5 * res_in,
-                                            atol=1e-1, rtol=1e-3, verbose=True))
+                                            atol=1e-1, rtol=1e-3, verbose=False))
 
     # --- gradients ---
     @parameterized.expand([("dry", False), ("moist", True)])
@@ -772,7 +772,7 @@ class TestHydrostaticBalanceProjection(unittest.TestCase):
         res, _ = self._residual(y, names, moist, bias, scale)
         target = torch.as_tensor(b_clim, dtype=res.dtype, device=res.device).view(1, -1, 1, 1).expand_as(res)
         self.assertTrue(compare_tensors("residual pinned to climatology", res, target,
-                                        atol=1e-1, rtol=1e-3, verbose=True))
+                                        atol=1e-1, rtol=1e-3, verbose=False))
 
     @parameterized.expand([("dry", False), ("moist", True)])
     def test_climatology_affine_fixed_point(self, _name, moist):
@@ -791,7 +791,7 @@ class TestHydrostaticBalanceProjection(unittest.TestCase):
                                             climatology_offset=b_clim).to(self.device)
         y = proj(x)
         self.assertTrue(compare_tensors("affine fixed point", y, x,
-                                        atol=1e-2, rtol=1e-4, verbose=True))
+                                        atol=1e-2, rtol=1e-4, verbose=False))
 
     @parameterized.expand([("dry", False), ("moist", True)])
     def test_climatology_strength_interpolates(self, _name, moist):
@@ -814,7 +814,7 @@ class TestHydrostaticBalanceProjection(unittest.TestCase):
         target = torch.as_tensor(b_clim, dtype=res_in.dtype, device=res_in.device).view(1, -1, 1, 1)
         expected = 0.5 * res_in + 0.5 * target
         self.assertTrue(compare_tensors("residual interpolated toward climatology", res_out, expected,
-                                        atol=1e-1, rtol=1e-3, verbose=True))
+                                        atol=1e-1, rtol=1e-3, verbose=False))
 
     @parameterized.expand([("dry", False), ("moist", True)])
     def test_climatology_full_offset_sliced_to_window(self, _name, moist):
@@ -846,7 +846,7 @@ class TestHydrostaticBalanceProjection(unittest.TestCase):
         res, _ = self._residual(y, names, moist, bias, scale, p_min=pw_min, p_max=pw_max)
         target = torch.as_tensor(expected_slice, dtype=res.dtype, device=res.device).view(1, -1, 1, 1).expand_as(res)
         self.assertTrue(compare_tensors("windowed residual pinned to b_clim slice", res, target,
-                                        atol=1e-1, rtol=1e-3, verbose=True))
+                                        atol=1e-1, rtol=1e-3, verbose=False))
 
     def test_climatology_offset_wrong_length_raises(self):
         """A climatology offset whose length is not (#all matching levels - 1) is rejected."""
