@@ -38,16 +38,50 @@ if __name__ == "__main__":
     parser.add_argument("--ensemble_size", default=0, type=int, help="Ensemble size parameter")
     parser.add_argument("--ensemble_parallel_size", default=1, type=int, help="Ensemble parallelization")
     parser.add_argument("--checkpoint_path", default=None, type=str)
-    parser.add_argument("--output_channels", default=[], nargs="+", type=str, help="Channels to output. Must be specified as a list.")
-    parser.add_argument("--output_file", default=None, type=str, help="Name of the output file. Will be written to the scores folder in the experiment directory.")
-    parser.add_argument("--output_memory_buffer_size", default=None, type=int, help="Number of (initial-condition x leadtime) steps to buffer in local memory before flushing to disk. With valid_autoreg_steps=R, one initial condition produces R+1 steps; setting this below R+1 enables mid-rollout flushing, which is useful when a single trajectory does not fit in memory. Bigger values use more memory but reduce I/O overhead. Defaults to the entire run (num_samples * (R+1)). Clamped to at least the local batch size. Pass 0 (or any non-positive value) to disable buffering entirely and stream every step directly to disk.")
+    parser.add_argument(
+        "--output_channels", default=[], nargs="+", type=str, help="Channels to output. Must be specified as a list."
+    )
+    parser.add_argument(
+        "--output_file",
+        default=None,
+        type=str,
+        help="Name of the output file. Will be written to the scores folder in the experiment directory.",
+    )
+    parser.add_argument(
+        "--output_memory_buffer_size",
+        default=None,
+        type=int,
+        help="Number of (initial-condition x leadtime) steps to buffer in local memory before flushing to disk. With valid_autoreg_steps=R, one initial condition produces R+1 steps; setting this below R+1 enables mid-rollout flushing, which is useful when a single trajectory does not fit in memory. Bigger values use more memory but reduce I/O overhead. Defaults to the entire run (num_samples * (R+1)). Clamped to at least the local batch size. Pass 0 (or any non-positive value) to disable buffering entirely and stream every step directly to disk.",
+    )
     parser.add_argument("--dataset_file_suffix", default="h5", type=str, help="Suffix of the input files.")
-    parser.add_argument("--mask_file", default=None, type=str, help="Masking file in order to weight datapoints geographically. If not specified, uniform weighting is applied.")
-    parser.add_argument("--climatology_file", default=None, type=str, help="Time dependent climatology file in order to subtract climatological mean. If not specified, static climatology is applied.")
+    parser.add_argument(
+        "--mask_file",
+        default=None,
+        type=str,
+        help="Masking file in order to weight datapoints geographically. If not specified, uniform weighting is applied.",
+    )
+    parser.add_argument(
+        "--climatology_file",
+        default=None,
+        type=str,
+        help="Time dependent climatology file in order to subtract climatological mean. If not specified, static climatology is applied.",
+    )
     parser.add_argument("--metrics_file", default="metrics.h5", type=str, help="Name of the metrics output file.")
-    parser.add_argument("--bias_file", default=None, type=str, help="If specified, bias will be computed and saved to this file.")
-    parser.add_argument("--spectrum_file", default=None, type=str, help="If specified, spectrum will be computed and saved to this file.")
-    parser.add_argument("--zonal_spectrum_file", default=None, type=str, help="If specified, zonal spectrum will be computed and saved to this file.")
+    parser.add_argument(
+        "--bias_file", default=None, type=str, help="If specified, bias will be computed and saved to this file."
+    )
+    parser.add_argument(
+        "--spectrum_file",
+        default=None,
+        type=str,
+        help="If specified, spectrum will be computed and saved to this file.",
+    )
+    parser.add_argument(
+        "--zonal_spectrum_file",
+        default=None,
+        type=str,
+        help="If specified, zonal spectrum will be computed and saved to this file.",
+    )
     parser.add_argument(
         "--start_date",
         type=str,
@@ -66,7 +100,9 @@ if __name__ == "__main__":
         default=1,
         help="At what interval to sample initial conditions. Needs to be an integer number specifying the step in terms of dhours.",
     )
-    parser.add_argument("--wb2_compatible", action="store_true", help="Makes metrics and quadratures compatible with weatherbench2.")
+    parser.add_argument(
+        "--wb2_compatible", action="store_true", help="Makes metrics and quadratures compatible with weatherbench2."
+    )
 
     # parse
     args = parser.parse_args()
@@ -104,7 +140,9 @@ if __name__ == "__main__":
         params.batch_size = args.batch_size
     params["global_batch_size"] = params.batch_size
     if params["global_batch_size"] % comm.get_size("batch") != 0:
-        raise ValueError(f"Error, cannot evenly distribute {params['global_batch_size']} across {comm.get_size('batch')} GPU.")
+        raise ValueError(
+            f"Error, cannot evenly distribute {params['global_batch_size']} across {comm.get_size('batch')} GPU."
+        )
     params["batch_size"] = int(params["global_batch_size"] // comm.get_size("batch"))
 
     # ensemble size
@@ -113,7 +151,9 @@ if __name__ == "__main__":
     elif not params.is_set("ensemble_size"):
         params["ensemble_size"] = 1
     if params["ensemble_size"] % comm.get_size("ensemble") != 0:
-        raise ValueError(f"Error, cannot evenly distribute {params['ensemble_size']} across {comm.get_size('ensemble')} GPU.")
+        raise ValueError(
+            f"Error, cannot evenly distribute {params['ensemble_size']} across {comm.get_size('ensemble')} GPU."
+        )
     params["local_ensemble_size"] = params["ensemble_size"] // comm.get_size("ensemble")
 
     # set device
@@ -135,15 +175,25 @@ if __name__ == "__main__":
 
     # output files
     output_channels = args.output_channels
-    output_file = os.path.join(params["experiment_dir"], "scores", args.output_file) if args.output_file is not None else None
+    output_file = (
+        os.path.join(params["experiment_dir"], "scores", args.output_file) if args.output_file is not None else None
+    )
     metrics_file = os.path.join(params["experiment_dir"], "scores", args.metrics_file)
     bias_file = os.path.join(params["experiment_dir"], "scores", args.bias_file) if args.bias_file is not None else None
-    spectrum_file = os.path.join(params["experiment_dir"], "scores", args.spectrum_file) if args.spectrum_file is not None else None
-    zonal_spectrum_file = os.path.join(params["experiment_dir"], "scores", args.zonal_spectrum_file) if args.zonal_spectrum_file is not None else None
+    spectrum_file = (
+        os.path.join(params["experiment_dir"], "scores", args.spectrum_file) if args.spectrum_file is not None else None
+    )
+    zonal_spectrum_file = (
+        os.path.join(params["experiment_dir"], "scores", args.zonal_spectrum_file)
+        if args.zonal_spectrum_file is not None
+        else None
+    )
     output_memory_buffer_size = args.output_memory_buffer_size
 
     if args.checkpoint_path is None:
-        params["checkpoint_path"] = os.path.join(expDir, "training_checkpoints/ckpt_mp{mp_rank}_v{checkpoint_version}.tar")
+        params["checkpoint_path"] = os.path.join(
+            expDir, "training_checkpoints/ckpt_mp{mp_rank}_v{checkpoint_version}.tar"
+        )
         params["best_checkpoint_path"] = os.path.join(expDir, "training_checkpoints/best_ckpt_mp{mp_rank}.tar")
     else:
         params["checkpoint_path"] = os.path.join(args.checkpoint_path, "ckpt_mp{mp_rank}_v{checkpoint_version}.tar")
@@ -194,7 +244,7 @@ if __name__ == "__main__":
     if "metadata_json_path" in params:
         params, _ = parse_dataset_metadata(params["metadata_json_path"], params=params)
     else:
-        raise RuntimeError(f"Error, please specify a dataset descriptor file in json format")
+        raise RuntimeError("Error, please specify a dataset descriptor file in json format")
 
     # instantiate trainer / inference / ensemble object
     inferencer = Inferencer(params, world_rank)
@@ -210,7 +260,12 @@ if __name__ == "__main__":
                     torch.profiler.ProfilerActivity.CPU,
                     torch.profiler.ProfilerActivity.CUDA,
                 ],
-                schedule=torch.profiler.schedule(wait=args.capture_range_start - 1, warmup=1, active=args.capture_range_stop - args.capture_range_start, repeat=1),
+                schedule=torch.profiler.schedule(
+                    wait=args.capture_range_start - 1,
+                    warmup=1,
+                    active=args.capture_range_stop - args.capture_range_start,
+                    repeat=1,
+                ),
                 on_trace_ready=trace_handler,
                 record_shapes=True,
                 profile_memory=True,
@@ -232,7 +287,9 @@ if __name__ == "__main__":
                     profiler=profiler,
                 )
         elif args.capture_type == "cupti":
-            with profiling.CUDAProfiler(capture_range_start=args.capture_range_start, capture_range_stop=args.capture_range_stop, enabled=True) as profiler:
+            with profiling.CUDAProfiler(
+                capture_range_start=args.capture_range_start, capture_range_stop=args.capture_range_stop, enabled=True
+            ) as profiler:
                 with torch.autograd.profiler.emit_nvtx(enabled=True, record_shapes=False):
                     inferencer.score_model(
                         metrics_file=metrics_file,
@@ -247,7 +304,7 @@ if __name__ == "__main__":
                         date_step=args.date_step,
                         wb2_compatible=args.wb2_compatible,
                         enable_odirect=params["enable_odirect"],
-                    odirect_alignment=params["odirect_alignment"],
+                        odirect_alignment=params["odirect_alignment"],
                         profiler=profiler,
                     )
 

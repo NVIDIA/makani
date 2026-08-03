@@ -41,7 +41,6 @@ from makani.models import model_registry
 # distributed computing stuff
 from makani.utils import comm
 from makani.utils.precision import AutocastManager
-from makani.utils import visualize
 
 from makani.mpu.mappings import init_gradient_reduction_hooks
 from makani.mpu.helpers import sync_params, gather_uneven
@@ -94,8 +93,12 @@ class StochasticTrainer(Driver):
         if self.log_to_screen:
             self.logger.info(f"Using channel names: {self.params.channel_names}")
             self.logger.info("initializing data loader")
-        self.train_dataloader, self.train_dataset, self.train_sampler = get_dataloader(self.params, self.params.train_data_path, mode="train", device=self.device)
-        self.valid_dataloader, self.valid_dataset, self.valid_sampler = get_dataloader(self.params, self.params.valid_data_path, mode="eval", device=self.device)
+        self.train_dataloader, self.train_dataset, self.train_sampler = get_dataloader(
+            self.params, self.params.train_data_path, mode="train", device=self.device
+        )
+        self.valid_dataloader, self.valid_dataset, self.valid_sampler = get_dataloader(
+            self.params, self.params.valid_data_path, mode="eval", device=self.device
+        )
         self._set_data_shapes(self.params, self.valid_dataset)
         # obtain the true lon lat grid after cropping and resampling
         self.lat_global = torch.as_tensor(self.valid_dataset.lat_lon_local[0]).to(self.device)
@@ -149,7 +152,15 @@ class StochasticTrainer(Driver):
         clim = torch.from_numpy(clim).to(torch.float32)
         ens_var_names = ["u10m", "t2m", "u500", "z500", "q500", "sp"] if (self.params.ensemble_size > 1) else []
         rollout_length = params.get("valid_autoreg_steps", 0) + 1
-        self.metrics = MetricsHandler(params=self.params, climatology=clim, num_rollout_steps=rollout_length, device=self.device, crps_var_names=ens_var_names, spread_var_names=ens_var_names, ssr_var_names=ens_var_names)
+        self.metrics = MetricsHandler(
+            params=self.params,
+            climatology=clim,
+            num_rollout_steps=rollout_length,
+            device=self.device,
+            crps_var_names=ens_var_names,
+            spread_var_names=ens_var_names,
+            ssr_var_names=ens_var_names,
+        )
         self.metrics.initialize_buffers()
 
         # loss handler
@@ -214,7 +225,9 @@ class StochasticTrainer(Driver):
             checkpoint_path = self.params.pretrained_checkpoint_path
 
             if self.log_to_screen:
-                self.logger.info(f"Loading pretrained checkpoint {checkpoint_path} in {self.params.load_checkpoint} mode")
+                self.logger.info(
+                    f"Loading pretrained checkpoint {checkpoint_path} in {self.params.load_checkpoint} mode"
+                )
 
             self.restore_from_checkpoint(
                 checkpoint_path,
@@ -237,7 +250,9 @@ class StochasticTrainer(Driver):
             # find latest checkpoint
             checkpoint_path = self.params.checkpoint_path
             self.checkpoint_version_current = get_latest_checkpoint_version(checkpoint_path)
-            checkpoint_path = checkpoint_path.format(checkpoint_version=self.checkpoint_version_current, mp_rank="{mp_rank}")
+            checkpoint_path = checkpoint_path.format(
+                checkpoint_version=self.checkpoint_version_current, mp_rank="{mp_rank}"
+            )
 
             if self.log_to_screen:
                 self.logger.info(f"Resuming from checkpoint {checkpoint_path} in {self.params.load_checkpoint} mode")
@@ -301,7 +316,9 @@ class StochasticTrainer(Driver):
         if self.log_to_screen:
             # log memory usage so far
             all_mem_gb, max_mem_gb = get_memory_usage(self.device)
-            self.logger.info(f"Scaffolding memory high watermark: {all_mem_gb:.2f} GB ({max_mem_gb:.2f} GB for pytorch)")
+            self.logger.info(
+                f"Scaffolding memory high watermark: {all_mem_gb:.2f} GB ({max_mem_gb:.2f} GB for pytorch)"
+            )
             # announce training start
             self.logger.info("Starting Training Loop...")
 
@@ -332,7 +349,7 @@ class StochasticTrainer(Driver):
             else:
                 train_time = 0
                 train_data_gb = 0
-                train_logs = {"train_steps" : 0, "loss" : 0.0}
+                train_logs = {"train_steps": 0, "loss": 0.0}
 
             # validate if not to be skipped
             if not self.params.get("skip_validation", False):
@@ -354,30 +371,58 @@ class StochasticTrainer(Driver):
                 wandb.log({"learning rate": lr}, step=self.epoch)
 
             # save out checkpoints
-            if (self.data_parallel_rank == 0) and (self.params.save_checkpoint != "none") and not self.params.get("skip_training", False):
+            if (
+                (self.data_parallel_rank == 0)
+                and (self.params.save_checkpoint != "none")
+                and not self.params.get("skip_training", False)
+            ):
                 store_start = time.time()
                 checkpoint_mode = self.params["save_checkpoint"]
                 counters = {"iters": self.iters, "epoch": self.epoch}
 
                 # increase checkpoint counter
-                self.checkpoint_version_current = (self.checkpoint_version_current + 1) % self.params.checkpoint_num_versions
-                checkpoint_path = self.params.checkpoint_path.format(checkpoint_version=self.checkpoint_version_current, mp_rank="{mp_rank}")
+                self.checkpoint_version_current = (
+                    self.checkpoint_version_current + 1
+                ) % self.params.checkpoint_num_versions
+                checkpoint_path = self.params.checkpoint_path.format(
+                    checkpoint_version=self.checkpoint_version_current, mp_rank="{mp_rank}"
+                )
 
                 # checkpoint at the end of every epoch
-                self.save_checkpoint(checkpoint_path, self.model, self.loss_obj, self.optimizer, self.scheduler, counters, checkpoint_mode=checkpoint_mode)
+                self.save_checkpoint(
+                    checkpoint_path,
+                    self.model,
+                    self.loss_obj,
+                    self.optimizer,
+                    self.scheduler,
+                    counters,
+                    checkpoint_mode=checkpoint_mode,
+                )
 
                 # save best checkpoint
                 best_checkpoint_path = self.params.best_checkpoint_path.format(mp_rank=comm.get_rank("model"))
                 best_checkpoint_saved = os.path.isfile(best_checkpoint_path)
-                if (not self.params.get("skip_validation", False)) and ((not best_checkpoint_saved) or (valid_logs["base"]["validation loss"] <= best_valid_loss)):
-                    self.save_checkpoint(self.params.best_checkpoint_path, self.model, self.loss_obj, self.optimizer, self.scheduler, counters, checkpoint_mode=checkpoint_mode)
+                if (not self.params.get("skip_validation", False)) and (
+                    (not best_checkpoint_saved) or (valid_logs["base"]["validation loss"] <= best_valid_loss)
+                ):
+                    self.save_checkpoint(
+                        self.params.best_checkpoint_path,
+                        self.model,
+                        self.loss_obj,
+                        self.optimizer,
+                        self.scheduler,
+                        counters,
+                        checkpoint_mode=checkpoint_mode,
+                    )
                     best_valid_loss = valid_logs["base"]["validation loss"]
 
                 # time how long it took
                 store_stop = time.time()
 
                 if self.log_to_screen:
-                    self.logger.info(f"Saving checkpoint ({checkpoint_mode}) took: {(store_stop - store_start):.2f} sec")
+                    self.logger.info(
+                        f"Saving checkpoint ({checkpoint_mode}) took: {(store_stop - store_start):.2f} sec"
+                    )
 
             # wait for everybody
             if dist.is_initialized():
@@ -392,7 +437,9 @@ class StochasticTrainer(Driver):
                 "training time [s]": train_time,
                 "validation time [s]": valid_time,
                 "visualization time [s]": viz_time,
-                "training step time [ms]": train_logs["train_steps"] and (train_time / train_logs["train_steps"]) * 10**3 or 0,
+                "training step time [ms]": train_logs["train_steps"]
+                and (train_time / train_logs["train_steps"]) * 10**3
+                or 0,
                 "minimal IO rate [GB/s]": train_time and train_data_gb / train_time or 0,
             }
 
@@ -433,7 +480,9 @@ class StochasticTrainer(Driver):
         train_steps = 0
         train_start = time.perf_counter_ns()
         self.model_train.zero_grad(set_to_none=True)
-        progress_bar = tqdm(self.train_dataloader, desc=f"Training progress epoch {self.epoch}", disable=not self.log_to_screen)
+        progress_bar = tqdm(
+            self.train_dataloader, desc=f"Training progress epoch {self.epoch}", disable=not self.log_to_screen
+        )
         for data in progress_bar:
             train_steps += 1
             self.iters += 1
@@ -452,7 +501,7 @@ class StochasticTrainer(Driver):
             total_data_bytes += inp.nbytes + tar.nbytes
 
             # check if we need to perform an update
-            do_update = (train_steps % self.params["gradient_accumulation_steps"] == 0)
+            do_update = train_steps % self.params["gradient_accumulation_steps"] == 0
             loss_scaling_fact = 1.0
             if self.params["gradient_accumulation_steps"] > 1:
                 loss_scaling_fact = 1.0 / np.float32(self.params["gradient_accumulation_steps"])
@@ -495,10 +544,16 @@ class StochasticTrainer(Driver):
                     with torch.no_grad():
                         normalize_weights(self.model_train, eps=1e-4)
 
-            if (self.params.print_timings_frequency > 0) and (self.iters % self.params.print_timings_frequency == 0) and self.log_to_screen:
+            if (
+                (self.params.print_timings_frequency > 0)
+                and (self.iters % self.params.print_timings_frequency == 0)
+                and self.log_to_screen
+            ):
                 running_train_time = time.perf_counter_ns() - train_start
                 print("\n")
-                print(f"Average step time after step {self.iters}: {running_train_time / float(train_steps) * 10**(-6):.1f} ms")
+                print(
+                    f"Average step time after step {self.iters}: {running_train_time / float(train_steps) * 10**(-6):.1f} ms"
+                )
                 print(
                     f"Average effective io rate after step {self.iters}: {total_data_bytes * float(comm.get_world_size()) / (float(running_train_time) * 10**(-9) * 1024. * 1024. * 1024.):.2f} GB/s"
                 )
@@ -506,11 +561,17 @@ class StochasticTrainer(Driver):
                 print("\n")
 
             # if logging of weights and grads during training is enabled, write them out at the first step of each epoch
-            if (self.params.dump_weights_and_grads > 0) and ((self.iters - 1) % self.params.dump_weights_and_grads == 0):
+            if (self.params.dump_weights_and_grads > 0) and (
+                (self.iters - 1) % self.params.dump_weights_and_grads == 0
+            ):
                 weights_and_grads_path = self.params["experiment_dir"]
                 if self.log_to_screen:
                     self.logger.info(f"Dumping weights and gradients to {weights_and_grads_path}")
-                self.dump_weights_and_grads(weights_and_grads_path, self.model, step=(self.epoch * self.params.num_samples_per_epoch + self.iters))
+                self.dump_weights_and_grads(
+                    weights_and_grads_path,
+                    self.model,
+                    step=(self.epoch * self.params.num_samples_per_epoch + self.iters),
+                )
 
             # set progress bar prefix
             progress_bar.set_postfix(**pbar_postfix)
@@ -571,7 +632,11 @@ class StochasticTrainer(Driver):
                     normalize_weights(self.model, eps=1e-4)
 
                 eval_steps = 0
-                progress_bar = tqdm(self.valid_dataloader, desc=f"Validation progress epoch {self.epoch}", disable=not self.log_to_screen)
+                progress_bar = tqdm(
+                    self.valid_dataloader,
+                    desc=f"Validation progress epoch {self.epoch}",
+                    disable=not self.log_to_screen,
+                )
                 for data in progress_bar:
                     eval_steps += 1
 
@@ -623,7 +688,9 @@ class StochasticTrainer(Driver):
                             # create average prediction for deterministic metrics
                             predm = torch.mean(pred, dim=1)
                             if comm.get_size("ensemble") > 1:
-                                predm = reduce_from_parallel_region(predm, "ensemble") / float(comm.get_size("ensemble"))
+                                predm = reduce_from_parallel_region(predm, "ensemble") / float(
+                                    comm.get_size("ensemble")
+                                )
 
                             pred_gather = predm[0, ...].detach().clone()
                             targ_gather = targ[0, ...].detach().clone()
@@ -669,7 +736,7 @@ class StochasticTrainer(Driver):
             # header:
             self.logger.info(separator)
             self.logger.info(f"Epoch {self.epoch} summary:")
-            self.logger.info(f"Performance Parameters:")
+            self.logger.info("Performance Parameters:")
             self.logger.info(print_prefix + "training steps: {}".format(train_logs["train_steps"]))
             self.logger.info(print_prefix + "validation steps: {}".format(valid_logs["base"]["validation steps"]))
             all_mem_gb, _ = get_memory_usage(self.device)
@@ -686,8 +753,13 @@ class StochasticTrainer(Driver):
             self.logger.info(print_prefix + "training loss: {}{}".format(get_pad(pad_len[0]), train_logs["loss"]))
             if "gradient norm" in train_logs:
                 plen = max_len - len("gradient norm")
-                self.logger.info(print_prefix + "gradient norm: {}{}".format(get_pad(plen), train_logs["gradient norm"]))
-            self.logger.info(print_prefix + "validation loss: {}{}".format(get_pad(pad_len[1]), valid_logs["base"]["validation loss"]))
+                self.logger.info(
+                    print_prefix + "gradient norm: {}{}".format(get_pad(plen), train_logs["gradient norm"])
+                )
+            self.logger.info(
+                print_prefix
+                + "validation loss: {}{}".format(get_pad(pad_len[1]), valid_logs["base"]["validation loss"])
+            )
             for idk, key in enumerate(print_list[3:], start=3):
                 value = valid_logs["metrics"][key]
                 if np.isscalar(value):

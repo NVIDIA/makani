@@ -20,6 +20,7 @@ from typing import Optional
 from makani.utils import comm
 from .layers import EncoderDecoder
 
+
 # helper module to handle imputation of SST
 class MLPImputation(nn.Module):
     def __init__(
@@ -75,6 +76,7 @@ class MLPImputation(nn.Module):
         imputed_sub = torch.where(mask, mlp_out, x_zeroed)
 
         return self._scatter_channels(x_clean, imputed_sub)
+
 
 class ConstantImputation(nn.Module):
     def __init__(

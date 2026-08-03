@@ -54,4 +54,3 @@ using the path to the model file and the class name `ModelName`.
 ### Model packages
 
 Model packages are used for seamless inference outside of this repository. They define a flexible interfact which takes care of normalization, unpredicted channels etc. Model packages seemlessly integrate with [earth2mip](https://github.com/NVIDIA/earth2mip).
-

@@ -188,8 +188,13 @@ class TestDistributedCheckpoint(unittest.TestCase):
 
         # 1. Save in legacy mode: each rank writes its own slice to its own file.
         Driver.save_checkpoint(
-            ckpt_path, model, loss=None, optimizer=None,
-            scheduler=None, counters=None, checkpoint_mode="legacy",
+            ckpt_path,
+            model,
+            loss=None,
+            optimizer=None,
+            scheduler=None,
+            counters=None,
+            checkpoint_mode="legacy",
         )
         if dist.is_initialized():
             dist.barrier()
@@ -224,8 +229,13 @@ class TestDistributedCheckpoint(unittest.TestCase):
 
         # 1. Save in flexible mode: rank 0 gathers and writes; other ranks no-op write.
         Driver.save_checkpoint(
-            ckpt_path, model, loss=None, optimizer=None,
-            scheduler=None, counters=None, checkpoint_mode="flexible",
+            ckpt_path,
+            model,
+            loss=None,
+            optimizer=None,
+            scheduler=None,
+            counters=None,
+            checkpoint_mode="flexible",
         )
         if dist.is_initialized():
             dist.barrier()
@@ -268,7 +278,9 @@ class TestDistributedCheckpoint(unittest.TestCase):
         snapshot = self._snapshot_weights(original)
 
         Driver.save_checkpoint(
-            ckpt_path, original, checkpoint_mode="flexible",
+            ckpt_path,
+            original,
+            checkpoint_mode="flexible",
         )
         if dist.is_initialized():
             dist.barrier()
@@ -276,7 +288,10 @@ class TestDistributedCheckpoint(unittest.TestCase):
         # Build a fresh model with DIFFERENT initial weights (different seed).
         torch.manual_seed(99999 + self.world_rank)
         replacement_local = torch.randn(
-            1, self.num_features, self.global_h // self.grid_size_h, self.global_w // self.grid_size_w,
+            1,
+            self.num_features,
+            self.global_h // self.grid_size_h,
+            self.global_w // self.grid_size_w,
             device=self.device,
         )
         fresh = _ShardedTestModel(replacement_local, num_features=self.num_features).to(self.device)
@@ -284,17 +299,18 @@ class TestDistributedCheckpoint(unittest.TestCase):
         # Confirm the fresh model is NOT already equal to the snapshot
         with self.subTest(desc="fresh model differs from snapshot before restore"):
             with torch.no_grad():
-                self.assertFalse(torch.equal(
-                    fresh.weight.detach().cpu(),
-                    snapshot["weight"].detach().cpu(),
-                ))
+                self.assertFalse(
+                    torch.equal(
+                        fresh.weight.detach().cpu(),
+                        snapshot["weight"].detach().cpu(),
+                    )
+                )
 
         # Restore from disk into the fresh model.
         Driver._restore_checkpoint_flexible(ckpt_path, fresh, strict=True)
 
         with self.subTest(desc="fresh model matches snapshot after restore"):
             self._verify_match(fresh, snapshot, label="flexible-fresh", verbose=verbose)
-
 
     # ----------------------------------------------------------------------
     # Gather-plan consistency precondition (the checkpoint-hang guard).
@@ -383,7 +399,10 @@ class TestDistributedCheckpoint(unittest.TestCase):
 
         # 1. Save flexible: rank 0 gathers the (sharded) optimizer moments into a global dict.
         Driver.save_checkpoint(
-            ckpt_path, model, optimizer=optimizer, checkpoint_mode="flexible",
+            ckpt_path,
+            model,
+            optimizer=optimizer,
+            checkpoint_mode="flexible",
         )
         if dist.is_initialized():
             dist.barrier()

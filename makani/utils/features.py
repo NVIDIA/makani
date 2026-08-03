@@ -24,7 +24,7 @@ def get_auxiliary_channels(
     grid_num_frequencies=0,
     add_orography=False,
     add_landmask=False,
-    landmask_preprocessing='floor',
+    landmask_preprocessing="floor",
     add_soiltype=False,
     add_copernicus_emb=False,
     n_noise_chan=0,
@@ -63,7 +63,6 @@ def get_auxiliary_channels(
 
     if add_copernicus_emb:
         channel_names += [f"xcop{i}" for i in range(8)]
-
 
     return channel_names
 
@@ -125,7 +124,9 @@ def get_channel_groups(channel_names, aux_channel_names=[]):
             n_atmo_chans = len(idx)
         else:
             if n_atmo_chans != len(idx):
-                raise ValueError(f"expected all atmospheric pressure level groups to have the same number of channels ({n_atmo_chans}), but got {len(idx)}")
+                raise ValueError(
+                    f"expected all atmospheric pressure level groups to have the same number of channels ({n_atmo_chans}), but got {len(idx)}"
+                )
 
         atmo_chans += idx
 

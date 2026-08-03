@@ -33,7 +33,9 @@ def get_default_argument_parser(training=True):
     parser.add_argument("--run_num", default="00", type=_nonempty_str)
 
     # hyperparameters override
-    parser.add_argument("--batch_size", default=-1, type=int, help="Switch for overriding batch size in the configuration file.")
+    parser.add_argument(
+        "--batch_size", default=-1, type=int, help="Switch for overriding batch size in the configuration file."
+    )
 
     # model parallelization options
     parser.add_argument("--matmul_parallel_size", default=1, type=int, help="Feature (tensor) parallelism dimension")
@@ -41,14 +43,36 @@ def get_default_argument_parser(training=True):
     parser.add_argument("--w_parallel_size", default=1, type=int, help="Spatial parallelism dimension in w")
 
     # performance options
-    parser.add_argument("--amp_mode", default="none", type=str, help="Mixed precision mode: 'none', 'fp16', 'bf16', or a combined '<amp>-<fp8recipe>' such as 'bf16-fp8_delayed' (requires transformer_engine). See makani.utils.precision.")
-    parser.add_argument("--jit_mode", default="none", type=str, choices=["none", "inductor"], help="Specify if and how to use torch compile.")
+    parser.add_argument(
+        "--amp_mode",
+        default="none",
+        type=str,
+        help="Mixed precision mode: 'none', 'fp16', 'bf16', or a combined '<amp>-<fp8recipe>' such as 'bf16-fp8_delayed' (requires transformer_engine). See makani.utils.precision.",
+    )
+    parser.add_argument(
+        "--jit_mode",
+        default="none",
+        type=str,
+        choices=["none", "inductor"],
+        help="Specify if and how to use torch compile.",
+    )
     parser.add_argument("--checkpointing_level", default=0, type=int, help="How aggressively checkpointing is used")
-    parser.add_argument("--print_timings_frequency", default=-1, type=int, help="Frequency at which to print timing information")
+    parser.add_argument(
+        "--print_timings_frequency", default=-1, type=int, help="Frequency at which to print timing information"
+    )
     if training:
-        parser.add_argument("--skip_validation", action="store_true", help="Flag to allow validation skipping, useful for profiling and debugging")
+        parser.add_argument(
+            "--skip_validation",
+            action="store_true",
+            help="Flag to allow validation skipping, useful for profiling and debugging",
+        )
         parser.add_argument("--skip_training", action="store_true", help="Flag to skip training, useful for debugging")
-        parser.add_argument("--parameters_reduction_buffer_count", default=1, type=int, help="How many buffers will be used (approximately) for weight gradient reductions.")
+        parser.add_argument(
+            "--parameters_reduction_buffer_count",
+            default=1,
+            type=int,
+            help="How many buffers will be used (approximately) for weight gradient reductions.",
+        )
 
     # data options
     parser.add_argument("--enable_synthetic_data", action="store_true", help="Enable to use synthetic data.")
@@ -71,14 +95,35 @@ def get_default_argument_parser(training=True):
 
     # checkpoint format
     if training:
-        parser.add_argument("--save_checkpoint", default="legacy", choices=["none", "flexible", "legacy"], type=str, help="Format in which to save checkpoints.")
-    parser.add_argument("--load_checkpoint", default="legacy", choices=["flexible", "legacy"], type=str, help="Format in which to load checkpoints.")
+        parser.add_argument(
+            "--save_checkpoint",
+            default="legacy",
+            choices=["none", "flexible", "legacy"],
+            type=str,
+            help="Format in which to save checkpoints.",
+        )
+    parser.add_argument(
+        "--load_checkpoint",
+        default="legacy",
+        choices=["flexible", "legacy"],
+        type=str,
+        help="Format in which to load checkpoints.",
+    )
 
     # multistep stuff
     if training:
-        parser.add_argument("--multistep_count", default=1, type=int, help="Number of autoregressive training steps. A value of 1 denotes conventional training")
-        parser.add_argument("--multistep_checkpoint", action="store_true", help="Activation-checkpoint each autoregressive step's model forward to cut the O(n_future) activation memory of backprop-through-time at the cost of one extra forward per step.")
-    
+        parser.add_argument(
+            "--multistep_count",
+            default=1,
+            type=int,
+            help="Number of autoregressive training steps. A value of 1 denotes conventional training",
+        )
+        parser.add_argument(
+            "--multistep_checkpoint",
+            action="store_true",
+            help="Activation-checkpoint each autoregressive step's model forward to cut the O(n_future) activation memory of backprop-through-time at the cost of one extra forward per step.",
+        )
+
     # debug parameters
     if training:
         parser.add_argument("--disable_ddp", action="store_true")
@@ -88,9 +133,23 @@ def get_default_argument_parser(training=True):
     parser.add_argument("--capture_range_start", default=1, type=int, help="Profile range start step")
     parser.add_argument("--capture_range_stop", default=1, type=int, help="Profile range stop step")
     parser.add_argument("--capture_ranks", default=[], type=int, nargs="+", help="Profile ranks from that list")
-    parser.add_argument("--capture_mode", default="training", type=str, choices=["training", "validation"], help="Specify which phase to capture")
-    parser.add_argument("--capture_prefix", default=None, type=str, help="Prefix including full path for profiling files")
-    parser.add_argument("--capture_type", default="torch", type=str, choices=["torch", "cupti"], help="Type for capturing, either torch internal profiler or cupti API.")
+    parser.add_argument(
+        "--capture_mode",
+        default="training",
+        type=str,
+        choices=["training", "validation"],
+        help="Specify which phase to capture",
+    )
+    parser.add_argument(
+        "--capture_prefix", default=None, type=str, help="Prefix including full path for profiling files"
+    )
+    parser.add_argument(
+        "--capture_type",
+        default="torch",
+        type=str,
+        choices=["torch", "cupti"],
+        help="Type for capturing, either torch internal profiler or cupti API.",
+    )
 
     return parser
 

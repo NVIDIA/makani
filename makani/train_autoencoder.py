@@ -16,7 +16,6 @@
 import os
 import torch
 import logging
-from functools import partial
 
 # utilities
 from makani.utils.profiling import Timer
@@ -54,7 +53,11 @@ if __name__ == "__main__":
 
     # make sure to reconfigure logger after the pytorch distributed init
     with Timer() as timer:
-        comm.init(model_parallel_sizes=params["model_parallel_sizes"], model_parallel_names=params["model_parallel_names"], verbose=False)
+        comm.init(
+            model_parallel_sizes=params["model_parallel_sizes"],
+            model_parallel_names=params["model_parallel_names"],
+            verbose=False,
+        )
     world_rank = comm.get_world_rank()
     if world_rank == 0:
         print(f"Communicators wireup time: {timer.time:.2f}s")
@@ -137,7 +140,7 @@ if __name__ == "__main__":
     if "metadata_json_path" in params:
         params, _ = parse_dataset_metadata(params["metadata_json_path"], params=params)
     else:
-        raise RuntimeError(f"Error, please specify a dataset descriptor file in json format")
+        raise RuntimeError("Error, please specify a dataset descriptor file in json format")
 
     # instantiate trainer / inference / ensemble object
     trainer = AutoencoderTrainer(params, world_rank)

@@ -48,7 +48,9 @@ def _register_from_module(model: nn.Module, name: Union[str, None] = None) -> No
 
     # Check if model is a torch module
     if not issubclass(model, nn.Module):
-        raise ValueError(f"Only subclasses of torch.nn.Module can be registered. " f"Provided model is of type {type(model)}")
+        raise ValueError(
+            f"Only subclasses of torch.nn.Module can be registered. " f"Provided model is of type {type(model)}"
+        )
 
     # If no name provided, use the model's name
     if name is None:
@@ -72,7 +74,9 @@ def _register_from_file(model_string: str, name: Union[str, None] = None) -> Non
     model_path, model_handle = model_string.split(":")
 
     if not os.path.exists(model_path):
-        raise ValueError(f"Expected string of format 'path/to/model_file.py:ModuleName' but {model_path} does not exist.")
+        raise ValueError(
+            f"Expected string of format 'path/to/model_file.py:ModuleName' but {model_path} does not exist."
+        )
 
     # Load under a dotted module name derived from the file (not the class handle) and register
     # it in sys.modules. Otherwise the module's __name__ is the bare class name and is not
@@ -128,7 +132,9 @@ def list_models() -> List[str]:
     return list(_model_registry.keys())
 
 
-def get_model(params: ParamsBase, use_stochastic_interpolation: bool = False, multistep: bool = False, **kwargs) -> "torch.nn.Module":
+def get_model(
+    params: ParamsBase, use_stochastic_interpolation: bool = False, multistep: bool = False, **kwargs
+) -> "torch.nn.Module":
     """
     Convenience routine that constructs the model passing parameters and kwargs.
     Unloads all the parameters in the params datastructure as a dict.
@@ -162,12 +168,22 @@ def get_model(params: ParamsBase, use_stochastic_interpolation: bool = False, mu
 
         # makani requires that these entries are set in params for now
         inp_shape = (params.img_shape_x_resampled, params.img_shape_y_resampled)
-        out_shape = (params.out_shape_x, params.out_shape_y) if hasattr(params, "out_shape_x") and hasattr(params, "out_shape_y") else inp_shape
+        out_shape = (
+            (params.out_shape_x, params.out_shape_y)
+            if hasattr(params, "out_shape_x") and hasattr(params, "out_shape_y")
+            else inp_shape
+        )
         inp_chans = params.N_in_channels
         out_chans = params.N_out_channels
 
         if hasattr(params, "constraints"):
-            cwrap = ConstraintsWrapper(constraints=params.constraints, channel_names=params.channel_names, bias=None, scale=None, model_handle=None)
+            cwrap = ConstraintsWrapper(
+                constraints=params.constraints,
+                channel_names=params.channel_names,
+                bias=None,
+                scale=None,
+                model_handle=None,
+            )
             out_chans = cwrap.N_in_channels
 
     # in the case that the model is not found in the model registry, we try to register it, given that it is a valid filepath:entrypoint
@@ -204,11 +220,19 @@ def get_model(params: ParamsBase, use_stochastic_interpolation: bool = False, mu
         hydrostatic_balance_means = params.get("hydrostatic_balance_means_path", None)
         if hydrostatic_balance_means is not None:
             from makani.utils.dataloaders.data_helpers import get_hydrostatic_balance_climatology
+
             hydrostatic_balance_means = get_hydrostatic_balance_climatology(params)
             model_kwargs["hydrostatic_balance_means"] = hydrostatic_balance_means
 
         # create model handle
-        model_handle = partial(model_handle, inp_shape=inp_shape, out_shape=out_shape, inp_chans=inp_chans, out_chans=out_chans, **model_kwargs)
+        model_handle = partial(
+            model_handle,
+            inp_shape=inp_shape,
+            out_shape=out_shape,
+            inp_chans=inp_chans,
+            out_chans=out_chans,
+            **model_kwargs,
+        )
     else:
         raise KeyError(f"No model is registered under the name {params.nettype}")
 
@@ -221,7 +245,14 @@ def get_model(params: ParamsBase, use_stochastic_interpolation: bool = False, mu
         scale = torch.from_numpy(scale)[:, params.out_channels, ...].to(torch.float32)
 
         # create a new wrapper handle
-        model_handle = partial(ConstraintsWrapper, constraints=params.constraints, channel_names=params.channel_names, bias=bias, scale=scale, model_handle=model_handle)
+        model_handle = partial(
+            ConstraintsWrapper,
+            constraints=params.constraints,
+            channel_names=params.channel_names,
+            bias=bias,
+            scale=scale,
+            model_handle=model_handle,
+        )
 
     if not use_stochastic_interpolation:
         # wrap into Multi-Step if requested
@@ -230,7 +261,12 @@ def get_model(params: ParamsBase, use_stochastic_interpolation: bool = False, mu
         else:
             model = SingleStepWrapper(params, model_handle)
     else:
-        model = StochasticInterpolantWrapper(params, model_handle, noise_epsilon=params.get("noise_epsilon", 1.0), use_foellmer=params.get("use_foellmer", False))
+        model = StochasticInterpolantWrapper(
+            params,
+            model_handle,
+            noise_epsilon=params.get("noise_epsilon", 1.0),
+            use_foellmer=params.get("use_foellmer", False),
+        )
 
     return model
 

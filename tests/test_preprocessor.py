@@ -15,6 +15,7 @@
 
 import sys
 import os
+
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 import unittest
@@ -22,7 +23,7 @@ import torch
 
 from makani.models.preprocessor import Preprocessor2D
 
-from .testutils import set_seed, get_default_parameters, compare_tensors, IMG_SIZE_H, IMG_SIZE_W, NUM_CHANNELS
+from .testutils import set_seed, get_default_parameters, compare_tensors, IMG_SIZE_H, IMG_SIZE_W
 
 
 class TestPreprocessor2DBasic(unittest.TestCase):
@@ -31,10 +32,10 @@ class TestPreprocessor2DBasic(unittest.TestCase):
         set_seed(333)
         self.params = get_default_parameters()
         self.pp = Preprocessor2D(self.params)
-        self.B = self.params.batch_size       # 1
-        self.C = self.params.N_in_channels    # NUM_CHANNELS
-        self.H = self.params.img_shape_x      # IMG_SIZE_H
-        self.W = self.params.img_shape_y      # IMG_SIZE_W
+        self.B = self.params.batch_size  # 1
+        self.C = self.params.N_in_channels  # NUM_CHANNELS
+        self.H = self.params.img_shape_x  # IMG_SIZE_H
+        self.W = self.params.img_shape_y  # IMG_SIZE_W
 
     def _rand(self, *shape):
         return torch.randn(*shape)
@@ -193,7 +194,9 @@ class TestPreprocessor2DBasic(unittest.TestCase):
         x1_5d = pp.expand_history(x1, nhist=T)
 
         self.assertTrue(compare_tensors("append_history newest slot", out_5d[:, -1], x2, verbose=verbose))
-        self.assertTrue(compare_tensors("append_history oldest slot rolled", out_5d[:, 0], x1_5d[:, 1], verbose=verbose))
+        self.assertTrue(
+            compare_tensors("append_history oldest slot rolled", out_5d[:, 0], x1_5d[:, 1], verbose=verbose)
+        )
 
     # -----------------------------------------------------------------------
     # cache_unpredicted_features / get_unpredicted_features
@@ -209,8 +212,8 @@ class TestPreprocessor2DBasic(unittest.TestCase):
     def test_cache_unpredicted_features_stores_and_retrieves_train(self, verbose=False):
         """Cached xz/yz are retrievable from get_unpredicted_features (train mode)."""
         self.pp.train()
-        x  = self._rand(self.B, self.C, self.H, self.W)
-        y  = self._rand(self.B, self.C, self.H, self.W)
+        x = self._rand(self.B, self.C, self.H, self.W)
+        y = self._rand(self.B, self.C, self.H, self.W)
         xz = self._rand(self.B, 1, 1, self.H, self.W)
         yz = self._rand(self.B, 1, 1, self.H, self.W)
         self.pp.cache_unpredicted_features(x, y, xz=xz, yz=yz)
@@ -223,8 +226,8 @@ class TestPreprocessor2DBasic(unittest.TestCase):
     def test_cache_unpredicted_features_stores_and_retrieves_eval(self, verbose=False):
         """Cached xz/yz are retrievable in eval mode."""
         self.pp.eval()
-        x  = self._rand(self.B, self.C, self.H, self.W)
-        y  = self._rand(self.B, self.C, self.H, self.W)
+        x = self._rand(self.B, self.C, self.H, self.W)
+        y = self._rand(self.B, self.C, self.H, self.W)
         xz = self._rand(self.B, 1, 1, self.H, self.W)
         yz = self._rand(self.B, 1, 1, self.H, self.W)
         self.pp.cache_unpredicted_features(x, y, xz=xz, yz=yz)
@@ -369,10 +372,10 @@ class TestPreprocessor2DBasic(unittest.TestCase):
     def test_cache_unpredicted_features_same_shape_reuses_buffer_train(self):
         """Second cache call with matching shape uses copy_(), preserving data_ptr (train)."""
         self.pp.train()
-        x   = self._rand(self.B, self.C, self.H, self.W)
+        x = self._rand(self.B, self.C, self.H, self.W)
         xz1 = self._rand(self.B, 1, 1, self.H, self.W)
         xz2 = self._rand(self.B, 1, 1, self.H, self.W)
-        yz  = self._rand(self.B, 1, 1, self.H, self.W)
+        yz = self._rand(self.B, 1, 1, self.H, self.W)
         self.pp.cache_unpredicted_features(x, x, xz=xz1, yz=yz)
         ptr1 = self.pp.unpredicted_inp_train.data_ptr()
         self.pp.cache_unpredicted_features(x, x, xz=xz2, yz=yz)
@@ -382,10 +385,10 @@ class TestPreprocessor2DBasic(unittest.TestCase):
     def test_cache_unpredicted_features_same_shape_updates_values_train(self, verbose=False):
         """After the copy_() path the stored values reflect the new tensor (train)."""
         self.pp.train()
-        x   = self._rand(self.B, self.C, self.H, self.W)
+        x = self._rand(self.B, self.C, self.H, self.W)
         xz1 = self._rand(self.B, 1, 1, self.H, self.W)
         xz2 = self._rand(self.B, 1, 1, self.H, self.W)
-        yz  = self._rand(self.B, 1, 1, self.H, self.W)
+        yz = self._rand(self.B, 1, 1, self.H, self.W)
         self.pp.cache_unpredicted_features(x, x, xz=xz1, yz=yz)
         self.pp.cache_unpredicted_features(x, x, xz=xz2, yz=yz)
         inp, _ = self.pp.get_unpredicted_features()
@@ -394,10 +397,10 @@ class TestPreprocessor2DBasic(unittest.TestCase):
     def test_cache_unpredicted_features_same_shape_reuses_buffer_eval(self):
         """Second cache call with matching shape uses copy_(), preserving data_ptr (eval)."""
         self.pp.eval()
-        x   = self._rand(self.B, self.C, self.H, self.W)
+        x = self._rand(self.B, self.C, self.H, self.W)
         xz1 = self._rand(self.B, 1, 1, self.H, self.W)
         xz2 = self._rand(self.B, 1, 1, self.H, self.W)
-        yz  = self._rand(self.B, 1, 1, self.H, self.W)
+        yz = self._rand(self.B, 1, 1, self.H, self.W)
         self.pp.cache_unpredicted_features(x, x, xz=xz1, yz=yz)
         ptr1 = self.pp.unpredicted_inp_eval.data_ptr()
         self.pp.cache_unpredicted_features(x, x, xz=xz2, yz=yz)
@@ -407,10 +410,10 @@ class TestPreprocessor2DBasic(unittest.TestCase):
     def test_cache_unpredicted_features_shape_change_rebinds_train(self):
         """When the shape changes, cache rebinds rather than copy_()."""
         self.pp.train()
-        x   = self._rand(self.B, self.C, self.H, self.W)
+        x = self._rand(self.B, self.C, self.H, self.W)
         xz1 = self._rand(self.B, 1, 1, self.H, self.W)
         xz2 = self._rand(self.B, 1, 2, self.H, self.W)  # different C_z
-        yz  = self._rand(self.B, 1, 1, self.H, self.W)
+        yz = self._rand(self.B, 1, 1, self.H, self.W)
         self.pp.cache_unpredicted_features(x, x, xz=xz1, yz=yz)
         ptr1 = self.pp.unpredicted_inp_train.data_ptr()
         self.pp.cache_unpredicted_features(x, x, xz=xz2, yz=yz)
@@ -421,7 +424,7 @@ class TestPreprocessor2DBasic(unittest.TestCase):
     def test_cache_unpredicted_features_none_xz_clears_cache_train(self):
         """Passing xz=None resets unpredicted_inp_train to None."""
         self.pp.train()
-        x  = self._rand(self.B, self.C, self.H, self.W)
+        x = self._rand(self.B, self.C, self.H, self.W)
         xz = self._rand(self.B, 1, 1, self.H, self.W)
         yz = self._rand(self.B, 1, 1, self.H, self.W)
         self.pp.cache_unpredicted_features(x, x, xz=xz, yz=yz)
@@ -436,21 +439,21 @@ class TestPreprocessor2DBasic(unittest.TestCase):
     def test_append_unpredicted_features_noop_no_cache_train(self, verbose=False):
         """Without cached features, append_unpredicted_features is identity (train)."""
         self.pp.train()
-        x   = self._rand(self.B, self.C, self.H, self.W)
+        x = self._rand(self.B, self.C, self.H, self.W)
         out = self.pp.append_unpredicted_features(x, target=False)
         self.assertTrue(compare_tensors("noop train", out, x, verbose=verbose))
 
     def test_append_unpredicted_features_noop_no_cache_eval(self, verbose=False):
         """Without cached features, append_unpredicted_features is identity (eval)."""
         self.pp.eval()
-        x   = self._rand(self.B, self.C, self.H, self.W)
+        x = self._rand(self.B, self.C, self.H, self.W)
         out = self.pp.append_unpredicted_features(x, target=False)
         self.assertTrue(compare_tensors("noop eval", out, x, verbose=verbose))
 
     def test_append_unpredicted_features_appends_inp_train(self):
         """With cached inp features, output has C + C_xz channels (train mode)."""
         self.pp.train()
-        x  = self._rand(self.B, self.C, self.H, self.W)
+        x = self._rand(self.B, self.C, self.H, self.W)
         xz = self._rand(self.B, 1, 1, self.H, self.W)
         yz = self._rand(self.B, 1, 1, self.H, self.W)
         self.pp.cache_unpredicted_features(x, x, xz=xz, yz=yz)
@@ -460,7 +463,7 @@ class TestPreprocessor2DBasic(unittest.TestCase):
     def test_append_unpredicted_features_appends_inp_eval(self):
         """With cached inp features, output has C + C_xz channels (eval mode)."""
         self.pp.eval()
-        x  = self._rand(self.B, self.C, self.H, self.W)
+        x = self._rand(self.B, self.C, self.H, self.W)
         xz = self._rand(self.B, 1, 1, self.H, self.W)
         yz = self._rand(self.B, 1, 1, self.H, self.W)
         self.pp.cache_unpredicted_features(x, x, xz=xz, yz=yz)
@@ -470,7 +473,7 @@ class TestPreprocessor2DBasic(unittest.TestCase):
     def test_append_unpredicted_features_target_uses_yz(self):
         """target=True appends yz features; inp and tar channel counts differ."""
         self.pp.train()
-        x  = self._rand(self.B, self.C, self.H, self.W)
+        x = self._rand(self.B, self.C, self.H, self.W)
         xz = self._rand(self.B, 1, 2, self.H, self.W)  # 2 inp channels
         yz = self._rand(self.B, 1, 3, self.H, self.W)  # 3 tar channels
         self.pp.cache_unpredicted_features(x, x, xz=xz, yz=yz)
@@ -482,23 +485,23 @@ class TestPreprocessor2DBasic(unittest.TestCase):
     def test_append_unpredicted_features_content_x_channels_preserved(self, verbose=False):
         """The original C channels of x appear unchanged in the first C output channels."""
         self.pp.train()
-        x  = self._rand(self.B, self.C, self.H, self.W)
+        x = self._rand(self.B, self.C, self.H, self.W)
         xz = self._rand(self.B, 1, 1, self.H, self.W)
         yz = self._rand(self.B, 1, 1, self.H, self.W)
         self.pp.cache_unpredicted_features(x, x, xz=xz, yz=yz)
         out = self.pp.append_unpredicted_features(x, target=False)
-        self.assertTrue(compare_tensors("original channels preserved", out[:, :self.C], x, verbose=verbose))
+        self.assertTrue(compare_tensors("original channels preserved", out[:, : self.C], x, verbose=verbose))
 
     def test_append_unpredicted_features_content_xz_channels_appended(self, verbose=False):
         """The appended channels equal the cached xz squeezed on the time dim."""
         self.pp.train()
-        x  = self._rand(self.B, self.C, self.H, self.W)
+        x = self._rand(self.B, self.C, self.H, self.W)
         xz = self._rand(self.B, 1, 1, self.H, self.W)
         yz = self._rand(self.B, 1, 1, self.H, self.W)
         self.pp.cache_unpredicted_features(x, x, xz=xz, yz=yz)
         out = self.pp.append_unpredicted_features(x, target=False)
         # xz has shape (B, T=1, C_z=1, H, W); xz[:, 0] is (B, C_z=1, H, W)
-        self.assertTrue(compare_tensors("xz appended", out[:, self.C:], xz[:, 0], verbose=verbose))
+        self.assertTrue(compare_tensors("xz appended", out[:, self.C :], xz[:, 0], verbose=verbose))
 
     # -----------------------------------------------------------------------
     # _append_channels with noise
@@ -510,7 +513,7 @@ class TestPreprocessor2DBasic(unittest.TestCase):
         params.input_noise = {"type": "dummy", "mode": "concatenate", "n_channels": 2}
         pp = Preprocessor2D(params)
         pp.train()
-        x  = self._rand(self.B, self.C, self.H, self.W)
+        x = self._rand(self.B, self.C, self.H, self.W)
         xz = self._rand(self.B, 1, 1, self.H, self.W)
         yz = self._rand(self.B, 1, 1, self.H, self.W)
         pp.cache_unpredicted_features(x, x, xz=xz, yz=yz)
@@ -524,21 +527,20 @@ class TestPreprocessor2DBasic(unittest.TestCase):
         params.input_noise = {"type": "dummy", "mode": "concatenate", "n_channels": 1}
         pp = Preprocessor2D(params)
         pp.train()
-        x  = self._rand(self.B, self.C, self.H, self.W)
+        x = self._rand(self.B, self.C, self.H, self.W)
         xz = self._rand(self.B, 1, 1, self.H, self.W)
         yz = self._rand(self.B, 1, 1, self.H, self.W)
         pp.cache_unpredicted_features(x, x, xz=xz, yz=yz)
         out = pp.append_unpredicted_features(x, target=False)
-        self.assertTrue(compare_tensors("x channels unchanged with concat noise", out[:, :self.C], x, verbose=verbose))
+        self.assertTrue(compare_tensors("x channels unchanged with concat noise", out[:, : self.C], x, verbose=verbose))
 
     def test_append_channels_perturb_noise_channel_count_unchanged(self):
         """perturb noise does not add extra channels to the output."""
         params = get_default_parameters()
-        params.input_noise = {"type": "dummy", "mode": "perturb",
-                              "perturb_channels": ["u10m"]}
+        params.input_noise = {"type": "dummy", "mode": "perturb", "perturb_channels": ["u10m"]}
         pp = Preprocessor2D(params)
         pp.train()
-        x  = self._rand(self.B, self.C, self.H, self.W)
+        x = self._rand(self.B, self.C, self.H, self.W)
         xz = self._rand(self.B, 1, 1, self.H, self.W)
         yz = self._rand(self.B, 1, 1, self.H, self.W)
         pp.cache_unpredicted_features(x, x, xz=xz, yz=yz)
@@ -549,16 +551,15 @@ class TestPreprocessor2DBasic(unittest.TestCase):
     def test_append_channels_perturb_noise_zero_leaves_x_unchanged(self, verbose=False):
         """With zero DummyNoiseS2 in perturb mode, the x channels are bit-identical."""
         params = get_default_parameters()
-        params.input_noise = {"type": "dummy", "mode": "perturb",
-                              "perturb_channels": ["u10m"]}
+        params.input_noise = {"type": "dummy", "mode": "perturb", "perturb_channels": ["u10m"]}
         pp = Preprocessor2D(params)
         pp.train()
-        x  = self._rand(self.B, self.C, self.H, self.W)
+        x = self._rand(self.B, self.C, self.H, self.W)
         xz = self._rand(self.B, 1, 1, self.H, self.W)
         yz = self._rand(self.B, 1, 1, self.H, self.W)
         pp.cache_unpredicted_features(x, x, xz=xz, yz=yz)
         out = pp.append_unpredicted_features(x, target=False)
-        self.assertTrue(compare_tensors("x unchanged with zero perturb noise", out[:, :self.C], x, verbose=verbose))
+        self.assertTrue(compare_tensors("x unchanged with zero perturb noise", out[:, : self.C], x, verbose=verbose))
 
     # -----------------------------------------------------------------------
     # append_history with update_state
@@ -585,7 +586,7 @@ class TestPreprocessor2DBasic(unittest.TestCase):
         params.n_history = 1
         pp = Preprocessor2D(params)
         pp.train()
-        T  = 2
+        T = 2
         x1 = self._rand(self.B, T * self.C, self.H, self.W)
         x2 = self._rand(self.B, self.C, self.H, self.W)
         xz = self._rand(self.B, T, 1, self.H, self.W)
@@ -603,7 +604,7 @@ class TestPreprocessor2DBasic(unittest.TestCase):
         params.n_history = 1
         pp = Preprocessor2D(params)
         pp.train()
-        T  = 2
+        T = 2
         x1 = self._rand(self.B, T * self.C, self.H, self.W)
         x2 = self._rand(self.B, self.C, self.H, self.W)
         xz = self._rand(self.B, T, 1, self.H, self.W)
@@ -629,7 +630,6 @@ class TestPreprocessor2DBasic(unittest.TestCase):
 
         inp, _ = pp.get_unpredicted_features()
         self.assertTrue(compare_tensors("inp unchanged with update_state=False", inp, xz, verbose=verbose))
-
 
     # -----------------------------------------------------------------------
     # history_compute_stats / history_normalize / history_denormalize
@@ -744,14 +744,20 @@ class TestPreprocessor2DBasic(unittest.TestCase):
         value = 3.7
         x = torch.full((self.B, T * self.C, self.H, self.W), value, dtype=torch.float32)
         pp.history_compute_stats(x)
-        self.assertTrue(compare_tensors("constant-field mean",
-                                        pp.history_mean,
-                                        torch.full_like(pp.history_mean, value),
-                                        atol=1e-5, verbose=verbose))
-        self.assertTrue(compare_tensors("constant-field std",
-                                        pp.history_std,
-                                        torch.zeros_like(pp.history_std),
-                                        atol=1e-5, verbose=verbose))
+        self.assertTrue(
+            compare_tensors(
+                "constant-field mean",
+                pp.history_mean,
+                torch.full_like(pp.history_mean, value),
+                atol=1e-5,
+                verbose=verbose,
+            )
+        )
+        self.assertTrue(
+            compare_tensors(
+                "constant-field std", pp.history_std, torch.zeros_like(pp.history_std), atol=1e-5, verbose=verbose
+            )
+        )
 
     def test_history_compute_stats_constant_field_exponential_mode(self, verbose=False):
         """Constant field → mean == value, std == 0 (exponential mode)."""
@@ -764,14 +770,24 @@ class TestPreprocessor2DBasic(unittest.TestCase):
         value = -1.25
         x = torch.full((self.B, T * self.C, self.H, self.W), value, dtype=torch.float32)
         pp.history_compute_stats(x)
-        self.assertTrue(compare_tensors("constant-field mean (exponential)",
-                                        pp.history_mean,
-                                        torch.full_like(pp.history_mean, value),
-                                        atol=1e-5, verbose=verbose))
-        self.assertTrue(compare_tensors("constant-field std (exponential)",
-                                        pp.history_std,
-                                        torch.zeros_like(pp.history_std),
-                                        atol=1e-5, verbose=verbose))
+        self.assertTrue(
+            compare_tensors(
+                "constant-field mean (exponential)",
+                pp.history_mean,
+                torch.full_like(pp.history_mean, value),
+                atol=1e-5,
+                verbose=verbose,
+            )
+        )
+        self.assertTrue(
+            compare_tensors(
+                "constant-field std (exponential)",
+                pp.history_std,
+                torch.zeros_like(pp.history_std),
+                atol=1e-5,
+                verbose=verbose,
+            )
+        )
 
     def test_history_compute_stats_per_channel_constants_mean_mode(self, verbose=False):
         """Per-channel constants: history_mean[:, c] equals channel c's constant value."""
@@ -784,12 +800,12 @@ class TestPreprocessor2DBasic(unittest.TestCase):
         x = pp.flatten_history(x5)
         pp.history_compute_stats(x)
         expected_mean = torch.arange(1, self.C + 1, dtype=torch.float32).reshape(1, self.C, 1, 1)
-        self.assertTrue(compare_tensors("per-channel mean", pp.history_mean, expected_mean,
-                                        atol=1e-5, verbose=verbose))
-        self.assertTrue(compare_tensors("per-channel std",
-                                        pp.history_std,
-                                        torch.zeros_like(pp.history_std),
-                                        atol=1e-5, verbose=verbose))
+        self.assertTrue(compare_tensors("per-channel mean", pp.history_mean, expected_mean, atol=1e-5, verbose=verbose))
+        self.assertTrue(
+            compare_tensors(
+                "per-channel std", pp.history_std, torch.zeros_like(pp.history_std), atol=1e-5, verbose=verbose
+            )
+        )
 
     def test_history_compute_stats_matches_analytical_weighted_mean_exponential(self, verbose=False):
         """Spatially-constant-per-step fields: history_mean recovers the analytical weighted temporal average."""
@@ -811,8 +827,11 @@ class TestPreprocessor2DBasic(unittest.TestCase):
         w = torch.exp(-0.5 * torch.arange(start=T - 1, end=-1, step=-1, dtype=torch.float32))
         w = w / w.sum()
         expected_mean = (w.unsqueeze(-1) * values).sum(dim=0).reshape(1, self.C, 1, 1)
-        self.assertTrue(compare_tensors("analytical weighted mean", pp.history_mean, expected_mean,
-                                        atol=1e-5, rtol=1e-5, verbose=verbose))
+        self.assertTrue(
+            compare_tensors(
+                "analytical weighted mean", pp.history_mean, expected_mean, atol=1e-5, rtol=1e-5, verbose=verbose
+            )
+        )
 
     def test_history_compute_stats_linear_ramp_mean_mode_mean(self, verbose=False):
         """Linear ramp v_t = a_c + b_c * t (spatially constant): history_mean matches a_c + b_c * t_bar."""
@@ -828,8 +847,9 @@ class TestPreprocessor2DBasic(unittest.TestCase):
         t_vec = torch.arange(T, dtype=torch.float32)
         t_bar = t_vec.mean()
         expected_mean = (a + b * t_bar).reshape(1, self.C, 1, 1)
-        self.assertTrue(compare_tensors("linear ramp mean", pp.history_mean, expected_mean,
-                                        atol=1e-5, rtol=1e-5, verbose=verbose))
+        self.assertTrue(
+            compare_tensors("linear ramp mean", pp.history_mean, expected_mean, atol=1e-5, rtol=1e-5, verbose=verbose)
+        )
 
     def test_history_compute_stats_linear_ramp_mean_mode_std(self, verbose=False):
         """Linear ramp: history_std = |b_c| * sqrt(Var_t) (uniform-weight variance of 0..T-1)."""
@@ -846,8 +866,9 @@ class TestPreprocessor2DBasic(unittest.TestCase):
         t_bar = t_vec.mean()
         var_t = ((t_vec - t_bar) ** 2).mean()
         expected_std = (b.abs() * torch.sqrt(var_t)).reshape(1, self.C, 1, 1)
-        self.assertTrue(compare_tensors("linear ramp std", pp.history_std, expected_std,
-                                        atol=1e-5, rtol=1e-5, verbose=verbose))
+        self.assertTrue(
+            compare_tensors("linear ramp std", pp.history_std, expected_std, atol=1e-5, rtol=1e-5, verbose=verbose)
+        )
 
     # -----------------------------------------------------------------------
     # history_normalize post-condition: weighted temporal mean ≈ 0, weighted L2 ≈ 1
@@ -862,16 +883,30 @@ class TestPreprocessor2DBasic(unittest.TestCase):
         xn = pp.history_normalize(x)
         xn5 = pp.expand_history(xn, nhist=T)
         # mean-mode weights are uniform 1/T: use plain temporal average of per-time area means
-        quad_xn  = pp.quadrature(xn5)          # (B, T, C)
-        quad_xn2 = pp.quadrature(xn5 ** 2)     # (B, T, C)
-        weighted_mean = quad_xn.mean(dim=1)    # (B, C)
-        weighted_l2   = quad_xn2.mean(dim=1)   # (B, C)
-        self.assertTrue(compare_tensors("normalize weighted mean ≈ 0 (mean mode)",
-                                        weighted_mean, torch.zeros_like(weighted_mean),
-                                        atol=1e-5, rtol=1e-4, verbose=verbose))
-        self.assertTrue(compare_tensors("normalize weighted L2 ≈ 1 (mean mode)",
-                                        weighted_l2, torch.ones_like(weighted_l2),
-                                        atol=1e-4, rtol=1e-4, verbose=verbose))
+        quad_xn = pp.quadrature(xn5)  # (B, T, C)
+        quad_xn2 = pp.quadrature(xn5**2)  # (B, T, C)
+        weighted_mean = quad_xn.mean(dim=1)  # (B, C)
+        weighted_l2 = quad_xn2.mean(dim=1)  # (B, C)
+        self.assertTrue(
+            compare_tensors(
+                "normalize weighted mean ≈ 0 (mean mode)",
+                weighted_mean,
+                torch.zeros_like(weighted_mean),
+                atol=1e-5,
+                rtol=1e-4,
+                verbose=verbose,
+            )
+        )
+        self.assertTrue(
+            compare_tensors(
+                "normalize weighted L2 ≈ 1 (mean mode)",
+                weighted_l2,
+                torch.ones_like(weighted_l2),
+                atol=1e-4,
+                rtol=1e-4,
+                verbose=verbose,
+            )
+        )
 
     def test_history_normalize_post_condition_exponential_mode(self, verbose=False):
         """After normalize (exponential mode): weighted temporal mean ≈ 0, weighted L2 ≈ 1, per channel."""
@@ -887,16 +922,30 @@ class TestPreprocessor2DBasic(unittest.TestCase):
         xn5 = pp.expand_history(xn, nhist=T)
         # exponential weights: buffer shape is (1, T, 1, 1, 1)
         w = pp.history_normalization_weights.reshape(1, T, 1)  # broadcasts with (B, T, C)
-        quad_xn  = pp.quadrature(xn5)
-        quad_xn2 = pp.quadrature(xn5 ** 2)
+        quad_xn = pp.quadrature(xn5)
+        quad_xn2 = pp.quadrature(xn5**2)
         weighted_mean = (w * quad_xn).sum(dim=1)
-        weighted_l2   = (w * quad_xn2).sum(dim=1)
-        self.assertTrue(compare_tensors("normalize weighted mean ≈ 0 (exponential)",
-                                        weighted_mean, torch.zeros_like(weighted_mean),
-                                        atol=1e-5, rtol=1e-4, verbose=verbose))
-        self.assertTrue(compare_tensors("normalize weighted L2 ≈ 1 (exponential)",
-                                        weighted_l2, torch.ones_like(weighted_l2),
-                                        atol=1e-4, rtol=1e-4, verbose=verbose))
+        weighted_l2 = (w * quad_xn2).sum(dim=1)
+        self.assertTrue(
+            compare_tensors(
+                "normalize weighted mean ≈ 0 (exponential)",
+                weighted_mean,
+                torch.zeros_like(weighted_mean),
+                atol=1e-5,
+                rtol=1e-4,
+                verbose=verbose,
+            )
+        )
+        self.assertTrue(
+            compare_tensors(
+                "normalize weighted L2 ≈ 1 (exponential)",
+                weighted_l2,
+                torch.ones_like(weighted_l2),
+                atol=1e-4,
+                rtol=1e-4,
+                verbose=verbose,
+            )
+        )
 
     # -----------------------------------------------------------------------
     # Noise determinism end-to-end
@@ -905,6 +954,7 @@ class TestPreprocessor2DBasic(unittest.TestCase):
     def _make_pp_with_constant_random_noise(self):
         """Build a preprocessor whose input_noise is a seeded DummyNoiseS2 in constant_random mode."""
         from makani.models.noise import DummyNoiseS2
+
         params = get_default_parameters()
         # construct with dummy-concatenate so the preprocessor is wired for noise
         params.input_noise = {"type": "dummy", "mode": "concatenate", "n_channels": 1}
@@ -923,7 +973,7 @@ class TestPreprocessor2DBasic(unittest.TestCase):
     def test_noise_determinism_same_seed_produces_equal_outputs(self, verbose=False):
         """set_rng(seed=42) twice, each followed by a forward pass, yields identical outputs."""
         pp = self._make_pp_with_constant_random_noise()
-        x  = self._rand(self.B, self.C, self.H, self.W)
+        x = self._rand(self.B, self.C, self.H, self.W)
         xz = self._rand(self.B, 1, 1, self.H, self.W)
         yz = self._rand(self.B, 1, 1, self.H, self.W)
         pp.cache_unpredicted_features(x, x, xz=xz, yz=yz)
@@ -941,7 +991,7 @@ class TestPreprocessor2DBasic(unittest.TestCase):
     def test_noise_determinism_different_seed_produces_different_outputs(self, verbose=False):
         """Two different seeds give different outputs (the noise channels differ)."""
         pp = self._make_pp_with_constant_random_noise()
-        x  = self._rand(self.B, self.C, self.H, self.W)
+        x = self._rand(self.B, self.C, self.H, self.W)
         xz = self._rand(self.B, 1, 1, self.H, self.W)
         yz = self._rand(self.B, 1, 1, self.H, self.W)
         pp.cache_unpredicted_features(x, x, xz=xz, yz=yz)
@@ -975,8 +1025,9 @@ class TestPreprocessor2DBasic(unittest.TestCase):
         pp.append_history(x1, x2, step=5, update_state=True)
         inp_after, _ = pp.get_unpredicted_features()
 
-        self.assertTrue(compare_tensors("inp unchanged after out-of-range step",
-                                        inp_after, inp_before, verbose=verbose))
+        self.assertTrue(
+            compare_tensors("inp unchanged after out-of-range step", inp_after, inp_before, verbose=verbose)
+        )
 
     # -----------------------------------------------------------------------
     # Gradient flow through train-path ops
@@ -1002,8 +1053,7 @@ class TestPreprocessor2DBasic(unittest.TestCase):
     def test_append_channels_grad_flows_perturb_noise(self):
         """_append_channels with perturb noise still preserves autograd w.r.t. x."""
         params = get_default_parameters()
-        params.input_noise = {"type": "dummy", "mode": "perturb",
-                              "perturb_channels": ["u10m"]}
+        params.input_noise = {"type": "dummy", "mode": "perturb", "perturb_channels": ["u10m"]}
         pp = Preprocessor2D(params)
         pp.train()
         x_base = self._rand(self.B, self.C, self.H, self.W)
@@ -1053,17 +1103,18 @@ class TestPreprocessor2DBasic(unittest.TestCase):
         """append_unpredicted_features matches on CPU and GPU (no noise)."""
         pp_cpu = Preprocessor2D(get_default_parameters())
         pp_gpu = Preprocessor2D(get_default_parameters()).to("cuda")
-        pp_cpu.train(); pp_gpu.train()
-        x  = self._rand(self.B, self.C, self.H, self.W)
+        pp_cpu.train()
+        pp_gpu.train()
+        x = self._rand(self.B, self.C, self.H, self.W)
         xz = self._rand(self.B, 1, 1, self.H, self.W)
         yz = self._rand(self.B, 1, 1, self.H, self.W)
         pp_cpu.cache_unpredicted_features(x, x, xz=xz, yz=yz)
-        pp_gpu.cache_unpredicted_features(x.to("cuda"), x.to("cuda"),
-                                          xz=xz.to("cuda"), yz=yz.to("cuda"))
+        pp_gpu.cache_unpredicted_features(x.to("cuda"), x.to("cuda"), xz=xz.to("cuda"), yz=yz.to("cuda"))
         out_cpu = pp_cpu.append_unpredicted_features(x, target=False)
         out_gpu = pp_gpu.append_unpredicted_features(x.to("cuda"), target=False).cpu()
-        self.assertTrue(compare_tensors("append_unpredicted cpu vs gpu", out_cpu, out_gpu,
-                                        atol=1e-6, rtol=1e-5, verbose=verbose))
+        self.assertTrue(
+            compare_tensors("append_unpredicted cpu vs gpu", out_cpu, out_gpu, atol=1e-6, rtol=1e-5, verbose=verbose)
+        )
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA not available")
     def test_history_compute_stats_cpu_gpu_match(self, verbose=False):
@@ -1074,12 +1125,26 @@ class TestPreprocessor2DBasic(unittest.TestCase):
         x = self._rand(self.B, T * self.C, self.H, self.W)
         pp_cpu.history_compute_stats(x)
         pp_gpu.history_compute_stats(x.to("cuda"))
-        self.assertTrue(compare_tensors("history_mean cpu vs gpu",
-                                        pp_cpu.history_mean, pp_gpu.history_mean.cpu(),
-                                        atol=1e-5, rtol=1e-5, verbose=verbose))
-        self.assertTrue(compare_tensors("history_std cpu vs gpu",
-                                        pp_cpu.history_std, pp_gpu.history_std.cpu(),
-                                        atol=1e-5, rtol=1e-5, verbose=verbose))
+        self.assertTrue(
+            compare_tensors(
+                "history_mean cpu vs gpu",
+                pp_cpu.history_mean,
+                pp_gpu.history_mean.cpu(),
+                atol=1e-5,
+                rtol=1e-5,
+                verbose=verbose,
+            )
+        )
+        self.assertTrue(
+            compare_tensors(
+                "history_std cpu vs gpu",
+                pp_cpu.history_std,
+                pp_gpu.history_std.cpu(),
+                atol=1e-5,
+                rtol=1e-5,
+                verbose=verbose,
+            )
+        )
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA not available")
     def test_history_normalize_cpu_gpu_match(self, verbose=False):
@@ -1092,8 +1157,9 @@ class TestPreprocessor2DBasic(unittest.TestCase):
         pp_gpu.history_compute_stats(x.to("cuda"))
         xn_cpu = pp_cpu.history_normalize(x)
         xn_gpu = pp_gpu.history_normalize(x.to("cuda")).cpu()
-        self.assertTrue(compare_tensors("history_normalize cpu vs gpu", xn_cpu, xn_gpu,
-                                        atol=1e-5, rtol=1e-4, verbose=verbose))
+        self.assertTrue(
+            compare_tensors("history_normalize cpu vs gpu", xn_cpu, xn_gpu, atol=1e-5, rtol=1e-4, verbose=verbose)
+        )
 
     # -----------------------------------------------------------------------
     # Hardening: controlled-fail shape / batch checks
@@ -1164,8 +1230,12 @@ class TestPreprocessor2DStochasticPhysics(unittest.TestCase):
         # N_in_predicted_channels is derived by the driver; set it for the standalone test
         self.params.N_in_predicted_channels = self.params.N_in_channels
         self.params.stochastic_physics = {
-            "type": "diffusion", "n_channels": 1, "sigma": 0.5,
-            "lmax": 20, "kT": [3.15e-2], "clip": 0.8,
+            "type": "diffusion",
+            "n_channels": 1,
+            "sigma": 0.5,
+            "lmax": 20,
+            "kT": [3.15e-2],
+            "clip": 0.8,
         }
         self.pp = Preprocessor2D(self.params)
         self.B = self.params.batch_size

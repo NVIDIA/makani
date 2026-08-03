@@ -23,7 +23,7 @@ import argparse as ap
 from glob import glob
 
 
-def annotate(metadata: dict, file_names_to_annotate: List[str], years: List[int], entry_key: Optional[str]="fields"):
+def annotate(metadata: dict, file_names_to_annotate: List[str], years: List[int], entry_key: Optional[str] = "fields"):
     """Function to annotate the dimensions of an existing makani compatible HDF5 dataset.
 
     Modifies the files in-place. If a file is already annotated, the annotation is skipped.
@@ -60,14 +60,16 @@ def annotate(metadata: dict, file_names_to_annotate: List[str], years: List[int]
     channel_names = metadata["coords"]["channel"]
     chanlen = max([len(v) for v in channel_names])
 
-    print( f"Annotating files: {file_names_to_annotate}")
+    print(f"Annotating files: {file_names_to_annotate}")
 
     for filename, year in zip(file_names_to_annotate, years):
 
         # get year offset
-        year_start = dt.datetime(year=year, month=1, day=1, hour=0, minute=0, second=0, tzinfo=dt.timezone.utc).timestamp()
+        year_start = dt.datetime(
+            year=year, month=1, day=1, hour=0, minute=0, second=0, tzinfo=dt.timezone.utc
+        ).timestamp()
 
-        with h5.File(filename, 'a', libver='latest') as f:
+        with h5.File(filename, "a", libver="latest") as f:
             # save timestamps first
             num_samples = f[entry_key].shape[0]
             timestamps = year_start + np.arange(0, num_samples * dhours * 3600, dhours * 3600, dtype=np.float64)
@@ -126,7 +128,7 @@ def main(args):
     annotate(metadata, files, years)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
 
     # argparse
     parser = ap.ArgumentParser()

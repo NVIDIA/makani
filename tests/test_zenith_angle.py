@@ -26,14 +26,16 @@ from .testutils import compare_arrays
 
 def _sample_times():
     """A mix of epochs across year, season and time-of-day."""
-    return np.asarray([
-        dt.datetime(2000, 1, 1, 0, 0, 0, tzinfo=dt.timezone.utc),
-        dt.datetime(2000, 1, 1, 12, 0, 0, tzinfo=dt.timezone.utc),
-        dt.datetime(2002, 6, 1, 12, 0, 0, tzinfo=dt.timezone.utc),
-        dt.datetime(2003, 1, 1, 12, 0, 0, tzinfo=dt.timezone.utc),
-        dt.datetime(2018, 3, 21, 6, 30, 0, tzinfo=dt.timezone.utc),
-        dt.datetime(2025, 9, 22, 18, 45, 0, tzinfo=dt.timezone.utc),
-    ])
+    return np.asarray(
+        [
+            dt.datetime(2000, 1, 1, 0, 0, 0, tzinfo=dt.timezone.utc),
+            dt.datetime(2000, 1, 1, 12, 0, 0, tzinfo=dt.timezone.utc),
+            dt.datetime(2002, 6, 1, 12, 0, 0, tzinfo=dt.timezone.utc),
+            dt.datetime(2003, 1, 1, 12, 0, 0, tzinfo=dt.timezone.utc),
+            dt.datetime(2018, 3, 21, 6, 30, 0, tzinfo=dt.timezone.utc),
+            dt.datetime(2025, 9, 22, 18, 45, 0, tzinfo=dt.timezone.utc),
+        ]
+    )
 
 
 def _sample_grid(step=5.0):
@@ -91,7 +93,9 @@ class TestGreenwichMeanSiderealTime(unittest.TestCase):
         b = v2._greenwich_mean_sidereal_time(jc)
         # GMST is an angle in [0, 2π); wrap the difference before comparing.
         diff = _wrapped_angle_diff(a, b)
-        self.assertTrue(compare_arrays("gmst (wrapped)", diff, np.zeros_like(diff), atol=atol, rtol=rtol, verbose=verbose))
+        self.assertTrue(
+            compare_arrays("gmst (wrapped)", diff, np.zeros_like(diff), atol=atol, rtol=rtol, verbose=verbose)
+        )
 
 
 class TestSunEclipticLongitude(unittest.TestCase):
@@ -103,7 +107,11 @@ class TestSunEclipticLongitude(unittest.TestCase):
         a = v1._sun_ecliptic_longitude(t)
         b = v2._sun_ecliptic_longitude(jc)
         diff = _wrapped_angle_diff(a, b)
-        self.assertTrue(compare_arrays("sun_ecliptic_longitude (wrapped)", diff, np.zeros_like(diff), atol=atol, rtol=rtol, verbose=verbose))
+        self.assertTrue(
+            compare_arrays(
+                "sun_ecliptic_longitude (wrapped)", diff, np.zeros_like(diff), atol=atol, rtol=rtol, verbose=verbose
+            )
+        )
 
 
 class TestCosZenithAngle(unittest.TestCase):
@@ -189,76 +197,90 @@ class TestCosZenithAngleEdgeCases(unittest.TestCase):
 
     def test_leap_day_transition_2000(self, atol=1e-4, rtol=1e-4, verbose=False):
         """Year 2000 is a century leap year — Feb 29 exists."""
-        t = np.asarray([
-            dt.datetime(2000, 2, 28, 12, 0, 0, tzinfo=dt.timezone.utc),
-            dt.datetime(2000, 2, 29, 0, 0, 0, tzinfo=dt.timezone.utc),
-            dt.datetime(2000, 2, 29, 12, 0, 0, tzinfo=dt.timezone.utc),
-            dt.datetime(2000, 2, 29, 23, 59, 59, tzinfo=dt.timezone.utc),
-            dt.datetime(2000, 3, 1, 0, 0, 0, tzinfo=dt.timezone.utc),
-            dt.datetime(2000, 3, 1, 12, 0, 0, tzinfo=dt.timezone.utc),
-        ])
+        t = np.asarray(
+            [
+                dt.datetime(2000, 2, 28, 12, 0, 0, tzinfo=dt.timezone.utc),
+                dt.datetime(2000, 2, 29, 0, 0, 0, tzinfo=dt.timezone.utc),
+                dt.datetime(2000, 2, 29, 12, 0, 0, tzinfo=dt.timezone.utc),
+                dt.datetime(2000, 2, 29, 23, 59, 59, tzinfo=dt.timezone.utc),
+                dt.datetime(2000, 3, 1, 0, 0, 0, tzinfo=dt.timezone.utc),
+                dt.datetime(2000, 3, 1, 12, 0, 0, tzinfo=dt.timezone.utc),
+            ]
+        )
         lon_grid, lat_grid = _sample_grid(step=15.0)
         self._cmp("leap_day_2000", t, lon_grid, lat_grid, atol=atol, rtol=rtol, verbose=verbose)
 
     def test_non_leap_year_feb_march(self, atol=1e-4, rtol=1e-4, verbose=False):
         """Non-leap year: Feb 28 → Mar 1 (no Feb 29)."""
-        t = np.asarray([
-            dt.datetime(2023, 2, 28, 23, 59, 0, tzinfo=dt.timezone.utc),
-            dt.datetime(2023, 3, 1, 0, 0, 0, tzinfo=dt.timezone.utc),
-            dt.datetime(2023, 3, 1, 0, 1, 0, tzinfo=dt.timezone.utc),
-        ])
+        t = np.asarray(
+            [
+                dt.datetime(2023, 2, 28, 23, 59, 0, tzinfo=dt.timezone.utc),
+                dt.datetime(2023, 3, 1, 0, 0, 0, tzinfo=dt.timezone.utc),
+                dt.datetime(2023, 3, 1, 0, 1, 0, tzinfo=dt.timezone.utc),
+            ]
+        )
         lon_grid, lat_grid = _sample_grid(step=15.0)
         self._cmp("non_leap_feb_march", t, lon_grid, lat_grid, atol=atol, rtol=rtol, verbose=verbose)
 
     def test_year_boundary_leap_year_end(self, atol=1e-4, rtol=1e-4, verbose=False):
         """End of leap year (day 366) → start of next year."""
-        t = np.asarray([
-            dt.datetime(2024, 12, 31, 12, 0, 0, tzinfo=dt.timezone.utc),
-            dt.datetime(2024, 12, 31, 23, 59, 59, tzinfo=dt.timezone.utc),
-            dt.datetime(2025, 1, 1, 0, 0, 0, tzinfo=dt.timezone.utc),
-            dt.datetime(2025, 1, 1, 12, 0, 0, tzinfo=dt.timezone.utc),
-        ])
+        t = np.asarray(
+            [
+                dt.datetime(2024, 12, 31, 12, 0, 0, tzinfo=dt.timezone.utc),
+                dt.datetime(2024, 12, 31, 23, 59, 59, tzinfo=dt.timezone.utc),
+                dt.datetime(2025, 1, 1, 0, 0, 0, tzinfo=dt.timezone.utc),
+                dt.datetime(2025, 1, 1, 12, 0, 0, tzinfo=dt.timezone.utc),
+            ]
+        )
         lon_grid, lat_grid = _sample_grid(step=15.0)
         self._cmp("leap_year_end_boundary", t, lon_grid, lat_grid, atol=atol, rtol=rtol, verbose=verbose)
 
     def test_year_boundary_non_leap(self, atol=1e-4, rtol=1e-4, verbose=False):
         """Rollover from a regular year."""
-        t = np.asarray([
-            dt.datetime(2023, 12, 31, 23, 59, 59, tzinfo=dt.timezone.utc),
-            dt.datetime(2024, 1, 1, 0, 0, 0, tzinfo=dt.timezone.utc),
-        ])
+        t = np.asarray(
+            [
+                dt.datetime(2023, 12, 31, 23, 59, 59, tzinfo=dt.timezone.utc),
+                dt.datetime(2024, 1, 1, 0, 0, 0, tzinfo=dt.timezone.utc),
+            ]
+        )
         lon_grid, lat_grid = _sample_grid(step=15.0)
         self._cmp("non_leap_year_boundary", t, lon_grid, lat_grid, atol=atol, rtol=rtol, verbose=verbose)
 
     def test_millennium_boundary(self, atol=1e-4, rtol=1e-4, verbose=False):
         """Cross the 2000 epoch from below (pre-epoch → post-epoch)."""
-        t = np.asarray([
-            dt.datetime(1999, 12, 31, 23, 59, 59, tzinfo=dt.timezone.utc),
-            dt.datetime(2000, 1, 1, 0, 0, 0, tzinfo=dt.timezone.utc),
-            dt.datetime(2000, 1, 1, 12, 0, 0, tzinfo=dt.timezone.utc),  # epoch exactly
-            dt.datetime(2000, 1, 1, 12, 0, 1, tzinfo=dt.timezone.utc),
-        ])
+        t = np.asarray(
+            [
+                dt.datetime(1999, 12, 31, 23, 59, 59, tzinfo=dt.timezone.utc),
+                dt.datetime(2000, 1, 1, 0, 0, 0, tzinfo=dt.timezone.utc),
+                dt.datetime(2000, 1, 1, 12, 0, 0, tzinfo=dt.timezone.utc),  # epoch exactly
+                dt.datetime(2000, 1, 1, 12, 0, 1, tzinfo=dt.timezone.utc),
+            ]
+        )
         lon_grid, lat_grid = _sample_grid(step=20.0)
         self._cmp("millennium_boundary", t, lon_grid, lat_grid, atol=atol, rtol=rtol, verbose=verbose)
 
     def test_pre_2000_dates(self, atol=1e-4, rtol=1e-4, verbose=False):
         """Dates before the epoch → negative days_from_2000."""
-        t = np.asarray([
-            dt.datetime(1950, 1, 1, 12, 0, 0, tzinfo=dt.timezone.utc),
-            dt.datetime(1980, 6, 21, 12, 0, 0, tzinfo=dt.timezone.utc),
-            dt.datetime(1985, 12, 21, 12, 0, 0, tzinfo=dt.timezone.utc),
-            dt.datetime(1999, 3, 20, 6, 0, 0, tzinfo=dt.timezone.utc),
-        ])
+        t = np.asarray(
+            [
+                dt.datetime(1950, 1, 1, 12, 0, 0, tzinfo=dt.timezone.utc),
+                dt.datetime(1980, 6, 21, 12, 0, 0, tzinfo=dt.timezone.utc),
+                dt.datetime(1985, 12, 21, 12, 0, 0, tzinfo=dt.timezone.utc),
+                dt.datetime(1999, 3, 20, 6, 0, 0, tzinfo=dt.timezone.utc),
+            ]
+        )
         lon_grid, lat_grid = _sample_grid(step=20.0)
         self._cmp("pre_2000_dates", t, lon_grid, lat_grid, atol=atol, rtol=rtol, verbose=verbose)
 
     def test_far_future(self, atol=1e-4, rtol=1e-4, verbose=False):
         """Keep the expansions numerically stable a century out."""
-        t = np.asarray([
-            dt.datetime(2099, 12, 31, 12, 0, 0, tzinfo=dt.timezone.utc),
-            dt.datetime(2100, 1, 1, 0, 0, 0, tzinfo=dt.timezone.utc),
-            dt.datetime(2100, 6, 21, 12, 0, 0, tzinfo=dt.timezone.utc),
-        ])
+        t = np.asarray(
+            [
+                dt.datetime(2099, 12, 31, 12, 0, 0, tzinfo=dt.timezone.utc),
+                dt.datetime(2100, 1, 1, 0, 0, 0, tzinfo=dt.timezone.utc),
+                dt.datetime(2100, 6, 21, 12, 0, 0, tzinfo=dt.timezone.utc),
+            ]
+        )
         lon_grid, lat_grid = _sample_grid(step=20.0)
         self._cmp("far_future", t, lon_grid, lat_grid, atol=atol, rtol=rtol, verbose=verbose)
 
@@ -285,10 +307,10 @@ class TestCosZenithAngleEdgeCases(unittest.TestCase):
         cz_dec = v2.cos_zenith_angle(dec, lon, pole_lat)[0, 0]
 
         # North pole in June → sun above horizon; in December → below.
-        self.assertGreater(float(cz_june[0]), 0.0)    # N pole, June
-        self.assertLess(float(cz_june[1]), 0.0)        # S pole, June
-        self.assertLess(float(cz_dec[0]), 0.0)         # N pole, December
-        self.assertGreater(float(cz_dec[1]), 0.0)      # S pole, December
+        self.assertGreater(float(cz_june[0]), 0.0)  # N pole, June
+        self.assertLess(float(cz_june[1]), 0.0)  # S pole, June
+        self.assertLess(float(cz_dec[0]), 0.0)  # N pole, December
+        self.assertGreater(float(cz_dec[1]), 0.0)  # S pole, December
 
     def test_equator_solar_noon_near_equinox(self):
         """At the vernal equinox, the sun is near the equator; at the sub-solar
@@ -337,19 +359,31 @@ class TestCosZenithAngleEdgeCases(unittest.TestCase):
 # where trig is most sensitive to tiny angular differences (~0.1° → ~1.5e-3
 # in cos_z). 2e-3 leaves headroom there while still catching any real bug:
 # v2 must agree with NREL SPA to within 0.2% of cos_z across the globe.
-_EDT = dt.timezone(dt.timedelta(hours=-4))   # US east coast, summer DST
-_JST = dt.timezone(dt.timedelta(hours=9))    # Japan, no DST
+_EDT = dt.timezone(dt.timedelta(hours=-4))  # US east coast, summer DST
+_JST = dt.timezone(dt.timedelta(hours=9))  # Japan, no DST
 _AEDT = dt.timezone(dt.timedelta(hours=11))  # Sydney, southern DST
 _NOAA_REFERENCE = [
     # (datetime in local zone, lat, lon, expected_cos_z, label)
     # Generated via tests/generate_zenith_reference.py (pvlib NREL SPA, no refraction).
-    (dt.datetime(2024, 6, 21, 12, 0, 0, tzinfo=dt.timezone.utc),  23.44,    0.0, 0.999970, "june solstice, subsolar lat, GMT"),
-    (dt.datetime(2024, 12, 21, 12, 0, 0, tzinfo=dt.timezone.utc), -23.44,   0.0, 0.999977, "dec solstice, subsolar lat, GMT"),
-    (dt.datetime(2024, 3, 20, 12, 0, 0, tzinfo=dt.timezone.utc),   0.0,     0.0, 0.999488, "march equinox, equator, GMT"),
-    (dt.datetime(2024, 9, 22, 12, 0, 0, tzinfo=dt.timezone.utc),   0.0,     0.0, 0.999468, "sept equinox, equator, GMT"),
-    (dt.datetime(2024, 7, 4, 14, 0, 0, tzinfo=_EDT),               40.0,   -75.0, 0.934621, "summer afternoon, eastern US"),
-    (dt.datetime(2024, 1, 15, 15, 0, 0, tzinfo=_JST),              35.0,   139.0, 0.316050, "winter afternoon, tokyo"),
-    (dt.datetime(2024, 11, 10, 11, 0, 0, tzinfo=_AEDT),           -33.9,   151.2, 0.884919, "spring morning, sydney"),
+    (
+        dt.datetime(2024, 6, 21, 12, 0, 0, tzinfo=dt.timezone.utc),
+        23.44,
+        0.0,
+        0.999970,
+        "june solstice, subsolar lat, GMT",
+    ),
+    (
+        dt.datetime(2024, 12, 21, 12, 0, 0, tzinfo=dt.timezone.utc),
+        -23.44,
+        0.0,
+        0.999977,
+        "dec solstice, subsolar lat, GMT",
+    ),
+    (dt.datetime(2024, 3, 20, 12, 0, 0, tzinfo=dt.timezone.utc), 0.0, 0.0, 0.999488, "march equinox, equator, GMT"),
+    (dt.datetime(2024, 9, 22, 12, 0, 0, tzinfo=dt.timezone.utc), 0.0, 0.0, 0.999468, "sept equinox, equator, GMT"),
+    (dt.datetime(2024, 7, 4, 14, 0, 0, tzinfo=_EDT), 40.0, -75.0, 0.934621, "summer afternoon, eastern US"),
+    (dt.datetime(2024, 1, 15, 15, 0, 0, tzinfo=_JST), 35.0, 139.0, 0.316050, "winter afternoon, tokyo"),
+    (dt.datetime(2024, 11, 10, 11, 0, 0, tzinfo=_AEDT), -33.9, 151.2, 0.884919, "spring morning, sydney"),
 ]
 
 
@@ -390,18 +424,18 @@ class TestAnalyticalAnchors(unittest.TestCase):
         The antipode of any point sees the sun at the negated elevation — sin
         is odd, so cos(zenith) flips sign exactly. This is a topological fact
         about the sphere, independent of the sun's position."""
-        t = np.asarray([
-            dt.datetime(2024, 1, 15, 6, 0, 0, tzinfo=dt.timezone.utc),
-            dt.datetime(2024, 6, 21, 12, 0, 0, tzinfo=dt.timezone.utc),
-            dt.datetime(2024, 12, 21, 18, 0, 0, tzinfo=dt.timezone.utc),
-        ])
+        t = np.asarray(
+            [
+                dt.datetime(2024, 1, 15, 6, 0, 0, tzinfo=dt.timezone.utc),
+                dt.datetime(2024, 6, 21, 12, 0, 0, tzinfo=dt.timezone.utc),
+                dt.datetime(2024, 12, 21, 18, 0, 0, tzinfo=dt.timezone.utc),
+            ]
+        )
         lat = np.array([[10.0, -30.0, 45.0, -60.0]])
         lon = np.array([[0.0, 90.0, -45.0, 170.0]])
         a = v2.cos_zenith_angle(t, lon, lat)
         b = v2.cos_zenith_angle(t, lon + 180.0, -lat)
-        self.assertTrue(compare_arrays(
-            "antipodal symmetry", a, -b, atol=1e-5, rtol=0.0
-        ))
+        self.assertTrue(compare_arrays("antipodal symmetry", a, -b, atol=1e-5, rtol=0.0))
 
     def test_subsolar_point_exists(self):
         """At any instant, the sun is directly overhead at exactly one point
@@ -432,13 +466,14 @@ class TestAnalyticalAnchors(unittest.TestCase):
         lat = np.linspace(-90.0, 90.0, 181)[:, None]
         lon_grid, lat_grid = np.broadcast_arrays(lon, lat)
         cz = v2.cos_zenith_angle(t, lon_grid.copy(), lat_grid.copy())[0]
-        self.assertGreater(float(cz.max()), 0.99)   # subsolar nearby
-        self.assertLess(float(cz.min()), -0.99)     # antisolar nearby
+        self.assertGreater(float(cz.max()), 0.99)  # subsolar nearby
+        self.assertLess(float(cz.min()), -0.99)  # antisolar nearby
         # Continuity: at least one zero-crossing per latitude band away from poles
         mid_band = cz[40:-40]  # exclude polar caps where day/night may be 24h
         sign_changes = np.diff(np.sign(mid_band), axis=1)
-        self.assertTrue(np.all(np.any(sign_changes != 0, axis=1)),
-                        "every mid-latitude band should cross the terminator")
+        self.assertTrue(
+            np.all(np.any(sign_changes != 0, axis=1)), "every mid-latitude band should cross the terminator"
+        )
 
 
 class TestTimezoneContract(unittest.TestCase):
@@ -469,9 +504,7 @@ class TestTimezoneContract(unittest.TestCase):
             naive_result = v2.cos_zenith_angle(naive, lon_grid, lat_grid)
         except TypeError:
             return  # clean rejection is acceptable
-        self.assertTrue(compare_arrays(
-            "naive == UTC", aware_result, naive_result, atol=1e-6, rtol=0.0
-        ))
+        self.assertTrue(compare_arrays("naive == UTC", aware_result, naive_result, atol=1e-6, rtol=0.0))
 
     def test_numpy_datetime64_treated_as_utc(self):
         """np.datetime64 has no tzinfo and is conventionally UTC. Production
@@ -486,9 +519,7 @@ class TestTimezoneContract(unittest.TestCase):
         except TypeError:
             self.skipTest("datetime64 input not supported by v2")
             return
-        self.assertTrue(compare_arrays(
-            "datetime64 == aware UTC", a, b, atol=1e-6, rtol=0.0
-        ))
+        self.assertTrue(compare_arrays("datetime64 == aware UTC", a, b, atol=1e-6, rtol=0.0))
 
 
 if __name__ == "__main__":

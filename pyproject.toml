@@ -142,6 +142,35 @@ exclude = '''
 )/
 '''
 
+[tool.ruff]
+# match black, which owns formatting; ruff is used for linting only
+line-length = 120
+
+[tool.ruff.lint]
+# Style rules that would require touching a large amount of existing code for
+# little benefit. Revisit individually rather than as a batch.
+#   E711/E712  `== None` / `== True` comparisons
+#   E722       bare `except:`
+#   E741       ambiguous names (`l`, `I`, `O`) -- `l` is idiomatic for the
+#              spherical-harmonic degree throughout this codebase
+#   F841       assigned-but-unused locals; ruff's fix for these is "unsafe"
+#              because the right-hand side may have side effects
+ignore = ["E711", "E712", "E722", "E741", "F841"]
+
+# Deliberately NOT ignored, because they flag real defects rather than style:
+#   F821  undefined name  -- these are latent NameErrors on branches that are
+#         currently unreachable (e.g. the distributed FFT path in mpu/layers.py
+#         and the non-default operator types in spectral_convolution.py)
+#   F811  redefinition of an unused name
+
+[tool.ruff.lint.per-file-ignores]
+# Package __init__ files re-export their imports as the public API.
+"**/__init__.py" = ["F401"]
+# Imports are deferred to the bottom of the module on purpose to break a
+# circular import with makani.utils; see the comment at the import site.
+"makani/mpu/mappings.py" = ["E402"]
+
+
 [tool.coverage.run]
 omit = [
     "makani/ensemble.py",

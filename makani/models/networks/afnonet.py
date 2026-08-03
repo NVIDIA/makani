@@ -54,7 +54,9 @@ class Mlp(nn.Module):
 
 
 class AFNO2D(nn.Module):
-    def __init__(self, hidden_size, num_blocks=8, sparsity_threshold=0.01, hard_thresholding_fraction=1, hidden_size_factor=1):
+    def __init__(
+        self, hidden_size, num_blocks=8, sparsity_threshold=0.01, hard_thresholding_fraction=1, hidden_size_factor=1
+    ):
         super().__init__()
         if hidden_size % num_blocks != 0:
             raise ValueError(f"hidden_size {hidden_size} should be divisble by num_blocks {num_blocks}")
@@ -67,9 +69,13 @@ class AFNO2D(nn.Module):
         self.hidden_size_factor = hidden_size_factor
         self.scale = 0.02
 
-        self.w1 = nn.Parameter(self.scale * torch.randn(2, self.num_blocks, self.block_size, self.block_size * self.hidden_size_factor))
+        self.w1 = nn.Parameter(
+            self.scale * torch.randn(2, self.num_blocks, self.block_size, self.block_size * self.hidden_size_factor)
+        )
         self.b1 = nn.Parameter(self.scale * torch.randn(2, self.num_blocks, self.block_size * self.hidden_size_factor))
-        self.w2 = nn.Parameter(self.scale * torch.randn(2, self.num_blocks, self.block_size * self.hidden_size_factor, self.block_size))
+        self.w2 = nn.Parameter(
+            self.scale * torch.randn(2, self.num_blocks, self.block_size * self.hidden_size_factor, self.block_size)
+        )
         self.b2 = nn.Parameter(self.scale * torch.randn(2, self.num_blocks, self.block_size))
 
     def forward(self, x):
@@ -82,8 +88,12 @@ class AFNO2D(nn.Module):
         x = torch.fft.rfft2(x, dim=(1, 2), norm="ortho")
         x = x.reshape(B, H, W // 2 + 1, self.num_blocks, self.block_size)
 
-        o1_real = torch.zeros([B, H, W // 2 + 1, self.num_blocks, self.block_size * self.hidden_size_factor], device=x.device)
-        o1_imag = torch.zeros([B, H, W // 2 + 1, self.num_blocks, self.block_size * self.hidden_size_factor], device=x.device)
+        o1_real = torch.zeros(
+            [B, H, W // 2 + 1, self.num_blocks, self.block_size * self.hidden_size_factor], device=x.device
+        )
+        o1_imag = torch.zeros(
+            [B, H, W // 2 + 1, self.num_blocks, self.block_size * self.hidden_size_factor], device=x.device
+        )
         o2_real = torch.zeros(x.shape, device=x.device)
         o2_imag = torch.zeros(x.shape, device=x.device)
 
@@ -91,26 +101,58 @@ class AFNO2D(nn.Module):
         kept_modes = int(total_modes * self.hard_thresholding_fraction)
 
         o1_real[:, total_modes - kept_modes : total_modes + kept_modes, :kept_modes] = F.relu(
-            torch.einsum("...bi,bio->...bo", x[:, total_modes - kept_modes : total_modes + kept_modes, :kept_modes].real, self.w1[0])
-            - torch.einsum("...bi,bio->...bo", x[:, total_modes - kept_modes : total_modes + kept_modes, :kept_modes].imag, self.w1[1])
+            torch.einsum(
+                "...bi,bio->...bo",
+                x[:, total_modes - kept_modes : total_modes + kept_modes, :kept_modes].real,
+                self.w1[0],
+            )
+            - torch.einsum(
+                "...bi,bio->...bo",
+                x[:, total_modes - kept_modes : total_modes + kept_modes, :kept_modes].imag,
+                self.w1[1],
+            )
             + self.b1[0]
         )
 
         o1_imag[:, total_modes - kept_modes : total_modes + kept_modes, :kept_modes] = F.relu(
-            torch.einsum("...bi,bio->...bo", x[:, total_modes - kept_modes : total_modes + kept_modes, :kept_modes].imag, self.w1[0])
-            + torch.einsum("...bi,bio->...bo", x[:, total_modes - kept_modes : total_modes + kept_modes, :kept_modes].real, self.w1[1])
+            torch.einsum(
+                "...bi,bio->...bo",
+                x[:, total_modes - kept_modes : total_modes + kept_modes, :kept_modes].imag,
+                self.w1[0],
+            )
+            + torch.einsum(
+                "...bi,bio->...bo",
+                x[:, total_modes - kept_modes : total_modes + kept_modes, :kept_modes].real,
+                self.w1[1],
+            )
             + self.b1[1]
         )
 
         o2_real[:, total_modes - kept_modes : total_modes + kept_modes, :kept_modes] = (
-            torch.einsum("...bi,bio->...bo", o1_real[:, total_modes - kept_modes : total_modes + kept_modes, :kept_modes], self.w2[0])
-            - torch.einsum("...bi,bio->...bo", o1_imag[:, total_modes - kept_modes : total_modes + kept_modes, :kept_modes], self.w2[1])
+            torch.einsum(
+                "...bi,bio->...bo",
+                o1_real[:, total_modes - kept_modes : total_modes + kept_modes, :kept_modes],
+                self.w2[0],
+            )
+            - torch.einsum(
+                "...bi,bio->...bo",
+                o1_imag[:, total_modes - kept_modes : total_modes + kept_modes, :kept_modes],
+                self.w2[1],
+            )
             + self.b2[0]
         )
 
         o2_imag[:, total_modes - kept_modes : total_modes + kept_modes, :kept_modes] = (
-            torch.einsum("...bi,bio->...bo", o1_imag[:, total_modes - kept_modes : total_modes + kept_modes, :kept_modes], self.w2[0])
-            + torch.einsum("...bi,bio->...bo", o1_real[:, total_modes - kept_modes : total_modes + kept_modes, :kept_modes], self.w2[1])
+            torch.einsum(
+                "...bi,bio->...bo",
+                o1_imag[:, total_modes - kept_modes : total_modes + kept_modes, :kept_modes],
+                self.w2[0],
+            )
+            + torch.einsum(
+                "...bi,bio->...bo",
+                o1_real[:, total_modes - kept_modes : total_modes + kept_modes, :kept_modes],
+                self.w2[1],
+            )
             + self.b2[1]
         )
 
@@ -209,7 +251,9 @@ class AdaptiveFourierNeuralOperatorNet(nn.Module):
 
         norm_layer = partial(nn.LayerNorm, eps=1e-6)
 
-        self.patch_embed = PatchEmbed2D(img_size=self.img_size, patch_size=self.patch_size, in_chans=self.inp_chans, embed_dim=self.embed_dim)
+        self.patch_embed = PatchEmbed2D(
+            img_size=self.img_size, patch_size=self.patch_size, in_chans=self.inp_chans, embed_dim=self.embed_dim
+        )
         num_patches = self.patch_embed.num_patches
 
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, self.embed_dim))

@@ -39,7 +39,8 @@ from makani.utils.losses.energy_score import SpectralCoherenceLoss
 # Add parent directory to path for testutils import
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 from .distributed_helpers import _init_grid, _split_helper, _gather_helper, reduce_success, sync_and_barrier
-from ..testutils import disable_tf32, set_seed, compare_tensors
+from ..testutils import disable_tf32, compare_tensors
+
 
 class TestDistributedLoss(unittest.TestCase):
 
@@ -71,7 +72,9 @@ class TestDistributedLoss(unittest.TestCase):
     def _gather_helper_fwd(self, tensor):
         # gather in world
         if self.world_size > 1:
-            olist = [torch.empty(tensor.shape, dtype=tensor.dtype, device=tensor.device) for _ in range(self.world_size)]
+            olist = [
+                torch.empty(tensor.shape, dtype=tensor.dtype, device=tensor.device) for _ in range(self.world_size)
+            ]
             olist[self.world_rank] = tensor
             dist.all_gather(olist, tensor)
             tensor_gather = torch.stack(olist, dim=-1)
@@ -88,7 +91,6 @@ class TestDistributedLoss(unittest.TestCase):
 
         return tensor_gather
 
-
     @parameterized.expand(
         [
             [128, 256, 32, 8, "naive", False, 1e-6],
@@ -100,7 +102,8 @@ class TestDistributedLoss(unittest.TestCase):
             [129, 256, 32, 8, "legendre-gauss", True, 1e-6],
             [129, 256, 32, 8, "weatherbench2", False, 1e-6],
             [129, 256, 32, 8, "weatherbench2", True, 1e-6],
-        ], skip_on_empty=True
+        ],
+        skip_on_empty=True,
     )
     def test_distributed_quadrature(self, nlat, nlon, batch_size, num_chan, quad_rule, normalize, tol, verbose=False):
 
@@ -109,8 +112,12 @@ class TestDistributedLoss(unittest.TestCase):
 
         B, C, H, W = batch_size, num_chan, nlat, nlon
 
-        quad_local = GridQuadrature(quadrature_rule=quad_rule, img_shape=(H, W), normalize=normalize, distributed=False).to(self.device)
-        quad_dist = GridQuadrature(quadrature_rule=quad_rule, img_shape=(H, W), normalize=normalize, distributed=True).to(self.device)
+        quad_local = GridQuadrature(
+            quadrature_rule=quad_rule, img_shape=(H, W), normalize=normalize, distributed=False
+        ).to(self.device)
+        quad_dist = GridQuadrature(
+            quadrature_rule=quad_rule, img_shape=(H, W), normalize=normalize, distributed=True
+        ).to(self.device)
 
         # input
         inp_full = torch.randn((B, C, H, W), dtype=torch.float32, device=self.device)
@@ -134,15 +141,21 @@ class TestDistributedLoss(unittest.TestCase):
         # evaluate FWD pass
         #############################################################
         with self.subTest(desc="outputs"):
-            self.assertTrue(reduce_success(compare_tensors("outputs", out_local, out_full, tol, tol, verbose=verbose), self.device))
+            self.assertTrue(
+                reduce_success(compare_tensors("outputs", out_local, out_full, tol, tol, verbose=verbose), self.device)
+            )
 
         #############################################################
         # evaluate BWD pass
         #############################################################
         with self.subTest(desc="input gradients"):
             igrad_gather_full = self._gather_helper_bwd(igrad_local, False)
-            self.assertTrue(reduce_success(compare_tensors("input gradients", igrad_gather_full, igrad_full, tol, tol, verbose=verbose), self.device))
-
+            self.assertTrue(
+                reduce_success(
+                    compare_tensors("input gradients", igrad_gather_full, igrad_full, tol, tol, verbose=verbose),
+                    self.device,
+                )
+            )
 
     @parameterized.expand(
         [
@@ -156,7 +169,8 @@ class TestDistributedLoss(unittest.TestCase):
             [129, 256, 1, 10, 4, "gauss", 1e-5],
             [128, 256, 32, 8, 4, "nll", 1e-5],
             [129, 256, 1, 10, 4, "nll", 1e-5],
-        ], skip_on_empty=True
+        ],
+        skip_on_empty=True,
     )
     def test_distributed_crps(self, nlat, nlon, batch_size, num_chan, ens_size, loss_type, tol, verbose=False):
 
@@ -261,7 +275,11 @@ class TestDistributedLoss(unittest.TestCase):
         # evaluate FWD pass
         #############################################################
         with self.subTest(desc="outputs"):
-            self.assertTrue(reduce_success(compare_tensors("outputs", loss_local, loss_full, tol, tol, verbose=verbose), self.device))
+            self.assertTrue(
+                reduce_success(
+                    compare_tensors("outputs", loss_local, loss_full, tol, tol, verbose=verbose), self.device
+                )
+            )
 
         #############################################################
         # evaluate BWD pass
@@ -269,13 +287,24 @@ class TestDistributedLoss(unittest.TestCase):
         # foreacst grads
         with self.subTest(desc="forecast gradients"):
             igrad_gather_full = self._gather_helper_bwd(igrad_local, True)
-            self.assertTrue(reduce_success(compare_tensors("forecast gradients", igrad_gather_full, igrad_full, tol, tol, verbose=verbose), self.device))
+            self.assertTrue(
+                reduce_success(
+                    compare_tensors("forecast gradients", igrad_gather_full, igrad_full, tol, tol, verbose=verbose),
+                    self.device,
+                )
+            )
 
         # observation grads
         with self.subTest(desc="observation gradients"):
             obsgrad_gather_full = self._gather_helper_bwd(obsgrad_local, False)
-            self.assertTrue(reduce_success(compare_tensors("observation gradients", obsgrad_gather_full, obsgrad_full, tol, tol, verbose=verbose), self.device))
-
+            self.assertTrue(
+                reduce_success(
+                    compare_tensors(
+                        "observation gradients", obsgrad_gather_full, obsgrad_full, tol, tol, verbose=verbose
+                    ),
+                    self.device,
+                )
+            )
 
     @parameterized.expand(
         [
@@ -289,9 +318,12 @@ class TestDistributedLoss(unittest.TestCase):
             [129, 256, 1, 10, 4, "skillspread", False, 1e-4],
             [128, 256, 32, 8, 4, "skillspread", True, 1e-4],
             [129, 256, 1, 10, 4, "skillspread", True, 5e-4],
-        ], skip_on_empty=True
+        ],
+        skip_on_empty=True,
     )
-    def test_distributed_spectral_crps(self, nlat, nlon, batch_size, num_chan, ens_size, loss_type, absolute, tol, verbose=False):
+    def test_distributed_spectral_crps(
+        self, nlat, nlon, batch_size, num_chan, ens_size, loss_type, absolute, tol, verbose=False
+    ):
         B, E, C, H, W = batch_size, ens_size, num_chan, nlat, nlon
 
         # generate gauss random distributed around 1, with sigma=2
@@ -368,7 +400,11 @@ class TestDistributedLoss(unittest.TestCase):
         # evaluate FWD pass
         #############################################################
         with self.subTest(desc="outputs"):
-            self.assertTrue(reduce_success(compare_tensors("outputs", loss_local, loss_full, tol, tol, verbose=verbose), self.device))
+            self.assertTrue(
+                reduce_success(
+                    compare_tensors("outputs", loss_local, loss_full, tol, tol, verbose=verbose), self.device
+                )
+            )
 
         #############################################################
         # evaluate BWD pass
@@ -376,19 +412,31 @@ class TestDistributedLoss(unittest.TestCase):
         # foreacst grads
         with self.subTest(desc="forecast gradients"):
             igrad_gather_full = self._gather_helper_bwd(igrad_local, True)
-            self.assertTrue(reduce_success(compare_tensors("forecast gradients", igrad_gather_full, igrad_full, tol, tol, verbose=verbose), self.device))
+            self.assertTrue(
+                reduce_success(
+                    compare_tensors("forecast gradients", igrad_gather_full, igrad_full, tol, tol, verbose=verbose),
+                    self.device,
+                )
+            )
 
         # observation grads
         with self.subTest(desc="observation gradients"):
             obsgrad_gather_full = self._gather_helper_bwd(obsgrad_local, False)
-            self.assertTrue(reduce_success(compare_tensors("observation gradients", obsgrad_gather_full, obsgrad_full, tol, tol, verbose=verbose), self.device))
-
+            self.assertTrue(
+                reduce_success(
+                    compare_tensors(
+                        "observation gradients", obsgrad_gather_full, obsgrad_full, tol, tol, verbose=verbose
+                    ),
+                    self.device,
+                )
+            )
 
     @parameterized.expand(
         [
             [128, 256, 8, 3, 4, 1e-4],
             [129, 256, 2, 5, 4, 1e-4],
-        ], skip_on_empty=True
+        ],
+        skip_on_empty=True,
     )
     def test_distributed_lp_energy_score(self, nlat, nlon, batch_size, num_chan, ens_size, tol, verbose=False):
 
@@ -466,25 +514,41 @@ class TestDistributedLoss(unittest.TestCase):
         # evaluate FWD pass
         #############################################################
         with self.subTest(desc="outputs"):
-            self.assertTrue(reduce_success(compare_tensors("outputs", loss_local, loss_full, tol, tol, verbose=verbose), self.device))
+            self.assertTrue(
+                reduce_success(
+                    compare_tensors("outputs", loss_local, loss_full, tol, tol, verbose=verbose), self.device
+                )
+            )
 
         #############################################################
         # evaluate BWD pass
         #############################################################
         with self.subTest(desc="forecast gradients"):
             fgrad_gather_full = self._gather_helper_bwd(fgrad_local, True)
-            self.assertTrue(reduce_success(compare_tensors("forecast gradients", fgrad_gather_full, fgrad_full, tol, tol, verbose=verbose), self.device))
+            self.assertTrue(
+                reduce_success(
+                    compare_tensors("forecast gradients", fgrad_gather_full, fgrad_full, tol, tol, verbose=verbose),
+                    self.device,
+                )
+            )
 
         with self.subTest(desc="observation gradients"):
             obsgrad_gather_full = self._gather_helper_bwd(obsgrad_local, False)
-            self.assertTrue(reduce_success(compare_tensors("observation gradients", obsgrad_gather_full, obsgrad_full, tol, tol, verbose=verbose), self.device))
-
+            self.assertTrue(
+                reduce_success(
+                    compare_tensors(
+                        "observation gradients", obsgrad_gather_full, obsgrad_full, tol, tol, verbose=verbose
+                    ),
+                    self.device,
+                )
+            )
 
     @parameterized.expand(
         [
             [128, 256, 8, 13, 4, 1e-4],
             [129, 256, 2, 12, 4, 1e-4],
-        ], skip_on_empty=True
+        ],
+        skip_on_empty=True,
     )
     def test_distributed_spectral_l2_energy_score(self, nlat, nlon, batch_size, num_chan, ens_size, tol, verbose=False):
 
@@ -558,27 +622,45 @@ class TestDistributedLoss(unittest.TestCase):
         # evaluate FWD pass
         #############################################################
         with self.subTest(desc="outputs"):
-            self.assertTrue(reduce_success(compare_tensors("outputs", loss_local, loss_full, tol, tol, verbose=verbose), self.device))
+            self.assertTrue(
+                reduce_success(
+                    compare_tensors("outputs", loss_local, loss_full, tol, tol, verbose=verbose), self.device
+                )
+            )
 
         #############################################################
         # evaluate BWD pass
         #############################################################
         with self.subTest(desc="forecast gradients"):
             fgrad_gather_full = self._gather_helper_bwd(fgrad_local, True)
-            self.assertTrue(reduce_success(compare_tensors("forecast gradients", fgrad_gather_full, fgrad_full, tol, tol, verbose=verbose), self.device))
+            self.assertTrue(
+                reduce_success(
+                    compare_tensors("forecast gradients", fgrad_gather_full, fgrad_full, tol, tol, verbose=verbose),
+                    self.device,
+                )
+            )
 
         with self.subTest(desc="observation gradients"):
             obsgrad_gather_full = self._gather_helper_bwd(obsgrad_local, False)
-            self.assertTrue(reduce_success(compare_tensors("observation gradients", obsgrad_gather_full, obsgrad_full, tol, tol, verbose=verbose), self.device))
-
+            self.assertTrue(
+                reduce_success(
+                    compare_tensors(
+                        "observation gradients", obsgrad_gather_full, obsgrad_full, tol, tol, verbose=verbose
+                    ),
+                    self.device,
+                )
+            )
 
     @parameterized.expand(
         [
             [128, 256, 8, 13, 4, 1.0, 1.0, 1.0, 1.0, 1e-5],
             [129, 256, 2, 12, 4, 0.8, 1.2, 0.5, 0.7, 1e-5],
-        ], skip_on_empty=True
+        ],
+        skip_on_empty=True,
     )
-    def test_distributed_sobolev_energy_score(self, nlat, nlon, batch_size, num_chan, ens_size, alpha, beta, offset, fraction, tol, verbose=False):
+    def test_distributed_sobolev_energy_score(
+        self, nlat, nlon, batch_size, num_chan, ens_size, alpha, beta, offset, fraction, tol, verbose=False
+    ):
 
         disable_tf32()
 
@@ -654,19 +736,34 @@ class TestDistributedLoss(unittest.TestCase):
         # evaluate FWD pass
         #############################################################
         with self.subTest(desc="outputs"):
-            self.assertTrue(reduce_success(compare_tensors("outputs", loss_local, loss_full, tol, tol, verbose=verbose), self.device))
+            self.assertTrue(
+                reduce_success(
+                    compare_tensors("outputs", loss_local, loss_full, tol, tol, verbose=verbose), self.device
+                )
+            )
 
         #############################################################
         # evaluate BWD pass
         #############################################################
         with self.subTest(desc="forecast gradients"):
             fgrad_gather_full = self._gather_helper_bwd(fgrad_local, True)
-            self.assertTrue(reduce_success(compare_tensors("forecast gradients", fgrad_gather_full, fgrad_full, tol, tol, verbose=verbose), self.device))
+            self.assertTrue(
+                reduce_success(
+                    compare_tensors("forecast gradients", fgrad_gather_full, fgrad_full, tol, tol, verbose=verbose),
+                    self.device,
+                )
+            )
 
         with self.subTest(desc="observation gradients"):
             obsgrad_gather_full = self._gather_helper_bwd(obsgrad_local, False)
-            self.assertTrue(reduce_success(compare_tensors("observation gradients", obsgrad_gather_full, obsgrad_full, tol, tol, verbose=verbose), self.device))
-
+            self.assertTrue(
+                reduce_success(
+                    compare_tensors(
+                        "observation gradients", obsgrad_gather_full, obsgrad_full, tol, tol, verbose=verbose
+                    ),
+                    self.device,
+                )
+            )
 
     @parameterized.expand(
         [
@@ -674,9 +771,12 @@ class TestDistributedLoss(unittest.TestCase):
             [128, 256, 8, 13, 4, 0, 0.0, 1e-4],
             [129, 256, 2, 12, 4, 16, 0.0, 1e-4],
             [129, 256, 2, 12, 4, 16, 0.5, 1e-4],
-        ], skip_on_empty=True
+        ],
+        skip_on_empty=True,
     )
-    def test_distributed_coherence_regularization(self, nlat, nlon, batch_size, num_chan, ens_size, lmin, ens_coh_weight, tol, verbose=False):
+    def test_distributed_coherence_regularization(
+        self, nlat, nlon, batch_size, num_chan, ens_size, lmin, ens_coh_weight, tol, verbose=False
+    ):
         """Local vs distributed equivalence for CoherenceRegularization.
 
         The lmin > 0 cases matter most: the wavenumber-band mask is split along h
@@ -762,27 +862,45 @@ class TestDistributedLoss(unittest.TestCase):
         # evaluate FWD pass
         #############################################################
         with self.subTest(desc="outputs"):
-            self.assertTrue(reduce_success(compare_tensors("outputs", loss_local, loss_full, tol, tol, verbose=verbose), self.device))
+            self.assertTrue(
+                reduce_success(
+                    compare_tensors("outputs", loss_local, loss_full, tol, tol, verbose=verbose), self.device
+                )
+            )
 
         #############################################################
         # evaluate BWD pass
         #############################################################
         with self.subTest(desc="forecast gradients"):
             fgrad_gather_full = self._gather_helper_bwd(fgrad_local, True)
-            self.assertTrue(reduce_success(compare_tensors("forecast gradients", fgrad_gather_full, fgrad_full, tol, tol, verbose=verbose), self.device))
+            self.assertTrue(
+                reduce_success(
+                    compare_tensors("forecast gradients", fgrad_gather_full, fgrad_full, tol, tol, verbose=verbose),
+                    self.device,
+                )
+            )
 
         with self.subTest(desc="observation gradients"):
             obsgrad_gather_full = self._gather_helper_bwd(obsgrad_local, False)
-            self.assertTrue(reduce_success(compare_tensors("observation gradients", obsgrad_gather_full, obsgrad_full, tol, tol, verbose=verbose), self.device))
-
+            self.assertTrue(
+                reduce_success(
+                    compare_tensors(
+                        "observation gradients", obsgrad_gather_full, obsgrad_full, tol, tol, verbose=verbose
+                    ),
+                    self.device,
+                )
+            )
 
     @parameterized.expand(
         [
             [128, 256, 8, 13, 4, False, 1e-4],
             [129, 256, 2, 12, 4, True, 1e-4],
-        ], skip_on_empty=True
+        ],
+        skip_on_empty=True,
     )
-    def test_distributed_spectral_coherence_loss(self, nlat, nlon, batch_size, num_chan, ens_size, relative, tol, verbose=False):
+    def test_distributed_spectral_coherence_loss(
+        self, nlat, nlon, batch_size, num_chan, ens_size, relative, tol, verbose=False
+    ):
         """Local vs distributed equivalence for SpectralCoherenceLoss.
 
         This could not be written before: the reference instance is built with
@@ -868,18 +986,34 @@ class TestDistributedLoss(unittest.TestCase):
         # evaluate FWD pass
         #############################################################
         with self.subTest(desc="outputs"):
-            self.assertTrue(reduce_success(compare_tensors("outputs", loss_local, loss_full, tol, tol, verbose=verbose), self.device))
+            self.assertTrue(
+                reduce_success(
+                    compare_tensors("outputs", loss_local, loss_full, tol, tol, verbose=verbose), self.device
+                )
+            )
 
         #############################################################
         # evaluate BWD pass
         #############################################################
         with self.subTest(desc="forecast gradients"):
             fgrad_gather_full = self._gather_helper_bwd(fgrad_local, True)
-            self.assertTrue(reduce_success(compare_tensors("forecast gradients", fgrad_gather_full, fgrad_full, tol, tol, verbose=verbose), self.device))
+            self.assertTrue(
+                reduce_success(
+                    compare_tensors("forecast gradients", fgrad_gather_full, fgrad_full, tol, tol, verbose=verbose),
+                    self.device,
+                )
+            )
 
         with self.subTest(desc="observation gradients"):
             obsgrad_gather_full = self._gather_helper_bwd(obsgrad_local, False)
-            self.assertTrue(reduce_success(compare_tensors("observation gradients", obsgrad_gather_full, obsgrad_full, tol, tol, verbose=verbose), self.device))
+            self.assertTrue(
+                reduce_success(
+                    compare_tensors(
+                        "observation gradients", obsgrad_gather_full, obsgrad_full, tol, tol, verbose=verbose
+                    ),
+                    self.device,
+                )
+            )
 
 
 if __name__ == "__main__":

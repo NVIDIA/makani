@@ -21,7 +21,13 @@ import math
 import torch
 from torch import amp
 
-from makani.utils.losses.base_loss import LossType, GeometricBaseLoss, SpectralBaseLoss, VortDivBaseLoss, GradientBaseLoss
+from makani.utils.losses.base_loss import (
+    LossType,
+    GeometricBaseLoss,
+    SpectralBaseLoss,
+    VortDivBaseLoss,
+    GradientBaseLoss,
+)
 from makani.utils import comm
 
 # distributed stuff
@@ -89,7 +95,9 @@ def _crps_ensemble_kernel(observation: torch.Tensor, forecasts: torch.Tensor, we
         condition = torch.logical_and(observation < forecast, torch.abs(obs_cdf) < 1.0e-7)
 
         # compute terms
-        term_true = (observation - prev_forecast) * torch.square(forecast_cdf) + (forecast - observation) * torch.square(forecast_cdf - 1)
+        term_true = (observation - prev_forecast) * torch.square(forecast_cdf) + (
+            forecast - observation
+        ) * torch.square(forecast_cdf - 1)
         term_false = (forecast - prev_forecast) * torch.square(forecast_cdf - obs_cdf)
         increment = torch.where(condition, term_true, term_false)
 
@@ -113,7 +121,9 @@ def _crps_ensemble_kernel(observation: torch.Tensor, forecasts: torch.Tensor, we
     return torch.squeeze(integral, dim=0)
 
 
-def _crps_skillspread_kernel(observation: torch.Tensor, forecasts: torch.Tensor, weights: torch.Tensor, alpha: float) -> torch.Tensor:
+def _crps_skillspread_kernel(
+    observation: torch.Tensor, forecasts: torch.Tensor, weights: torch.Tensor, alpha: float
+) -> torch.Tensor:
     """
     fair CRPS variant that uses spread and skill. Assumes pre-sorted ensemble
     """
@@ -138,7 +148,12 @@ def _crps_skillspread_kernel(observation: torch.Tensor, forecasts: torch.Tensor,
     num_ensemble = forecasts.shape[0]
 
     # get the ensemble spread (total_weight is ensemble size here)
-    espread = 2 * torch.mean((2 * rank - num_ensemble - 1) * forecasts, dim=0) * (float(num_ensemble) - 1.0 + alpha) / float(num_ensemble * (num_ensemble - 1))
+    espread = (
+        2
+        * torch.mean((2 * rank - num_ensemble - 1) * forecasts, dim=0)
+        * (float(num_ensemble) - 1.0 + alpha)
+        / float(num_ensemble * (num_ensemble - 1))
+    )
     eskill = (observation - forecasts).abs().mean(dim=0)
 
     crps = torch.where(nanmask_bool, 0.0, eskill - 0.5 * espread)
@@ -146,7 +161,9 @@ def _crps_skillspread_kernel(observation: torch.Tensor, forecasts: torch.Tensor,
     return crps
 
 
-def _crps_probability_weighted_moment_kernel(observation: torch.Tensor, forecasts: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
+def _crps_probability_weighted_moment_kernel(
+    observation: torch.Tensor, forecasts: torch.Tensor, weights: torch.Tensor
+) -> torch.Tensor:
     """
     CRPS estimator based on the probability weighted moment. see [1].
 
@@ -185,7 +202,9 @@ def _crps_probability_weighted_moment_kernel(observation: torch.Tensor, forecast
     return crps
 
 
-def _crps_naive_skillspread_kernel(observation: torch.Tensor, forecasts: torch.Tensor, weights: torch.Tensor, alpha: float) -> torch.Tensor:
+def _crps_naive_skillspread_kernel(
+    observation: torch.Tensor, forecasts: torch.Tensor, weights: torch.Tensor, alpha: float
+) -> torch.Tensor:
     """
     alternative fair CRPS variant that uses spread and skill. Uses naive computation which is O(N^2) in the number of ensemble members. Useful for complex
     """
@@ -207,7 +226,11 @@ def _crps_naive_skillspread_kernel(observation: torch.Tensor, forecasts: torch.T
     num_ensemble = forecasts.shape[0]
 
     # use broadcasting semantics to compute spread and skill
-    espread = (forecasts.unsqueeze(1) - forecasts.unsqueeze(0)).abs().sum(dim=(0,1)) * (float(num_ensemble) - 1.0 + alpha) / float(num_ensemble * num_ensemble * (num_ensemble - 1))
+    espread = (
+        (forecasts.unsqueeze(1) - forecasts.unsqueeze(0)).abs().sum(dim=(0, 1))
+        * (float(num_ensemble) - 1.0 + alpha)
+        / float(num_ensemble * num_ensemble * (num_ensemble - 1))
+    )
     eskill = (observation - forecasts).abs().mean(dim=0)
 
     crps = eskill - 0.5 * espread
@@ -219,7 +242,9 @@ def _crps_naive_skillspread_kernel(observation: torch.Tensor, forecasts: torch.T
 
 
 # @torch.compile
-def _crps_gauss_kernel(observation: torch.Tensor, forecasts: torch.Tensor, weights: torch.Tensor, eps: float) -> torch.Tensor:
+def _crps_gauss_kernel(
+    observation: torch.Tensor, forecasts: torch.Tensor, weights: torch.Tensor, eps: float
+) -> torch.Tensor:
     """
     CRPS Gauss score, assuming the input ensemble is gaussian distributed
     disabling torch compile for the moment due to very long startup times when training large ensembles with ensemble parallelism
@@ -277,18 +302,24 @@ class CRPSLoss(GeometricBaseLoss):
         )
 
         self.spatial_distributed = comm.is_distributed("spatial") and spatial_distributed
-        self.ensemble_distributed = comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1) and ensemble_distributed
+        self.ensemble_distributed = (
+            comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1) and ensemble_distributed
+        )
         self.crps_type = crps_type
         self.alpha = alpha
         self.eps = eps
 
         if (self.crps_type not in ("skillspread", "naive skillspread")) and (self.alpha < 1.0):
-            raise NotImplementedError("The alpha parameter (almost fair CRPS factor) is only supported for the skillspread kernels.")
+            raise NotImplementedError(
+                "The alpha parameter (almost fair CRPS factor) is only supported for the skillspread kernels."
+            )
 
         # we also need a variant of the weights split in ensemble direction:
         quad_weight_split = self.quadrature.quad_weight.reshape(1, 1, -1)
         if self.ensemble_distributed:
-            quad_weight_split = split_tensor_along_dim(quad_weight_split, dim=-1, num_chunks=comm.get_size("ensemble"))[comm.get_rank("ensemble")]
+            quad_weight_split = split_tensor_along_dim(quad_weight_split, dim=-1, num_chunks=comm.get_size("ensemble"))[
+                comm.get_rank("ensemble")
+            ]
         quad_weight_split = quad_weight_split.contiguous()
         self.register_buffer("quad_weight_split", quad_weight_split, persistent=False)
 
@@ -301,7 +332,13 @@ class CRPSLoss(GeometricBaseLoss):
     def type(self):
         return LossType.Probabilistic
 
-    def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, spatial_weights: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor:
+    def forward(
+        self,
+        forecasts: torch.Tensor,
+        observations: torch.Tensor,
+        spatial_weights: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> torch.Tensor:
 
         # sanity checks
         if forecasts.dim() != 5:
@@ -311,7 +348,9 @@ class CRPSLoss(GeometricBaseLoss):
         if (spatial_weights is not None) and (spatial_weights.dim() != observations.dim()):
             spdim = spatial_weights.dim()
             odim = observations.dim()
-            raise ValueError(f"the weights have to have the same number of dimensions (found {spdim}) as observations (found {odim}).")
+            raise ValueError(
+                f"the weights have to have the same number of dimensions (found {spdim}) as observations (found {odim})."
+            )
 
         # we assume the following shapes:
         # forecasts: batch, ensemble, channels, lat, lon
@@ -443,13 +482,17 @@ class SpectralCRPSLoss(SpectralBaseLoss):
         )
 
         self.spatial_distributed = spatial_distributed and comm.is_distributed("spatial")
-        self.ensemble_distributed = ensemble_distributed and comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1)
+        self.ensemble_distributed = (
+            ensemble_distributed and comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1)
+        )
         self.crps_type = crps_type
         self.alpha = alpha
         self.eps = eps
 
         if (self.crps_type not in ("skillspread", "naive skillspread")) and (self.alpha < 1.0):
-            raise NotImplementedError("The alpha parameter (almost fair CRPS factor) is only supported for the skillspread kernels.")
+            raise NotImplementedError(
+                "The alpha parameter (almost fair CRPS factor) is only supported for the skillspread kernels."
+            )
 
         if ensemble_weights is not None:
             self.register_buffer("ensemble_weights", ensemble_weights, persistent=False)
@@ -463,7 +506,13 @@ class SpectralCRPSLoss(SpectralBaseLoss):
     def type(self):
         return LossType.Probabilistic
 
-    def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, spectral_weights: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor:
+    def forward(
+        self,
+        forecasts: torch.Tensor,
+        observations: torch.Tensor,
+        spectral_weights: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> torch.Tensor:
 
         # sanity checks
         if forecasts.dim() != 5:
@@ -490,7 +539,9 @@ class SpectralCRPSLoss(SpectralBaseLoss):
         else:
             # since the other kernels require sorting, this approach only works with the naive CRPS kernel
             if self.crps_type != "skillspread":
-                raise ValueError(f"the non-absolute path only works with the naive 'skillspread' CRPS kernel, but got crps_type {self.crps_type}")
+                raise ValueError(
+                    f"the non-absolute path only works with the naive 'skillspread' CRPS kernel, but got crps_type {self.crps_type}"
+                )
 
         # we assume the following shapes:
         # forecasts: batch, ensemble, channels, mmax, lmax
@@ -585,6 +636,7 @@ class SpectralCRPSLoss(SpectralBaseLoss):
         # the resulting tensor should have dimension B, C, which is what we return
         return crps
 
+
 class GradientCRPSLoss(GradientBaseLoss):
 
     def __init__(
@@ -619,18 +671,24 @@ class GradientCRPSLoss(GradientBaseLoss):
         self.absolute = absolute
 
         self.spatial_distributed = comm.is_distributed("spatial") and spatial_distributed
-        self.ensemble_distributed = comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1) and ensemble_distributed
+        self.ensemble_distributed = (
+            comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1) and ensemble_distributed
+        )
         self.crps_type = crps_type
         self.alpha = alpha
         self.eps = eps
 
         if (self.crps_type not in ("skillspread", "naive skillspread")) and (self.alpha < 1.0):
-            raise NotImplementedError("The alpha parameter (almost fair CRPS factor) is only supported for the skillspread kernels.")
+            raise NotImplementedError(
+                "The alpha parameter (almost fair CRPS factor) is only supported for the skillspread kernels."
+            )
 
         # we also need a variant of the weights split in ensemble direction:
         quad_weight_split = self.quadrature.quad_weight.reshape(1, 1, -1)
         if self.ensemble_distributed:
-            quad_weight_split = split_tensor_along_dim(quad_weight_split, dim=-1, num_chunks=comm.get_size("ensemble"))[comm.get_rank("ensemble")]
+            quad_weight_split = split_tensor_along_dim(quad_weight_split, dim=-1, num_chunks=comm.get_size("ensemble"))[
+                comm.get_rank("ensemble")
+            ]
         quad_weight_split = quad_weight_split.contiguous()
         self.register_buffer("quad_weight_split", quad_weight_split, persistent=False)
 
@@ -659,7 +717,13 @@ class GradientCRPSLoss(GradientBaseLoss):
         else:
             return [weight for weight in chw for _ in range(2)]
 
-    def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, spatial_weights: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor:
+    def forward(
+        self,
+        forecasts: torch.Tensor,
+        observations: torch.Tensor,
+        spatial_weights: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> torch.Tensor:
 
         # sanity checks
         if forecasts.dim() != 5:
@@ -669,7 +733,9 @@ class GradientCRPSLoss(GradientBaseLoss):
         if (spatial_weights is not None) and (spatial_weights.dim() != observations.dim()):
             spdim = spatial_weights.dim()
             odim = observations.dim()
-            raise ValueError(f"the weights have to have the same number of dimensions (found {spdim}) as observations (found {odim}).")
+            raise ValueError(
+                f"the weights have to have the same number of dimensions (found {spdim}) as observations (found {odim})."
+            )
 
         # we assume the following shapes:
         # forecasts: batch, ensemble, channels, lat, lon
@@ -777,6 +843,7 @@ class GradientCRPSLoss(GradientBaseLoss):
         # the resulting tensor should have dimension B, C, which is what we return
         return crps
 
+
 class VortDivCRPSLoss(VortDivBaseLoss):
 
     def __init__(
@@ -805,18 +872,24 @@ class VortDivCRPSLoss(VortDivBaseLoss):
         )
 
         self.spatial_distributed = comm.is_distributed("spatial") and spatial_distributed
-        self.ensemble_distributed = comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1) and ensemble_distributed
+        self.ensemble_distributed = (
+            comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1) and ensemble_distributed
+        )
         self.crps_type = crps_type
         self.alpha = alpha
         self.eps = eps
 
         if (self.crps_type not in ("skillspread", "naive skillspread")) and (self.alpha < 1.0):
-            raise NotImplementedError("The alpha parameter (almost fair CRPS factor) is only supported for the skillspread kernels.")
+            raise NotImplementedError(
+                "The alpha parameter (almost fair CRPS factor) is only supported for the skillspread kernels."
+            )
 
         # we also need a variant of the weights split in ensemble direction:
         quad_weight_split = self.quadrature.quad_weight.reshape(1, 1, -1)
         if self.ensemble_distributed:
-            quad_weight_split = split_tensor_along_dim(quad_weight_split, dim=-1, num_chunks=comm.get_size("ensemble"))[comm.get_rank("ensemble")]
+            quad_weight_split = split_tensor_along_dim(quad_weight_split, dim=-1, num_chunks=comm.get_size("ensemble"))[
+                comm.get_rank("ensemble")
+            ]
         quad_weight_split = quad_weight_split.contiguous()
         self.register_buffer("quad_weight_split", quad_weight_split, persistent=False)
 
@@ -829,7 +902,13 @@ class VortDivCRPSLoss(VortDivBaseLoss):
     def type(self):
         return LossType.Probabilistic
 
-    def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, spatial_weights: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor:
+    def forward(
+        self,
+        forecasts: torch.Tensor,
+        observations: torch.Tensor,
+        spatial_weights: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> torch.Tensor:
 
         # sanity checks
         if forecasts.dim() != 5:
@@ -839,7 +918,9 @@ class VortDivCRPSLoss(VortDivBaseLoss):
         if (spatial_weights is not None) and (spatial_weights.dim() != observations.dim()):
             spdim = spatial_weights.dim()
             odim = observations.dim()
-            raise ValueError(f"the weights have to have the same number of dimensions (found {spdim}) as observations (found {odim}).")
+            raise ValueError(
+                f"the weights have to have the same number of dimensions (found {spdim}) as observations (found {odim})."
+            )
 
         # we assume the following shapes:
         # forecasts: batch, ensemble, channels, lat, lon
@@ -937,6 +1018,7 @@ class VortDivCRPSLoss(VortDivBaseLoss):
         # the resulting tensor should have dimension B, C, which is what we return
         return crps
 
+
 class KernelScoreLoss(GeometricBaseLoss):
     """
     Computes the kernel score defined in Gneiting and Raftery (2007) with kernels
@@ -972,18 +1054,24 @@ class KernelScoreLoss(GeometricBaseLoss):
         )
 
         self.spatial_distributed = comm.is_distributed("spatial") and spatial_distributed
-        self.ensemble_distributed = comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1) and ensemble_distributed
+        self.ensemble_distributed = (
+            comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1) and ensemble_distributed
+        )
         self.crps_type = crps_type
         self.alpha = alpha
         self.eps = eps
 
         if (self.crps_type not in ("skillspread", "naive skillspread")) and (self.alpha < 1.0):
-            raise NotImplementedError("The alpha parameter (almost fair CRPS factor) is only supported for the skillspread kernels.")
+            raise NotImplementedError(
+                "The alpha parameter (almost fair CRPS factor) is only supported for the skillspread kernels."
+            )
 
         # we also need a variant of the weights split in ensemble direction:
         quad_weight_split = self.quadrature.quad_weight.reshape(1, 1, -1)
         if self.ensemble_distributed:
-            quad_weight_split = split_tensor_along_dim(quad_weight_split, dim=-1, num_chunks=comm.get_size("ensemble"))[comm.get_rank("ensemble")]
+            quad_weight_split = split_tensor_along_dim(quad_weight_split, dim=-1, num_chunks=comm.get_size("ensemble"))[
+                comm.get_rank("ensemble")
+            ]
         quad_weight_split = quad_weight_split.contiguous()
         self.register_buffer("quad_weight_split", quad_weight_split, persistent=False)
 
@@ -1000,7 +1088,9 @@ class KernelScoreLoss(GeometricBaseLoss):
                 thd.init(polar_group, azimuth_group)
 
         # set up DISCO convolution (one per kernel)
-        conv_handle = thd.DistributedDiscreteContinuousConvS2 if self.spatial_distributed else th.DiscreteContinuousConvS2
+        conv_handle = (
+            thd.DistributedDiscreteContinuousConvS2 if self.spatial_distributed else th.DiscreteContinuousConvS2
+        )
 
         fb = th.filter_basis.get_filter_basis(tuple(kernel_shape), kernel_basis_type)
         self.kernel_basis_size = fb.kernel_size
@@ -1034,7 +1124,13 @@ class KernelScoreLoss(GeometricBaseLoss):
     def type(self):
         return LossType.Probabilistic
 
-    def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, spatial_weights: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor:
+    def forward(
+        self,
+        forecasts: torch.Tensor,
+        observations: torch.Tensor,
+        spatial_weights: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> torch.Tensor:
 
         # sanity checks
         if forecasts.dim() != 5:
@@ -1044,7 +1140,9 @@ class KernelScoreLoss(GeometricBaseLoss):
         if (spatial_weights is not None) and (spatial_weights.dim() != observations.dim()):
             spdim = spatial_weights.dim()
             odim = observations.dim()
-            raise ValueError(f"the weights have to have the same number of dimensions (found {spdim}) as observations (found {odim}).")
+            raise ValueError(
+                f"the weights have to have the same number of dimensions (found {spdim}) as observations (found {odim})."
+            )
 
         # get the data type before stripping amp types
         dtype = forecasts.dtype
@@ -1057,7 +1155,7 @@ class KernelScoreLoss(GeometricBaseLoss):
         # before anything else compute the transform
         # as the CDF definition doesn't generalize well to more than one-dimensional variables, we treat complex and imaginary part as the same
         with amp.autocast(device_type="cuda", enabled=False):
-            forecasts = self.conv(forecasts.float().reshape(B*E, -1, H, W))
+            forecasts = self.conv(forecasts.float().reshape(B * E, -1, H, W))
             observations = self.conv(observations.float())
 
         forecasts = forecasts.reshape(B, E, -1, H, W)

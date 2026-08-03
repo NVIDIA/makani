@@ -1,0 +1,51 @@
+# Pre-commit hooks for makani, mirroring the torch-harmonics setup.
+#
+# Dropped relative to that repo: clang-format (makani has no C/C++/CUDA sources)
+# and mdformat (no docs/ tree to format).
+#
+# NOTE: the formatting hooks (black, ruff) have not been applied to the tree yet.
+# Running `pre-commit run --all-files` today reformats ~137 of 156 Python files.
+# That sweep is intentionally deferred to its own commit so it does not conflict
+# with in-flight branches. Until then, install the hooks with `pre-commit install`
+# and they will only touch files you actually change.
+#
+# Known blocker for the sweep: data_process/h5_convert.py does not parse under
+# Python 3 (TabError, inconsistent tabs and spaces at line 139), so black cannot
+# format it. That file needs fixing before `--all-files` can pass.
+
+# Many Linux installs provide python3 only; avoid hook envs calling bare `python`.
+default_language_version:
+  python: python3
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-added-large-files
+        args: ['--maxkb=2500']
+      - id: check-merge-conflict
+
+  - repo: https://github.com/psf/black
+    rev: 25.1.0
+    hooks:
+      - id: black
+        language_version: python3
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.11.12
+    hooks:
+      - id: ruff
+        language_version: python3
+        args: ['--fix']
+
+  - repo: local
+    hooks:
+      - id: license-header-check
+        name: Check SPDX license headers
+        entry: python3 scripts/check_license_header.py
+        language: system
+        types: [python]
+        pass_filenames: true
