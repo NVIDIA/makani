@@ -37,6 +37,7 @@ from makani.utils.losses import (
     SpectralAMSELoss,
     DriftRegularization,
     SpectralRegularization,
+    CoherenceRegularization,
     EnsembleNLLLoss,
     LpEnergyScoreLoss,
     SpectralL2EnergyScoreLoss,
@@ -3379,6 +3380,187 @@ class TestEnsembleLossE1FastPath(unittest.TestCase):
         self.assertIsNotNone(fc.grad)
         self.assertFalse(torch.isnan(fc.grad).any(), f"{name}: NaN grad in E=1 backward")
         self.assertFalse(torch.isinf(fc.grad).any(), f"{name}: Inf grad in E=1 backward")
+
+
+class TestCoherenceRegularization(unittest.TestCase):
+    """Tests for CoherenceRegularization.
+
+    The loss penalizes low spectral coherence between each ensemble member and
+    the observation over a wavenumber band:
+
+        Coh_l = CrossPSD_l / sqrt(PSD^f_l * PSD^y_l + eps)
+        Loss  = mean_{l in band} (1 - mean_e Coh_l)
+
+    Coherence is signed, so the loss has three reference points that anchor most
+    of the tests below:
+
+        f = +y  -> Coh = +1 -> loss 0    (perfectly correlated)
+        f random-> Coh ~  0 -> loss 1    (uncorrelated)
+        f = -y  -> Coh = -1 -> loss 2    (anti-correlated)
+
+    Several tests use a tiny eps. The default eps=1e-6 is a stabilizer that
+    biases the ratio toward 0 wherever the PSD is small, which pulls the loss
+    toward the "uncorrelated" value of 1: at eps=1e-6 the perfectly-correlated
+    case scores 0.086 rather than 0. That is fine for training but makes the
+    exact reference points untestable, so the analytic tests shrink eps.
+
+    This class also serves as the regression test for the three bugs reported in
+    issue #95, each marked below.
+    """
+
+    _E = 5
+
+    def setUp(self):
+        disable_tf32()
+        set_seed(333)
+
+    def _fn(self, **kw):
+        return CoherenceRegularization(
+            **_SPEC_KWARGS,
+            spatial_distributed=False,
+            ensemble_distributed=False,
+            **kw,
+        )
+
+    @staticmethod
+    def _broadcast(obs, ensemble, scale=1.0):
+        """Build an ensemble in which every member is ``scale * obs``."""
+        return scale * obs.unsqueeze(1).repeat(1, ensemble, 1, 1, 1)
+
+    # -- output-shape contract -----------------------------------------------
+
+    def test_output_shape(self):
+        out = self._fn()(_rand_ensemble(self._E), _rand())
+        self.assertEqual(tuple(out.shape), (_BATCH, _NUM_CH))
+
+    def test_n_channels_matches_output(self):
+        fn = self._fn()
+        self.assertEqual(fn.n_channels, _NUM_CH)
+        self.assertEqual(fn(_rand_ensemble(self._E), _rand()).shape[-1], fn.n_channels)
+
+    def test_wrong_forecast_dims_raises(self):
+        with self.assertRaises(ValueError):
+            self._fn()(_rand(), _rand())  # 4-D, missing ensemble dim
+
+    # -- analytic reference points -------------------------------------------
+
+    def test_fully_correlated_is_zero(self):
+        """f = y is perfect coherence, so the loss must vanish."""
+        obs = _rand()
+        out = self._fn(eps=1e-16)(self._broadcast(obs, self._E), obs)
+        self.assertTrue(torch.allclose(out, torch.zeros_like(out), atol=1e-3), f"expected 0, got mean {out.mean().item()}")
+
+    def test_anti_correlated_is_two(self):
+        """f = -y is coherence -1, so (1 - Coh) = 2.
+
+        This is the case that distinguishes the signed coherence used here from
+        the sign-blind magnitude-squared convention, which would score this
+        identically to a perfect forecast.
+        """
+        obs = _rand()
+        out = self._fn(eps=1e-16)(self._broadcast(obs, self._E, scale=-1.0), obs)
+        self.assertTrue(torch.allclose(out, 2.0 * torch.ones_like(out), atol=1e-3), f"expected 2, got mean {out.mean().item()}")
+
+    def test_uncorrelated_is_one(self):
+        """Independent forecasts have zero expected coherence, so the loss ~ 1.
+
+        This one is statistical rather than exact, hence the loose tolerance.
+        """
+        out = self._fn(eps=1e-16)(_rand_ensemble(self._E), _rand())
+        self.assertAlmostEqual(out.mean().item(), 1.0, delta=0.1)
+
+    def test_ordering_of_the_three_regimes(self):
+        """correlated < uncorrelated < anti-correlated, without tolerance games."""
+        obs = _rand()
+        fn = self._fn(eps=1e-16)
+        pos = fn(self._broadcast(obs, self._E), obs).mean().item()
+        rnd = fn(_rand_ensemble(self._E), obs).mean().item()
+        neg = fn(self._broadcast(obs, self._E, scale=-1.0), obs).mean().item()
+        self.assertLess(pos, rnd)
+        self.assertLess(rnd, neg)
+
+    def test_positive_scaling_is_invariant(self):
+        """Coherence is normalized, so f = a*y scores 0 for any a > 0."""
+        obs = _rand()
+        fn = self._fn(eps=1e-16)
+        for scale in (0.5, 1.0, 7.0):
+            out = fn(self._broadcast(obs, self._E, scale=scale), obs)
+            self.assertTrue(torch.allclose(out, torch.zeros_like(out), atol=1e-3), f"scale {scale}: expected 0, got {out.mean().item()}")
+
+    # -- issue #95 regressions ------------------------------------------------
+
+    def test_cross_psd_is_computed(self):
+        """Issue #95 bug 1: the forecast-observation cross-PSD must be used.
+
+        The previous implementation correlated forecasts with each other and
+        never formed the cross term, so flipping the sign of the forecast was
+        invisible to the loss. A sign flip must move the result by 2.
+        """
+        obs = _rand()
+        fn = self._fn(eps=1e-16)
+        pos = fn(self._broadcast(obs, self._E), obs)
+        neg = fn(self._broadcast(obs, self._E, scale=-1.0), obs)
+        self.assertTrue(torch.allclose(neg - pos, 2.0 * torch.ones_like(pos), atol=1e-3))
+
+    def test_loss_depends_on_observations(self):
+        """Issue #95 bug 1: swapping the observation must change the loss."""
+        fc = _rand_ensemble(self._E)
+        fn = self._fn()
+        self.assertFalse(torch.allclose(fn(fc, _rand()), fn(fc, _rand())))
+
+    def test_band_mask_is_applied(self):
+        """Issue #95 bug 2: lmin must restrict the wavenumber band.
+
+        Previously l_band was built and registered but never used in forward, so
+        lmin had no effect at all.
+        """
+        widths = [self._fn(lmin=lmin).band_size.item() for lmin in (0, 4, 8)]
+        self.assertEqual(widths, sorted(widths, reverse=True))
+        self.assertGreater(widths[0], widths[-1])
+
+    def test_band_mask_changes_the_loss(self):
+        """Issue #95 bug 2: a different band must give a different value."""
+        fc, obs = _rand_ensemble(self._E), _rand()
+        self.assertNotAlmostEqual(self._fn(lmin=0)(fc, obs).mean().item(), self._fn(lmin=8)(fc, obs).mean().item(), places=4)
+
+    def test_band_restricted_to_single_wavenumber(self):
+        fn = self._fn(lmin=14)
+        self.assertEqual(fn.band_size.item(), 1.0)
+        self.assertEqual(tuple(fn(_rand_ensemble(self._E), _rand()).shape), (_BATCH, _NUM_CH))
+
+    def test_empty_band_raises(self):
+        """lmin at or beyond the bandlimit would silently produce an empty band."""
+        with self.assertRaises(ValueError):
+            self._fn(lmin=10_000)
+
+    def test_ensemble_coherence_weight_is_applied(self):
+        """Issue #95 bug 3: the weight was stored but never read.
+
+        The inter-member term enters linearly, so the increment over the
+        weight=0 baseline must be proportional to the weight.
+        """
+        fc, obs = _rand_ensemble(self._E), _rand()
+        base = self._fn(ensemble_coherence_weight=0.0)(fc, obs)
+        d1 = self._fn(ensemble_coherence_weight=1.0)(fc, obs) - base
+        d2 = self._fn(ensemble_coherence_weight=2.0)(fc, obs) - base
+        self.assertFalse(torch.allclose(d1, torch.zeros_like(d1)))
+        self.assertTrue(torch.allclose(d2, 2.0 * d1, atol=1e-4))
+
+    # -- edge cases -----------------------------------------------------------
+
+    def test_single_member_skips_inter_member_term(self):
+        """E=1 would divide by E*(E-1)=0 if the inter-member term ran."""
+        out = self._fn(ensemble_coherence_weight=1.0)(_rand_ensemble(1), _rand())
+        self.assertEqual(tuple(out.shape), (_BATCH, _NUM_CH))
+        self.assertFalse(torch.isnan(out).any())
+        self.assertFalse(torch.isinf(out).any())
+
+    def test_backward_is_finite(self):
+        fc = _rand_ensemble(self._E, requires_grad=True)
+        self._fn(ensemble_coherence_weight=0.5)(fc, _rand()).sum().backward()
+        self.assertIsNotNone(fc.grad)
+        self.assertFalse(torch.isnan(fc.grad).any())
+        self.assertFalse(torch.isinf(fc.grad).any())
 
 
 if __name__ == "__main__":
