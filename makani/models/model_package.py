@@ -174,6 +174,16 @@ class ModelWrapper(torch.nn.Module):
 
         See :meth:`forward` for the ``time`` contract this enforces.
         """
+        # Only the zenith path depends on the input rank: history has to live in the
+        # flattened channel axis for (B, nhist, H, W) to line up with it. The rest of
+        # the pipeline broadcasts over other ranks, so this stays scoped here rather
+        # than becoming a blanket check in _prepare_input.
+        if x.ndim != 4:
+            raise ValueError(
+                f"add_zenith: expected a 4D (B, (n_history+1)*C, H, W) input, got {x.ndim}D. "
+                f"History is carried in the flattened channel axis, not a separate dim."
+            )
+
         nhist = self.model.preprocessor.n_history + 1
         batch_size = x.shape[0]
 
@@ -203,15 +213,10 @@ class ModelWrapper(torch.nn.Module):
     def _prepare_input(self, x, time, normalized_data):
         """Normalize the input and cache the time-dependent unpredicted features.
 
-        ``x`` must be ``(B, (n_history + 1) * C, H, W)``. See :meth:`forward` for
-        the batching contract on ``time``.
+        ``x`` is normally ``(B, (n_history + 1) * C, H, W)``; that layout is
+        required when ``add_zenith`` is set, but not otherwise. See :meth:`forward`
+        for the batching contract on ``time``.
         """
-        if x.ndim != 4:
-            raise ValueError(
-                f"expected a 4D (B, (n_history+1)*C, H, W) input, got {x.ndim}D. "
-                f"History is carried in the flattened channel axis, not a separate dim."
-            )
-
         if not normalized_data:
             x = (x - self.in_bias) / self.in_scale
 
