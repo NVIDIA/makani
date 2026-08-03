@@ -98,6 +98,9 @@ class TestStepper(unittest.TestCase):
         self.assertTrue(compare_tensors("single_step_with_history", out, 2.0 * inp[:, -self.C:], verbose=True))
 
     def test_single_step_encode_process_uses_forward_preprocessing(self):
+        # encode_process must agree with forward on everything up to the decoder.
+        # _StagedScaleModel.encode_process mirrors its forward, so with a
+        # bias-correction/denormalization no-op config the two must match exactly.
         params = self._make_params(n_history=0)
         wrapper = SingleStepWrapper(
             params,
@@ -106,16 +109,48 @@ class TestStepper(unittest.TestCase):
         inp = torch.randn(self.B, self.C, self.H, self.W)
 
         features = wrapper.encode_process(inp)
+        expected = wrapper(inp)
 
         self.assertEqual(features.shape, inp.shape)
-        self.assertTrue(
-            compare_tensors(
-                "single_step_encode_process",
-                features,
-                2.0 * inp,
-                verbose=True,
-            )
+        self.assertTrue(compare_tensors("single_step_encode_process", features, expected, verbose=True))
+
+    def test_single_step_encode_process_batched(self):
+        # the latent path must accept a batch larger than params.batch_size (1),
+        # which is what an ensemble pushing B*E members through as one forward does
+        params = self._make_params(n_history=0)
+        wrapper = SingleStepWrapper(
+            params,
+            lambda: _StagedScaleModel(n_out_chans=self.C, scale=2.0),
         )
+        batch = 4
+        inp = torch.randn(batch, self.C, self.H, self.W)
+
+        features = wrapper.encode_process(inp)
+
+        self.assertEqual(features.shape, (batch, self.C, self.H, self.W))
+        self.assertTrue(compare_tensors("single_step_encode_process_batched", features, 2.0 * inp, verbose=True))
+
+    def test_single_step_forward_batched(self):
+        # the same must hold for the ordinary forward path
+        params = self._make_params(n_history=0)
+        wrapper = SingleStepWrapper(params, self._make_handle())
+        batch = 4
+        inp = torch.randn(batch, self.C, self.H, self.W)
+
+        out = wrapper(inp)
+
+        self.assertEqual(out.shape, (batch, self.C, self.H, self.W))
+        self.assertTrue(compare_tensors("single_step_forward_batched", out, 2.0 * inp, verbose=True))
+
+    def test_single_step_encode_process_unsupported_backbone(self):
+        # a backbone without encode_process must fail with a clear error rather
+        # than an AttributeError from deep inside the call
+        params = self._make_params(n_history=0)
+        wrapper = SingleStepWrapper(params, self._make_handle())
+        inp = torch.randn(self.B, self.C, self.H, self.W)
+
+        with self.assertRaises(NotImplementedError):
+            wrapper.encode_process(inp)
 
     # ------------------------------------------------------------------
     # MultiStepWrapper — train mode produces the full rollout

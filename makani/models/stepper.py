@@ -50,10 +50,22 @@ class SingleStepWrapper(nn.Module):
         self.preprocessor = Preprocessor2D(params)
         self.model = model_handle()
 
-    def forward(self, inp, update_state=True, replace_state=True):
+    def _preprocess(self, inp, update_state=True, replace_state=True):
+        """Run the shared input pipeline for one step.
+
+        The stochastic state is sized to THIS call's batch. The noise module is
+        constructed with ``params.batch_size`` -- a training setting, and 1 for a
+        packaged model -- but inference legitimately drives it with other
+        batches, e.g. an ensemble pushing B*E members through as a single
+        batched forward. Without this, ``append_unpredicted_features`` rejects
+        the call with "batch mismatch between input_noise state (1) and input".
+        ``_ensure_state`` reallocates only when the batch actually changes, so
+        the steady-state cost is zero; the flip side is that changing the batch
+        mid-rollout discards a stateful noise module's history.
+        """
         # update internal state
         if update_state:
-            self.preprocessor.update_internal_state(replace_state=replace_state)
+            self.preprocessor.update_internal_state(replace_state=replace_state, batch_size=inp.shape[0])
 
         # append unpredicted features
         inpa = self.preprocessor.append_unpredicted_features(inp)
@@ -63,7 +75,10 @@ class SingleStepWrapper(nn.Module):
         inpan = self.preprocessor.history_normalize(inpa, target=False)
 
         # now add static features if requested
-        inpans = self.preprocessor.add_static_features(inpan)
+        return self.preprocessor.add_static_features(inpan)
+
+    def forward(self, inp, update_state=True, replace_state=True):
+        inpans = self._preprocess(inp, update_state=update_state, replace_state=replace_state)
 
         # forward pass
         yn = self.model(inpans)
@@ -79,30 +94,16 @@ class SingleStepWrapper(nn.Module):
     def encode_process(self, inp, update_state=True, replace_state=True):
         """Prepare one input and return backbone features before decoding.
 
-        The preprocessing is identical to :meth:`forward`; only the final
-        decoder, bias correction, and target denormalization are skipped.
+        Shares :meth:`_preprocess` with :meth:`forward`, so the preprocessing is
+        identical by construction; only the decoder, bias correction, and target
+        denormalization are skipped.
         """
         if not hasattr(self.model, "encode_process"):
             raise NotImplementedError(
                 f"{type(self.model).__name__} does not expose encode_process()."
             )
 
-        if update_state:
-            # Size the stochastic state to THIS call's batch. The noise module is
-            # constructed with params.batch_size (1 for the packaged FCN3), but the
-            # latent path drives it with arbitrary batches -- e.g. the diagnostic
-            # ensemble runs B*E members through as one batched forward. Without an
-            # explicit batch_size the state stays at 1 and append_unpredicted_features
-            # raises "_append_channels: batch mismatch ... input_noise state (1)".
-            # _ensure_state(batch_size) reallocates only when the batch changes.
-            self.preprocessor.update_internal_state(
-                replace_state=replace_state, batch_size=inp.shape[0]
-            )
-
-        inpa = self.preprocessor.append_unpredicted_features(inp)
-        self.preprocessor.history_compute_stats(inpa)
-        inpan = self.preprocessor.history_normalize(inpa, target=False)
-        inpans = self.preprocessor.add_static_features(inpan)
+        inpans = self._preprocess(inp, update_state=update_state, replace_state=replace_state)
 
         return self.model.encode_process(inpans)
 
@@ -190,9 +191,12 @@ class MultiStepWrapper(nn.Module):
         return result
 
     def _forward_eval(self, inp, update_state=True, replace_state=True):
-        # update internal state
+        # update internal state; size the noise state to this call's batch so that
+        # batched inference works regardless of params.batch_size. See
+        # SingleStepWrapper._preprocess for the rationale. The training path
+        # deliberately keeps the fixed-batch behaviour.
         if update_state:
-            self.preprocessor.update_internal_state(replace_state=replace_state)
+            self.preprocessor.update_internal_state(replace_state=replace_state, batch_size=inp.shape[0])
 
         # first append unpredicted features
         inpa = self.preprocessor.append_unpredicted_features(inp)
