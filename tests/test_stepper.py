@@ -48,6 +48,11 @@ class _ScaleModel(nn.Module):
         return self.scale * x[..., -self.n_out_chans:, :, :]
 
 
+class _StagedScaleModel(_ScaleModel):
+    def encode_process(self, x):
+        return self.scale * x[..., -self.n_out_chans:, :, :]
+
+
 class TestStepper(unittest.TestCase):
 
     def setUp(self):
@@ -78,7 +83,7 @@ class TestStepper(unittest.TestCase):
         inp = torch.randn(self.B, self.C, self.H, self.W)
         out = wrapper(inp)
         self.assertEqual(out.shape, inp.shape)
-        self.assertTrue(compare_tensors("single_step_no_history", out, 2.0 * inp, verbose=True))
+        self.assertTrue(compare_tensors("single_step_no_history", out, 2.0 * inp, verbose=False))
 
     def test_single_step_with_history(self):
         n_history = 2
@@ -90,7 +95,62 @@ class TestStepper(unittest.TestCase):
         out = wrapper(inp)
         self.assertEqual(out.shape, (self.B, self.C, self.H, self.W))
         # only the most-recent timestep slice is consumed by the dummy model
-        self.assertTrue(compare_tensors("single_step_with_history", out, 2.0 * inp[:, -self.C:], verbose=True))
+        self.assertTrue(compare_tensors("single_step_with_history", out, 2.0 * inp[:, -self.C:], verbose=False))
+
+    def test_single_step_encode_process_uses_forward_preprocessing(self):
+        # encode_process must agree with forward on everything up to the decoder.
+        # _StagedScaleModel.encode_process mirrors its forward, so with a
+        # bias-correction/denormalization no-op config the two must match exactly.
+        params = self._make_params(n_history=0)
+        wrapper = SingleStepWrapper(
+            params,
+            lambda: _StagedScaleModel(n_out_chans=self.C, scale=2.0),
+        )
+        inp = torch.randn(self.B, self.C, self.H, self.W)
+
+        features = wrapper.encode_process(inp)
+        expected = wrapper(inp)
+
+        self.assertEqual(features.shape, inp.shape)
+        self.assertTrue(compare_tensors("single_step_encode_process", features, expected, verbose=True))
+
+    def test_single_step_encode_process_batched(self):
+        # the latent path must accept a batch larger than params.batch_size (1),
+        # which is what an ensemble pushing B*E members through as one forward does
+        params = self._make_params(n_history=0)
+        wrapper = SingleStepWrapper(
+            params,
+            lambda: _StagedScaleModel(n_out_chans=self.C, scale=2.0),
+        )
+        batch = 4
+        inp = torch.randn(batch, self.C, self.H, self.W)
+
+        features = wrapper.encode_process(inp)
+
+        self.assertEqual(features.shape, (batch, self.C, self.H, self.W))
+        self.assertTrue(compare_tensors("single_step_encode_process_batched", features, 2.0 * inp, verbose=True))
+
+    def test_single_step_forward_batched(self):
+        # the same must hold for the ordinary forward path
+        params = self._make_params(n_history=0)
+        wrapper = SingleStepWrapper(params, self._make_handle())
+        batch = 4
+        inp = torch.randn(batch, self.C, self.H, self.W)
+
+        out = wrapper(inp)
+
+        self.assertEqual(out.shape, (batch, self.C, self.H, self.W))
+        self.assertTrue(compare_tensors("single_step_forward_batched", out, 2.0 * inp, verbose=True))
+
+    def test_single_step_encode_process_unsupported_backbone(self):
+        # a backbone without encode_process must fail with a clear error rather
+        # than an AttributeError from deep inside the call
+        params = self._make_params(n_history=0)
+        wrapper = SingleStepWrapper(params, self._make_handle())
+        inp = torch.randn(self.B, self.C, self.H, self.W)
+
+        with self.assertRaises(NotImplementedError):
+            wrapper.encode_process(inp)
 
     # ------------------------------------------------------------------
     # MultiStepWrapper — train mode produces the full rollout
@@ -121,7 +181,7 @@ class TestStepper(unittest.TestCase):
                     f"multistep_train_step_{k}_h{n_history}",
                     block,
                     (2.0 ** (k + 1)) * last,
-                    verbose=True,
+                    verbose=False,
                 )
             )
 
@@ -138,7 +198,7 @@ class TestStepper(unittest.TestCase):
         out = wrapper(inp)
         # _forward_eval returns one step regardless of n_future
         self.assertEqual(out.shape, (self.B, self.C, self.H, self.W))
-        self.assertTrue(compare_tensors("multistep_eval", out, 2.0 * inp, verbose=True))
+        self.assertTrue(compare_tensors("multistep_eval", out, 2.0 * inp, verbose=False))
 
     def test_train_eval_dispatch(self):
         params = self._make_params(n_history=0, n_future=2)
@@ -170,7 +230,7 @@ class TestStepper(unittest.TestCase):
 
         out_off = wrapper_off(inp)
         out_on = wrapper_on(inp)
-        self.assertTrue(compare_tensors("push_forward_values", out_off, out_on, verbose=True))
+        self.assertTrue(compare_tensors("push_forward_values", out_off, out_on, verbose=False))
 
     def test_push_forward_truncates_gradient(self):
         # use ones() so the gradient takes a known closed form and we can

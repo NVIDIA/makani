@@ -474,7 +474,35 @@ class Preprocessor2D(nn.Module):
         return
 
     def update_internal_state(self, replace_state=False, batch_size=None):
+        """Advance the stochastic noise state by one step.
+
+        ``batch_size`` resizes the state to the given batch; None leaves it at its
+        current size. Resizing is guarded: the state carries an ``n_history + 1``
+        time axis holding the autoregressive noise history, and reallocating it
+        zeroes that history. Doing so while continuing an AR sequence
+        (``replace_state`` falsy) would silently restart the noise from zero and
+        yield a spin-up transient instead of the intended stationary distribution,
+        so it is rejected.
+
+        Only stateful noise (``DiffusionNoiseS2``) is guarded: white and dummy
+        noise redraw from scratch every step, so for them a resize destroys
+        nothing.
+
+        This matches what every caller already does: the ensemble trainer and the
+        inferencer resize only when priming an episode, always with
+        ``replace_state=True``, and then roll forward at a fixed batch.
+        """
         if hasattr(self, "input_noise"):
+            current_batch = self.input_noise.state.shape[0]
+            if (batch_size is not None) and (not replace_state) and (current_batch != batch_size) and self.input_noise.is_stateful():
+                raise RuntimeError(
+                    f"update_internal_state: refusing to resize the stochastic noise state from "
+                    f"batch {current_batch} to {batch_size} while continuing an autoregressive "
+                    f"noise sequence (replace_state={replace_state}). The state carries an "
+                    f"n_history+1 time history which resizing would zero, silently restarting "
+                    f"the noise from zero. Pass replace_state=True to draw a fresh state at the "
+                    f"new batch size, or keep the batch size fixed for the whole rollout."
+                )
             self.input_noise.update(replace_state=replace_state, batch_size=batch_size)
         if hasattr(self, "stochastic_physics"):
             self.stochastic_physics.update(replace_state=replace_state, batch_size=batch_size)

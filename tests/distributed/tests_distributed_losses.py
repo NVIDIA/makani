@@ -381,8 +381,6 @@ class TestDistributedLoss(unittest.TestCase):
         # observation grads
         with self.subTest(desc="observation gradients"):
             obsgrad_gather_full = self._gather_helper_bwd(obsgrad_local, False)
-            if self.world_rank == 0:
-                print("obsgrad_gather_full", obsgrad_gather_full[0, 0, ...], "obsgrad_full", obsgrad_full[0, 0, ...])
             self.assertTrue(reduce_success(compare_tensors("observation gradients", obsgrad_gather_full, obsgrad_full, tol, tol, verbose=verbose), self.device))
 
 
@@ -488,7 +486,7 @@ class TestDistributedLoss(unittest.TestCase):
             [129, 256, 2, 12, 4, 1e-4],
         ], skip_on_empty=True
     )
-    def test_distributed_spectral_l2_energy_score(self, nlat, nlon, batch_size, num_chan, ens_size, tol, verbose=True):
+    def test_distributed_spectral_l2_energy_score(self, nlat, nlon, batch_size, num_chan, ens_size, tol, verbose=False):
 
         # disable tf32 for deterministic comparison
         disable_tf32()
@@ -580,7 +578,7 @@ class TestDistributedLoss(unittest.TestCase):
             [129, 256, 2, 12, 4, 0.8, 1.2, 0.5, 0.7, 1e-5],
         ], skip_on_empty=True
     )
-    def test_distributed_sobolev_energy_score(self, nlat, nlon, batch_size, num_chan, ens_size, alpha, beta, offset, fraction, tol, verbose=True):
+    def test_distributed_sobolev_energy_score(self, nlat, nlon, batch_size, num_chan, ens_size, alpha, beta, offset, fraction, tol, verbose=False):
 
         disable_tf32()
 
@@ -678,7 +676,7 @@ class TestDistributedLoss(unittest.TestCase):
             [129, 256, 2, 12, 4, 16, 0.5, 1e-4],
         ], skip_on_empty=True
     )
-    def test_distributed_coherence_regularization(self, nlat, nlon, batch_size, num_chan, ens_size, lmin, ens_coh_weight, tol, verbose=True):
+    def test_distributed_coherence_regularization(self, nlat, nlon, batch_size, num_chan, ens_size, lmin, ens_coh_weight, tol, verbose=False):
         """Local vs distributed equivalence for CoherenceRegularization.
 
         The lmin > 0 cases matter most: the wavenumber-band mask is split along h
@@ -784,7 +782,7 @@ class TestDistributedLoss(unittest.TestCase):
             [129, 256, 2, 12, 4, True, 1e-4],
         ], skip_on_empty=True
     )
-    def test_distributed_spectral_coherence_loss(self, nlat, nlon, batch_size, num_chan, ens_size, relative, tol, verbose=True):
+    def test_distributed_spectral_coherence_loss(self, nlat, nlon, batch_size, num_chan, ens_size, relative, tol, verbose=False):
         """Local vs distributed equivalence for SpectralCoherenceLoss.
 
         This could not be written before: the reference instance is built with

@@ -2300,7 +2300,7 @@ class TestLpEnergyScoreLoss(unittest.TestCase):
         )
 
     @parameterized.expand([(2,), (3,), (5,)])
-    def test_combinations_matches_reference(self, ensemble_size, verbose=True):
+    def test_combinations_matches_reference(self, ensemble_size, verbose=False):
         """New upper-triangular combinations path must match the O(E^2) reference."""
         fn = self._fn(p=2.0)
         fc = _rand_ensemble(ensemble_size)
@@ -2774,7 +2774,7 @@ class TestSpectralCoherenceLoss(unittest.TestCase):
         self.assertFalse(torch.isinf(fc.grad).any(), "Inf in fc.grad")
 
     @parameterized.expand([(True,), (False,)])
-    def test_zero_on_perfect_prediction(self, relative, verbose=True):
+    def test_zero_on_perfect_prediction(self, relative, verbose=False):
         """All ensemble members == observation:
           - psd_skill = 0 exactly (same inputs through the same op)
           - coherences = P / sqrt(P² + eps) → 1 only as eps → 0
