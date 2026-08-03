@@ -634,9 +634,13 @@ class SpectralCoherenceLoss(SpectralBaseLoss):
         lm_weights = torch.ones((self.sht.lmax, self.sht.mmax))
         lm_weights[:, 1:] *= 2.0
         lm_weights = torch.where(ms > ls, 0.0, lm_weights)
-        if comm.get_size("h") > 1:
+        # Guard on spatial_distributed, not just the group size: the SHT above is only
+        # the distributed one when spatial_distributed is set, so slicing the weights
+        # whenever an h/w group happens to exist would pair local weights with
+        # full-size coefficients. forward() reduces under the same condition.
+        if self.spatial_distributed and comm.get_size("h") > 1:
             lm_weights = split_tensor_along_dim(lm_weights, dim=-2, num_chunks=comm.get_size("h"))[comm.get_rank("h")]
-        if comm.get_size("w") > 1:
+        if self.spatial_distributed and comm.get_size("w") > 1:
             lm_weights = split_tensor_along_dim(lm_weights, dim=-1, num_chunks=comm.get_size("w"))[comm.get_rank("w")]
         lm_weights = lm_weights.contiguous()
 

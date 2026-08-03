@@ -32,7 +32,9 @@ from makani.utils.losses import (
     LpEnergyScoreLoss,
     SpectralL2EnergyScoreLoss,
     SobolevEnergyScoreLoss,
+    CoherenceRegularization,
 )
+from makani.utils.losses.energy_score import SpectralCoherenceLoss
 
 # Add parent directory to path for testutils import
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
@@ -621,6 +623,220 @@ class TestDistributedLoss(unittest.TestCase):
             fraction=fraction,
             eps=1.0e-6,
         ).to(self.device)
+
+        #############################################################
+        # local loss
+        #############################################################
+        forecasts_full.requires_grad = True
+        obs_full.requires_grad = True
+        loss_full = loss_fn_local(forecasts_full, obs_full)
+
+        with torch.no_grad():
+            ograd_full = torch.randn_like(loss_full)
+            ograd_local = ograd_full.clone()
+
+        loss_full.backward(ograd_full)
+        fgrad_full = forecasts_full.grad.clone()
+        obsgrad_full = obs_full.grad.clone()
+
+        #############################################################
+        # distributed loss
+        #############################################################
+        forecasts_local = self._split_helper(forecasts_full.clone())
+        obs_local = self._split_helper(obs_full.clone())
+        forecasts_local.requires_grad = True
+        obs_local.requires_grad = True
+
+        loss_local = loss_fn_dist(forecasts_local, obs_local)
+        loss_local.backward(ograd_local)
+        fgrad_local = forecasts_local.grad.clone()
+        obsgrad_local = obs_local.grad.clone()
+
+        #############################################################
+        # evaluate FWD pass
+        #############################################################
+        with self.subTest(desc="outputs"):
+            self.assertTrue(reduce_success(compare_tensors("outputs", loss_local, loss_full, tol, tol, verbose=verbose), self.device))
+
+        #############################################################
+        # evaluate BWD pass
+        #############################################################
+        with self.subTest(desc="forecast gradients"):
+            fgrad_gather_full = self._gather_helper_bwd(fgrad_local, True)
+            self.assertTrue(reduce_success(compare_tensors("forecast gradients", fgrad_gather_full, fgrad_full, tol, tol, verbose=verbose), self.device))
+
+        with self.subTest(desc="observation gradients"):
+            obsgrad_gather_full = self._gather_helper_bwd(obsgrad_local, False)
+            self.assertTrue(reduce_success(compare_tensors("observation gradients", obsgrad_gather_full, obsgrad_full, tol, tol, verbose=verbose), self.device))
+
+
+    @parameterized.expand(
+        [
+            # nlat, nlon, batch, chans, ens, lmin, ens_coh_weight, tol
+            [128, 256, 8, 13, 4, 0, 0.0, 1e-4],
+            [129, 256, 2, 12, 4, 16, 0.0, 1e-4],
+            [129, 256, 2, 12, 4, 16, 0.5, 1e-4],
+        ], skip_on_empty=True
+    )
+    def test_distributed_coherence_regularization(self, nlat, nlon, batch_size, num_chan, ens_size, lmin, ens_coh_weight, tol, verbose=True):
+        """Local vs distributed equivalence for CoherenceRegularization.
+
+        The lmin > 0 cases matter most: the wavenumber-band mask is split along h
+        exactly like the SHT's l dimension, and the band width used to normalize
+        is the global one, so a mismatch between the two would show up here as a
+        forward discrepancy. The ens_coh_weight case additionally exercises the
+        inter-member term, which is formed after the ensemble transpose.
+        """
+
+        # disable tf32 for deterministic comparison
+        disable_tf32()
+
+        # shapes
+        B, E, C, H, W = batch_size, ens_size, num_chan, nlat, nlon
+
+        mean, sigma = (1.0, 2.0)
+        forecasts_full = torch.randn((B, E, C, H, W), dtype=torch.float32, device=self.device) * sigma + mean
+        obs_full = torch.randn((B, C, H, W), dtype=torch.float32, device=self.device) * sigma * 0.01 + mean
+
+        # local loss
+        loss_fn_local = CoherenceRegularization(
+            img_shape=(H, W),
+            crop_shape=None,
+            crop_offset=(0, 0),
+            channel_names=(),
+            grid_type="equiangular",
+            lmin=lmin,
+            ensemble_coherence_weight=ens_coh_weight,
+            eps=1.0e-3,
+            spatial_distributed=False,
+            ensemble_distributed=False,
+            ensemble_weights=None,
+        ).to(self.device)
+
+        # distributed loss
+        loss_fn_dist = CoherenceRegularization(
+            img_shape=(H, W),
+            crop_shape=None,
+            crop_offset=(0, 0),
+            channel_names=(),
+            grid_type="equiangular",
+            lmin=lmin,
+            ensemble_coherence_weight=ens_coh_weight,
+            eps=1.0e-3,
+            spatial_distributed=(comm.is_distributed("spatial") and (comm.get_size("spatial") > 1)),
+            ensemble_distributed=(comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1)),
+            ensemble_weights=None,
+        ).to(self.device)
+
+        # the band width is a global quantity and must agree across the decomposition
+        with self.subTest(desc="band size"):
+            self.assertEqual(loss_fn_local.band_size.item(), loss_fn_dist.band_size.item())
+
+        #############################################################
+        # local loss
+        #############################################################
+        forecasts_full.requires_grad = True
+        obs_full.requires_grad = True
+        loss_full = loss_fn_local(forecasts_full, obs_full)
+
+        with torch.no_grad():
+            ograd_full = torch.randn_like(loss_full)
+            ograd_local = ograd_full.clone()
+
+        loss_full.backward(ograd_full)
+        fgrad_full = forecasts_full.grad.clone()
+        obsgrad_full = obs_full.grad.clone()
+
+        #############################################################
+        # distributed loss
+        #############################################################
+        forecasts_local = self._split_helper(forecasts_full.clone())
+        obs_local = self._split_helper(obs_full.clone())
+        forecasts_local.requires_grad = True
+        obs_local.requires_grad = True
+
+        loss_local = loss_fn_dist(forecasts_local, obs_local)
+        loss_local.backward(ograd_local)
+        fgrad_local = forecasts_local.grad.clone()
+        obsgrad_local = obs_local.grad.clone()
+
+        #############################################################
+        # evaluate FWD pass
+        #############################################################
+        with self.subTest(desc="outputs"):
+            self.assertTrue(reduce_success(compare_tensors("outputs", loss_local, loss_full, tol, tol, verbose=verbose), self.device))
+
+        #############################################################
+        # evaluate BWD pass
+        #############################################################
+        with self.subTest(desc="forecast gradients"):
+            fgrad_gather_full = self._gather_helper_bwd(fgrad_local, True)
+            self.assertTrue(reduce_success(compare_tensors("forecast gradients", fgrad_gather_full, fgrad_full, tol, tol, verbose=verbose), self.device))
+
+        with self.subTest(desc="observation gradients"):
+            obsgrad_gather_full = self._gather_helper_bwd(obsgrad_local, False)
+            self.assertTrue(reduce_success(compare_tensors("observation gradients", obsgrad_gather_full, obsgrad_full, tol, tol, verbose=verbose), self.device))
+
+
+    @parameterized.expand(
+        [
+            [128, 256, 8, 13, 4, False, 1e-4],
+            [129, 256, 2, 12, 4, True, 1e-4],
+        ], skip_on_empty=True
+    )
+    def test_distributed_spectral_coherence_loss(self, nlat, nlon, batch_size, num_chan, ens_size, relative, tol, verbose=True):
+        """Local vs distributed equivalence for SpectralCoherenceLoss.
+
+        This could not be written before: the reference instance is built with
+        spatial_distributed=False while h/w groups are >1, and __init__ used to
+        slice lm_weights on group size alone, pairing local weights with the
+        full-size coefficients of the non-distributed SHT.
+        """
+
+        # disable tf32 for deterministic comparison
+        disable_tf32()
+
+        # shapes
+        B, E, C, H, W = batch_size, ens_size, num_chan, nlat, nlon
+
+        mean, sigma = (1.0, 2.0)
+        forecasts_full = torch.randn((B, E, C, H, W), dtype=torch.float32, device=self.device) * sigma + mean
+        obs_full = torch.randn((B, C, H, W), dtype=torch.float32, device=self.device) * sigma * 0.01 + mean
+
+        # local loss
+        loss_fn_local = SpectralCoherenceLoss(
+            img_shape=(H, W),
+            crop_shape=None,
+            crop_offset=(0, 0),
+            channel_names=(),
+            grid_type="equiangular",
+            relative=relative,
+            channel_reduction=False,
+            eps=1.0e-3,
+            spatial_distributed=False,
+            ensemble_distributed=False,
+            ensemble_weights=None,
+        ).to(self.device)
+
+        # distributed loss
+        loss_fn_dist = SpectralCoherenceLoss(
+            img_shape=(H, W),
+            crop_shape=None,
+            crop_offset=(0, 0),
+            channel_names=(),
+            grid_type="equiangular",
+            relative=relative,
+            channel_reduction=False,
+            eps=1.0e-3,
+            spatial_distributed=(comm.is_distributed("spatial") and (comm.get_size("spatial") > 1)),
+            ensemble_distributed=(comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1)),
+            ensemble_weights=None,
+        ).to(self.device)
+
+        # the non-distributed instance must keep full-size weights regardless of
+        # whether h/w groups exist; this is the regression guard for the split
+        with self.subTest(desc="local weights are not split"):
+            self.assertEqual(tuple(loss_fn_local.lm_weights.shape), (loss_fn_local.sht.lmax, loss_fn_local.sht.mmax))
 
         #############################################################
         # local loss
