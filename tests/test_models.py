@@ -32,6 +32,19 @@ if torch.cuda.is_available():
     _devices.append((torch.device("cuda"),))
 
 
+# Per-model parameter overrides for the generic construction test.
+#
+# Most models pick a small, usable width from their own constructor defaults. A model
+# belongs here when it deliberately has *no* default for a required setting, so that
+# omitting it fails loudly rather than silently building something degenerate --
+# fourcastnatt3 raises on embed_dim=None because the per-level encoder path it used to
+# select was removed. Giving that model a default purely to satisfy this test would
+# defeat the guard, so the value is supplied here instead.
+_MODEL_PARAM_OVERRIDES = {
+    "FCN3ATT": {"embed_dim": 8},
+}
+
+
 @parameterized_class(("device",), _devices)
 class TestModels(unittest.TestCase):
 
@@ -71,6 +84,9 @@ class TestModels(unittest.TestCase):
         self.params.nettype = nettype
         if nettype == "DebugNet":
             return
+
+        for key, value in _MODEL_PARAM_OVERRIDES.get(nettype, {}).items():
+            setattr(self.params, key, value)
 
         multistep = self.params.n_future > 0
         model = model_registry.get_model(self.params, multistep=multistep).to(self.device)
