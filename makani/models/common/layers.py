@@ -161,9 +161,8 @@ class LayerScale(nn.Module):
     of each branch to admit, which is what makes very deep residual stacks train
     stably.
 
-    Implemented as a grouped 1x1 convolution with one group per channel, which
-    is equivalent to a broadcast multiply but keeps the parameter in the layout
-    the surrounding conv-based blocks expect.
+    The parameter is kept in the 4D ``(C, 1, 1, 1)`` layout the surrounding
+    blocks and the model-parallel sharding annotations expect.
 
     Parameters
     ----------
@@ -193,7 +192,10 @@ class LayerScale(nn.Module):
         torch.Tensor
             Tensor of the same shape as ``x``.
         """
-        return nn.functional.conv2d(x, self.weight, groups=self.num_chans)
+        # plain multiply rather than a depthwise conv2d: cuDNN prefers channels_last for
+        # depthwise convolutions and returns gradients tagged that way, which propagates
+        # into the preceding layer's weight grads and defeats DDP's gradient_as_bucket_view.
+        return x * self.weight.reshape(1, -1, 1, 1)
 
 
 class PatchEmbed2D(nn.Module):
