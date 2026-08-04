@@ -419,6 +419,9 @@ class IsotropicGaussianRandomFieldS2(BaseNoiseS2):
         ``alpha = 0.0``.
     grid_type : string, default is "equiangular"
         Grid type. Currently supports ``"equiangular"`` and ``"legendre-gauss"``.
+    lmax : int, optional
+        Spectral truncation. Defaults to the maximum supported by the grid;
+        lowering it produces a smoother field.
     seed : int, optional
         Seed for the private generators, by default ``333``.
     reflect : bool, optional
@@ -665,6 +668,9 @@ class DiffusionNoiseS2(BaseNoiseS2):
         a list it has to match ``num_channels``.
     grid_type : string, default is "equiangular"
         Grid type. Currently supports ``"equiangular"`` and ``"legendre-gauss"``.
+    lmax : int, optional
+        Spectral truncation. Defaults to the maximum supported by the grid;
+        lowering it produces a smoother field.
     seed : int, optional
         Seed for the private generators, by default ``333``.
     reflect : bool, optional

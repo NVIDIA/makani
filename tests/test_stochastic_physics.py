@@ -20,7 +20,9 @@ import torch
 
 from makani.models.stochastic_physics import StochasticPhysics
 
-import sys, os
+import sys
+import os
+
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from .testutils import disable_tf32, set_seed, compare_tensors
 
@@ -46,13 +48,22 @@ def _make_params(n_history=0, n_out=4, sp=None, in_channels=None, out_channels=N
     if sp is None:
         sp = {"type": "diffusion", "n_channels": 1, "sigma": 0.5, "lmax": 20, "kT": [3.15e-2], "clip": 0.8}
     c_base = n_out
-    return _Params(dict(
-        stochastic_physics=sp,
-        img_shape_x_resampled=IMG_SHAPE[0], img_shape_y_resampled=IMG_SHAPE[1],
-        batch_size=BATCH_SIZE, model_grid_type="equiangular", dt=6, dhours=1,
-        n_history=n_history, N_in_predicted_channels=c_base * (n_history + 1),
-        N_out_channels=n_out, in_channels=in_channels, out_channels=out_channels,
-    ))
+    return _Params(
+        dict(
+            stochastic_physics=sp,
+            img_shape_x_resampled=IMG_SHAPE[0],
+            img_shape_y_resampled=IMG_SHAPE[1],
+            batch_size=BATCH_SIZE,
+            model_grid_type="equiangular",
+            dt=6,
+            dhours=1,
+            n_history=n_history,
+            N_in_predicted_channels=c_base * (n_history + 1),
+            N_out_channels=n_out,
+            in_channels=in_channels,
+            out_channels=out_channels,
+        )
+    )
 
 
 @parameterized_class(("device",), _devices)
@@ -98,15 +109,18 @@ class TestStochasticPhysics(unittest.TestCase):
 
     def test_clip_prevents_sign_flip(self):
         """With clip < 1, (1 + r) stays positive, so the perturbed tendency never flips sign."""
-        sp = self._build(n_out=4, sp={"type": "diffusion", "n_channels": 1, "sigma": 2.0,
-                                       "lmax": 20, "kT": [3.15e-2], "clip": 0.8})
+        sp = self._build(
+            n_out=4, sp={"type": "diffusion", "n_channels": 1, "sigma": 2.0, "lmax": 20, "kT": [3.15e-2], "clip": 0.8}
+        )
         inp = torch.randn(self.B, 4, self.H, self.W, device=self.device)
         pred = torch.randn(self.B, 4, self.H, self.W, device=self.device)
         out = sp(inp, pred)
         baseline = inp  # n_history=0, in==out
-        self.assertTrue(compare_tensors(
-            "sign_preserved", torch.sign(out - baseline), torch.sign(pred - baseline), atol=0.0, rtol=0.0
-        ))
+        self.assertTrue(
+            compare_tensors(
+                "sign_preserved", torch.sign(out - baseline), torch.sign(pred - baseline), atol=0.0, rtol=0.0
+            )
+        )
 
     def test_update_advances_pattern(self):
         sp = self._build(n_out=4)
@@ -124,8 +138,9 @@ class TestStochasticPhysics(unittest.TestCase):
 
     def test_channel_count_validation(self):
         """n_channels must be 1 (shared) or N_out (per-channel)."""
-        sp = self._build(n_out=4, sp={"type": "diffusion", "n_channels": 3, "sigma": 0.5,
-                                      "lmax": 20, "kT": [1e-2, 2e-2, 3e-2]})
+        sp = self._build(
+            n_out=4, sp={"type": "diffusion", "n_channels": 3, "sigma": 0.5, "lmax": 20, "kT": [1e-2, 2e-2, 3e-2]}
+        )
         inp = torch.randn(self.B, 4, self.H, self.W, device=self.device)
         pred = torch.randn(self.B, 4, self.H, self.W, device=self.device)
         with self.assertRaises(ValueError):
