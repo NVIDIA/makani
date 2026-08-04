@@ -22,19 +22,65 @@ from makani.models.common import DropPath, PatchEmbed2D
 
 
 class PeriodicPad2d(nn.Module):
-    """Pad longitudinal (left-right) circular, pad latitude (top-bottom) with zeros."""
+    r"""
+    Pad longitudinal (left-right) circular, pad latitude (top-bottom) with zeros.
+
+    Matches the topology of a global lat-lon grid: longitude wraps around, so
+    the left and right edges are genuinely adjacent and are padded circularly,
+    while latitude terminates at the poles and is padded with zeros.
+
+    Parameters
+    ----------
+    pad_width : int
+        Number of cells added on each of the four sides.
+    """
 
     def __init__(self, pad_width):
         super(PeriodicPad2d, self).__init__()
         self.pad_width = pad_width
 
     def forward(self, x):
+        r"""
+        Pad the input according to the grid topology.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input of shape ``(B, C, H, W)``.
+
+        Returns
+        -------
+        torch.Tensor
+            Padded tensor of shape
+            ``(B, C, H + 2 * pad_width, W + 2 * pad_width)``.
+        """
         out = F.pad(x, (self.pad_width, self.pad_width, 0, 0), mode="circular")
         out = F.pad(out, (0, 0, self.pad_width, self.pad_width), mode="constant", value=0)
         return out
 
 
 class Mlp(nn.Module):
+    r"""
+    Two-layer channels-last feed-forward block.
+
+    The MLP used inside :class:`Block`. Simpler than
+    :class:`~makani.models.common.layers.MLP`: linear layers only, no
+    model-parallel or TransformerEngine paths.
+
+    Parameters
+    ----------
+    in_features : int
+        Number of input features.
+    hidden_features : int, optional
+        Hidden width, defaults to ``in_features``.
+    out_features : int, optional
+        Number of output features, defaults to ``in_features``.
+    act_layer : callable, optional
+        Activation constructor, by default :class:`torch.nn.GELU`.
+    drop : float, optional
+        Dropout probability applied after each layer, by default ``0.0``.
+    """
+
     def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.0):
         super().__init__()
         out_features = out_features or in_features
@@ -45,6 +91,19 @@ class Mlp(nn.Module):
         self.drop = nn.Dropout(drop)
 
     def forward(self, x):
+        r"""
+        Apply the feed-forward block.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input of shape ``(..., in_features)``.
+
+        Returns
+        -------
+        torch.Tensor
+            Output of shape ``(..., out_features)``.
+        """
         x = self.fc1(x)
         x = self.act(x)
         x = self.drop(x)
@@ -54,6 +113,53 @@ class Mlp(nn.Module):
 
 
 class AFNO2D(nn.Module):
+    r"""
+    Adaptive Fourier Neural Operator token mixer.
+
+    Mixes tokens by transforming to Fourier space, applying a two-layer
+    block-diagonal MLP to the complex coefficients, and transforming back:
+
+    .. math::
+
+        y = \mathcal{F}^{-1}\bigl(S_\lambda(\mathrm{MLP}(\mathcal{F}(x)))\bigr) + x
+
+    Three choices make this cheaper than dense spectral mixing. The channel
+    dimension is split into ``num_blocks`` groups mixed independently, so the
+    weights are block-diagonal rather than full. Only a fraction of the modes is
+    retained (``hard_thresholding_fraction``), discarding the high frequencies.
+    And a soft-shrink :math:`S_\lambda` sparsifies the coefficients, which acts
+    as a learned frequency-domain filter.
+
+    The transform is always taken in fp32 regardless of autocast, since the FFT
+    accumulates over the whole grid.
+
+    Parameters
+    ----------
+    hidden_size : int
+        Channel dimension. Must be divisible by ``num_blocks``.
+    num_blocks : int, optional
+        Number of independently mixed channel blocks, by default ``8``.
+    sparsity_threshold : float, optional
+        Soft-shrink threshold :math:`\lambda` applied to the output
+        coefficients, by default ``0.01``.
+    hard_thresholding_fraction : float, optional
+        Fraction of Fourier modes retained, by default ``1`` (keep all).
+    hidden_size_factor : int, optional
+        Width of the spectral MLP's hidden layer as a multiple of the block
+        size, by default ``1``.
+
+    Raises
+    ------
+    ValueError
+        If ``hidden_size`` is not divisible by ``num_blocks``.
+
+    References
+    ----------
+    Guibas, J.; Mardani, M.; Pathak, J.; Vahdat, A.; Kashinath, K.; Catanzaro,
+    B.; Anandkumar, A.; Adaptive Fourier Neural Operators: Efficient Token
+    Mixers for Transformers; ICLR 2022.
+    """
+
     def __init__(
         self, hidden_size, num_blocks=8, sparsity_threshold=0.01, hard_thresholding_fraction=1, hidden_size_factor=1
     ):
@@ -79,6 +185,19 @@ class AFNO2D(nn.Module):
         self.b2 = nn.Parameter(self.scale * torch.randn(2, self.num_blocks, self.block_size))
 
     def forward(self, x):
+        r"""
+        Mix tokens in Fourier space and add the input back as a residual.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input of shape ``(B, H, W, hidden_size)``, channels last.
+
+        Returns
+        -------
+        torch.Tensor
+            Tensor of the same shape as ``x``, with the input added back.
+        """
         bias = x
 
         dtype = x.dtype
@@ -167,6 +286,39 @@ class AFNO2D(nn.Module):
 
 
 class Block(nn.Module):
+    r"""
+    AFNO block: spectral token mixing followed by a channel MLP.
+
+    Structurally a transformer block with :class:`AFNO2D` in place of
+    attention. ``double_skip`` selects between two residual arrangements: with
+    it enabled each sublayer gets its own skip, and with it disabled a single
+    skip spans both.
+
+    Parameters
+    ----------
+    dim : int
+        Channel dimension.
+    mlp_ratio : float, optional
+        Hidden width of the MLP as a multiple of ``dim``, by default ``4.0``.
+    drop : float, optional
+        Dropout probability inside the MLP, by default ``0.0``.
+    drop_path : float, optional
+        Stochastic depth probability, by default ``0.0``.
+    act_layer : callable, optional
+        Activation constructor, by default :class:`torch.nn.GELU`.
+    norm_layer : callable, optional
+        Normalization constructor, by default :class:`torch.nn.LayerNorm`.
+    double_skip : bool, optional
+        Use a separate residual connection around each sublayer, by default
+        ``True``.
+    num_blocks : int, optional
+        Number of channel blocks in the AFNO mixer, by default ``8``.
+    sparsity_threshold : float, optional
+        Soft-shrink threshold in the AFNO mixer, by default ``0.01``.
+    hard_thresholding_fraction : float, optional
+        Fraction of Fourier modes retained, by default ``1.0``.
+    """
+
     def __init__(
         self,
         dim,
@@ -191,6 +343,19 @@ class Block(nn.Module):
         self.double_skip = double_skip
 
     def forward(self, x):
+        r"""
+        Apply spectral mixing and the channel MLP with residual connections.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input of shape ``(B, H, W, dim)``, channels last.
+
+        Returns
+        -------
+        torch.Tensor
+            Tensor of the same shape as ``x``.
+        """
         residual = x
         x = self.norm1(x)
         x = self.filter(x)
@@ -207,6 +372,29 @@ class Block(nn.Module):
 
 
 class PrecipNet(nn.Module):
+    r"""
+    Precipitation head on top of a forecasting backbone.
+
+    Runs a backbone and post-processes its output with a periodically padded
+    3x3 convolution and a ReLU. The ReLU matters physically: precipitation
+    cannot be negative, and clamping it in the architecture is more reliable
+    than hoping the loss enforces it. The local convolution smooths the
+    backbone's output, which suits a field that is spatially patchy.
+
+    Parameters
+    ----------
+    backbone : torch.nn.Module
+        Model producing the field this head refines.
+    patch_size : (int, int), optional
+        Recorded for reference, by default ``(16, 16)``.
+    inp_chans : int, optional
+        Number of backbone input channels, by default ``2``.
+    out_chans : int, optional
+        Number of output channels, by default ``2``.
+    **kwargs
+        Ignored; present so model configs can pass extra keys.
+    """
+
     def __init__(self, backbone, patch_size=(16, 16), inp_chans=2, out_chans=2, **kwargs):
         super().__init__()
         self.patch_size = patch_size
@@ -218,6 +406,19 @@ class PrecipNet(nn.Module):
         self.act = nn.ReLU()
 
     def forward(self, x):
+        r"""
+        Run the backbone and refine its output into a non-negative field.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input of shape ``(B, inp_chans, nlat, nlon)``.
+
+        Returns
+        -------
+        torch.Tensor
+            Non-negative prediction of shape ``(B, out_chans, nlat, nlon)``.
+        """
         x = self.backbone(x)
         x = self.ppad(x)
         x = self.conv(x)
@@ -226,6 +427,54 @@ class PrecipNet(nn.Module):
 
 
 class AdaptiveFourierNeuralOperatorNet(nn.Module):
+    r"""
+    Adaptive Fourier Neural Operator network (AFNO).
+
+    A transformer-shaped architecture in which attention is replaced by the
+    :class:`AFNO2D` spectral mixer. The input is tokenized by patch embedding, a
+    stack of :class:`Block` layers mixes the tokens, and a linear head decodes
+    each token back into its patch. Replacing attention with an FFT-based mixer
+    reduces the token-mixing cost from quadratic to ``O(N log N)``, which is
+    what makes high-resolution inputs affordable.
+
+    Parameters
+    ----------
+    inp_shape : (int, int), optional
+        Input grid as ``(nlat, nlon)``, by default ``(720, 1440)``.
+    patch_size : (int, int), optional
+        Patch size, by default ``(6, 6)``.
+    inp_chans : int, optional
+        Number of input channels, by default ``2``.
+    out_chans : int, optional
+        Number of output channels, by default ``2``.
+    embed_dim : int, optional
+        Token dimension, by default ``768``.
+    num_layers : int, optional
+        Number of AFNO blocks, by default ``12``.
+    mlp_ratio : float, optional
+        Hidden width of the block MLPs as a multiple of ``embed_dim``, by
+        default ``4.0``.
+    drop_rate : float, optional
+        Dropout probability, by default ``0.0``.
+    drop_path_rate : float, optional
+        Maximum stochastic depth probability, ramped linearly across the depth,
+        by default ``0.0``.
+    num_blocks : int, optional
+        Number of independently mixed channel blocks in each AFNO mixer, by
+        default ``16``.
+    sparsity_threshold : float, optional
+        Soft-shrink threshold in the AFNO mixers, by default ``0.01``.
+    hard_thresholding_fraction : float, optional
+        Fraction of Fourier modes retained, by default ``1.0``.
+    **kwargs
+        Ignored; present so model configs can pass extra keys.
+
+    References
+    ----------
+    Guibas, J. et al.; Adaptive Fourier Neural Operators: Efficient Token
+    Mixers for Transformers; ICLR 2022.
+    """
+
     def __init__(
         self,
         inp_shape=(720, 1440),
@@ -297,9 +546,38 @@ class AdaptiveFourierNeuralOperatorNet(nn.Module):
 
     @torch.compiler.disable(recursive=True)
     def no_weight_decay(self):
+        r"""
+        Parameters that should be excluded from weight decay.
+
+        Position embeddings and class tokens encode location and identity
+        rather than a learned transformation, so decaying them toward zero
+        degrades the model instead of regularizing it.
+
+        Returns
+        -------
+        set of str
+            Names of the parameters to exclude.
+        """
         return {"pos_embed", "cls_token"}
 
     def forward_features(self, x):
+        r"""
+        Tokenize the input and run it through the AFNO blocks.
+
+        Exposed separately from ``forward`` so callers can obtain the latent
+        token grid without decoding it back to a field.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input field of shape ``(B, inp_chans, nlat, nlon)``.
+
+        Returns
+        -------
+        torch.Tensor
+            Token grid of shape ``(B, h, w, embed_dim)``, where ``h`` and ``w``
+            are the patched grid dimensions.
+        """
         B = x.shape[0]
         x = self.patch_embed(x).transpose(1, 2)
         x = x + self.pos_embed
@@ -312,6 +590,19 @@ class AdaptiveFourierNeuralOperatorNet(nn.Module):
         return x
 
     def forward(self, x):
+        r"""
+        Map an input field to the predicted output field.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input of shape ``(B, inp_chans, nlat, nlon)``.
+
+        Returns
+        -------
+        torch.Tensor
+            Prediction of shape ``(B, out_chans, nlat, nlon)``.
+        """
         x = self.forward_features(x)
         x = self.head(x)
 

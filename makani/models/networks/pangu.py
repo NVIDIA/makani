@@ -397,18 +397,93 @@ class EarthAttention3D(nn.Module):
         self.softmax = nn.Softmax(dim=-1)
 
     def calculate_attn(self, q, k):
+        r"""
+        Compute raw attention logits from queries and keys.
+
+        Split out as its own method so subclasses and export wrappers can
+        substitute a different attention implementation without reimplementing
+        the surrounding bias and masking logic.
+
+        Parameters
+        ----------
+        q : torch.Tensor
+            Queries of shape ``(B_, num_heads, nW_, N, head_dim)``.
+        k : torch.Tensor
+            Keys of the same shape.
+
+        Returns
+        -------
+        torch.Tensor
+            Logits of shape ``(B_, num_heads, nW_, N, N)``. Not yet scaled,
+            biased or softmaxed.
+        """
         attn = q @ k.transpose(-2, -1)
         return attn
 
     def add_earth_pos_bias(self, attn, earth_position_bias):
+        r"""
+        Add the Earth-specific position bias to the attention logits.
+
+        Parameters
+        ----------
+        attn : torch.Tensor
+            Attention logits of shape ``(B_, num_heads, nW_, N, N)``.
+        earth_position_bias : torch.Tensor
+            Bias of shape ``(num_heads, nW_, N, N)``, broadcast over the batch.
+
+        Returns
+        -------
+        torch.Tensor
+            Biased logits, same shape as ``attn``.
+        """
         attn = attn + earth_position_bias.unsqueeze(0)
         return attn
 
     def apply_attention(self, attn, v, B_, nW_, N, C):
+        r"""
+        Apply normalized attention weights to the values.
+
+        Parameters
+        ----------
+        attn : torch.Tensor
+            Normalized attention weights of shape ``(B_, num_heads, nW_, N, N)``.
+        v : torch.Tensor
+            Values of shape ``(B_, num_heads, nW_, N, head_dim)``.
+        B_ : int
+            Batch dimension, including the longitude windows folded into it.
+        nW_ : int
+            Number of window groups.
+        N : int
+            Number of tokens per window.
+        C : int
+            Feature dimension.
+
+        Returns
+        -------
+        torch.Tensor
+            Attended features of shape ``(B_, nW_, N, C)``, with the heads
+            merged back together.
+        """
         x = (attn @ v).permute(0, 2, 3, 1, 4).reshape(B_, nW_, N, C)
         return x
 
     def extract_earth_pos_bias(self):
+        r"""
+        Gather the position bias for the current window layout.
+
+        Indexes the learned bias table by the precomputed relative-position
+        index and reshapes it to broadcast against the attention logits. The
+        bias is Earth-specific: on a lat-lon grid the relationship between two
+        cells depends on their absolute latitude and pressure level, not only on
+        their offset, so the table is indexed by more than a relative
+        displacement.
+
+        Returns
+        -------
+        torch.Tensor
+            Bias of shape ``(num_heads, num_pl * num_lat, N, N)`` where
+            ``N = Wpl * Wlat * Wlon``.
+        """
         earth_position_bias = self.earth_position_bias_table[self.earth_position_index.view(-1)].view(
             self.window_size[0] * self.window_size[1] * self.window_size[2],
             self.window_size[0] * self.window_size[1] * self.window_size[2],
@@ -422,6 +497,32 @@ class EarthAttention3D(nn.Module):
         return earth_position_bias
 
     def apply_mask(self, attn, mask, B_, nW_, N):
+        r"""
+        Apply the shifted-window attention mask and normalize.
+
+        Under a shifted window partitioning, some windows contain tokens that
+        are not actually adjacent on the globe. The mask assigns those pairs
+        ``-inf`` so the softmax gives them zero weight.
+
+        Parameters
+        ----------
+        attn : torch.Tensor
+            Attention logits of shape ``(B_, num_heads, nW_, N, N)``.
+        mask : torch.Tensor
+            Additive mask of shape ``(num_lon, nW_, N, N)``, containing ``0``
+            for valid pairs and ``-inf`` for invalid ones.
+        B_ : int
+            Batch dimension, including the longitude windows folded into it.
+        nW_ : int
+            Number of window groups.
+        N : int
+            Number of tokens per window.
+
+        Returns
+        -------
+        torch.Tensor
+            Softmax-normalized attention weights, same shape as ``attn``.
+        """
         nLon = mask.shape[0]
         attn = attn.view(B_ // nLon, nLon, self.num_heads, nW_, N, N) + mask.unsqueeze(1).unsqueeze(0)
         attn = attn.view(-1, self.num_heads, nW_, N, N)
@@ -575,6 +676,24 @@ class Transformer3DBlock(nn.Module):
         self.register_buffer("attn_mask", attn_mask, persistent=False)
 
     def forward(self, x: torch.Tensor):
+        r"""
+        Apply windowed 3D attention and the channel MLP with residuals.
+
+        Pads the volume to a whole number of windows, optionally rolls it to
+        realize the shifted-window partitioning, attends within each window,
+        then reverses the roll and crops back to the original resolution.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Tokens of shape ``(B, Pl * Lat * Lon, C)`` on the block's
+            ``input_resolution``.
+
+        Returns
+        -------
+        torch.Tensor
+            Tokens of the same shape as ``x``.
+        """
         Pl, Lat, Lon = self.input_resolution
         B, L, C = x.shape
 
@@ -696,6 +815,19 @@ class FuserLayer(nn.Module):
         )
 
     def forward(self, x):
+        r"""
+        Run the tokens through this layer's stack of transformer blocks.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Tokens of shape ``(B, Pl * Lat * Lon, C)``.
+
+        Returns
+        -------
+        torch.Tensor
+            Tokens of the same shape as ``x``.
+        """
         for blk in self.blocks:
             x = blk(x)
         return x
@@ -939,6 +1071,28 @@ class Pangu(nn.Module):
         return output
 
     def forward(self, input):
+        r"""
+        Map an input field to the predicted output field.
+
+        Splits the flat channel stack into surface and atmospheric (pressure
+        level) variables, embeds each with its own patch embedding, runs the
+        encoder-decoder transformer stack with a skip connection between the two
+        levels of resolution, and recombines the two variable groups into a
+        single output stack.
+
+        Parameters
+        ----------
+        input : torch.Tensor
+            Input of shape ``(B, inp_chans, nlat, nlon)``, with the surface and
+            atmospheric variables concatenated along the channel dimension in
+            the order the model was configured with.
+
+        Returns
+        -------
+        torch.Tensor
+            Prediction of shape ``(B, out_chans, nlat, nlon)``, in the same
+            channel layout as the input.
+        """
 
         # Prep the input by splitting into surface and atmospheric variables
         surface_aux, atmospheric = self.prepare_input(input)

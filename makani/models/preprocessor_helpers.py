@@ -19,6 +19,31 @@ import torch
 
 
 def get_bias_correction(params):
+    r"""
+    Load and shard the bias correction field, if one is configured.
+
+    The returned tensor is already restricted to this rank's local domain and
+    subsampled to match the model grid, so the caller can subtract it directly
+    without further slicing.
+
+    Parameters
+    ----------
+    params : ParamsBase
+        Configuration. ``bias_correction`` gives the path to the correction
+        file; the ``img_local_*`` keys and ``subsampling_factor`` determine the
+        local shard.
+
+    Returns
+    -------
+    torch.Tensor or None
+        Bias correction of shape ``(1, C, H_local, W_local)``, or ``None`` if
+        no ``bias_correction`` path is configured.
+
+    Raises
+    ------
+    IOError
+        If ``bias_correction`` is set but does not point at an existing file.
+    """
     if params.get("bias_correction", None) is not None:
         from makani.utils.auxiliary_fields import get_bias_correction
 
@@ -45,6 +70,30 @@ def get_bias_correction(params):
 
 
 def get_static_features(params):
+    r"""
+    Assemble the time-invariant feature channels for the model input.
+
+    Collects whichever static fields the configuration asks for -- grid
+    coordinates, orography, land-sea mask, soil type, Copernicus embeddings --
+    into a single tensor, sharded to this rank's local domain and subsampled to
+    the model grid. These give the network the geographic context that the
+    prognostic variables alone do not carry.
+
+    Parameters
+    ----------
+    params : ParamsBase
+        Configuration. ``add_grid``, ``add_orography``, ``add_landmask``,
+        ``add_soiltype`` and ``add_copernicus_emb`` select which features are
+        included; ``normalize_static_features`` enables area-weighted
+        normalization; the ``img_local_*`` / ``img_crop_*`` keys and
+        ``subsampling_factor`` determine the shard.
+
+    Returns
+    -------
+    torch.Tensor or None
+        Static features of shape ``(1, n_static, H_local, W_local)``, or
+        ``None`` if no static features are requested.
+    """
 
     # set up normalizer
     normalize_static_features = params.get("normalize_static_features", False)

@@ -44,11 +44,60 @@ from makani.mpu.layer_norm import DistributedInstanceNorm2d, DistributedLayerNor
 
 # for annotation of models
 from dataclasses import dataclass
-import physicsnemo
 from physicsnemo import ModelMetaData
+
+from makani.models.physicsnemo_compat import module_from_torch
 
 
 class SpectralFilterLayer(nn.Module):
+    r"""
+    Thin dispatcher selecting the spectral filter used inside a block.
+
+    Exists so that :class:`NeuralOperatorBlock` can be written against one
+    interface while the choice between a linear spectral convolution and a
+    nonlinear spectral MLP stays a config option. Constructor arguments that do
+    not apply to the selected filter are ignored.
+
+    Parameters
+    ----------
+    forward_transform : torch.nn.Module
+        Grid-to-spectral transform.
+    inverse_transform : torch.nn.Module
+        Spectral-to-grid transform.
+    embed_dim : int
+        Channel width; used for both input and output.
+    filter_type : str, optional
+        ``"linear"`` (default) selects
+        :class:`~makani.models.common.spectral_convolution.SpectralConv`;
+        ``"non-linear"`` selects
+        :class:`~makani.models.common.spectral_convolution.SpectralAttention`.
+    operator_type : str, optional
+        Weight layout passed to the selected filter, by default ``"diagonal"``.
+    hidden_size_factor : int, optional
+        Hidden width multiplier for the nonlinear filter, by default ``1``.
+        Ignored by the linear filter.
+    rank : float, optional
+        Accepted for config compatibility; currently unused.
+    separable : bool, optional
+        Depthwise (per-channel) filtering for the linear filter, by default
+        ``False``. Ignored by the nonlinear filter.
+    complex_activation : str, optional
+        Complex activation mode for the nonlinear filter, by default ``"real"``.
+    spectral_layers : int, optional
+        Number of layers in the nonlinear filter's spectral MLP, by default ``1``.
+    bias : bool, optional
+        Whether the filter carries a bias, by default ``False``.
+    drop_rate : float, optional
+        Dropout probability inside the nonlinear filter, by default ``0.0``.
+    gain : float, optional
+        Scales the variance of the filter's output initialization, by default ``1.0``.
+
+    Raises
+    ------
+    NotImplementedError
+        If ``filter_type`` is neither ``"linear"`` nor ``"non-linear"``.
+    """
+
     def __init__(
         self,
         forward_transform,
@@ -98,10 +147,104 @@ class SpectralFilterLayer(nn.Module):
             raise (NotImplementedError)
 
     def forward(self, x):
+        r"""
+        Apply the selected spectral filter.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input field of shape ``(B, embed_dim, nlat, nlon)``.
+
+        Returns
+        -------
+        x : torch.Tensor
+            Filtered field, on the inverse transform's grid.
+        residual : torch.Tensor
+            The input resampled onto the output grid; see
+            :meth:`~makani.models.common.spectral_convolution.SpectralConv.forward`.
+        """
         return self.filter(x)
 
 
 class NeuralOperatorBlock(nn.Module):
+    r"""
+    One block of the SFNO processor: spectral filter, norms, skips, and MLP.
+
+    The structural analogue of a transformer block, with the spectral filter
+    playing the role of attention (global mixing across space) and the MLP
+    mixing channels pointwise. Both stages sit behind their own normalization
+    and skip connection:
+
+    .. code-block:: text
+
+        x -> filter -> norm0 -> [+ inner_skip(residual)] -> act
+          -> mlp -> norm1 -> [+ outer_skip(residual)] -> [act]
+
+    Skip weights are initialized with a gain that is halved for each active skip
+    path, so the variance of the block's output stays roughly constant no matter
+    which skips are enabled -- deep stacks then do not need retuning when the
+    block configuration changes.
+
+    Parameters
+    ----------
+    forward_transform : torch.nn.Module
+        Grid-to-spectral transform for the filter.
+    inverse_transform : torch.nn.Module
+        Spectral-to-grid transform for the filter. May target a different
+        resolution, which is how the model changes resolution between blocks.
+    embed_dim : int
+        Channel width of the block.
+    filter_type : str, optional
+        ``"linear"`` (default) or ``"non-linear"``; see :class:`SpectralFilterLayer`.
+    operator_type : str, optional
+        Weight layout for the spectral filter, by default ``"diagonal"``.
+    mlp_ratio : float, optional
+        Hidden width of the MLP as a multiple of ``embed_dim``, by default ``2.0``.
+        Also used as the nonlinear filter's hidden size factor.
+    mlp_drop_rate : float, optional
+        Dropout probability inside the MLP, by default ``0.0``.
+    path_drop_rate : float, optional
+        Stochastic depth probability for the block, by default ``0.0``.
+    act_layer : callable, optional
+        Activation constructor, by default :class:`torch.nn.GELU`. Passing
+        :class:`torch.nn.Identity` halves the initialization gain, since no
+        activation-induced variance loss needs compensating.
+    norm_layer : tuple of callable, optional
+        Two normalization constructors, applied after the filter and after the
+        MLP respectively. By default both are :class:`torch.nn.Identity`.
+    rank : float, optional
+        Accepted for config compatibility; currently unused.
+    separable : bool, optional
+        Depthwise filtering for the linear filter, by default ``False``.
+    inner_skip : str, optional
+        Skip around the filter: ``"linear"`` (default), ``"identity"``, or
+        ``"none"``.
+    outer_skip : str, optional
+        Skip around the MLP: ``"linear"``, ``"identity"``, or ``"none"``. By
+        default ``None``, which raises -- pass ``"none"`` to disable it.
+    use_mlp : bool, optional
+        Whether to include the channel MLP, by default ``False``. Automatically
+        uses the distributed MLP when the ``matmul`` group is larger than one.
+    comm_feature_name : str, optional
+        Communicator group the distributed MLP shards over, by default ``"matmul"``.
+    complex_activation : str, optional
+        Complex activation mode for the nonlinear filter, by default ``"real"``.
+    spectral_layers : int, optional
+        Number of layers in the nonlinear filter's spectral MLP, by default ``1``.
+    bias : bool, optional
+        Whether the spectral filter carries a bias, by default ``False``.
+    final_activation : bool, optional
+        Apply an activation after the outer skip, by default ``False``.
+    checkpointing_level : int, optional
+        Gradient checkpointing aggressiveness; the MLP is checkpointed at level
+        2 and above. By default ``0``.
+
+    Raises
+    ------
+    ValueError
+        If ``inner_skip`` or ``outer_skip`` is not one of the supported values.
+    """
+
     def __init__(
         self,
         forward_transform,
@@ -222,8 +365,21 @@ class NeuralOperatorBlock(nn.Module):
             self.act_layer1 = act_layer()
 
     def forward(self, x):
-        """
-        Updated FNO block
+        r"""
+        Apply the spectral filter, skips, norms and MLP.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input of shape ``(B, embed_dim, nlat_in, nlon_in)`` matching the
+            forward transform's grid.
+
+        Returns
+        -------
+        torch.Tensor
+            Output of shape ``(B, embed_dim, nlat_out, nlon_out)`` on the
+            inverse transform's grid, which differs from the input shape when
+            the block changes resolution.
         """
 
         x, residual = self.filter(x)
@@ -253,8 +409,110 @@ class NeuralOperatorBlock(nn.Module):
 
 
 class SphericalFourierNeuralOperatorNet(nn.Module):
-    """
-    SFNO implementation as in Bonev et al.; Spherical Fourier Neural Operators: Learning Stable Dynamics on the Sphere
+    r"""
+    Spherical Fourier Neural Operator (SFNO).
+
+    An encoder-processor-decoder network in which all spatial mixing happens in
+    spherical harmonic space. The encoder lifts input variables to ``embed_dim``
+    channels, a stack of :class:`NeuralOperatorBlock` layers evolves them, and
+    the decoder projects back to ``out_chans``. Because the transforms are
+    spherical rather than planar, the operator respects the geometry of the
+    globe -- no pole artifacts and no seam at the dateline -- which is what
+    makes the rollouts stable over long horizons.
+
+    The first block downsamples from the input grid to an internal grid reduced
+    by ``scale_factor``, the interior blocks operate at that resolution, and the
+    last block maps back to the output grid. Spectral truncation is controlled
+    by ``hard_thresholding_fraction`` or by ``max_modes`` directly.
+
+    Parameters
+    ----------
+    spectral_transform : str, optional
+        ``"sht"`` (default) for spherical harmonic transforms, or ``"fft"`` to
+        treat the domain as a periodic plane.
+    model_grid_type : str, optional
+        Grid the input data lives on, by default ``"equiangular"``.
+    sht_grid_type : str, optional
+        Grid used internally by the transforms, by default ``"legendre-gauss"``,
+        whose quadrature is exact for band-limited fields.
+    filter_type : str, optional
+        ``"linear"`` (default) or ``"non-linear"`` spectral filter.
+    operator_type : str, optional
+        Weight layout of the spectral filter, by default ``"dhconv"``
+        (rotationally equivariant).
+    inp_shape : (int, int), optional
+        Input grid as ``(nlat, nlon)``, by default ``(721, 1440)``.
+    out_shape : (int, int), optional
+        Output grid as ``(nlat, nlon)``, by default ``(721, 1440)``.
+    scale_factor : int, optional
+        Factor by which the internal grid is coarsened relative to the input,
+        by default ``8``.
+    inp_chans : int, optional
+        Number of input channels, by default ``2``.
+    out_chans : int, optional
+        Number of output channels, by default ``2``.
+    embed_dim : int, optional
+        Latent channel width, by default ``32``.
+    num_layers : int, optional
+        Number of neural operator blocks, by default ``4``.
+    use_mlp : bool, optional
+        Include the channel MLP in each block, by default ``True``.
+    mlp_ratio : float, optional
+        Hidden width of the block MLPs as a multiple of ``embed_dim``, by
+        default ``2.0``.
+    encoder_ratio : int, optional
+        Hidden width of the encoder as a multiple of ``embed_dim``, by default ``1``.
+    decoder_ratio : int, optional
+        Hidden width of the decoder as a multiple of ``embed_dim``, by default ``1``.
+    activation_function : str, optional
+        One of ``"relu"``, ``"gelu"`` (default) or ``"silu"``.
+    encoder_layers : int, optional
+        Number of hidden layers in the encoder and decoder, by default ``1``.
+    pos_embed : str, optional
+        Position embedding type, by default ``"none"``.
+    pos_drop_rate : float, optional
+        Dropout applied after the position embedding, by default ``0.0``.
+    path_drop_rate : float, optional
+        Stochastic depth probability, by default ``0.0``.
+    mlp_drop_rate : float, optional
+        Dropout inside the block MLPs, by default ``0.0``.
+    normalization_layer : str, optional
+        Normalization used inside the blocks, by default ``"instance_norm"``.
+    max_modes : (int, int), optional
+        Explicit spectral truncation as ``(lmax, mmax)``. Overrides
+        ``hard_thresholding_fraction`` when given.
+    hard_thresholding_fraction : float, optional
+        Fraction of the available modes retained, by default ``1.0``.
+    big_skip : bool, optional
+        Add a skip connection from the network input to the decoder input, by
+        default ``True``. Lets the network predict a correction rather than the
+        full field.
+    rank : float, optional
+        Accepted for config compatibility; currently unused.
+    separable : bool, optional
+        Depthwise spectral filtering, by default ``False``.
+    complex_activation : str, optional
+        Complex activation mode for nonlinear filters, by default ``"real"``.
+    spectral_layers : int, optional
+        Number of layers in each nonlinear filter's spectral MLP, by default ``3``.
+    bias : bool, optional
+        Whether the spectral filters carry a bias, by default ``False``.
+    checkpointing_level : int, optional
+        Gradient checkpointing aggressiveness (higher recomputes more), by
+        default ``0``.
+    **kwargs
+        Ignored; present so model configs can pass extra keys.
+
+    Raises
+    ------
+    ValueError
+        If ``activation_function`` is not one of the supported names.
+
+    References
+    ----------
+    [1] Bonev, B.; Kurth, T.; Hundt, C.; Pathak, J.; Baust, M.; Kashinath, K.;
+    Anandkumar, A.; Spherical Fourier Neural Operators: Learning Stable Dynamics
+    on the Sphere; ICML 2023.
     """
 
     def __init__(
@@ -581,6 +839,19 @@ class SphericalFourierNeuralOperatorNet(nn.Module):
 
     @torch.compiler.disable(recursive=True)
     def no_weight_decay(self):
+        r"""
+        Parameters that should be excluded from weight decay.
+
+        Position embeddings and class tokens encode absolute location and
+        identity rather than a learned transformation, so decaying them toward
+        zero degrades the model instead of regularizing it. Optimizer setup
+        calls this to build its no-decay parameter group.
+
+        Returns
+        -------
+        set of str
+            Names of the parameters to exclude.
+        """
         return {"pos_embed", "cls_token"}
 
     def _forward_features(self, x):
@@ -593,6 +864,19 @@ class SphericalFourierNeuralOperatorNet(nn.Module):
         return x
 
     def forward(self, x):
+        r"""
+        Map an input field to the predicted output field.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input of shape ``(B, inp_chans, nlat, nlon)`` on ``inp_shape``.
+
+        Returns
+        -------
+        torch.Tensor
+            Prediction of shape ``(B, out_chans, nlat, nlon)`` on ``out_shape``.
+        """
         # save big skip
         if self.big_skip:
             # if output shape differs, use the spectral transforms to change resolution
@@ -653,7 +937,32 @@ class SphericalFourierNeuralOperatorNet(nn.Module):
 # this part exposes the model to modulus by constructing modulus Modules
 @dataclass
 class SphericalFourierNeuralOperatorNetMetaData(ModelMetaData):
-    name: str = "SFNO"
+    r"""
+    PhysicsNeMo metadata for :class:`SphericalFourierNeuralOperatorNet`.
+
+    Declares which execution features the model supports, so PhysicsNeMo knows
+    what it may enable when wrapping it. Consumed by
+    :func:`~makani.models.physicsnemo_compat.module_from_torch`, which produces
+    the ``SFNO`` module exported from this file.
+
+    Attributes
+    ----------
+    jit : bool
+        TorchScript tracing is not supported. This says nothing about
+        ``torch.compile``, which these flags do not govern.
+    cuda_graphs : bool
+        CUDA graph capture is not supported.
+    amp_cpu : bool
+        Mixed precision on CPU is not supported.
+    amp_gpu : bool
+        Mixed precision on GPU is supported.
+
+    Notes
+    -----
+    The model name is deliberately not set here. ``ModelMetaData.name`` is
+    deprecated in PhysicsNeMo 2.x, so it is passed to ``module_from_torch``
+    instead and applied only where it still has an effect.
+    """
 
     jit: bool = False
     cuda_graphs: bool = False
@@ -661,17 +970,68 @@ class SphericalFourierNeuralOperatorNetMetaData(ModelMetaData):
     amp_gpu: bool = True
 
 
-SFNO = physicsnemo.Module.from_torch(SphericalFourierNeuralOperatorNet, SphericalFourierNeuralOperatorNetMetaData())
+SFNO = module_from_torch(
+    SphericalFourierNeuralOperatorNet,
+    SphericalFourierNeuralOperatorNetMetaData(),
+    name="SFNO",
+)
 
 
 class FourierNeuralOperatorNet(SphericalFourierNeuralOperatorNet):
+    r"""
+    Planar Fourier Neural Operator (FNO).
+
+    :class:`SphericalFourierNeuralOperatorNet` with ``spectral_transform="fft"``
+    forced, so mixing happens over Fourier modes on a doubly periodic plane
+    rather than over spherical harmonics. Useful as a baseline and for domains
+    that genuinely are periodic; on global data it treats the poles and the
+    dateline as ordinary interior points, which the spherical variant does not.
+
+    Parameters
+    ----------
+    *args
+        Forwarded to :class:`SphericalFourierNeuralOperatorNet`.
+    **kwargs
+        Forwarded to :class:`SphericalFourierNeuralOperatorNet`. Passing
+        ``spectral_transform`` raises, since it is set here.
+
+    See Also
+    --------
+    SphericalFourierNeuralOperatorNet : the base implementation and full
+        parameter documentation.
+    """
+
     def __init__(self, *args, **kwargs):
         return super().__init__(*args, spectral_transform="fft", **kwargs)
 
 
 @dataclass
 class FourierNeuralOperatorNetMetaData(ModelMetaData):
-    name: str = "FNO"
+    r"""
+    PhysicsNeMo metadata for :class:`FourierNeuralOperatorNet`.
+
+    Same supported-feature declaration as
+    :class:`SphericalFourierNeuralOperatorNetMetaData`, under the name ``"FNO"``.
+    Consumed by :func:`~makani.models.physicsnemo_compat.module_from_torch` to
+    produce the ``FNO`` module exported from this file.
+
+    Attributes
+    ----------
+    jit : bool
+        TorchScript tracing is not supported. This says nothing about
+        ``torch.compile``, which these flags do not govern.
+    cuda_graphs : bool
+        CUDA graph capture is not supported.
+    amp_cpu : bool
+        Mixed precision on CPU is not supported.
+    amp_gpu : bool
+        Mixed precision on GPU is supported.
+
+    Notes
+    -----
+    The model name is deliberately not set here; see
+    :class:`SphericalFourierNeuralOperatorNetMetaData`.
+    """
 
     jit: bool = False
     cuda_graphs: bool = False
@@ -679,4 +1039,8 @@ class FourierNeuralOperatorNetMetaData(ModelMetaData):
     amp_gpu: bool = True
 
 
-FNO = physicsnemo.Module.from_torch(FourierNeuralOperatorNet, FourierNeuralOperatorNetMetaData())
+FNO = module_from_torch(
+    FourierNeuralOperatorNet,
+    FourierNeuralOperatorNetMetaData(),
+    name="FNO",
+)

@@ -52,6 +52,19 @@ class OnnxWrapper(nn.Module):
         self.load_onnx_session(onnx_file)
 
     def load_onnx_session(self, onnx_file):
+        r"""
+        Create the ONNX Runtime inference sessions for a weight file.
+
+        Builds a CUDA session when a GPU is available and always builds a CPU
+        session, so :meth:`onnx_session_run` can pick whichever matches the
+        device the inputs arrive on. Called from the constructor; call it again
+        to swap in different weights without rebuilding the wrapper.
+
+        Parameters
+        ----------
+        onnx_file : str
+            Path to the ``.onnx`` weight file.
+        """
         self.onnx_file = onnx_file
 
         # Check if cuda is available to initialize a CUDA onnxruntime
@@ -69,6 +82,26 @@ class OnnxWrapper(nn.Module):
         )
 
     def onnx_session_run(self, inputs):
+        r"""
+        Run the ONNX graph on a dict of input tensors.
+
+        Selects the CUDA session when the inputs are on a GPU and one is
+        available, otherwise the CPU session. Tensors are converted to fp32
+        numpy arrays for the runtime and the outputs are converted back to
+        torch tensors on the input's device.
+
+        Parameters
+        ----------
+        inputs : dict of str to torch.Tensor
+            Graph inputs keyed by ONNX input name. Modified in place: the
+            values are replaced by their numpy equivalents.
+
+        Returns
+        -------
+        list of torch.Tensor
+            Graph outputs, in the order the ONNX graph declares them, on the
+            same device as the inputs.
+        """
         input_device = next(iter(inputs.values())).device
         if (self.gpu_session is not None) and input_device != torch.device("cpu"):
             onnx_session = self.gpu_session

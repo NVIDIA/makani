@@ -46,8 +46,9 @@ from makani.utils import comm
 
 # for annotation of models
 from dataclasses import dataclass
-import physicsnemo
 from physicsnemo import ModelMetaData
+
+from makani.models.physicsnemo_compat import module_from_torch
 
 
 # heuristic for finding theta_cutoff
@@ -64,9 +65,33 @@ def _soft_clamp(x: torch.Tensor, offset: float = 0.0):
     return y
 
 
-# heper function to be able to pass Sin as an activation function
 class Sin(nn.Module):
+    r"""
+    Sine activation, as a module.
+
+    :func:`torch.sin` is a function, not an ``nn.Module``, so it cannot be
+    passed where the model config expects an activation constructor. This
+    trivial wrapper makes it usable there.
+
+    Sinusoidal activations are worth having available for physical fields:
+    unlike ReLU-family activations they are smooth and periodic, which suits
+    networks that need to represent oscillatory structure.
+    """
+
     def forward(self, x):
+        r"""
+        Apply the sine elementwise.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input tensor of any shape.
+
+        Returns
+        -------
+        torch.Tensor
+            Tensor of the same shape as ``x``.
+        """
         return torch.sin(x)
 
 
@@ -125,6 +150,55 @@ def _get_norm_layer_handle(
 
 
 class DiscreteContinuousEncoder(nn.Module):
+    r"""
+    Encoder built on a discrete-continuous convolution on the sphere.
+
+    Lifts input variables into the model's latent width while resampling from
+    the data grid onto the (typically coarser) model grid. A
+    discrete-continuous convolution is defined by a *continuous* kernel
+    evaluated at the actual angular positions of the grid points, so input and
+    output grids need not agree and the operator remains a genuine spherical
+    convolution.
+
+    Differs from the FourCastNet 3 encoder in that the kernel cutoff radius is
+    derived from the spectral truncation ``lmax`` rather than the input
+    resolution, and a fused convolution kernel can be requested.
+
+    Parameters
+    ----------
+    inp_shape : (int, int), optional
+        Input grid as ``(nlat, nlon)``, by default ``(721, 1440)``.
+    out_shape : (int, int), optional
+        Output grid as ``(nlat, nlon)``, by default ``(480, 960)``.
+    grid_in : str, optional
+        Input grid type, by default ``"equiangular"``.
+    grid_out : str, optional
+        Output grid type, by default ``"equiangular"``.
+    inp_chans : int, optional
+        Number of input channels, by default ``2``.
+    out_chans : int, optional
+        Number of output channels, by default ``2``.
+    kernel_shape : (int, int), optional
+        Shape of the continuous kernel, by default ``(3, 3)``.
+    basis_type : str, optional
+        Basis the kernel is expanded in, by default ``"harmonic"``.
+    basis_norm_mode : str, optional
+        Basis normalization mode, by default ``"nodal"``.
+    lmax : int, optional
+        Spectral truncation used to derive the kernel cutoff radius, by default
+        ``240``.
+    groups : int, optional
+        Number of convolution groups, by default ``1``.
+    bias : bool, optional
+        Whether the convolution carries a bias, by default ``False``.
+    fused : bool, optional
+        Use the fused convolution implementation, by default ``False``.
+
+    See Also
+    --------
+    DiscreteContinuousDecoder : the corresponding decoder.
+    """
+
     def __init__(
         self,
         inp_shape=(721, 1440),
@@ -173,6 +247,19 @@ class DiscreteContinuousEncoder(nn.Module):
                 self.conv.bias.sharded_dims_mp = [None]
 
     def forward(self, x):
+        r"""
+        Encode the input field onto the model grid.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input of shape ``(B, inp_chans, *inp_shape)``.
+
+        Returns
+        -------
+        torch.Tensor
+            Encoded field of shape ``(B, out_chans, *out_shape)``.
+        """
 
         # convolution
         x = self.conv(x)
@@ -181,6 +268,53 @@ class DiscreteContinuousEncoder(nn.Module):
 
 
 class DiscreteContinuousDecoder(nn.Module):
+    r"""
+    Decoder built on a discrete-continuous convolution on the sphere.
+
+    Mirror of :class:`DiscreteContinuousEncoder`: projects latent features back
+    to output variables while resampling from the model grid onto the data
+    grid. Resampling runs in fp32 with autocast disabled, since it is a long
+    accumulation whose accuracy the output depends on directly.
+
+    Parameters
+    ----------
+    inp_shape : (int, int), optional
+        Input grid as ``(nlat, nlon)``, by default ``(480, 960)``.
+    out_shape : (int, int), optional
+        Output grid as ``(nlat, nlon)``, by default ``(721, 1440)``.
+    grid_in : str, optional
+        Input grid type, by default ``"equiangular"``.
+    grid_out : str, optional
+        Output grid type, by default ``"equiangular"``.
+    inp_chans : int, optional
+        Number of input channels, by default ``2``.
+    out_chans : int, optional
+        Number of output channels, by default ``2``.
+    kernel_shape : (int, int), optional
+        Shape of the continuous kernel, by default ``(3, 3)``.
+    basis_type : str, optional
+        Basis the kernel is expanded in, by default ``"harmonic"``.
+    basis_norm_mode : str, optional
+        Basis normalization mode, by default ``"nodal"``.
+    lmax : int, optional
+        Spectral truncation used to derive the kernel cutoff radius, by default
+        ``240``.
+    resample_sht : bool, optional
+        Resample spectrally via an SHT rather than by bilinear interpolation,
+        by default ``False``. Spectral resampling is exact for band-limited
+        fields but costs more.
+    groups : int, optional
+        Number of convolution groups, by default ``1``.
+    bias : bool, optional
+        Whether the convolution carries a bias, by default ``False``.
+    fused : bool, optional
+        Use the fused convolution implementation, by default ``False``.
+
+    See Also
+    --------
+    DiscreteContinuousEncoder : the corresponding encoder.
+    """
+
     def __init__(
         self,
         inp_shape=(480, 960),
@@ -252,6 +386,19 @@ class DiscreteContinuousDecoder(nn.Module):
                 self.conv.bias.sharded_dims_mp = [None]
 
     def forward(self, x):
+        r"""
+        Decode latent features onto the output grid.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Latent field of shape ``(B, inp_chans, *inp_shape)``.
+
+        Returns
+        -------
+        torch.Tensor
+            Output field of shape ``(B, out_chans, *out_shape)``.
+        """
         dtype = x.dtype
 
         with amp.autocast(device_type="cuda", enabled=False):
@@ -264,6 +411,63 @@ class DiscreteContinuousDecoder(nn.Module):
 
 
 class NeuralOperatorBlock(nn.Module):
+    r"""
+    Processor block mixing spatially via either a local or a global operator.
+
+    The building block of :class:`AtmoSphericNeuralOperatorNet31`.
+    ``conv_type`` selects between a discrete-continuous convolution with a
+    bounded angular footprint (``"local"``) and a spectral convolution acting
+    on all modes at once (``"global"``). Interleaving the two lets the model
+    capture fine local structure and long-range teleconnections without paying
+    global cost in every layer.
+
+    Parameters
+    ----------
+    forward_transform : torch.nn.Module
+        Grid-to-spectral transform; also defines the input grid.
+    inverse_transform : torch.nn.Module
+        Spectral-to-grid transform; also defines the output grid, which may
+        differ in resolution.
+    inp_chans : int
+        Number of input channels.
+    out_chans : int
+        Number of output channels.
+    conv_type : str, optional
+        ``"local"`` (default) for a discrete-continuous convolution,
+        ``"global"`` for a spectral convolution.
+    mlp_ratio : float, optional
+        Hidden width of the channel MLP as a multiple of the channel count, by
+        default ``2.0``.
+    mlp_drop_rate : float, optional
+        Dropout probability inside the MLP, by default ``0.0``.
+    path_drop_rate : float, optional
+        Stochastic depth probability, by default ``0.0``.
+    act_layer : callable, optional
+        Activation constructor, by default :class:`torch.nn.GELU`.
+    normalization_layer : str, optional
+        Name of the normalization to use, by default ``"none"``.
+    num_groups : int, optional
+        Number of channel groups in the convolution, by default ``1``.
+    skip : str, optional
+        Skip connection type, by default ``"identity"``.
+    layer_scale : bool, optional
+        Apply a learned per-channel scale to the branch output, by default
+        ``True``. Initialized small so the block starts near the identity.
+    use_mlp : bool, optional
+        Include the channel MLP, by default ``False``.
+    kernel_shape : (int, int), optional
+        Kernel shape for the local convolution, by default ``(3, 3)``.
+    basis_type : str, optional
+        Basis for the local convolution kernel, by default ``"harmonic"``.
+    basis_norm_mode : str, optional
+        Basis normalization mode, by default ``"nodal"``.
+    lmax : int, optional
+        Spectral truncation used to derive the kernel cutoff radius, by default
+        ``240``.
+    checkpointing_level : int, optional
+        Gradient checkpointing aggressiveness, by default ``0``.
+    """
+
     def __init__(
         self,
         forward_transform,
@@ -818,6 +1022,26 @@ class AtmoSphericNeuralOperatorNet31(nn.Module):
         return x
 
     def processor_blocks(self, x, x_aux):
+        r"""
+        Run the latent state through the stack of processor blocks.
+
+        Auxiliary embeddings are re-concatenated before *every* block rather
+        than only at the encoder, so conditioning information stays available at
+        every depth instead of having to survive the whole stack.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Latent field of shape ``(B, embed_dim, h, w)``.
+        x_aux : torch.Tensor or None
+            Auxiliary embedding channels to append to each block's input, or
+            ``None`` to append nothing.
+
+        Returns
+        -------
+        torch.Tensor
+            Processed latent field of shape ``(B, embed_dim, h, w)``.
+        """
         # maybe clean the padding just in case
         x = self.pos_drop(x)
 
@@ -856,6 +1080,24 @@ class AtmoSphericNeuralOperatorNet31(nn.Module):
         return x
 
     def forward(self, x):
+        r"""
+        Map an input field to the predicted output field.
+
+        Runs SST imputation, encodes the auxiliary channels, encodes the
+        prognostic channels, applies the processor blocks, and decodes.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input of shape ``(B, inp_chans, nlat, nlon)`` on the input grid.
+            May contain ``NaN`` in the imputed channels.
+
+        Returns
+        -------
+        torch.Tensor
+            Prediction of shape ``(B, out_chans, nlat, nlon)`` on the output
+            grid.
+        """
 
         # sst imputation
         x = self.impute_sst_channels(x)
@@ -894,7 +1136,33 @@ class AtmoSphericNeuralOperatorNet31(nn.Module):
 # this part exposes the model to modulus by constructing modulus Modules
 @dataclass
 class AtmoSphericNeuralOperatorNetMetaData(ModelMetaData):
-    name: str = "FCN3.1"
+    r"""
+    PhysicsNeMo metadata for :class:`AtmoSphericNeuralOperatorNet31`.
+
+    Declares which execution features the model supports, so PhysicsNeMo knows
+    what it may enable when wrapping it. Consumed by
+    :func:`~makani.models.physicsnemo_compat.module_from_torch`.
+
+    Attributes
+    ----------
+    jit : bool
+        TorchScript tracing is not supported.
+    cuda_graphs : bool
+        CUDA graph capture is not supported.
+    amp_cpu : bool
+        Mixed precision on CPU is not supported.
+    amp_gpu : bool
+        Mixed precision on GPU is supported.
+
+    Notes
+    -----
+    ``jit`` refers to TorchScript only. ``torch.compile`` is supported for this
+    model and is unaffected by these flags.
+
+    The model name is deliberately not set here. ``ModelMetaData.name`` is
+    deprecated in PhysicsNeMo 2.x, so it is passed to ``module_from_torch``
+    instead and applied only where it still has an effect.
+    """
 
     jit: bool = False
     cuda_graphs: bool = False
@@ -902,4 +1170,8 @@ class AtmoSphericNeuralOperatorNetMetaData(ModelMetaData):
     amp_gpu: bool = True
 
 
-FCN3 = physicsnemo.Module.from_torch(AtmoSphericNeuralOperatorNet31, AtmoSphericNeuralOperatorNetMetaData())
+FCN3 = module_from_torch(
+    AtmoSphericNeuralOperatorNet31,
+    AtmoSphericNeuralOperatorNetMetaData(),
+    name="FCN3.1",
+)

@@ -25,6 +25,51 @@ from makani.mpu.layers import DistributedMLP, DistributedAttention
 
 
 class Attention(nn.Module):
+    r"""
+    Standard multi-head self-attention.
+
+    Projects the input to queries, keys and values, splits them into
+    ``num_heads`` independent subspaces, and applies scaled dot-product
+    attention:
+
+    .. math::
+
+        \mathrm{Attention}(Q, K, V) =
+        \mathrm{softmax}\!\left(\frac{Q K^\top}{\sqrt{d_h}}\right) V
+
+    Dispatches to :func:`torch.nn.functional.scaled_dot_product_attention`, so
+    it uses a fused kernel where one is available.
+
+    Parameters
+    ----------
+    dim : int
+        Feature dimension. Must be divisible by ``num_heads``.
+    input_format : str, optional
+        Input layout, by default ``"traditional"`` (channels last).
+    num_heads : int, optional
+        Number of attention heads, by default ``8``.
+    qkv_bias : bool, optional
+        Whether the QKV projection carries a bias, by default ``False``.
+    qk_norm : bool, optional
+        Normalize queries and keys before the attention product, by default
+        ``False``. Bounds the logits and stabilizes training at large widths.
+    attn_drop_rate : float, optional
+        Dropout probability on the attention weights, by default ``0.0``.
+    proj_drop_rate : float, optional
+        Dropout probability after the output projection, by default ``0.0``.
+    norm_layer : callable, optional
+        Normalization used for ``qk_norm``, by default :class:`torch.nn.LayerNorm`.
+
+    Raises
+    ------
+    ValueError
+        If ``dim`` is not divisible by ``num_heads``.
+
+    See Also
+    --------
+    makani.mpu.layers.DistributedAttention : head-parallel version.
+    """
+
     def __init__(
         self,
         dim,
@@ -56,6 +101,19 @@ class Attention(nn.Module):
             self.proj_drop = nn.Identity()
 
     def forward(self, x):
+        r"""
+        Apply multi-head self-attention.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Token tensor of shape ``(B, N, dim)``.
+
+        Returns
+        -------
+        torch.Tensor
+            Tensor of shape ``(B, N, dim)``.
+        """
         B, N, C = x.shape
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
         q, k, v = qkv.unbind(0)
@@ -70,6 +128,47 @@ class Attention(nn.Module):
 
 
 class Block(nn.Module):
+    r"""
+    Standard pre-norm transformer block.
+
+    Attention followed by a feed-forward MLP, each preceded by a normalization
+    and wrapped in a residual connection:
+
+    .. code-block:: text
+
+        x = x + drop_path(attn(norm1(x)))
+        x = norm2(x)
+        x = x + drop_path(mlp(x))
+
+    Both sublayers automatically switch to their tensor-parallel
+    implementations when the ``comm_name`` group has more than one rank, so the
+    same block definition serves single-GPU and model-parallel runs.
+
+    Parameters
+    ----------
+    dim : int
+        Feature dimension.
+    num_heads : int
+        Number of attention heads.
+    mlp_ratio : float, optional
+        Hidden width of the MLP as a multiple of ``dim``, by default ``4.0``.
+    qkv_bias : bool, optional
+        Whether the QKV projection carries a bias, by default ``False``.
+    mlp_drop_rate : float, optional
+        Dropout probability in the MLP and after the attention projection, by
+        default ``0.0``.
+    attn_drop_rate : float, optional
+        Dropout probability on the attention weights, by default ``0.0``.
+    path_drop_rate : float, optional
+        Stochastic depth probability for both residual branches, by default ``0.0``.
+    act_layer : callable, optional
+        Activation constructor for the MLP, by default :class:`torch.nn.GELU`.
+    norm_layer : callable, optional
+        Normalization constructor, by default :class:`torch.nn.LayerNorm`.
+    comm_name : str, optional
+        Communicator group used when model parallel, by default ``"matmul"``.
+    """
+
     def __init__(
         self,
         dim,
@@ -135,6 +234,19 @@ class Block(nn.Module):
             )
 
     def forward(self, x):
+        r"""
+        Apply attention and MLP with residual connections.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Token tensor of shape ``(B, N, dim)``.
+
+        Returns
+        -------
+        torch.Tensor
+            Tensor of shape ``(B, N, dim)``.
+        """
         y = self.attn(self.norm1(x))
         x = x + self.drop_path(y)
         x = self.norm2(x)
@@ -143,6 +255,62 @@ class Block(nn.Module):
 
 
 class VisionTransformer(nn.Module):
+    r"""
+    Vision transformer baseline for gridded forecasting.
+
+    Embeds the input field into patch tokens, adds a learned position
+    embedding, runs a stack of :class:`Block` layers, and decodes each token
+    back into its patch of the output field. Attention is global over patches,
+    so every location can influence every other in a single layer -- but at
+    ``O(N^2)`` cost in the number of patches, which is why the input is
+    tokenized rather than processed at full resolution.
+
+    Included as a baseline against the spectral operators; unlike them it has no
+    notion of the sphere's geometry.
+
+    Parameters
+    ----------
+    inp_shape : list of int, optional
+        Input grid as ``[nlat, nlon]``, by default ``[72, 144]``.
+    patch_size : (int, int), optional
+        Patch size, by default ``(6, 6)``.
+    inp_chans : int, optional
+        Number of input channels, by default ``3``.
+    out_chans : int, optional
+        Number of output channels, by default ``3``.
+    embed_dim : int, optional
+        Token dimension, by default ``768``.
+    depth : int, optional
+        Number of transformer blocks, by default ``12``.
+    num_heads : int, optional
+        Number of attention heads per block, by default ``12``.
+    mlp_ratio : float, optional
+        Hidden width of the block MLPs as a multiple of ``embed_dim``, by
+        default ``4.0``.
+    qkv_bias : bool, optional
+        Whether the QKV projections carry a bias, by default ``True``.
+    mlp_drop_rate : float, optional
+        Dropout probability in the MLPs, by default ``0.0``.
+    attn_drop_rate : float, optional
+        Dropout probability on the attention weights, by default ``0.0``.
+    path_drop_rate : float, optional
+        Maximum stochastic depth probability, by default ``0.0``. Ramped
+        linearly from zero at the first block to this value at the last, the
+        usual schedule: early layers are kept intact while deeper ones are
+        dropped more aggressively.
+    norm_layer : str, optional
+        Normalization type; only ``"layer_norm"`` is supported.
+    comm_name : str, optional
+        Communicator group used when model parallel, by default ``"matmul"``.
+    **kwargs
+        Ignored; present so model configs can pass extra keys.
+
+    Raises
+    ------
+    NotImplementedError
+        If ``norm_layer`` is not ``"layer_norm"``.
+    """
+
     def __init__(
         self,
         inp_shape=[72, 144],
@@ -222,6 +390,24 @@ class VisionTransformer(nn.Module):
             nn.init.constant_(m.weight, 1.0)
 
     def prepare_tokens(self, x):
+        r"""
+        Embed the input field into position-encoded tokens.
+
+        Exposed separately from ``forward`` so callers can obtain the token
+        sequence -- for probing or feature extraction -- without running the
+        blocks.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input field of shape ``(B, inp_chans, nlat, nlon)``.
+
+        Returns
+        -------
+        torch.Tensor
+            Tokens of shape ``(B, num_patches, embed_dim)``, with the position
+            embedding added and dropout applied.
+        """
         B, C, H, W = x.shape
         x = self.patch_embed(x).transpose(1, 2)  # patch linear embedding
 
@@ -230,6 +416,22 @@ class VisionTransformer(nn.Module):
         return self.pos_drop(x)
 
     def forward_head(self, x):
+        r"""
+        Decode tokens back into a full-resolution output field.
+
+        Each token is projected to ``out_chans * patch_h * patch_w`` values and
+        those are unfolded into its patch, reassembling the grid.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Tokens of shape ``(B, num_patches, embed_dim)``.
+
+        Returns
+        -------
+        torch.Tensor
+            Field of shape ``(B, out_chans, nlat, nlon)``.
+        """
         B, _, _ = x.shape  # B x N x embed_dim
         x = x.reshape(B, self.patch_embed.red_img_size[0], self.patch_embed.red_img_size[1], self.embed_dim)
         B, h, w, _ = x.shape
@@ -243,6 +445,19 @@ class VisionTransformer(nn.Module):
         return x
 
     def forward(self, x):
+        r"""
+        Map an input field to the predicted output field.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input of shape ``(B, inp_chans, nlat, nlon)``.
+
+        Returns
+        -------
+        torch.Tensor
+            Prediction of shape ``(B, out_chans, nlat, nlon)``.
+        """
         x = self.prepare_tokens(x)
         for blk in self.blocks:
             x = blk(x)

@@ -33,7 +33,7 @@ from makani.utils.te_helpers import TE_AVAILABLE as _TE_AVAILABLE, get_te
 
 
 class DistributedMatmul(nn.Module):
-    """Megatron-style tensor-parallel matmul over a single feature-parallel group.
+    r"""Megatron-style tensor-parallel matmul over a single feature-parallel group.
 
     The legacy 2D (fin x fout) decomposition has been retired in favor of a 1D
     column/row fork-join over a single comm group (``comm_name``, "matmul" by
@@ -48,6 +48,38 @@ class DistributedMatmul(nn.Module):
       and the partial outputs are all-reduced (``reduce_from_parallel_region``)
       into a replicated full output. For a row layer the bias is replicated and
       added AFTER the reduction.
+
+    Pairing a column layer with a row layer is what makes this cheap: the
+    intermediate stays sharded and only one all-reduce is needed for the pair,
+    rather than one per layer.
+
+    Parameters
+    ----------
+    inp_dim : int
+        Global input feature dimension. For ``"row"`` mode this is sharded
+        across the group, so it must be divisible by the group size.
+    out_dim : int
+        Global output feature dimension. For ``"column"`` mode this is sharded
+        across the group, so it must be divisible by the group size.
+    input_format : str, optional
+        ``"nchw"`` (default) for ``(B, C, H, W)`` inputs, or ``"traditional"``
+        for channels-last inputs.
+    comm_name : str, optional
+        Name of the communicator group to shard over, by default ``"matmul"``.
+    parallel_mode : str, optional
+        ``"column"`` (default) or ``"row"``; see above.
+    bias : bool, optional
+        Whether to add a bias, by default ``True``.
+    use_te : bool, optional
+        Use a TransformerEngine linear for the local GEMM, enabling the FP8/FP4
+        path. Falls back to the standard path if TransformerEngine is not
+        installed. By default ``False``.
+
+    Raises
+    ------
+    ValueError
+        If ``parallel_mode`` is neither ``"column"`` nor ``"row"``, or if the
+        sharded dimension is not divisible by the group size.
     """
 
     def __init__(
@@ -138,6 +170,26 @@ class DistributedMatmul(nn.Module):
 
     @property
     def weight(self):
+        r"""
+        The local weight shard, regardless of which backend holds it.
+
+        TransformerEngine's linear owns its weight internally; exposing it under
+        the same attribute name keeps external initialization, the model-parallel
+        annotations, and the gradient reduction hook uniform across both paths.
+
+        Returns
+        -------
+        torch.nn.Parameter
+            The local weight shard.
+
+        Raises
+        ------
+        AttributeError
+            If the native weight is not registered yet. This must be
+            ``AttributeError`` specifically: ``register_parameter`` probes
+            ``hasattr(self, "weight")`` while registering, and ``hasattr`` only
+            swallows that exception type.
+        """
         # te.Linear owns the weight in the TE path; expose it through the same
         # attribute so external init / annotation / the gradient hook are uniform.
         # raise AttributeError (not KeyError) when the native weight is not yet
@@ -161,6 +213,22 @@ class DistributedMatmul(nn.Module):
         return self.matmul_handle(x, self.weight, bias=None)
 
     def forward(self, x):
+        r"""
+        Apply the tensor-parallel matmul.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            For ``"column"`` mode, a replicated tensor with the full
+            ``inp_dim``. For ``"row"`` mode, a tensor already sharded along the
+            input dimension, typically the output of a preceding column layer.
+
+        Returns
+        -------
+        torch.Tensor
+            For ``"column"`` mode, sharded along the output dimension. For
+            ``"row"`` mode, replicated with the full ``out_dim``.
+        """
         if self.parallel_mode == "column":
             # replicated input -> sharded output, no output reduction
             x = copy_to_parallel_region(x, self.comm_name)
@@ -178,6 +246,49 @@ class DistributedMatmul(nn.Module):
 
 # distributed encoder/decoder
 class DistributedEncoderDecoder(nn.Module):
+    r"""
+    Tensor-parallel counterpart of
+    :class:`~makani.models.common.layers.EncoderDecoder`.
+
+    A stack of :class:`DistributedMatmul` layers with activations in between,
+    arranged so the chain consumes a replicated input and produces a replicated
+    output. The parallel modes are assigned from the *end* backwards: the last
+    layer is row-parallel (which reduces to a replicated output) and the modes
+    alternate from there. This keeps intermediates sharded and costs one
+    all-reduce per column/row pair rather than one per layer.
+
+    Because the modes alternate and the last must be ``"row"``, the first layer
+    is column-parallel only if ``num_layers`` is even -- hence the requirement
+    below.
+
+    Parameters
+    ----------
+    num_layers : int
+        Total number of matmul layers. Must be even when the communicator group
+        is larger than one.
+    input_dim : int
+        Number of input features.
+    output_dim : int
+        Number of output features.
+    hidden_dim : int
+        Width of the hidden layers.
+    act_layer : callable
+        Activation module constructor, called with no arguments.
+    gain : float, optional
+        Scales the variance of the output layer's initialization, by default ``1.0``.
+    input_format : str, optional
+        ``"nchw"`` (default) or ``"traditional"``.
+    comm_name : str, optional
+        Communicator group to shard over, by default ``"matmul"``.
+    use_te : bool, optional
+        Use TransformerEngine linears for the local GEMMs, by default ``False``.
+
+    Raises
+    ------
+    ValueError
+        If ``num_layers`` is odd while matmul parallelism is active.
+    """
+
     def __init__(
         self,
         num_layers,
@@ -254,11 +365,72 @@ class DistributedEncoderDecoder(nn.Module):
         self.fwd = nn.Sequential(*encoder_modules)
 
     def forward(self, x):
+        r"""
+        Apply the tensor-parallel layer stack.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Replicated input with ``input_dim`` features, in the layout implied
+            by ``input_format``.
+
+        Returns
+        -------
+        torch.Tensor
+            Replicated output with ``output_dim`` features.
+        """
         return self.fwd(x)
 
 
 # more complicated layers
 class DistributedMLP(nn.Module):
+    r"""
+    Tensor-parallel counterpart of :class:`~makani.models.common.layers.MLP`.
+
+    Two-layer feed-forward block in which the hidden dimension is sharded across
+    the communicator group: the first matmul is column-parallel and the second
+    row-parallel, so the wide intermediate never has to be materialized in full
+    on any rank and the pair needs only a single all-reduce.
+
+    Parameters
+    ----------
+    in_features : int
+        Number of input features.
+    hidden_features : int, optional
+        Width of the sharded hidden layer, defaults to ``in_features``.
+    out_features : int, optional
+        Number of output features, defaults to ``in_features``.
+    output_bias : bool, optional
+        Whether the output projection carries a bias, by default ``True``.
+    input_format : str, optional
+        ``"nchw"`` (default) or ``"traditional"``.
+    comm_name : str, optional
+        Communicator group to shard the hidden dimension over, by default
+        ``"matmul"``.
+    act_layer : callable, optional
+        Activation constructor, by default :class:`torch.nn.GELU`.
+    drop_rate : float, optional
+        Dropout probability, by default ``0.0``.
+    drop_type : str, optional
+        ``"iid"`` (default) or ``"features"``. ``"features"`` requires
+        ``input_format="nchw"``.
+    checkpointing : bool, optional
+        Recompute the block in the backward pass instead of storing
+        activations, by default ``False``.
+    gain : float, optional
+        Scales the variance of the output layer's initialization, by default ``1.0``.
+    use_te : bool, optional
+        Use TransformerEngine linears for the GEMMs, by default ``False``. On
+        this path the matmuls are built channels-last and the block permutes
+        once at its boundaries rather than around every GEMM.
+
+    Raises
+    ------
+    NotImplementedError
+        If ``drop_type`` is unsupported, or if ``"traditional"`` is combined
+        with feature dropout.
+    """
+
     def __init__(
         self,
         in_features,
@@ -340,6 +512,22 @@ class DistributedMLP(nn.Module):
             self.drop = nn.Identity()
 
     def fwd(self, x):
+        r"""
+        Run the block body, without the checkpointing wrapper.
+
+        Split out from ``forward`` so gradient checkpointing has a plain
+        callable to recompute.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Replicated input with ``in_features`` features.
+
+        Returns
+        -------
+        torch.Tensor
+            Replicated output with ``out_features`` features.
+        """
         # on the TE path the matmuls are channels-last ("traditional"): permute
         # nchw -> nhwc once here and back at the end, keeping act/iid-dropout
         # channels-last in between.
@@ -366,14 +554,95 @@ class DistributedMLP(nn.Module):
         return checkpoint(self.fwd, x, use_reentrant=False)
 
     def forward(self, x):
+        r"""
+        Apply the tensor-parallel feed-forward block.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Replicated input with ``in_features`` features, in the layout
+            implied by ``input_format``.
+
+        Returns
+        -------
+        torch.Tensor
+            Replicated output with ``out_features`` features.
+        """
         if self.checkpointing:
             return self._checkpoint_forward(x)
         else:
             return self.fwd(x)
 
 
-# Stochastic MLP needs comm datastructure
 class StochasticMLP(nn.Module):
+    r"""
+    Two-layer MLP whose weights are resampled from a learned distribution.
+
+    Instead of holding point-estimate weights, each layer stores a mean and a
+    log standard deviation and draws a fresh weight on every forward pass:
+
+    .. math::
+
+        W = s\, e^{\log \sigma} \odot \varepsilon + \mu,
+        \qquad \varepsilon \sim \mathcal{N}(0, 1)
+
+    where :math:`s` is a constant fan-in scale. This is a variational /
+    Bayesian-style layer: the model learns how uncertain each weight is, and
+    the resulting forward-pass variability is a principled source of ensemble
+    spread rather than an injected perturbation. Parameterizing the spread
+    through :math:`\log \sigma` keeps it positive without a constraint, and
+    leaving it at its zero initialization makes the effective standard
+    deviation exactly :math:`s`.
+
+    The draws come from private, explicitly seeded generators rather than the
+    global RNG, so the sampled weights are reproducible and can be decorrelated
+    across ensemble members.
+
+    Parameters
+    ----------
+    in_features : int
+        Number of input features.
+    hidden_features : int, optional
+        Width of the hidden layer, defaults to ``in_features``.
+    out_features : int, optional
+        Number of output features, defaults to ``in_features``.
+    output_bias : bool, optional
+        Whether the output projection carries a bias, by default ``True``.
+    input_format : str, optional
+        Only ``"nchw"`` is supported; anything else raises.
+    comm_name : str, optional
+        Communicator group name, by default ``"matmul"``.
+    act_layer : callable, optional
+        Activation constructor, by default :class:`torch.nn.GELU`.
+    drop_rate : float, optional
+        Dropout probability, by default ``0.0``.
+    drop_type : str, optional
+        ``"iid"`` or ``"features"``, by default ``"iid"``.
+    checkpointing : bool, optional
+        Recompute the block in the backward pass, by default ``False``.
+    gain : float, optional
+        Scales the variance of the output layer's initialization, by default ``1.0``.
+    seed : int, optional
+        Seed for the private weight-sampling generators. Give distinct values
+        to distinct ensemble members.
+
+    Raises
+    ------
+    NotImplementedError
+        If ``input_format`` is not ``"nchw"``, if ``drop_type`` is unsupported,
+        or if ``"traditional"`` is combined with feature dropout.
+
+    Notes
+    -----
+    The weight parameters are tagged ``is_shared_mp = ["spatial"]``: they are
+    replicated across the spatial model-parallel group and their gradients are
+    reduced over it.
+
+    See Also
+    --------
+    DistributedMLP : the deterministic counterpart.
+    """
+
     def __init__(
         self,
         in_features,
@@ -461,6 +730,15 @@ class StochasticMLP(nn.Module):
 
     @torch.compiler.disable(recursive=False)
     def set_rng(self, seed=333):
+        r"""
+        Re-seed the private weight-sampling generators.
+
+        Parameters
+        ----------
+        seed : int, optional
+            Seed applied to both the CPU and CUDA generators, by default
+            ``333``. The CUDA generator is bound to this rank's local device.
+        """
         self.rng_cpu = torch.Generator(device=torch.device("cpu"))
         self.rng_cpu.manual_seed(seed)
         if torch.cuda.is_available():
@@ -469,9 +747,40 @@ class StochasticMLP(nn.Module):
 
     @torch.compiler.disable(recursive=False)
     def checkpoint_forward(self, x):
+        r"""
+        Run the block under gradient checkpointing.
+
+        Normally reached via ``forward`` with ``checkpointing=True``. Note that
+        the weights are resampled during recomputation, so the backward pass
+        sees a different draw than the forward did.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input of shape ``(B, in_features, H, W)``.
+
+        Returns
+        -------
+        torch.Tensor
+            Output of shape ``(B, out_features, H, W)``.
+        """
         return checkpoint(self.fwd, x, use_reentrant=False)
 
     def fwd(self, x):
+        r"""
+        Sample weights and run the block body, without the checkpointing wrapper.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input of shape ``(B, in_features, H, W)``.
+
+        Returns
+        -------
+        torch.Tensor
+            Output of shape ``(B, out_features, H, W)``. Two calls with the same
+            input give different results, since the weights are redrawn.
+        """
 
         # generate weight1: weight = scale * exp(log_std) * eps + mean
         weight1 = torch.empty_like(self.fc1_weight_mean)
@@ -503,6 +812,20 @@ class StochasticMLP(nn.Module):
         return x
 
     def forward(self, x):
+        r"""
+        Apply the stochastic feed-forward block.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input of shape ``(B, in_features, H, W)``.
+
+        Returns
+        -------
+        torch.Tensor
+            Output of shape ``(B, out_features, H, W)``, using a fresh weight
+            draw.
+        """
         if self.checkpointing:
             return self.checkpoint_forward(x)
         else:
@@ -510,6 +833,49 @@ class StochasticMLP(nn.Module):
 
 
 class DistributedPatchEmbed(nn.Module):
+    r"""
+    Patch embedding with the spatial grid sharded across ranks.
+
+    Distributed counterpart of
+    :class:`~makani.models.common.layers.PatchEmbed2D`. The image is sharded
+    along its width across the spatial group and each rank embeds the slice it
+    owns. Because patch embedding is a strided convolution whose stride equals
+    its kernel, patches never straddle a shard boundary, so no halo exchange is
+    needed. The projection weights are replicated across the spatial group and
+    their gradients reduced over it.
+
+    Parameters
+    ----------
+    img_size : (int, int), optional
+        Global image size, by default ``(224, 224)``. The patched width must be
+        divisible by the spatial group size.
+    patch_size : (int, int), optional
+        Patch size, by default ``(16, 16)``.
+    in_chans : int, optional
+        Number of input channels, by default ``3``.
+    embed_dim : int, optional
+        Global dimension of each output token, by default ``768``. Sharded over
+        the matmul group when the output is matmul-parallel, in which case it
+        must be divisible by that group's size.
+    input_is_matmul_parallel : bool, optional
+        Whether the input arrives sharded along channels over the matmul group,
+        in which case it is gathered first. By default ``False``.
+    output_is_matmul_parallel : bool, optional
+        Whether to leave the output sharded along the embedding dimension, by
+        default ``False``.
+
+    Raises
+    ------
+    ValueError
+        If the patched width is not divisible by the spatial group size, or if
+        ``embed_dim`` is not divisible by the matmul group size when the output
+        is matmul-parallel.
+
+    See Also
+    --------
+    makani.models.common.layers.PatchEmbed2D : the single-rank version.
+    """
+
     def __init__(
         self,
         img_size=(224, 224),
@@ -560,6 +926,23 @@ class DistributedPatchEmbed(nn.Module):
         self.gather_shapes = compute_split_shapes(in_chans, comm.get_size("matmul"))
 
     def forward(self, x):
+        r"""
+        Embed this rank's slice of the image into patch tokens.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input of shape ``(B, in_chans, H, W_local)``, where ``W_local`` is
+            this rank's share of the width. Gathered along channels first if the
+            input is matmul-parallel.
+
+        Returns
+        -------
+        torch.Tensor
+            Tokens of shape ``(B, embed_dim_local, num_patches)``, where
+            ``embed_dim_local`` is the full ``embed_dim`` unless the output is
+            matmul-parallel.
+        """
         if self.input_parallel:
             x = gather_from_parallel_region(x, 1, self.gather_shapes, "matmul")
 
@@ -575,7 +958,47 @@ class DistributedPatchEmbed(nn.Module):
 
 
 class DistributedAttention(nn.Module):
-    """Distributed Attention layer"""
+    r"""
+    Multi-head self-attention with the heads sharded across ranks.
+
+    Attention heads are independent by construction, which makes them the
+    natural unit to shard: each rank computes a subset of the heads end to end
+    and no communication is needed inside the attention itself. The QKV
+    projection is column-parallel (producing this rank's heads) and the output
+    projection is row-parallel (reducing the concatenated heads back to a
+    replicated result), so the layer costs a single all-reduce.
+
+    Parameters
+    ----------
+    dim : int
+        Feature dimension. Must be divisible by ``num_heads``.
+    input_format : str, optional
+        Input layout, by default ``"traditional"`` (channels last).
+    comm_name : str, optional
+        Communicator group to shard heads over, by default ``"matmul"``.
+    num_heads : int, optional
+        Global number of attention heads, by default ``8``. Must be divisible
+        by the group size.
+    qkv_bias : bool, optional
+        Whether the QKV projection carries a bias, by default ``False``.
+    qk_norm : bool, optional
+        Normalize queries and keys before the attention product, by default
+        ``False``. Stabilizes training by bounding the logits.
+    attn_drop_rate : float, optional
+        Dropout probability on the attention weights, by default ``0.0``.
+    proj_drop_rate : float, optional
+        Dropout probability after the output projection, by default ``0.0``.
+    norm_layer : callable, optional
+        Normalization used for ``qk_norm``, by default :class:`torch.nn.LayerNorm`.
+    use_te : bool, optional
+        Use TransformerEngine linears for the projections, by default ``False``.
+
+    Raises
+    ------
+    ValueError
+        If ``dim`` is not divisible by ``num_heads``, or if ``num_heads`` is not
+        divisible by the communicator group size.
+    """
 
     def __init__(
         self,
@@ -634,6 +1057,19 @@ class DistributedAttention(nn.Module):
                 self.k_norm.bias.is_shared_mp = []
 
     def forward(self, x):
+        r"""
+        Apply head-parallel multi-head self-attention.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Replicated token tensor of shape ``(B, N, dim)``.
+
+        Returns
+        -------
+        torch.Tensor
+            Replicated tensor of shape ``(B, N, dim)``.
+        """
         B, N, C = x.shape
 
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads_local, self.head_dim).permute(2, 0, 3, 1, 4)

@@ -68,6 +68,33 @@ class PanguOnnx(OnnxWrapper):
         return
 
     def prepare_input(self, input):
+        r"""
+        Split the flat channel stack into the two inputs the ONNX graph expects.
+
+        The exported Pangu graph takes surface and atmospheric variables as
+        separate inputs, with the atmospheric ones laid out by pressure level
+        rather than flattened into channels. This reshapes makani's single
+        channel stack accordingly.
+
+        Parameters
+        ----------
+        input : torch.Tensor
+            Input of shape ``(1, V, Lat, Long)``.
+
+        Returns
+        -------
+        surface_aux_inp : torch.Tensor
+            Surface variables of shape ``(n_surf_chans, Lat, Long)``.
+        atmospheric_inp : torch.Tensor
+            Atmospheric variables of shape
+            ``(n_atmo_chans, n_atmo_groups, Lat, Long)``.
+
+        Raises
+        ------
+        NotImplementedError
+            If the batch size is greater than one. The exported graph has a
+            fixed batch dimension.
+        """
 
         B, V, Lat, Long = input.shape
 
@@ -96,6 +123,20 @@ class PanguOnnx(OnnxWrapper):
         return output.unsqueeze(0)
 
     def forward(self, input):
+        r"""
+        Run the exported Pangu ONNX graph on a makani-layout input.
+
+        Parameters
+        ----------
+        input : torch.Tensor
+            Input of shape ``(1, V, Lat, Long)`` in makani's channel layout.
+
+        Returns
+        -------
+        torch.Tensor
+            Prediction of shape ``(1, V, Lat, Long)``, restructured back into
+            makani's channel layout.
+        """
 
         surface, atmospheric = self.prepare_input(input)
 
