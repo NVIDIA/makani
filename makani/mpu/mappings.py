@@ -208,24 +208,106 @@ def gather_from_parallel_region(input, dim, shapes, comm_id):
 
 @torch.compiler.disable
 def distributed_transpose(x, dims, shapes, comm_id):
+    r"""
+    Redistribute a tensor by swapping which dimension is sharded.
+
+    Performs an all-to-all so that the dimension currently split across the
+    group becomes local and a currently local dimension becomes split. This is
+    the primitive behind distributed transforms: an operation that needs a full
+    axis (an FFT along longitude, say) first transposes so that axis is local,
+    trading away locality of another one.
+
+    Differentiable -- the backward pass performs the inverse redistribution.
+
+    Parameters
+    ----------
+    x : torch.Tensor
+        Input tensor, sharded along ``dims[0]``.
+    dims : tuple of int
+        ``(src, dst)``: the dimension currently sharded and the one to shard
+        instead.
+    shapes : list of int
+        Per-rank sizes along the dimension being gathered, needed because the
+        split may be uneven.
+    comm_id : str
+        Name of the communicator group to redistribute over.
+
+    Returns
+    -------
+    torch.Tensor
+        The redistributed tensor, now sharded along ``dims[1]``.
+    """
     return _DistributedTranspose.apply(x, dims, shapes, comm_id)
 
 
 class gradient_print_wrapper(torch.autograd.Function):
+    r"""
+    Identity in the forward pass that prints gradient statistics in the backward.
+
+    Debugging aid: insert it anywhere in a model to see the min, max and mean of
+    the gradient flowing through that point, without altering the computation.
+    Useful for locating where gradients vanish or blow up in a deep or
+    distributed stack.
+
+    Call via ``gradient_print_wrapper.apply(x, msg)``.
+    """
 
     @staticmethod
     @torch.compiler.disable
     def forward(x, msg=""):
+        r"""
+        Return the input unchanged.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Tensor to pass through.
+        msg : str, optional
+            Label included in the backward-pass printout.
+
+        Returns
+        -------
+        torch.Tensor
+            ``x``, unchanged.
+        """
         return x
 
     @staticmethod
     def setup_context(ctx, inputs, output):
+        r"""
+        Stash the label for use in the backward pass.
+
+        Parameters
+        ----------
+        ctx : torch.autograd.function.FunctionCtx
+            Autograd context.
+        inputs : tuple
+            The forward arguments ``(x, msg)``.
+        output : torch.Tensor
+            The forward result; unused.
+        """
         _, msg = inputs
         ctx.msg = msg
 
     @staticmethod
     @torch.compiler.disable
     def backward(ctx, go):
+        r"""
+        Print gradient statistics and pass the gradient through unchanged.
+
+        Parameters
+        ----------
+        ctx : torch.autograd.function.FunctionCtx
+            Autograd context carrying the label.
+        go : torch.Tensor
+            Incoming gradient.
+
+        Returns
+        -------
+        tuple
+            ``(go, None)`` -- the gradient unchanged, and ``None`` for the
+            non-tensor ``msg`` argument.
+        """
         msg = ctx.msg
         print(f"Gradient stats for {msg}: min: {go.min()}, max: {go.max()}, mean: {go.mean()}")
         return go, None
@@ -246,6 +328,52 @@ def init_gradient_reduction_hooks(
     static_graph=False,
     verbose=None,
 ):
+    r"""
+    Wrap a model in DDP with the gradient reductions model parallelism requires.
+
+    Plain DDP reduces every gradient over the data-parallel group, which is
+    wrong once model parallelism is in play: a parameter replicated across model
+    ranks accumulates a gradient contribution on each of them, so it must also
+    be reduced over the group it is shared across, while a sharded parameter
+    must not be. This function inspects the ``is_shared_mp`` annotation each
+    layer stamps on its parameters and installs a communication hook that
+    performs the right reduction per parameter.
+
+    Two cases avoid the hook entirely: with no model parallelism, or when *all*
+    parameters are shared across all model ranks. In the latter case the correct
+    result is obtained by scaling gradients by the model group size and letting
+    ordinary DDP handle the rest, which is cheaper than a custom hook.
+
+    Parameters
+    ----------
+    model : torch.nn.Module
+        Model to wrap. Parameters without an ``is_shared_mp`` annotation are
+        assumed to be shared across all model ranks.
+    device : torch.device
+        Device the model lives on.
+    reduction_buffer_count : int, optional
+        Number of DDP gradient buckets, by default ``1``. Forced to ``1`` when
+        custom hooks are needed, since the hook reduces per parameter.
+    broadcast_buffers : bool, optional
+        Broadcast buffers from rank 0 at each forward, by default ``True``.
+        Disabled automatically when custom hooks are needed, as sharded buffers
+        legitimately differ across ranks.
+    find_unused_parameters : bool, optional
+        Passed to DDP, by default ``False``.
+    gradient_as_bucket_view : bool, optional
+        Passed to DDP, by default ``True``.
+    static_graph : bool, optional
+        Passed to DDP, by default ``False``.
+    verbose : bool, optional
+        Log the sharing modes and hook setup. Defaults to the debug setting in
+        the mpu config.
+
+    Returns
+    -------
+    torch.nn.Module
+        The wrapped model, or the original model unchanged if torch.distributed
+        is not initialized.
+    """
     # early exit if we are not in a distributed setting:
     if not dist.is_initialized():
         return model

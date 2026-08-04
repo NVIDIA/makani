@@ -35,10 +35,82 @@ import torch_harmonics.distributed as thd
 
 
 class SpectralConv(nn.Module):
-    """
-    Spectral Convolution implemented via SHT or FFT. Designed for convolutions on the two-sphere S2
-    using the Spherical Harmonic Transforms in torch-harmonics, but supports convolutions on the periodic
-    domain via the RealFFT2 and InverseRealFFT2 wrappers.
+    r"""
+    Spectral convolution implemented via SHT or FFT.
+
+    Convolution in grid space is multiplication in spectral space, so this layer
+    transforms the input, multiplies by learned coefficients, and transforms
+    back:
+
+    .. math::
+
+        y = \mathcal{F}^{-1}\bigl( W \cdot \mathcal{F}(x) \bigr)
+
+    The learned weights therefore act globally on the field at a cost set by the
+    transform rather than by a kernel radius. Designed for convolutions on the
+    two-sphere :math:`S^2` using the spherical harmonic transforms in
+    torch-harmonics, but it works on the periodic plane too if the
+    :class:`~makani.models.common.fft.RealFFT2` /
+    :class:`~makani.models.common.fft.InverseRealFFT2` wrappers are passed
+    instead -- the layer only requires the transform interface, not sphericity.
+
+    Two weight layouts are available via ``operator_type``:
+
+    * ``"dhconv"`` -- one weight per spherical degree :math:`l`, shared across
+      orders :math:`m`. This is exactly the condition for the operator to be a
+      genuine convolution on :math:`S^2` (rotationally equivariant), and it
+      keeps the parameter count linear in ``lmax``.
+    * ``"diagonal"`` -- an independent weight per :math:`(l, m)` pair. More
+      expressive, but no longer rotation-equivariant.
+
+    Transforms run in fp32 with autocast disabled: the SHT is a long
+    accumulation over quadrature points, and doing it in reduced precision
+    loses accuracy in the high-degree coefficients. Only the contraction runs
+    in the surrounding precision.
+
+    Parameters
+    ----------
+    forward_transform : torch.nn.Module
+        Grid-to-spectral transform (e.g. ``RealSHT`` or ``RealFFT2``).
+    inverse_transform : torch.nn.Module
+        Spectral-to-grid transform. May target a different resolution or grid
+        than ``forward_transform``, in which case the residual is resampled
+        accordingly.
+    in_channels : int
+        Number of input channels. Must be divisible by ``num_groups``.
+    out_channels : int
+        Number of output channels. Must be divisible by ``num_groups``.
+    num_groups : int, optional
+        Number of channel groups mixed independently, by default ``1``.
+    operator_type : str, optional
+        ``"dhconv"`` (default) or ``"diagonal"``; see above.
+    separable : bool, optional
+        If ``True``, apply one weight per input channel instead of mixing
+        channels, making the layer depthwise. Requires
+        ``out_channels == in_channels``. By default ``False``.
+    bias : bool, optional
+        If ``True``, add a learned per-channel bias in grid space, by default
+        ``False``.
+    gain : float, optional
+        Scales the variance of the weight initialization, by default ``1.0``.
+
+    Returns
+    -------
+    See ``forward``, which returns both the transformed output and a residual.
+
+    Raises
+    ------
+    ValueError
+        If the channel counts are not divisible by ``num_groups``, if the
+        inverse transform's mode counts disagree with the forward transform's,
+        or if ``operator_type`` is unsupported.
+
+    Notes
+    -----
+    Under model parallelism the weight is sharded along its spectral dimensions
+    (``h`` for degrees, ``w`` for orders) and marked shared over the groups it
+    is replicated across, so gradients are reduced correctly. For ``"dhconv"``
+    there is no order dimension, hence the weight is shared over ``w``.
     """
 
     def __init__(
@@ -139,6 +211,26 @@ class SpectralConv(nn.Module):
             self.bias.sharded_dims_mp = [None, None, None, None]
 
     def forward(self, x):
+        r"""
+        Transform, apply the learned spectral weights, and transform back.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input field of shape ``(B, in_channels, nlat, nlon)`` on the grid
+            the forward transform was constructed for.
+
+        Returns
+        -------
+        x : torch.Tensor
+            Output field of shape ``(B, out_channels, nlat_out, nlon_out)``.
+        residual : torch.Tensor
+            The input, resampled onto the output grid if the forward and
+            inverse transforms differ in resolution or grid type, and returned
+            unchanged otherwise. Returned so the caller can form its own skip
+            connection at the correct resolution, which it could not do itself
+            without repeating the transform.
+        """
         dtype = x.dtype
         residual = x
 
@@ -173,8 +265,65 @@ class SpectralConv(nn.Module):
 
 
 class SpectralAttention(nn.Module):
-    """
-    Spherical non-linear FNO layer
+    r"""
+    Nonlinear spectral layer: an MLP applied in spherical harmonic space.
+
+    Where :class:`SpectralConv` multiplies the spectrum by a fixed learned
+    factor, this layer runs a small complex-valued MLP over the coefficients,
+
+    .. math::
+
+        y = \mathcal{F}^{-1}\bigl( \mathrm{MLP}(\mathcal{F}(x)) \bigr)
+
+    with complex activations between the layers. Interleaving nonlinearities
+    with the channel mixing lets modes interact rather than each being scaled
+    independently, which is what the "attention" in the name refers to -- it is
+    not dot-product attention.
+
+    Two weight layouts are available via ``operator_type``:
+
+    * ``"diagonal"`` -- one weight matrix shared across all modes.
+    * ``"l-dependant"`` -- an independent weight matrix per spherical degree
+      :math:`l`, so the channel mixing can vary with spatial scale. Costs a
+      factor of ``lmax`` more parameters.
+
+    Parameters
+    ----------
+    forward_transform : torch.nn.Module
+        Grid-to-spectral transform.
+    inverse_transform : torch.nn.Module
+        Spectral-to-grid transform. May target a different resolution or grid.
+    in_channels : int
+        Number of input channels.
+    out_channels : int
+        Number of output channels.
+    operator_type : str, optional
+        ``"diagonal"`` (default) or ``"l-dependant"``; see above.
+    hidden_size_factor : int, optional
+        Hidden width of the spectral MLP as a multiple of ``in_channels``, by
+        default ``2``.
+    complex_activation : str, optional
+        Mode passed to :class:`~makani.models.common.activations.ComplexReLU`,
+        by default ``"real"``.
+    bias : bool, optional
+        If ``True``, add a learned complex bias in each spectral layer, by
+        default ``False``.
+    spectral_layers : int, optional
+        Number of hidden layers in the spectral MLP, by default ``1``.
+    drop_rate : float, optional
+        Dropout probability applied after each activation, by default ``0.0``.
+    gain : float, optional
+        Scales the variance of the output weight's initialization, by default ``1.0``.
+
+    Raises
+    ------
+    ValueError
+        If the inverse transform's mode counts disagree with the forward
+        transform's, or if ``operator_type`` is unknown.
+
+    See Also
+    --------
+    SpectralConv : the linear, cheaper spectral layer.
     """
 
     def __init__(
@@ -282,6 +431,23 @@ class SpectralAttention(nn.Module):
         self.drop = nn.Dropout(drop_rate) if drop_rate > 0.0 else nn.Identity()
 
     def forward_mlp(self, x):
+        r"""
+        Run the complex-valued MLP on spectral coefficients.
+
+        Exposed separately from ``forward`` so the spectral MLP can be applied
+        to coefficients that are already in spectral space, without paying for a
+        transform round trip.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Complex coefficients of shape ``(B, in_channels, lmax, mmax)``.
+
+        Returns
+        -------
+        torch.Tensor
+            Complex coefficients of shape ``(B, out_channels, lmax, mmax)``.
+        """
         B, C, H, W = x.shape
 
         xr = torch.view_as_real(x)
@@ -304,6 +470,23 @@ class SpectralAttention(nn.Module):
         return x
 
     def forward(self, x):
+        r"""
+        Transform, apply the spectral MLP, and transform back.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input field of shape ``(B, in_channels, nlat, nlon)``.
+
+        Returns
+        -------
+        x : torch.Tensor
+            Output field of shape ``(B, out_channels, nlat_out, nlon_out)``.
+        residual : torch.Tensor
+            The input, resampled onto the output grid if the forward and
+            inverse transforms differ, and unchanged otherwise. Returned so the
+            caller can form a skip connection at the correct resolution.
+        """
         dtype = x.dtype
         residual = x
 
@@ -314,8 +497,11 @@ class SpectralAttention(nn.Module):
             if self.scale_residual:
                 residual = self.inverse_transform(x)
 
-        # convert back
-        x = x.to(dtype=dtype)
+        # convert back. Only the residual is cast here: x still holds the complex
+        # spectral coefficients that forward_mlp consumes via view_as_real, so
+        # casting it to the (real) input dtype at this point would discard the
+        # imaginary part. It is cast once after the inverse transform below,
+        # matching SpectralConv.forward.
         if self.scale_residual:
             residual = residual.to(dtype=dtype)
 

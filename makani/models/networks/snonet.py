@@ -48,6 +48,57 @@ def _compute_cutoff_radius(nlat, kernel_shape, basis_type):
 
 
 class DiscreteContinuousEncoder(nn.Module):
+    r"""
+    Encoder built on a discrete-continuous convolution on the sphere.
+
+    Lifts input variables into the model's latent width while resampling from
+    the data grid onto the (typically coarser) model grid. Unlike an ordinary
+    convolution, a discrete-continuous convolution is defined by a *continuous*
+    kernel evaluated at the actual angular positions of the grid points, so
+    input and output grids need not agree and the operator remains a genuine
+    spherical convolution rather than an approximation on a lat-lon array.
+
+    The kernel cutoff radius is derived from the input resolution and kernel
+    shape, so the receptive field stays consistent across resolutions.
+
+    Parameters
+    ----------
+    inp_shape : (int, int), optional
+        Input grid as ``(nlat, nlon)``, by default ``(721, 1440)``.
+    out_shape : (int, int), optional
+        Output grid as ``(nlat, nlon)``, by default ``(480, 960)``.
+    grid_in : str, optional
+        Input grid type, by default ``"equiangular"``.
+    grid_out : str, optional
+        Output grid type, by default ``"equiangular"``.
+    inp_chans : int, optional
+        Number of input channels, by default ``2``.
+    out_chans : int, optional
+        Number of output channels, by default ``2``.
+    kernel_shape : (int, int), optional
+        Shape of the continuous kernel, by default ``(3, 3)``.
+    basis_type : str, optional
+        Basis the kernel is expanded in, by default ``"harmonic"``.
+    basis_norm_mode : str, optional
+        Basis normalization mode, by default ``"mean"``.
+    use_mlp : bool, optional
+        Follow the convolution with an activation and a pointwise MLP, by
+        default ``False``. When enabled the convolution weights are scaled by
+        :math:`\sqrt{2}` to compensate for the variance the activation removes.
+    mlp_ratio : float, optional
+        Hidden width of that MLP as a multiple of ``out_chans``, by default ``2.0``.
+    activation_function : callable, optional
+        Activation constructor, by default :class:`torch.nn.GELU`.
+    groups : int, optional
+        Number of convolution groups, by default ``1``.
+    bias : bool, optional
+        Whether the convolution carries a bias, by default ``False``.
+
+    See Also
+    --------
+    DiscreteContinuousDecoder : the corresponding decoder.
+    """
+
     def __init__(
         self,
         inp_shape=(721, 1440),
@@ -111,6 +162,19 @@ class DiscreteContinuousEncoder(nn.Module):
             )
 
     def forward(self, x):
+        r"""
+        Encode the input field onto the model grid.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input of shape ``(B, inp_chans, *inp_shape)``.
+
+        Returns
+        -------
+        torch.Tensor
+            Encoded field of shape ``(B, out_chans, *out_shape)``.
+        """
 
         # perform conv
         x = self.conv(x)
@@ -125,6 +189,56 @@ class DiscreteContinuousEncoder(nn.Module):
 
 
 class DiscreteContinuousDecoder(nn.Module):
+    r"""
+    Decoder built on a discrete-continuous convolution on the sphere.
+
+    Mirror of :class:`DiscreteContinuousEncoder`: projects latent features back
+    to output variables while resampling from the model grid onto the (typically
+    finer) data grid. The upsampling step is applied before the convolution and
+    runs in fp32 with autocast disabled, since it is a long accumulation whose
+    accuracy the output depends on directly.
+
+    Parameters
+    ----------
+    inp_shape : (int, int), optional
+        Input grid as ``(nlat, nlon)``, by default ``(480, 960)``.
+    out_shape : (int, int), optional
+        Output grid as ``(nlat, nlon)``, by default ``(721, 1440)``.
+    grid_in : str, optional
+        Input grid type, by default ``"equiangular"``.
+    grid_out : str, optional
+        Output grid type, by default ``"equiangular"``.
+    inp_chans : int, optional
+        Number of input channels, by default ``2``.
+    out_chans : int, optional
+        Number of output channels, by default ``2``.
+    kernel_shape : (int, int), optional
+        Shape of the continuous kernel, by default ``(3, 3)``.
+    basis_type : str, optional
+        Basis the kernel is expanded in, by default ``"harmonic"``.
+    basis_norm_mode : str, optional
+        Basis normalization mode, by default ``"mean"``.
+    use_mlp : bool, optional
+        Precede the convolution with a pointwise MLP and activation, by
+        default ``False``.
+    mlp_ratio : float, optional
+        Hidden width of that MLP as a multiple of ``inp_chans``, by default ``2.0``.
+    activation_function : callable, optional
+        Activation constructor, by default :class:`torch.nn.GELU`.
+    groups : int, optional
+        Number of convolution groups, by default ``1``.
+    bias : bool, optional
+        Whether the convolution carries a bias, by default ``False``.
+    upsample_sht : bool, optional
+        Upsample spectrally via an SHT rather than by interpolation, by default
+        ``False``. Spectral upsampling is exact for band-limited fields but
+        costs more.
+
+    See Also
+    --------
+    DiscreteContinuousEncoder : the corresponding encoder.
+    """
+
     def __init__(
         self,
         inp_shape=(480, 960),
@@ -209,6 +323,20 @@ class DiscreteContinuousDecoder(nn.Module):
                 self.conv.bias.sharded_dims_mp = [None]
 
     def forward(self, x):
+        r"""
+        Decode latent features onto the output grid.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Latent field of shape ``(B, inp_chans, *inp_shape)``.
+
+        Returns
+        -------
+        torch.Tensor
+            Output field of shape ``(B, out_chans, *out_shape)``, cast back to
+            the dtype of ``x``.
+        """
         dtype = x.dtype
 
         if hasattr(self, "act"):
@@ -227,6 +355,63 @@ class DiscreteContinuousDecoder(nn.Module):
 
 
 class NeuralOperatorBlock(nn.Module):
+    r"""
+    Processor block mixing spatially via either a local or a global operator.
+
+    The building block of :class:`SphericalNeuralOperatorNet`. Unlike the SFNO
+    block, which always mixes globally in spectral space, this one lets
+    ``conv_type`` choose between a discrete-continuous convolution with a
+    bounded angular footprint (``"local"``) and a spectral convolution acting on
+    all modes at once (``"global"``). Stacking both kinds lets a model resolve
+    fine local structure and long-range teleconnections without paying global
+    cost at every layer.
+
+    Parameters
+    ----------
+    forward_transform : torch.nn.Module
+        Grid-to-spectral transform; also defines the input grid.
+    inverse_transform : torch.nn.Module
+        Spectral-to-grid transform; also defines the output grid, which may
+        differ in resolution.
+    inp_chans : int
+        Number of input channels.
+    out_chans : int
+        Number of output channels.
+    conv_type : str, optional
+        ``"local"`` (default) for a discrete-continuous convolution,
+        ``"global"`` for a spectral convolution.
+    mlp_ratio : float, optional
+        Hidden width of the channel MLP as a multiple of the channel count, by
+        default ``2.0``.
+    mlp_drop_rate : float, optional
+        Dropout probability inside the MLP, by default ``0.0``.
+    path_drop_rate : float, optional
+        Stochastic depth probability, by default ``0.0``.
+    act_layer : callable, optional
+        Activation constructor, by default :class:`torch.nn.GELU`.
+    norm_layer : callable, optional
+        Normalization constructor, by default :class:`torch.nn.Identity`.
+    num_groups : int, optional
+        Number of channel groups in the convolution, by default ``1``.
+    skip : str, optional
+        Skip connection type, by default ``"identity"``.
+    layer_scale : bool, optional
+        Apply a learned per-channel scale to the branch output, by default
+        ``True``. Initialized small so the block starts near the identity.
+    use_mlp : bool, optional
+        Include the channel MLP, by default ``False``.
+    kernel_shape : (int, int), optional
+        Kernel shape for the local convolution, by default ``(3, 3)``.
+    basis_type : str, optional
+        Basis for the local convolution kernel, by default ``"harmonic"``.
+    basis_norm_mode : str, optional
+        Basis normalization mode, by default ``"mean"``.
+    checkpointing_level : int, optional
+        Gradient checkpointing aggressiveness, by default ``0``.
+    bias : bool, optional
+        Whether the convolution carries a bias, by default ``False``.
+    """
+
     def __init__(
         self,
         forward_transform,
@@ -654,12 +839,44 @@ class SphericalNeuralOperatorNet(nn.Module):
         return x
 
     def clamp_water_channels(self, x):
+        r"""
+        Clamp water-related output channels to non-negative values.
+
+        Quantities such as specific humidity and precipitation cannot be
+        negative, but nothing in the network guarantees that. Applying a ReLU to
+        exactly those channels enforces it in the architecture rather than
+        relying on the loss. A no-op if no water channel mask is configured.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Output field of shape ``(B, out_chans, nlat, nlon)``.
+
+        Returns
+        -------
+        torch.Tensor
+            Tensor of the same shape, with the masked channels clamped at zero
+            and all others untouched.
+        """
         if hasattr(self, "water_channel_mask"):
             w = nn.functional.relu(x)
             x = torch.where(self.water_channel_mask, w, x)
         return x
 
     def forward(self, x):
+        r"""
+        Map an input field to the predicted output field.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input of shape ``(B, inp_chans, nlat, nlon)`` on ``inp_shape``.
+
+        Returns
+        -------
+        torch.Tensor
+            Prediction of shape ``(B, out_chans, nlat, nlon)`` on ``out_shape``.
+        """
         dtype = x.dtype
 
         # save big skip

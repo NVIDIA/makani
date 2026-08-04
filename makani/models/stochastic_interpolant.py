@@ -23,8 +23,25 @@ from makani.models import Preprocessor2D
 from makani.models.noise import IsotropicGaussianRandomFieldS2 as IGRF
 
 
-# useful helper function
 def expand_time(x: torch.Tensor, n_samples: int) -> torch.Tensor:
+    r"""
+    Replicate a tensor along a new sample dimension after the batch.
+
+    Used to evaluate several interpolant time samples per batch element: the
+    input is repeated so each sample can be paired with a different time.
+
+    Parameters
+    ----------
+    x : torch.Tensor
+        Input of shape ``(B, ...)``.
+    n_samples : int
+        Number of copies.
+
+    Returns
+    -------
+    torch.Tensor
+        Tensor of shape ``(B, n_samples, ...)``.
+    """
     shape = x.shape
     x = x.unsqueeze(1).repeat(1, n_samples, *[1 for _ in shape[1:]])
 
@@ -32,6 +49,21 @@ def expand_time(x: torch.Tensor, n_samples: int) -> torch.Tensor:
 
 
 def expand_batch(x: torch.Tensor, n_batch: int) -> torch.Tensor:
+    r"""
+    Replicate a tensor along a new leading batch dimension.
+
+    Parameters
+    ----------
+    x : torch.Tensor
+        Input of any shape.
+    n_batch : int
+        Number of copies.
+
+    Returns
+    -------
+    torch.Tensor
+        Tensor of shape ``(n_batch, *x.shape)``.
+    """
     shape = x.shape
     x = x.unsqueeze(0).repeat(n_batch, 1, *[1 for _ in shape[1:]])
 
@@ -39,6 +71,28 @@ def expand_batch(x: torch.Tensor, n_batch: int) -> torch.Tensor:
 
 
 def expand_batch_space(x: torch.Tensor, n_batch: int, n_lat: int, n_lon: int) -> torch.Tensor:
+    r"""
+    Broadcast a per-time, per-channel tensor over batch and space.
+
+    Turns a table of scalars indexed by time step and channel into a full field,
+    so it can be combined elementwise with gridded data.
+
+    Parameters
+    ----------
+    x : torch.Tensor
+        Input of shape ``(T, C)``.
+    n_batch : int
+        Batch size to expand to.
+    n_lat : int
+        Number of latitudes.
+    n_lon : int
+        Number of longitudes.
+
+    Returns
+    -------
+    torch.Tensor
+        Tensor of shape ``(n_batch, T, C, n_lat, n_lon)``.
+    """
     T, C = x.shape
     x = x.reshape(1, T, C, 1, 1).repeat(n_batch, 1, 1, n_lat, n_lon)
 
@@ -198,14 +252,49 @@ class StochasticInterpolantWrapper(nn.Module):
         self.dgamma_fn = lambda s: torch.sqrt(s) * self.dsigma_fn(s)
 
     def get_internal_rng(self, gpu=True):
+        r"""
+        Return the noise module's private generator.
+
+        Parameters
+        ----------
+        gpu : bool, optional
+            Return the CUDA generator if ``True`` (the default), otherwise the
+            CPU generator.
+
+        Returns
+        -------
+        torch.Generator
+            The generator driving the interpolant's noise.
+        """
         if gpu:
             return self.noise_module.rng_gpu
         else:
             return self.noise_module.rng_cpu
 
-    # only used in Foellmer process: compute q^2 instead of g
-    # @torch.compile
     def gsq_fn(self, s: torch.Tensor, foellmer=False) -> torch.Tensor:
+        r"""
+        Squared diffusion coefficient of the sampling SDE.
+
+        The interpolant admits a family of samplers that share the same marginal
+        distributions but differ in how much noise they inject; ``gsq_fn``
+        selects one. The default is :math:`g^2(s) = \sigma^2(s)`. The Föllmer
+        choice instead returns :math:`q^2(s)`, the diffusion of the Föllmer
+        process, which drives the sample toward the target with a different
+        noise schedule.
+
+        Parameters
+        ----------
+        s : torch.Tensor
+            Interpolant time in :math:`[0, 1]`.
+        foellmer : bool, optional
+            Use the Föllmer coefficient rather than :math:`\sigma^2`, by
+            default ``False``.
+
+        Returns
+        -------
+        torch.Tensor
+            Squared diffusion coefficient, same shape as ``s``.
+        """
         if foellmer:
             term1 = (
                 2.0 * torch.square(self.sigma_fn(s)) * torch.where(s > 0, s * self.dbeta_fn(s) / self.beta_fn(s), 2.0)
@@ -217,8 +306,34 @@ class StochasticInterpolantWrapper(nn.Module):
 
         return result
 
-    # @torch.compile
     def dlog_rho(self, x: torch.Tensor, x0: torch.Tensor, b: torch.Tensor, s: torch.Tensor) -> torch.Tensor:
+        r"""
+        Score function :math:`\nabla_x \log \rho_s(x)` of the interpolant density.
+
+        Recovered algebraically from the learned drift ``b`` rather than
+        estimated separately: for a Gaussian stochastic interpolant the drift
+        and the score are related by a closed-form expression in the schedule
+        functions, so one network suffices for both. The score is what turns the
+        probability-flow ODE into an SDE sampler.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Current state along the interpolant path.
+        x0 : torch.Tensor
+            Base sample the path starts from.
+        b : torch.Tensor
+            Drift predicted by the model at ``(x, s)``.
+        s : torch.Tensor
+            Interpolant time, strictly inside :math:`(0, 1)`. The expression is
+            singular at both endpoints, which the samplers avoid by never
+            evaluating there.
+
+        Returns
+        -------
+        torch.Tensor
+            The score, same shape as ``x``.
+        """
         # we never call this at s=0 or s=1, so everything is fine
         As = 1.0 / (s * self.sigma_fn(s) * (self.dbeta_fn(s) * self.sigma_fn(s) - self.beta_fn(s) * self.dsigma_fn(s)))
         cs = x * self.dbeta_fn(s) + (self.beta_fn(s) * self.dalpha_fn(s) - self.dbeta_fn(s) * self.alpha_fn(s)) * x0
@@ -387,6 +502,43 @@ class StochasticInterpolantWrapper(nn.Module):
         return x
 
     def forward(self, inp, tar=None, n_samples=1, n_steps=1):
+        r"""
+        Train on interpolant samples, or generate a forecast by integrating the SDE.
+
+        The two modes are genuinely different computations, selected by the
+        module's training mode. In training, interpolant times are sampled and
+        the model learns to predict the drift at those times, so ``tar`` is
+        required and ``n_samples`` controls how many times are drawn per batch
+        element. In evaluation, no target exists: the sampler integrates the
+        interpolant from the base distribution to the target distribution in
+        ``n_steps`` steps, and ``n_samples`` is unused.
+
+        Both noise sources are resized to the current input batch and redrawn
+        from their stationary distribution on entry, so callers that fold an
+        ensemble dimension into the batch can pass a ``(B * E, ...)`` input
+        without managing noise state themselves.
+
+        Parameters
+        ----------
+        inp : torch.Tensor
+            Input of shape ``(B, inp_chans, nlat, nlon)``.
+        tar : torch.Tensor, optional
+            Target of shape ``(B, out_chans, nlat, nlon)``. Required in
+            training mode, ignored in evaluation mode.
+        n_samples : int, optional
+            Number of interpolant time samples per batch element during
+            training, by default ``1``.
+        n_steps : int, optional
+            Number of integration steps during evaluation, by default ``1``.
+
+        Returns
+        -------
+        torch.Tensor or tuple of torch.Tensor
+            In training mode, a ``(drift_pred, drift)`` pair -- the model's
+            predicted drift and the analytic drift of the interpolant path --
+            for the loss to compare. In evaluation mode, the generated forecast
+            of shape ``(B, out_chans, nlat, nlon)``.
+        """
         # Keep both noise sources sized to the current input batch so callers that
         # fold an ensemble dim into the batch (e.g. stochastic_trainer.validate_one_epoch)
         # can hand us a (B*E, ...) input without any state-resize plumbing of their own.

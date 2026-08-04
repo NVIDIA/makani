@@ -35,8 +35,19 @@ logger = logging.getLogger(__name__)
 
 
 class LocalPackage:
-    """
-    Implements the modulus Package interface.
+    r"""
+    Filesystem-backed model package, implementing the PhysicsNeMo Package interface.
+
+    A model package bundles everything needed to run a trained model outside the
+    training environment: the checkpoint, the config, the normalization
+    statistics, and the static fields. This class resolves the well-known
+    filenames within a package directory, so consumers refer to package members
+    by name rather than hard-coding the layout.
+
+    Parameters
+    ----------
+    root : str
+        Path to the package directory.
     """
 
     # These define the model package in terms of where makani expects the files to be located
@@ -54,6 +65,20 @@ class LocalPackage:
         self.root = root
 
     def get(self, path):
+        r"""
+        Resolve a package-relative path to an absolute one.
+
+        Parameters
+        ----------
+        path : str
+            Path relative to the package root, typically one of the class-level
+            filename constants.
+
+        Returns
+        -------
+        str
+            The absolute path. Existence is not checked.
+        """
         return os.path.join(self.root, path)
 
     @staticmethod
@@ -77,8 +102,25 @@ class LocalPackage:
 
 
 class ModelWrapper(torch.nn.Module):
-    """
+    r"""
     Model wrapper to make inference simple outside of makani.
+
+    Presents a trained model as a plain callable that takes physical fields and
+    a valid time, so downstream consumers do not need makani's training
+    machinery. The wrapper owns the pieces that would otherwise be the caller's
+    problem: input and output normalization, the lat-lon grid definition, and
+    the solar zenith angle channel, which has to be computed from the valid time
+    rather than read from the data.
+
+    Parameters
+    ----------
+    model : torch.nn.Module
+        ML model that is wrapped.
+    params : ParamsBase
+        Parameter object containing information on how the model was
+        initialized in makani. Params assembled outside
+        :func:`load_model_package` (e.g. by earth2studio) are tolerated and do
+        not need to carry the resampled shapes.
 
     Attributes
     ----------
@@ -86,6 +128,12 @@ class ModelWrapper(torch.nn.Module):
         ML model that is wrapped.
     params : ParamsBase
         parameter object containing information on how the model was initialized in makani
+    lats : numpy.ndarray
+        Latitudes of the model grid, taken from ``params`` if present and
+        otherwise assumed equiangular from 90 to -90.
+    lons : numpy.ndarray
+        Longitudes of the model grid, taken from ``params`` if present and
+        otherwise assumed equiangular from 0 to 360.
 
     Methods
     -------
@@ -136,14 +184,39 @@ class ModelWrapper(torch.nn.Module):
 
     @property
     def in_channels(self):
+        r"""
+        Names of the input channels.
+
+        Returns
+        -------
+        list of str or None
+            Channel names, or ``None`` if the config does not record them.
+        """
         return self.params.get("channel_names", None)
 
     @property
     def out_channels(self):
+        r"""
+        Names of the output channels.
+
+        Returns
+        -------
+        list of str or None
+            Channel names, or ``None`` if the config does not record them.
+        """
         return self.params.get("channel_names", None)
 
     @property
     def timestep(self):
+        r"""
+        Model time step in hours.
+
+        Returns
+        -------
+        int or float
+            ``dt * dhours``: the number of data steps per model step times the
+            spacing of the data in hours.
+        """
         return self.params.dt * self.params.dhours
 
     def update_state(self, replace_state=True, batch_size=None):
@@ -159,6 +232,19 @@ class ModelWrapper(torch.nn.Module):
         return
 
     def set_rng(self, reset=True, seed=333):
+        r"""
+        Re-seed the model's stochastic noise, optionally clearing its state.
+
+        Use this to make an ensemble member reproducible, or to decorrelate
+        members by giving each a distinct seed.
+
+        Parameters
+        ----------
+        reset : bool, optional
+            Also zero the noise state, by default ``True``.
+        seed : int, optional
+            New seed, by default ``333``.
+        """
         self.model.preprocessor.set_rng(reset=reset, seed=seed)
         return
 
