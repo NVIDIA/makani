@@ -84,7 +84,14 @@ class StochasticPhysics(nn.Module):
 
         # precompute the index that gathers the predicted variables' current-timestep state
         # out of the raw (physical) input, aligned 1:1 with the model output channels.
-        self.register_buffer("baseline_index", self._build_baseline_index(params), persistent=False)
+        baseline_index = self._build_baseline_index(params)
+        self.register_buffer("baseline_index", baseline_index, persistent=False)
+
+        # Stash the largest index as a plain Python int. The validation in _baseline needs it
+        # on every forward, and reading it off the buffer there would call Tensor.item(),
+        # which is a data-dependent value dynamo cannot trace -- it graph-breaks the whole
+        # step. The buffer is fixed at construction, so the bound is a constant.
+        self._baseline_index_max = int(baseline_index.max())
 
     @staticmethod
     def _build_baseline_index(params):
@@ -133,10 +140,10 @@ class StochasticPhysics(nn.Module):
 
     def _baseline(self, inp):
         torch._check(
-            inp.shape[1] > int(self.baseline_index.max()),
+            inp.shape[1] > self._baseline_index_max,
             lambda: (
                 f"StochasticPhysics: input has {inp.shape[1]} channels but the persistence "
-                f"baseline needs index {int(self.baseline_index.max())}. The raw prognostic "
+                f"baseline needs index {self._baseline_index_max}. The raw prognostic "
                 f"input layout does not match the configured channels."
             ),
         )
