@@ -299,7 +299,10 @@ class PatchEmbed2D(nn.Module):
         # forward pass
         x = self.proj(x)
         if self.norm is not None:
-            x = self.norm(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
+            # permute back leaves channels-last strides; restore contiguous format so the
+            # tag does not propagate into downstream convolutions, whose weight gradients
+            # would then be tagged channels_last and defeat DDP's gradient_as_bucket_view.
+            x = self.norm(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2).contiguous()
         # flatten: new: B, C, H*W
         if self.flatten:
             x = x.flatten(2)
@@ -401,7 +404,9 @@ class PatchEmbed3D(nn.Module):
             x = self.pad(x)
         x = self.proj(x)
         if self.norm:
-            x = self.norm(x.permute(0, 2, 3, 4, 1)).permute(0, 4, 1, 2, 3)
+            # see PatchEmbed2D.forward: restore contiguous format after the round trip so
+            # the channels-last tag does not propagate into downstream convolutions.
+            x = self.norm(x.permute(0, 2, 3, 4, 1)).permute(0, 4, 1, 2, 3).contiguous()
         return x
 
 
@@ -1060,8 +1065,10 @@ class DownSample2D(nn.Module):
                 lambda: f"Input shape {x.shape} does not match expected input resolution {self.input_resolution}.",
             )
 
-        # Padding the input to facilitate downsampling
-        x = self.pad(x.permute(0, -1, 1, 2)).permute(0, 2, 3, 1)
+        # Padding the input to facilitate downsampling. The permute back leaves
+        # channels-last strides, so make the layout explicit before the reshapes below --
+        # which would otherwise force the copy implicitly anyway.
+        x = self.pad(x.permute(0, -1, 1, 2)).permute(0, 2, 3, 1).contiguous()
         x = x.reshape(B, out_lat, 2, out_lon, 2, C).permute(0, 1, 3, 2, 4, 5)
         x = x.reshape(B, out_lat * out_lon, 4 * C)
 

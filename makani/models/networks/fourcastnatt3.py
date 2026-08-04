@@ -165,11 +165,23 @@ class FiLM(nn.Module):
         Returns
         -------
         torch.Tensor
-            Modulated features of the same shape as ``x``. Equal to ``x`` at
-            initialization, since the projection starts at zero.
+            Modulated features of the same shape as ``x``, in contiguous memory
+            format. Equal to ``x`` at initialization, since the projection
+            starts at zero.
+
+        Notes
+        -----
+        The result is forced contiguous. ``chunk`` returns strided views into
+        the projection output, and an elementwise op fed by those can produce a
+        result whose memory format is not plain contiguous. That format then
+        propagates into the 1x1 convolutions downstream, which makes cuDNN hand
+        back weight gradients tagged ``channels_last``; DDP compares those
+        strides against its bucket view, finds a mismatch, and silently falls
+        back to a copy instead of using ``gradient_as_bucket_view``. Normalizing
+        here is a no-op when the result is already contiguous.
         """
         gamma, beta = self.proj(cond).chunk(2, dim=1)
-        return x * (1.0 + gamma) + beta
+        return (x * (1.0 + gamma) + beta).contiguous()
 
 
 class PreLNMLP(nn.Module):
