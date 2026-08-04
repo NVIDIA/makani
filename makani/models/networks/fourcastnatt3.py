@@ -30,7 +30,7 @@ import torch_harmonics as th
 import torch_harmonics.distributed as thd
 
 # get pre-formulated layers
-#from makani.models.common import GeometricInstanceNormS2
+# from makani.models.common import GeometricInstanceNormS2
 from makani.mpu.layers import DistributedMLP
 
 # more distributed stuff
@@ -38,8 +38,10 @@ from makani.utils import comm
 
 # for annotation of models
 from dataclasses import dataclass
-import physicsnemo
 from physicsnemo import ModelMetaData
+
+from makani.models.physicsnemo_compat import module_from_torch
+
 
 # heuristic for finding theta_cutoff
 def _compute_cutoff_radius(nlat, kernel_shape, basis_type):
@@ -58,6 +60,7 @@ def _run_eager(fn, *args, **kwargs):
     eagerly; the compiled region only sees the real-valued tensors on either side.
     """
     return fn(*args, **kwargs)
+
 
 def _init_low_l_spectral(spec_param, isht, std=0.1, l_cutoff_frac=0.25):
     """
@@ -83,8 +86,7 @@ def _init_low_l_spectral(spec_param, isht, std=0.1, l_cutoff_frac=0.25):
         l_idx = torch.arange(global_l, device=device)
         m_idx = torch.arange(global_m, device=device)
         l_cutoff = max(1, int(global_l * l_cutoff_frac))
-        mask = ((m_idx.view(1, -1) <= l_idx.view(-1, 1)) &
-                (l_idx.view(-1, 1) < l_cutoff))
+        mask = (m_idx.view(1, -1) <= l_idx.view(-1, 1)) & (l_idx.view(-1, 1) < l_cutoff)
         mask_f = mask.view(1, 1, global_l, global_m).float()
 
         # global Gaussian field — identical on every rank (same RNG state)
@@ -96,9 +98,9 @@ def _init_low_l_spectral(spec_param, isht, std=0.1, l_cutoff_frac=0.25):
 
         # slice the local portion held by this rank
         if isinstance(isht, thd.DistributedInverseRealSHT):
-            l_start = sum(isht.l_shapes[:comm.get_rank("h")])
+            l_start = sum(isht.l_shapes[: comm.get_rank("h")])
             l_end = l_start + isht.l_shapes[comm.get_rank("h")]
-            m_start = sum(isht.m_shapes[:comm.get_rank("w")])
+            m_start = sum(isht.m_shapes[: comm.get_rank("w")])
             m_end = m_start + isht.m_shapes[comm.get_rank("w")]
         else:
             l_start, l_end = 0, global_l
@@ -111,15 +113,32 @@ def _init_low_l_spectral(spec_param, isht, std=0.1, l_cutoff_frac=0.25):
 
 
 class FiLM(nn.Module):
-    """
+    r"""
     AdaLN-Zero style spatial FiLM modulation: ``x * (1 + gamma) + beta`` where
     ``(gamma, beta)`` are produced from a conditioning tensor by a 1x1 conv.
 
-    The projection is zero-initialized so the modulation is identity at start —
+    The projection is zero-initialized so the modulation is identity at start --
     the surrounding network trains exactly as it would without conditioning until
     FiLM learns to use it. This is the trick from DiT that lets AdaLN train from
     scratch without instability.
+
+    Parameters
+    ----------
+    cond_dim : int
+        Number of channels in the conditioning tensor.
+    feat_dim : int
+        Number of channels in the modulated feature tensor. The projection emits
+        ``2 * feat_dim`` channels, split into scale and shift.
+    bias : bool, optional
+        Whether the projection carries a bias, by default ``False``. Also
+        zero-initialized when present.
+
+    Notes
+    -----
+    The projection is pointwise, so its parameters are replicated across the
+    spatial model-parallel group and their gradients reduced over it.
     """
+
     def __init__(self, cond_dim, feat_dim, bias=False):
         super().__init__()
         self.proj = nn.Conv2d(cond_dim, 2 * feat_dim, 1, bias=bias)
@@ -132,18 +151,67 @@ class FiLM(nn.Module):
             self.proj.bias.sharded_dims_mp = [None]
 
     def forward(self, x, cond):
+        r"""
+        Modulate features with a conditioning-derived scale and shift.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Features of shape ``(B, feat_dim, H, W)``.
+        cond : torch.Tensor
+            Conditioning tensor of shape ``(B, cond_dim, H, W)``, broadcastable
+            against ``x`` in the spatial dimensions.
+
+        Returns
+        -------
+        torch.Tensor
+            Modulated features of the same shape as ``x``. Equal to ``x`` at
+            initialization, since the projection starts at zero.
+        """
         gamma, beta = self.proj(cond).chunk(2, dim=1)
         return x * (1.0 + gamma) + beta
 
 
 class PreLNMLP(nn.Module):
-    """
+    r"""
     Standard transformer Pre-LN MLP residual: ``x = x + LayerScale(MLP(norm(x)))``.
 
     Used to add a stabilizing residual MLP after the encoder/decoder cross-attention,
     so the latent enters/leaves the deep processor stack with a consistent magnitude
     and the model has additional non-linear capacity at the boundary.
+
+    Parameters
+    ----------
+    chans : int
+        Channel width; the block is shape-preserving.
+    h : int
+        Latitude extent of the grid the block operates on. Used to build the
+        normalization layer.
+    w : int
+        Longitude extent of the grid.
+    mlp_ratio : float, optional
+        Hidden width of the MLP as a multiple of ``chans``, by default ``2.0``.
+    normalization_layer : str, optional
+        Normalization type, by default ``"layer_norm"``.
+    sht_grid_type : str, optional
+        Grid type passed to the normalization layer when it is geometry-aware,
+        by default ``"legendre-gauss"``.
+    act_layer : callable, optional
+        Activation constructor, by default :class:`torch.nn.GELU`.
+    layer_scale : bool, optional
+        Scale the residual branch by a learned per-channel factor, by default
+        ``True``. Initialized small so the block starts near the identity.
+    gain : float, optional
+        Scales the variance of the MLP's output initialization, by default ``0.5``.
+    use_te : bool, optional
+        Use TransformerEngine linears inside the MLP, by default ``False``.
+
+    Notes
+    -----
+    Automatically switches to the tensor-parallel MLP when the ``matmul`` group
+    has more than one rank.
     """
+
     def __init__(
         self,
         chans,
@@ -177,13 +245,24 @@ class PreLNMLP(nn.Module):
             self.layer_scale.weight.sharded_dims_mp = [None, None, None, None]
 
     def forward(self, x):
+        r"""
+        Apply the pre-norm MLP residual.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input of shape ``(B, chans, h, w)``.
+
+        Returns
+        -------
+        torch.Tensor
+            Tensor of the same shape as ``x``.
+        """
         scale = self.layer_scale if hasattr(self, "layer_scale") else nn.Identity()
         return x + scale(self.mlp(self.norm(x)))
 
 
 @torch.compile
-
-
 @torch.compiler.disable(recursive=True)
 def _get_norm_layer_handle(
     h,
@@ -198,19 +277,27 @@ def _get_norm_layer_handle(
     # pick norm layer
     if normalization_layer == "layer_norm":
         from makani.mpu.layer_norm import DistributedLayerNorm
-        norm_layer_handle = partial(DistributedLayerNorm, normalized_shape=(embed_dim), elementwise_affine=True, eps=1e-6)
+
+        norm_layer_handle = partial(
+            DistributedLayerNorm, normalized_shape=(embed_dim), elementwise_affine=True, eps=1e-6
+        )
     elif normalization_layer == "instance_norm":
         if comm.get_size("spatial") > 1:
             from makani.mpu.layer_norm import DistributedInstanceNorm2d
+
             norm_layer_handle = partial(DistributedInstanceNorm2d, num_features=embed_dim, eps=1e-6, affine=True)
         else:
-            norm_layer_handle = partial(nn.InstanceNorm2d, num_features=embed_dim, eps=1e-6, affine=True, track_running_stats=False)
+            norm_layer_handle = partial(
+                nn.InstanceNorm2d, num_features=embed_dim, eps=1e-6, affine=True, track_running_stats=False
+            )
     elif normalization_layer == "instance_norm_s2":
         if comm.get_size("spatial") > 1:
             from makani.mpu.layer_norm import DistributedGeometricInstanceNormS2
+
             norm_layer_handle = DistributedGeometricInstanceNormS2
         else:
             from makani.models.common import GeometricInstanceNormS2
+
             norm_layer_handle = GeometricInstanceNormS2
         norm_layer_handle = partial(
             norm_layer_handle,
@@ -232,6 +319,71 @@ def _get_norm_layer_handle(
 
 
 class DiscreteContinuousEncoder(nn.Module):
+    r"""
+    Encoder that bridges into the latent grid with neighborhood attention on the sphere.
+
+    Where the FourCastNet 3 encoder uses a discrete-continuous *convolution*,
+    this one uses spherical neighborhood attention: each latent cell attends over
+    the input cells within an angular radius, with a learned query per latent
+    cell rather than a fixed kernel. That makes the encoder's weighting
+    input-dependent, so it can select which high-resolution detail to carry into
+    the bottleneck instead of applying the same stencil everywhere.
+
+    The queries are parameterized spectrally and initialized with low-degree
+    content only, so the initial query field is smooth rather than noisy at the
+    grid scale. An optional Pre-LN MLP residual follows the attention.
+
+    The kernel cutoff radius is sized by the *latent* (``out_shape``) grid, so
+    the receptive field is about one latent cell wide in each direction. Sizing
+    it by the input grid instead would shrink the radius as input resolution
+    grows, which is backwards for an operator bridging into the latent.
+
+    Parameters
+    ----------
+    inp_shape : (int, int), optional
+        Input grid as ``(nlat, nlon)``, by default ``(721, 1440)``.
+    out_shape : (int, int), optional
+        Latent grid as ``(nlat, nlon)``, by default ``(480, 960)``.
+    grid_in : str, optional
+        Input grid type, by default ``"equiangular"``.
+    grid_out : str, optional
+        Latent grid type, by default ``"equiangular"``.
+    inp_chans : int, optional
+        Number of input channels, by default ``2``.
+    out_chans : int, optional
+        Number of output channels, by default ``2``.
+    kernel_shape : (int, int), optional
+        Shape used to derive the attention radius, by default ``(3, 3)``.
+    basis_type : str, optional
+        Basis used for the radius heuristic, by default ``"morlet"``.
+    inverse_transform : torch.nn.Module
+        Inverse SHT for the latent grid, used to synthesize the learned queries
+        from their spectral parameterization. Required.
+    use_mlp : bool, optional
+        Append a :class:`PreLNMLP` residual after the attention, by default ``False``.
+    mlp_ratio : float, optional
+        Hidden width of that MLP as a multiple of ``out_chans``, by default ``2.0``.
+    activation_function : callable, optional
+        Activation constructor, by default :class:`torch.nn.GELU`.
+    normalization_layer : str, optional
+        Normalization used inside the MLP residual, by default ``"layer_norm"``.
+    layer_scale : bool, optional
+        Apply a learned scale to the MLP residual branch, by default ``True``.
+    bias : bool, optional
+        Whether the attention carries a bias, by default ``False``.
+    use_te : bool, optional
+        Use TransformerEngine linears inside the MLP, by default ``False``.
+
+    Raises
+    ------
+    ValueError
+        If ``inverse_transform`` is not provided.
+
+    See Also
+    --------
+    DiscreteContinuousDecoder : the corresponding decoder.
+    """
+
     def __init__(
         self,
         inp_shape=(721, 1440),
@@ -240,7 +392,7 @@ class DiscreteContinuousEncoder(nn.Module):
         grid_out="equiangular",
         inp_chans=2,
         out_chans=2,
-        kernel_shape=(3,3),
+        kernel_shape=(3, 3),
         basis_type="morlet",
         inverse_transform=None,
         use_mlp=False,
@@ -265,7 +417,9 @@ class DiscreteContinuousEncoder(nn.Module):
         theta_cutoff = _compute_cutoff_radius(nlat=out_shape[0], kernel_shape=kernel_shape, basis_type=basis_type)
 
         # set up local convolution
-        attn_handle = thd.DistributedNeighborhoodAttentionS2 if comm.get_size("spatial") > 1 else th.NeighborhoodAttentionS2
+        attn_handle = (
+            thd.DistributedNeighborhoodAttentionS2 if comm.get_size("spatial") > 1 else th.NeighborhoodAttentionS2
+        )
         self.attn = attn_handle(
             in_channels=inp_chans,
             out_channels=out_chans,
@@ -350,6 +504,22 @@ class DiscreteContinuousEncoder(nn.Module):
         return query.to(dtype=x.dtype)
 
     def forward(self, x):
+        r"""
+        Encode the input field onto the latent grid by cross-attention.
+
+        The learned queries live on the latent grid and attend to the
+        full-resolution input, which supplies both keys and values.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input of shape ``(B, inp_chans, *inp_shape)``.
+
+        Returns
+        -------
+        torch.Tensor
+            Latent field of shape ``(B, out_chans, *out_shape)``.
+        """
         query = self._spectral_query(x)
 
         # cross-attention: learned spectral queries attend to full-resolution input
@@ -362,6 +532,72 @@ class DiscreteContinuousEncoder(nn.Module):
 
 
 class DiscreteContinuousDecoder(nn.Module):
+    r"""
+    Decoder from the latent grid back to the prediction grid, via neighborhood attention.
+
+    Counterpart to :class:`DiscreteContinuousEncoder`. Two decoding paths are
+    available:
+
+    * **Classic** (default) -- optionally apply an MLP residual on the latent,
+      resample up to the output grid, then run neighborhood attention there.
+    * **Perceiver** (``perceiver_decoder=True``) -- learn queries on the *output*
+      grid and cross-attend directly to the latent, skipping the explicit
+      upsample. The queries are parameterized spectrally, as in the encoder, so
+      the output field is synthesized from smooth low-degree content rather than
+      interpolated. Requires ``inverse_transform``.
+
+    Parameters
+    ----------
+    inp_shape : (int, int), optional
+        Latent grid as ``(nlat, nlon)``, by default ``(480, 960)``.
+    out_shape : (int, int), optional
+        Output grid as ``(nlat, nlon)``, by default ``(721, 1440)``.
+    grid_in : str, optional
+        Latent grid type, by default ``"equiangular"``.
+    grid_out : str, optional
+        Output grid type, by default ``"equiangular"``.
+    inp_chans : int, optional
+        Number of input channels, by default ``2``.
+    out_chans : int, optional
+        Number of output channels, by default ``2``.
+    kernel_shape : (int, int), optional
+        Shape used to derive the attention radius, by default ``(3, 3)``.
+    basis_type : str, optional
+        Basis used for the radius heuristic, by default ``"morlet"``.
+    inverse_transform : torch.nn.Module, optional
+        Inverse SHT on the output grid, used to synthesize the learned queries.
+        Required when ``perceiver_decoder`` is ``True``.
+    use_mlp : bool, optional
+        Add a :class:`PreLNMLP` residual, by default ``False``.
+    mlp_ratio : float, optional
+        Hidden width of that MLP as a multiple of the channel count, by default ``2.0``.
+    activation_function : callable, optional
+        Activation constructor, by default :class:`torch.nn.GELU`.
+    normalization_layer : str, optional
+        Normalization used inside the MLP residual, by default ``"layer_norm"``.
+    layer_scale : bool, optional
+        Apply a learned scale to the MLP residual branch, by default ``True``.
+    bias : bool, optional
+        Whether the attention carries a bias, by default ``False``.
+    upsample_sht : bool, optional
+        Upsample spectrally via an SHT rather than by interpolation on the
+        classic path, by default ``False``.
+    perceiver_decoder : bool, optional
+        Use the Perceiver-style cross-attention path, by default ``False``. Not
+        supported together with spatial model parallelism.
+    use_te : bool, optional
+        Use TransformerEngine linears inside the MLP, by default ``False``.
+
+    Raises
+    ------
+    ValueError
+        If ``perceiver_decoder`` is set without an ``inverse_transform``.
+
+    See Also
+    --------
+    DiscreteContinuousEncoder : the corresponding encoder.
+    """
+
     def __init__(
         self,
         inp_shape=(480, 960),
@@ -395,7 +631,9 @@ class DiscreteContinuousDecoder(nn.Module):
             azimuth_group = None if (comm.get_size("w") == 1) else comm.get_group("w")
             thd.init(polar_group, azimuth_group)
 
-        attn_handle = thd.DistributedNeighborhoodAttentionS2 if comm.get_size("spatial") > 1 else th.NeighborhoodAttentionS2
+        attn_handle = (
+            thd.DistributedNeighborhoodAttentionS2 if comm.get_size("spatial") > 1 else th.NeighborhoodAttentionS2
+        )
 
         if perceiver_decoder:
             # Perceiver-style: learnable spectral query projected to the output grid,
@@ -461,7 +699,9 @@ class DiscreteContinuousDecoder(nn.Module):
                 self.upsample = nn.Sequential(self.sht, self.isht)
             else:
                 resample_handle = thd.DistributedResampleS2 if comm.get_size("spatial") > 1 else th.ResampleS2
-                self.upsample = resample_handle(*inp_shape, *out_shape, grid_in=grid_in, grid_out=grid_out, mode="bilinear")
+                self.upsample = resample_handle(
+                    *inp_shape, *out_shape, grid_in=grid_in, grid_out=grid_out, mode="bilinear"
+                )
 
             # Size the self-attention's neighborhood by the LATENT (pre-upsample) grid,
             # not the post-upsample high-res grid. After bilinear upsample, adjacent
@@ -531,6 +771,22 @@ class DiscreteContinuousDecoder(nn.Module):
         return query.to(dtype=x.dtype)
 
     def forward(self, x):
+        r"""
+        Decode the latent field onto the output grid.
+
+        Takes the Perceiver path when learned output-grid queries were built,
+        otherwise the classic upsample-then-attend path.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Latent field of shape ``(B, inp_chans, *inp_shape)``.
+
+        Returns
+        -------
+        torch.Tensor
+            Output field of shape ``(B, out_chans, *out_shape)``.
+        """
         if hasattr(self, "latent_query_spec"):
             # Perceiver-style: project spectral query to output grid, cross-attend to latent
             query = self._spectral_query(x)
@@ -554,6 +810,68 @@ class DiscreteContinuousDecoder(nn.Module):
 
 
 class NeuralOperatorBlock(nn.Module):
+    r"""
+    Processor block mixing spatially by neighborhood attention or a spectral operator.
+
+    The attention-based counterpart to the FourCastNet 3 block. ``attn_type``
+    selects between spherical neighborhood attention over a bounded angular
+    footprint (``"local"``) and a spectral convolution acting on all modes at
+    once (``"global"``). Interleaving the two lets the model resolve fine local
+    structure and long-range teleconnections without paying global cost in every
+    layer.
+
+    When ``aux_embed_dim`` is non-zero the block is conditioned on auxiliary
+    embeddings through two :class:`FiLM` modulations -- one on the attention
+    branch, one on the MLP branch. Because FiLM is zero-initialized, adding
+    conditioning does not perturb the block at initialization.
+
+    Parameters
+    ----------
+    forward_transform : torch.nn.Module
+        Grid-to-spectral transform; also defines the input grid.
+    inverse_transform : torch.nn.Module
+        Spectral-to-grid transform; also defines the output grid, which may
+        differ in resolution.
+    inp_chans : int
+        Number of input channels.
+    out_chans : int
+        Number of output channels.
+    attn_type : str, optional
+        ``"local"`` (default) for spherical neighborhood attention, ``"global"``
+        for a spectral convolution.
+    mlp_ratio : float, optional
+        Hidden width of the channel MLP as a multiple of the channel count, by
+        default ``2.0``.
+    mlp_drop_rate : float, optional
+        Dropout probability inside the MLP, by default ``0.0``.
+    path_drop_rate : float, optional
+        Stochastic depth probability, by default ``0.0``.
+    act_layer : callable, optional
+        Activation constructor, by default :class:`torch.nn.GELU`.
+    normalization_layer : str, optional
+        Normalization type, by default ``"layer_norm"``.
+    num_groups : int, optional
+        Number of channel groups in the spatial operator, by default ``1``.
+    skip : str, optional
+        Skip connection type, by default ``"identity"``.
+    layer_scale : bool, optional
+        Apply a learned per-channel scale to each branch, by default ``True``.
+        Initialized small so the block starts near the identity.
+    kernel_shape : (int, int), optional
+        Shape used to derive the attention radius, by default ``(3, 3)``.
+    basis_type : str, optional
+        Basis used for the radius heuristic, by default ``"morlet"``.
+    checkpointing_level : int, optional
+        Gradient checkpointing aggressiveness, by default ``0``.
+    bias : bool, optional
+        Whether the spatial operator carries a bias, by default ``False``.
+    aux_embed_dim : int, optional
+        Channel count of the auxiliary conditioning embedding, by default ``0``
+        (no conditioning).
+    use_te : bool, optional
+        Use TransformerEngine linears inside the MLP, by default ``False``.
+    """
+
     def __init__(
         self,
         forward_transform,
@@ -589,9 +907,13 @@ class NeuralOperatorBlock(nn.Module):
         # disco convolution layer
         if attn_type == "local":
             # heuristic for finding theta_cutoff
-            theta_cutoff = 2 * _compute_cutoff_radius(nlat=self.inp_shape[0], kernel_shape=kernel_shape, basis_type=basis_type)
+            theta_cutoff = 2 * _compute_cutoff_radius(
+                nlat=self.inp_shape[0], kernel_shape=kernel_shape, basis_type=basis_type
+            )
 
-            attn_handle = thd.DistributedNeighborhoodAttentionS2 if comm.get_size("spatial") > 1 else th.NeighborhoodAttentionS2
+            attn_handle = (
+                thd.DistributedNeighborhoodAttentionS2 if comm.get_size("spatial") > 1 else th.NeighborhoodAttentionS2
+            )
             self.attn = attn_handle(
                 in_channels=inp_chans,
                 out_channels=inp_chans,
@@ -708,7 +1030,7 @@ class NeuralOperatorBlock(nn.Module):
         Updated NO block
         """
         attn_scale = self.layer_scale1 if hasattr(self, "layer_scale1") else nn.Identity()
-        mlp_scale  = self.layer_scale2 if hasattr(self, "layer_scale2") else nn.Identity()
+        mlp_scale = self.layer_scale2 if hasattr(self, "layer_scale2") else nn.Identity()
 
         # mixing sub-layer: Pre-LN residual, local attention or global spectral conv
         x_norm = self.norm1(x)
@@ -792,9 +1114,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         # Perceiver-style decoder is not yet supported under spatial model parallelism
         # because DistributedNeighborhoodAttentionS2 cannot do low-res KV → high-res Q.
         if perceiver_decoder and comm.get_size("spatial") > 1:
-            raise NotImplementedError(
-                "perceiver_decoder=True is not supported with spatial model parallelism yet"
-            )
+            raise NotImplementedError("perceiver_decoder=True is not supported with spatial model parallelism yet")
 
         self.inp_shape = inp_shape
         self.out_shape = out_shape
@@ -828,8 +1148,10 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         if perceiver_decoder:
             isht_out_handle = thd.DistributedInverseRealSHT if comm.get_size("spatial") > 1 else th.InverseRealSHT
             self.isht_out = isht_out_handle(
-                out_shape[0], out_shape[1],
-                lmax=self.modes_lat, mmax=self.modes_lon,
+                out_shape[0],
+                out_shape[1],
+                lmax=self.modes_lat,
+                mmax=self.modes_lon,
                 grid=model_grid_type,
             ).float()
             decoder_inv_transform = self.isht_out
@@ -922,7 +1244,6 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         self.pos_drop = nn.Dropout(p=pos_drop_rate) if pos_drop_rate > 0.0 else nn.Identity()
         dpr = [x.item() for x in torch.linspace(0, path_drop_rate, num_layers)]
 
-
         # Internal NO blocks
         self.blocks = nn.ModuleList([])
         for i in range(num_layers):
@@ -967,16 +1288,20 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
             # bandwidth so the input's high-l content (which the model cannot have predicted
             # through its own latent at lmax = self.modes_lat) does not contaminate the
             # output with frequencies the rest of the network never modeled.
-            sht_handle  = thd.DistributedRealSHT        if comm.get_size("spatial") > 1 else th.RealSHT
+            sht_handle = thd.DistributedRealSHT if comm.get_size("spatial") > 1 else th.RealSHT
             isht_handle = thd.DistributedInverseRealSHT if comm.get_size("spatial") > 1 else th.InverseRealSHT
             self.residual_sht = sht_handle(
-                out_shape[0], out_shape[1],
-                lmax=self.modes_lat, mmax=self.modes_lon,
+                out_shape[0],
+                out_shape[1],
+                lmax=self.modes_lat,
+                mmax=self.modes_lon,
                 grid=model_grid_type,
             ).float()
             self.residual_isht = isht_handle(
-                out_shape[0], out_shape[1],
-                lmax=self.modes_lat, mmax=self.modes_lon,
+                out_shape[0],
+                out_shape[1],
+                lmax=self.modes_lat,
+                mmax=self.modes_lon,
                 grid=model_grid_type,
             ).float()
 
@@ -991,17 +1316,33 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
 
         if clamp_water != "none":
             from makani.utils.constraints import NonNegativeConstraint
+
             water_chan_names = [channel_names[i] for i in get_water_channels(channel_names)]
             if water_chan_names:
-                bias_buf  = torch.as_tensor(normalization_means).view(1, -1, 1, 1) if normalization_means is not None else None
-                scale_buf = torch.as_tensor(normalization_stds).view(1, -1, 1, 1)  if normalization_stds  is not None else None
-                self.nonneg_constraint = NonNegativeConstraint(channel_names, water_chan_names, bias=bias_buf, scale=scale_buf, mode=clamp_water)
-            
+                bias_buf = (
+                    torch.as_tensor(normalization_means).view(1, -1, 1, 1) if normalization_means is not None else None
+                )
+                scale_buf = (
+                    torch.as_tensor(normalization_stds).view(1, -1, 1, 1) if normalization_stds is not None else None
+                )
+                self.nonneg_constraint = NonNegativeConstraint(
+                    channel_names, water_chan_names, bias=bias_buf, scale=scale_buf, mode=clamp_water
+                )
+
         if hydrostatic_balance_lambda > 0.0:
             from makani.utils.constraints import HydrostaticBalanceProjection
-            bias_buf  = torch.as_tensor(normalization_means).view(1, -1, 1, 1) if normalization_means is not None else None
-            scale_buf = torch.as_tensor(normalization_stds).view(1, -1, 1, 1)  if normalization_stds  is not None else None
-            offset_buf = torch.as_tensor(hydrostatic_balance_means).view(1, -1, 1, 1) if hydrostatic_balance_means is not None else None
+
+            bias_buf = (
+                torch.as_tensor(normalization_means).view(1, -1, 1, 1) if normalization_means is not None else None
+            )
+            scale_buf = (
+                torch.as_tensor(normalization_stds).view(1, -1, 1, 1) if normalization_stds is not None else None
+            )
+            offset_buf = (
+                torch.as_tensor(hydrostatic_balance_means).view(1, -1, 1, 1)
+                if hydrostatic_balance_means is not None
+                else None
+            )
             self.hydrostatic_balance_constraint = HydrostaticBalanceProjection(
                 channel_names,
                 bias=bias_buf,
@@ -1026,7 +1367,6 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
             frozen_params = self.blocks.parameters()
             for param in frozen_params:
                 param.requires_grad = False
-
 
     @torch.compiler.disable(recursive=False)
     def _init_spectral_transforms(
@@ -1065,7 +1405,6 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         self.modes_lat = modes_lat
         self.modes_lon = modes_lon
 
-
     @torch.compiler.disable(recursive=True)
     def _precompute_channel_groups(
         self,
@@ -1077,7 +1416,9 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         group the channels appropriately into atmospheric pressure levels and surface variables
         """
 
-        atmo_chans, surf_chans, dyn_aux_chans, stat_aux_chans, pressure_lvls = get_channel_groups(channel_names, aux_channel_names)
+        atmo_chans, surf_chans, dyn_aux_chans, stat_aux_chans, pressure_lvls = get_channel_groups(
+            channel_names, aux_channel_names
+        )
 
         # compute how many channel groups will be kept internally
         self.n_atmo_groups = len(pressure_lvls)
@@ -1090,7 +1431,9 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
 
         # make sure they are divisible. Attention! This does not guarantee that the grrouping is correct
         if len(atmo_chans) % self.n_atmo_groups:
-            raise ValueError(f"Expected number of atmospheric variables to be divisible by number of atmospheric groups but got {len(atmo_chans)} and {self.n_atmo_groups}")
+            raise ValueError(
+                f"Expected number of atmospheric variables to be divisible by number of atmospheric groups but got {len(atmo_chans)} and {self.n_atmo_groups}"
+            )
 
         # Flattened-history input layout: [dyn_step0, dyn_step1, ..., dyn_stepH, static_aux],
         # where each dynamic step chunk is (atmo | surf | dynamic aux) of size n_dyn_chans and
@@ -1172,6 +1515,26 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         return x_out
 
     def processor_blocks(self, x, x_aux):
+        r"""
+        Run the latent state through the stack of processor blocks.
+
+        Auxiliary information is supplied to every block as a FiLM conditioning
+        signal rather than concatenated as extra channels, so the conditioning
+        reaches every depth without widening the latent.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Latent field of shape ``(B, embed_dim, h, w)``.
+        x_aux : torch.Tensor or None
+            Auxiliary embedding of shape ``(B, aux_embed_dim, h, w)`` used to
+            modulate each block, or ``None`` for no conditioning.
+
+        Returns
+        -------
+        torch.Tensor
+            Processed latent field of shape ``(B, embed_dim, h, w)``.
+        """
         # maybe clean the padding just in case
         x = self.pos_drop(x)
 
@@ -1186,6 +1549,27 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         return x
 
     def apply_constraints(self, x):
+        r"""
+        Project the prediction onto the configured physical constraints.
+
+        Applies whichever constraints were enabled at construction: clamping
+        water-related channels to non-negative values, and/or a soft projection
+        toward hydrostatic balance. Enforcing these in the architecture makes
+        the output physically admissible by construction rather than only
+        approximately so through the loss. A no-op if none are configured.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Prediction of shape ``(B, n_out_chans, nlat, nlon)``, in normalized
+            units; the constraints undo and reapply the normalization
+            internally, since they are physical relations.
+
+        Returns
+        -------
+        torch.Tensor
+            Constrained prediction of the same shape as ``x``.
+        """
         if hasattr(self, "nonneg_constraint"):
             x = self.nonneg_constraint(x)
 
@@ -1195,6 +1579,26 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         return x
 
     def forward(self, x):
+        r"""
+        Map an input field to the predicted output field.
+
+        Encodes the auxiliary channels, encodes the prognostic channels onto the
+        latent grid, runs the processor blocks under FiLM conditioning, decodes
+        back to the output grid, and applies the physical constraints.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input of shape ``(B, inp_chans, nlat, nlon)`` on the input grid,
+            with history steps flattened into the channel dimension in
+            oldest-to-newest order.
+
+        Returns
+        -------
+        torch.Tensor
+            Prediction of shape ``(B, n_out_chans, nlat, nlon)`` on the output
+            grid.
+        """
 
         # save big skip: use only the latest history step (the current state). In the
         # flattened-history layout steps run oldest->newest, so the newest dynamic chunk
@@ -1231,10 +1635,37 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
 
         return x
 
-# this part exposes the model to modulus by constructing modulus Modules
+
 @dataclass
 class AtmoSphericNeuralOperatorNetMetaData(ModelMetaData):
-    name: str = "FCN3"
+    r"""
+    PhysicsNeMo metadata for this file's :class:`AtmoSphericNeuralOperatorNet`.
+
+    Declares which execution features the model supports, so PhysicsNeMo knows
+    what it may enable when wrapping it. Consumed by
+    :func:`~makani.models.physicsnemo_compat.module_from_torch` to produce the
+    ``FCN3`` module exported from this file, under the display name ``FCN3ATT``.
+
+    Attributes
+    ----------
+    jit : bool
+        TorchScript tracing is not supported.
+    cuda_graphs : bool
+        CUDA graph capture is not supported.
+    amp_cpu : bool
+        Mixed precision on CPU is not supported.
+    amp_gpu : bool
+        Mixed precision on GPU is supported.
+
+    Notes
+    -----
+    ``jit`` refers to TorchScript only. ``torch.compile`` is supported for this
+    model and is unaffected by these flags.
+
+    The model name is deliberately not set here. ``ModelMetaData.name`` is
+    deprecated in PhysicsNeMo 2.x, so it is passed to ``module_from_torch``
+    instead and applied only where it still has an effect.
+    """
 
     jit: bool = False
     cuda_graphs: bool = False
@@ -1242,4 +1673,28 @@ class AtmoSphericNeuralOperatorNetMetaData(ModelMetaData):
     amp_gpu: bool = True
 
 
-FCN3 = physicsnemo.Module.from_torch(AtmoSphericNeuralOperatorNet, AtmoSphericNeuralOperatorNetMetaData())
+class AtmoSphericNeuralOperatorNetAttention(AtmoSphericNeuralOperatorNet):
+    r"""
+    Distinctly named alias of :class:`AtmoSphericNeuralOperatorNet` for registration.
+
+    This file's ``AtmoSphericNeuralOperatorNet`` has the same class name as the
+    one in ``fourcastnet3.py``, and PhysicsNeMo derives its registry key from
+    that name -- so registering both would collide on a single key, and under
+    1.x the second import would raise outright.
+
+    Wrapping this subclass instead makes the derived key unique
+    (``AtmoSphericNeuralOperatorNetAttentionPhysicsNeMoModel``) without renaming
+    the model itself, which configs still reference by its original handle. It
+    is done with a subclass rather than by passing an explicit registry name
+    because PhysicsNeMo 1.x has no such argument -- this way both major versions
+    produce the same key.
+
+    Adds no behavior; see :class:`AtmoSphericNeuralOperatorNet` for the model.
+    """
+
+
+FCN3ATT = module_from_torch(
+    AtmoSphericNeuralOperatorNetAttention,
+    AtmoSphericNeuralOperatorNetMetaData(),
+    name="FCN3ATT",
+)
