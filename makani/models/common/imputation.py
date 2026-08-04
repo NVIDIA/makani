@@ -21,8 +21,39 @@ from makani.utils import comm
 from .layers import EncoderDecoder
 
 
-# helper module to handle imputation of SST
 class MLPImputation(nn.Module):
+    r"""
+    Learned imputation of missing values from the other input channels.
+
+    Fields such as sea surface temperature are undefined over parts of the
+    globe and arrive as ``NaN``. Feeding those straight into a network poisons
+    every downstream activation, so they must be filled first. This module
+    predicts the fill values with a small MLP that sees all ``inp_chans``
+    channels, letting it infer a plausible value from correlated fields rather
+    than substituting a constant.
+
+    Only masked positions are replaced; valid data passes through untouched.
+    Positions that are ``NaN`` in the input are always treated as missing, in
+    addition to anything flagged by an explicit ``mask``.
+
+    Parameters
+    ----------
+    inp_chans : int, optional
+        Total number of input channels the MLP conditions on, by default ``2``.
+    inpute_chans : torch.Tensor, optional
+        1D integer tensor of channel indices to impute, by default
+        ``tensor([0])``. Its length sets the number of predicted channels.
+    mlp_ratio : float, optional
+        Hidden width of the MLP as a multiple of the number of imputed
+        channels, by default ``2.0``.
+    activation_function : torch.nn.Module, optional
+        Activation used inside the MLP, by default :class:`torch.nn.GELU`.
+
+    See Also
+    --------
+    ConstantImputation : cheaper alternative that fills with a learned constant.
+    """
+
     def __init__(
         self,
         inp_chans: int = 2,
@@ -56,6 +87,26 @@ class MLPImputation(nn.Module):
         return x.scatter(c_dim, idx_expanded, values)
 
     def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None):
+        r"""
+        Fill masked entries of the imputed channels with MLP predictions.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input of shape ``(..., inp_chans, nlat, nlon)``. Leading batch
+            dimensions are flattened internally, so any number of them is fine.
+        mask : torch.Tensor, optional
+            Boolean mask of shape ``(..., len(inpute_chans), nlat, nlon)``, with
+            ``True`` marking positions to impute. Combined by logical OR with
+            the ``NaN`` positions of ``x``. If omitted, only ``NaN`` positions
+            are imputed.
+
+        Returns
+        -------
+        torch.Tensor
+            Tensor of the same shape as ``x``, with masked entries of the
+            imputed channels replaced and everything else unchanged.
+        """
         x_sub = x[..., self.inpute_chans, :, :]
 
         if mask is None:
@@ -79,6 +130,29 @@ class MLPImputation(nn.Module):
 
 
 class ConstantImputation(nn.Module):
+    r"""
+    Imputation of missing values with a learned per-channel constant.
+
+    The cheap counterpart to :class:`MLPImputation`: instead of predicting fill
+    values from the other channels, each channel gets a single scalar that is
+    learned jointly with the rest of the model. Masked positions are replaced by
+    that scalar and valid data passes through untouched.
+
+    Under spatial model parallelism the fill values are replicated rather than
+    sharded (the parameter is marked shared across the ``"spatial"`` group), so
+    every rank imputes with identical constants.
+
+    Parameters
+    ----------
+    inp_chans : int, optional
+        Number of input channels, by default ``2``. One fill value is learned
+        per channel, initialized from a standard normal.
+
+    See Also
+    --------
+    MLPImputation : learned imputation conditioned on the other channels.
+    """
+
     def __init__(
         self,
         inp_chans: int = 2,
@@ -92,6 +166,23 @@ class ConstantImputation(nn.Module):
             self.weight.sharded_dims_mp = [None, None, None]
 
     def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None):
+        r"""
+        Replace masked entries with the learned per-channel constants.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input of shape ``(..., inp_chans, nlat, nlon)``.
+        mask : torch.Tensor, optional
+            Boolean mask broadcastable to ``x``, with ``True`` marking positions
+            to impute. Combined by logical OR with the ``NaN`` positions of
+            ``x``. If omitted, only ``NaN`` positions are imputed.
+
+        Returns
+        -------
+        torch.Tensor
+            Tensor of the same shape as ``x`` with masked entries filled.
+        """
         if mask is None:
             mask = torch.isnan(x)
         else:

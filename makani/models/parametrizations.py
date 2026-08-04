@@ -231,10 +231,53 @@ class _HydrostaticBalanceWrapper(nn.Module):
         return out
 
 
-# constraints is a list of dicts with variables, e.g.:
-# constraints = [{type: hydrostatic_balance,
-#                 options: {specific options}]
 class ConstraintsWrapper(nn.Module):
+    r"""
+    Enforce physical constraints on a model's output.
+
+    A purely data-driven prediction need not satisfy the balance relations the
+    atmosphere obeys. This wrapper projects the output onto the constrained
+    manifold after the forward pass, so the prediction is physically consistent
+    by construction rather than only approximately so through the loss.
+
+    Can either wrap a model (constraints applied to its output) or act
+    standalone on a tensor, which is useful for post-processing predictions
+    produced elsewhere.
+
+    ``constraints`` is a list of dicts, e.g.::
+
+        constraints = [{"type": "hydrostatic_balance",
+                        "options": {...}}]
+
+    Parameters
+    ----------
+    constraints : list of dict
+        Constraint specifications. Each entry needs a ``"type"`` key and an
+        ``"options"`` dict forwarded to that constraint. Currently only
+        ``"hydrostatic_balance"`` is supported.
+    channel_names : list of str
+        Names of the output channels, used to locate the variables each
+        constraint acts on.
+    bias : torch.Tensor
+        Normalization bias of the output channels. Needed because constraints
+        are physical relations and must be applied in physical units, not
+        normalized ones.
+    scale : torch.Tensor
+        Normalization scale of the output channels.
+    model_handle : callable, optional
+        Zero-argument factory returning a model to wrap. If omitted, the
+        wrapper applies the constraints directly to its input.
+
+    Raises
+    ------
+    NotImplementedError
+        If a constraint type other than ``"hydrostatic_balance"`` is requested.
+
+    Notes
+    -----
+    Only a single constraint is applied at present; if several are configured,
+    the first one is used.
+    """
 
     def __init__(self, constraints, channel_names, bias, scale, model_handle=None):
         super().__init__()
@@ -260,6 +303,21 @@ class ConstraintsWrapper(nn.Module):
                 )
 
     def forward(self, inp: torch.Tensor) -> torch.Tensor:
+        r"""
+        Run the wrapped model, if any, and apply the constraint to the result.
+
+        Parameters
+        ----------
+        inp : torch.Tensor
+            Model input if a model is wrapped, otherwise the field to constrain
+            directly.
+
+        Returns
+        -------
+        torch.Tensor
+            Constrained output. Channels the constraint does not act on pass
+            through unchanged.
+        """
         if self.model is not None:
             # get model output
             inp = self.model(inp)

@@ -28,6 +28,7 @@
 # limitations under the License.
 
 import unittest
+import warnings
 from parameterized import parameterized
 from importlib.metadata import entry_points
 
@@ -59,6 +60,60 @@ class TestEntryPoints(unittest.TestCase):
         model = model_type()
         with self.subTest(desc="model is not None"):
             self.assertIsNotNone(model)
+
+
+class TestPhysicsNeMoCompat(unittest.TestCase):
+    """Guards the PhysicsNeMo 1.x/2.x compatibility contract.
+
+    PhysicsNeMo 2.0 made ``Module.from_torch`` registration opt-in and changed
+    the generated class name. Both changes are silent -- the old call still
+    succeeds, it just stops registering -- so nothing else in the suite would
+    catch a regression here. These tests assert the behavior makani relies on,
+    which :mod:`makani.models.physicsnemo_compat` normalizes across versions.
+    """
+
+    @parameterized.expand(
+        [
+            ("SFNO", "makani.models.networks.sfnonet", "SphericalFourierNeuralOperatorNet"),
+            ("FNO", "makani.models.networks.sfnonet", "FourierNeuralOperatorNet"),
+            ("FCN3", "makani.models.networks.fourcastnet3", "AtmoSphericNeuralOperatorNet"),
+            ("FCN3", "makani.models.networks.fourcastnet3_1", "AtmoSphericNeuralOperatorNet31"),
+        ]
+    )
+    def test_registered_under_legacy_name(self, attr, module_name, torch_class_name):
+        """The wrapped class keeps its 1.x name and stays in the model registry."""
+        import importlib
+
+        from makani.models.physicsnemo_compat import get_model_registry, legacy_registered_name
+
+        ModelRegistry = get_model_registry()
+
+        module = importlib.import_module(module_name)
+        wrapped = getattr(module, attr)
+        expected = legacy_registered_name(getattr(module, torch_class_name))
+
+        with self.subTest(desc="class name matches the PhysicsNeMo 1.x name"):
+            self.assertEqual(wrapped.__name__, expected)
+
+        # Registration is what from_checkpoint resolves against; on 2.x it only
+        # happens because the compat helper passes register=True.
+        with self.subTest(desc="class is registered"):
+            self.assertIn(expected, ModelRegistry().list_models())
+
+    def test_metadata_does_not_set_deprecated_name(self):
+        """Constructing the metadata must not emit a DeprecationWarning.
+
+        ``ModelMetaData.name`` is deprecated and inert on 2.x. makani keeps it
+        off the dataclasses and applies it via the compat helper instead.
+        """
+        from makani.models.networks.sfnonet import SphericalFourierNeuralOperatorNetMetaData
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            SphericalFourierNeuralOperatorNetMetaData()
+
+        offenders = [w for w in caught if issubclass(w.category, DeprecationWarning) and "name" in str(w.message)]
+        self.assertEqual(offenders, [], f"metadata set a deprecated field: {[str(w.message) for w in offenders]}")
 
 
 if __name__ == "__main__":
