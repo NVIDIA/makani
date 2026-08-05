@@ -80,7 +80,10 @@ RUN pip install git+https://github.com/NVIDIA/physicsnemo.git@14e0874847ffb56b35
 
 # torch-harmonics
 RUN pip install setuptools_scm
-ENV FORCE_CUDA_EXTENSION=1
+# torch-harmonics gates the CUDA build on this variable; without it BUILD_CUDA falls back
+# to torch.cuda.is_available(), which is False inside docker build (no GPU on the builder),
+# and TH silently compiles CPU-only kernels. The old name FORCE_CUDA_EXTENSION is dead.
+ENV TORCH_HARMONICS_BUILD_CUDA_EXTENSION=1
 ENV TORCH_CUDA_ARCH_LIST="8.0 8.6 8.7 9.0a 10.0a+PTX"
 RUN cd /opt && git clone https://github.com/NVIDIA/torch-harmonics.git && \
     cd torch-harmonics && \
