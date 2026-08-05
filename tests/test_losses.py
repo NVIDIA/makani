@@ -138,6 +138,34 @@ def _rand(batch=_BATCH, channels=_NUM_CH, requires_grad=False):
     return t
 
 
+def _imaginary_only_pair(ensemble=5, wavenumber=3, delta=1.0):
+    """Build an (forecast, observation) pair differing ONLY in Im(SH coefficients).
+
+    On the uniform longitude grid the SHT's azimuthal transform is a DFT, so for a
+    field ``g(theta) * cos(m*lambda)`` the coefficients at order m are purely real,
+    while ``g(theta) * sin(m*lambda)`` gives purely imaginary ones. Adding a scaled
+    sine component therefore perturbs the imaginary part of the coefficients and
+    leaves the real part bit-for-bit identical.
+
+    A spectral loss built on the squared modulus |z|^2 must see this as an error.
+    A loss that discards Im(z) scores it as a perfect forecast.
+
+    Every ensemble member is the same perturbed field, so the pairwise spread term
+    vanishes and the returned loss is the accuracy (eskill) term alone.
+    """
+
+    lon = 2.0 * math.pi * torch.arange(_IMG_W, dtype=torch.float32) / _IMG_W
+    profile = torch.sin(torch.linspace(0.0, math.pi, _IMG_H, dtype=torch.float32))
+
+    base = profile.unsqueeze(-1) * torch.cos(wavenumber * lon).unsqueeze(0)
+    perturbation = profile.unsqueeze(-1) * torch.sin(wavenumber * lon).unsqueeze(0)
+
+    observations = base.expand(_BATCH, _NUM_CH, _IMG_H, _IMG_W).contiguous()
+    forecasts = (base + delta * perturbation).expand(_BATCH, ensemble, _NUM_CH, _IMG_H, _IMG_W).contiguous()
+
+    return forecasts, observations
+
+
 def _rand_ensemble(ensemble=5, batch=_BATCH, channels=_NUM_CH, requires_grad=False):
     t = torch.randn(batch, ensemble, channels, _IMG_H, _IMG_W)
     t.requires_grad_(requires_grad)
@@ -2523,6 +2551,43 @@ class TestSpectralL2EnergyScoreLoss(unittest.TestCase):
         self.assertFalse(torch.isnan(fc.grad).any(), "NaN in spec_l2_es gradient at perfect forecast")
         self.assertFalse(torch.isinf(fc.grad).any(), "Inf in spec_l2_es gradient at perfect forecast")
 
+    def test_penalizes_imaginary_only_error(self):
+        """An error confined to Im(SH coefficients) must not be scored as perfect.
+
+        Regression test: the forward used to cast the complex SHT output back to the
+        real input dtype, which discarded the imaginary part of every coefficient. The
+        score is built on |z|^2 (``.abs().square()``) and the m > 0 weights carry the
+        Parseval factor 2 for the conjugate-symmetric negative-m modes, so dropping
+        Im(z) silently halved the information in every m > 0 mode and made the error
+        constructed here invisible -- the loss came out exactly 0.
+        """
+
+        fn = self._fn()
+        fc, obs = _imaginary_only_pair(ensemble=self._E)
+
+        # verify the construction: the real parts of the coefficients must be identical,
+        # so anything the loss reports comes purely from the imaginary part
+        with torch.no_grad():
+            obs_coeffs = fn.sht(obs)
+            fc_coeffs = fn.sht(fc[:, 0])
+        with self.subTest(desc="perturbation is imaginary-only"):
+            self.assertTrue(
+                torch.allclose(obs_coeffs.real, fc_coeffs.real, atol=1e-5),
+                "test construction is wrong: the real parts of the coefficients differ",
+            )
+            self.assertFalse(
+                torch.allclose(obs_coeffs.imag, fc_coeffs.imag, atol=1e-5),
+                "test construction is wrong: the imaginary parts are identical",
+            )
+
+        out = fn(fc, obs)
+        with self.subTest(desc="loss is nonzero"):
+            self.assertGreater(
+                out.abs().max().item(),
+                1e-3,
+                "imaginary-only error scored as a perfect forecast -- Im(z) is being discarded",
+            )
+
     def test_batch_independence(self, verbose=False):
         fn = self._fn()
         fc = _rand_ensemble(self._E)
@@ -3011,6 +3076,20 @@ class TestCorrectedSpectralL2EnergyScoreLoss(unittest.TestCase):
             ensemble_distributed=False,
             channel_reduction=channel_reduction,
             **kw,
+        )
+
+    def test_penalizes_imaginary_only_error(self):
+        """Same regression as TestSpectralL2EnergyScoreLoss -- the corrected variant
+        carried an identical complex-to-real cast in its forward."""
+
+        fn = self._fn()
+        fc, obs = _imaginary_only_pair(ensemble=self._E)
+
+        out = fn(fc, obs)
+        self.assertGreater(
+            out.abs().max().item(),
+            1e-3,
+            "imaginary-only error scored as a perfect forecast -- Im(z) is being discarded",
         )
 
     def _fn_uncorrected(self, channel_reduction=True, **kw):

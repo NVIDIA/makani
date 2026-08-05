@@ -34,10 +34,39 @@ same spirit as the DALI dataloader, which already runs its workers with
 case.
 
 Override with ``MAKANI_TEST_START_METHOD`` (e.g. ``spawn`` or ``fork``) to debug.
+
+Also resets the torch.compile state between tests -- see ``reset_dynamo`` below.
 """
 
 import os
 import multiprocessing as mp
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def reset_dynamo():
+    """Clear the dynamo compile cache before every test.
+
+    ``LossHandler`` compiles each loss (``makani/utils/loss.py``), and dynamo keys its
+    cache of compiled variants on the *code object* -- e.g. ``LpLoss.forward`` -- which
+    every ``LpLoss`` instance in the process shares. Tests that build a fresh trainer or
+    loss per parameterization therefore each add a cache entry to the same code object:
+    new instance, new device, new shapes, new guard set. Across a parameterized matrix
+    that accumulates past ``torch._dynamo.config.recompile_limit`` (default 8), at which
+    point dynamo gives up and falls back to eager for that code object *for the rest of
+    the session* -- so later tests silently stop exercising the compiled path they are
+    meant to cover.
+
+    Resetting per test keeps each one compiling from a clean cache. The cost is that
+    tests which trigger compilation genuinely recompile instead of reusing a warm cache.
+    """
+
+    import torch
+
+    torch._dynamo.reset()
+
+    yield
 
 
 def pytest_configure(config):

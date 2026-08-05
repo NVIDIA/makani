@@ -37,6 +37,7 @@ from makani.utils import comm
 from makani.utils.dataloaders.data_helpers import get_data_normalization
 from makani.utils.training.training_helpers import get_parameter_groups
 from makani.utils.checkpoint_helpers import (
+    load_checkpoint,
     gather_model_state_dict,
     scatter_model_state_dict,
     gather_optimizer_state_dict,
@@ -432,7 +433,7 @@ class Driver(metaclass=abc.ABCMeta):
         validate_comms: bool = True,
     ):
         checkpoint_fname = checkpoint_path.format(mp_rank=comm.get_rank("model"))
-        checkpoint = torch.load(checkpoint_fname, map_location="cpu", weights_only=False)
+        checkpoint = load_checkpoint(checkpoint_fname, map_location="cpu")
 
         # check compatibility of the comm grid stored inside the file
         if validate_comms:
@@ -503,7 +504,7 @@ class Driver(metaclass=abc.ABCMeta):
     ):
         # when loading the weights in flexble mode we exclusively use mp_rank=0 and load them onto the cpu
         checkpoint_fname = checkpoint_path.format(mp_rank=0)
-        checkpoint = torch.load(checkpoint_fname, map_location="cpu", weights_only=False)
+        checkpoint = load_checkpoint(checkpoint_fname, map_location="cpu")
 
         # this is reworked to avoid loading modules related to the SHT
         state_dict = checkpoint["model_state"]
