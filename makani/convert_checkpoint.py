@@ -28,6 +28,7 @@ from makani.models import model_registry
 
 # distributed computing stuff
 from makani.utils.driver import Driver
+from makani.utils.checkpoint_helpers import load_checkpoint
 from makani.utils.YParams import ParamsBase
 
 
@@ -116,7 +117,7 @@ def consolidate_checkpoints(input_path, output_path, checkpoint_version=0):
     # open all files in mmap mode
     checkpoints = OrderedDict()
     for checkpoint in checkpoint_paths:
-        checkpoints[checkpoint] = torch.load(checkpoint, map_location="cpu", weights_only=False, mmap=True)
+        checkpoints[checkpoint] = load_checkpoint(checkpoint, map_location="cpu", mmap=True)
 
     # parse comm grids: extract comm dimensions and get a mapping of file to comm rank
     comm_dims, comm_ranks = parse_comm_grid(checkpoints)
@@ -208,13 +209,13 @@ def average_checkpoints(input_path, output_path):
     checkpoint_output_path = os.path.join(output_path, checkpoint_template)
 
     print(f"opening base checkpoint {checkpoint_paths[0]}")
-    base_checkpoint = torch.load(checkpoint_paths[0], map_location="cpu", weights_only=False)
+    base_checkpoint = load_checkpoint(checkpoint_paths[0], map_location="cpu")
     model_state_dict = base_checkpoint["model_state"]
 
     # this is reworked to avoid loading modules related t
     for checkpoint_file in checkpoint_paths[1:]:
         print(f"processing {checkpoint_file}")
-        current_checkpoint = torch.load(checkpoint_file, map_location="cpu", weights_only=False)
+        current_checkpoint = load_checkpoint(checkpoint_file, map_location="cpu")
         current_model_state = current_checkpoint["model_state"]
 
         for k, v in model_state_dict.items():
@@ -251,7 +252,7 @@ def strip_module(input_path):
 
     for checkpoint_file in checkpoint_paths:
         print(f"processing {checkpoint_file}")
-        checkpoint = torch.load(checkpoint_file, map_location="cpu", weights_only=False)
+        checkpoint = load_checkpoint(checkpoint_file, map_location="cpu")
         nn.modules.utils.consume_prefix_in_state_dict_if_present(checkpoint["model_state"], "module.")
         torch.save(checkpoint, checkpoint_file)
 

@@ -17,9 +17,11 @@ import os
 import glob
 import re
 import zlib
+import pickle
 
 from collections import OrderedDict
-from typing import Optional, Dict, Any
+from typing import Any, Dict, Optional
+from warnings import warn
 
 import torch
 import torch.nn as nn
@@ -30,6 +32,77 @@ from makani.utils import comm
 from makani.mpu.helpers import gather_uneven
 
 from torch_harmonics.distributed import split_tensor_along_dim
+
+
+# escape hatch for loading legacy checkpoints which contain pickled objects that are not
+# on the allowlist below. Only set this for checkpoints from a trusted source: it restores
+# the unrestricted (arbitrary code execution) unpickler.
+UNSAFE_LOAD_ENV_VAR = "MAKANI_ALLOW_UNSAFE_CHECKPOINT_LOAD"
+
+_safe_globals_registered = False
+
+
+def _register_checkpoint_safe_globals():
+    """Allowlist the non-tensor types makani stores inside checkpoints.
+
+    ``torch.load(weights_only=True)`` uses a restricted unpickler which only knows about
+    tensors and a handful of builtin containers. Everything makani writes into a checkpoint
+    beyond that has to be declared here. Note that the sharding metadata (``sharded_dims_mp``)
+    attached to the checkpoint tensors needs no entry: it is a plain list of strings/None and
+    is restored through ``torch._tensor._rebuild_from_type_v2``, which the restricted
+    unpickler permits.
+    """
+
+    global _safe_globals_registered
+    if _safe_globals_registered:
+        return
+
+    # imported lazily to avoid a circular import through makani.utils
+    from makani.utils.YParams import ParamsBase, YParams
+
+    torch.serialization.add_safe_globals([ParamsBase, YParams])
+
+    _safe_globals_registered = True
+
+
+def load_checkpoint(checkpoint_fname: str, map_location: str = "cpu", mmap: bool = False) -> Dict[str, Any]:
+    """Load a makani checkpoint with the safe (``weights_only=True``) unpickler.
+
+    Parameters
+    ============
+    checkpoint_fname: str
+        Path of the checkpoint file to load
+    map_location: str
+        Device to map the storages to, forwarded to ``torch.load``
+    mmap: bool
+        Whether to memory-map the tensor storages instead of reading them eagerly
+
+    Returns
+    ========
+    Dict[str, Any]
+        The deserialized checkpoint dictionary
+    """
+
+    _register_checkpoint_safe_globals()
+
+    if os.environ.get(UNSAFE_LOAD_ENV_VAR, "0").lower() in ("1", "true", "yes"):
+        warn(
+            f"{UNSAFE_LOAD_ENV_VAR} is set, loading {checkpoint_fname} with the unrestricted unpickler. "
+            "This executes arbitrary code contained in the checkpoint file and should only be done for "
+            "checkpoints from a trusted source.",
+            RuntimeWarning,
+        )
+        return torch.load(checkpoint_fname, map_location=map_location, weights_only=False, mmap=mmap)
+
+    try:
+        return torch.load(checkpoint_fname, map_location=map_location, weights_only=True, mmap=mmap)
+    except pickle.UnpicklingError as err:
+        raise RuntimeError(
+            f"Checkpoint {checkpoint_fname} contains pickled objects which are not on the allowlist in "
+            f"{__name__}._register_checkpoint_safe_globals. If the type reported below is a legitimate "
+            "makani type, add it to that allowlist. If the checkpoint comes from a trusted source, loading "
+            f"can be forced by setting {UNSAFE_LOAD_ENV_VAR}=1, which disables the safety check entirely."
+        ) from err
 
 
 def get_latest_checkpoint_version(checkpoint_path):
