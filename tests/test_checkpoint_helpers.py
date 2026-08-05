@@ -14,12 +14,13 @@
 # limitations under the License.
 
 """
-Non-distributed unit tests for the three pure-Python helpers in
+Non-distributed unit tests for the pure-Python helpers in
 ``makani.utils.checkpoint_helpers``:
 
   * ``get_latest_checkpoint_version``
   * ``get_model_state_dict_prefix``
   * ``prepend_prefix_to_state_dict``
+  * ``load_checkpoint``
 
 The distributed gather/scatter round-trip is covered separately by
 ``tests/distributed/tests_distributed_checkpoint.py``.
@@ -30,7 +31,9 @@ import sys
 import unittest
 import tempfile
 from collections import OrderedDict
+from unittest import mock
 
+import torch
 import torch.nn as nn
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
@@ -39,7 +42,22 @@ from makani.utils.checkpoint_helpers import (
     get_latest_checkpoint_version,
     get_model_state_dict_prefix,
     prepend_prefix_to_state_dict,
+    load_checkpoint,
+    UNSAFE_LOAD_ENV_VAR,
 )
+
+
+class UnsupportedPayload:
+    """Stand-in for an arbitrary object smuggled into a checkpoint.
+
+    Must live at module scope so that pickle can resolve it by qualified name.
+    """
+
+    def __init__(self, value="payload"):
+        self.value = value
+
+    def __eq__(self, other):
+        return isinstance(other, UnsupportedPayload) and other.value == self.value
 
 
 class TestGetLatestCheckpointVersion(unittest.TestCase):
@@ -217,6 +235,126 @@ class TestPrependPrefixToStateDict(unittest.TestCase):
         with self.subTest(desc="metadata values preserved"):
             self.assertEqual(d._metadata["module."], {"version": 1})
             self.assertEqual(d._metadata["module.b"], {"version": 1})
+
+
+class TestLoadCheckpoint(unittest.TestCase):
+    """
+    ``load_checkpoint`` wraps ``torch.load`` with the restricted (``weights_only=True``)
+    unpickler so that a hostile checkpoint cannot execute code on load. These tests pin
+    both halves of that contract: legitimate checkpoint content still round-trips, and
+    anything outside the allowlist is refused with an actionable error.
+    """
+
+    def setUp(self):
+        self.tmpdir_ctx = tempfile.TemporaryDirectory()
+        self.tmpdir = self.tmpdir_ctx.name
+        self.path = os.path.join(self.tmpdir, "ckpt.tar")
+        # make sure the env escape hatch is off regardless of the ambient environment
+        self.env_ctx = mock.patch.dict(os.environ, {UNSAFE_LOAD_ENV_VAR: "0"})
+        self.env_ctx.start()
+
+    def tearDown(self):
+        self.env_ctx.stop()
+        self.tmpdir_ctx.cleanup()
+
+    def test_loads_plain_checkpoint_contents(self):
+        # the shape of what Driver.save_checkpoint writes, without any exotic objects
+        store_dict = {
+            "model_state": OrderedDict([("w", torch.randn(2, 3))]),
+            "comm_grid": OrderedDict([("matmul", {"size": 1, "rank": 0})]),
+            "iters": 42,
+            "epoch": 2,
+        }
+        torch.save(store_dict, self.path)
+
+        checkpoint = load_checkpoint(self.path)
+
+        self.assertEqual(checkpoint["iters"], 42)
+        self.assertEqual(checkpoint["comm_grid"]["matmul"], {"size": 1, "rank": 0})
+        self.assertTrue(torch.allclose(checkpoint["model_state"]["w"], store_dict["model_state"]["w"]))
+
+    def test_preserves_sharding_metadata_on_tensors(self):
+        # makani attaches sharded_dims_mp directly to the checkpoint tensors. Tensors with
+        # extra attributes serialize through torch._tensor._rebuild_from_type_v2, which the
+        # restricted unpickler permits -- convert_checkpoint depends on this surviving.
+        tensor = torch.randn(2, 3)
+        tensor.sharded_dims_mp = ["matmul", None]
+        torch.save({"model_state": OrderedDict([("w", tensor)])}, self.path)
+
+        restored = load_checkpoint(self.path)["model_state"]["w"]
+
+        self.assertTrue(hasattr(restored, "sharded_dims_mp"))
+        self.assertEqual(restored.sharded_dims_mp, ["matmul", None])
+
+    def test_mmap_load(self):
+        torch.save({"model_state": OrderedDict([("w", torch.randn(2, 3))])}, self.path)
+
+        # convert_checkpoint opens the shards with mmap=True; that must work under the
+        # restricted unpickler as well
+        checkpoint = load_checkpoint(self.path, mmap=True)
+
+        self.assertEqual(tuple(checkpoint["model_state"]["w"].shape), (2, 3))
+
+    def test_loads_allowlisted_params_struct(self):
+        """Legacy checkpoints may carry a params struct, which the allowlist covers.
+
+        Reconstructing an allowlisted class from its ``__dict__`` needs the restricted
+        unpickler to support the BUILD opcode for user-registered globals. If this test
+        fails, the ParamsBase/YParams entries in ``_register_checkpoint_safe_globals`` do
+        not actually help on this torch version and such checkpoints need the env escape
+        hatch instead.
+        """
+        from makani.utils.YParams import ParamsBase
+
+        params = ParamsBase()
+        params.update_params({"N_in_channels": 3, "nettype": "sfno"})
+        torch.save({"model_state": OrderedDict(), "params": params}, self.path)
+
+        checkpoint = load_checkpoint(self.path)
+
+        self.assertEqual(checkpoint["params"].N_in_channels, 3)
+        self.assertEqual(checkpoint["params"].nettype, "sfno")
+
+    def test_rejects_object_outside_allowlist(self):
+        torch.save({"model_state": OrderedDict(), "payload": UnsupportedPayload()}, self.path)
+
+        with self.assertRaises(RuntimeError) as ctx:
+            load_checkpoint(self.path)
+
+        # the error has to tell the user what to do about it
+        message = str(ctx.exception)
+        self.assertIn(UNSAFE_LOAD_ENV_VAR, message)
+        self.assertIn("allowlist", message)
+        # and the underlying unpickler error, naming the offending type, must be chained
+        self.assertIsNotNone(ctx.exception.__cause__)
+        self.assertIn("UnsupportedPayload", str(ctx.exception.__cause__))
+
+    def test_rejects_object_nested_in_model_state(self):
+        # the interesting attack position is inside the state dict itself, not next to it
+        torch.save({"model_state": OrderedDict([("w", UnsupportedPayload())])}, self.path)
+
+        with self.assertRaises(RuntimeError):
+            load_checkpoint(self.path)
+
+    def test_env_var_escape_hatch_allows_unsafe_load(self):
+        torch.save({"model_state": OrderedDict(), "payload": UnsupportedPayload("legacy")}, self.path)
+
+        with mock.patch.dict(os.environ, {UNSAFE_LOAD_ENV_VAR: "1"}):
+            # the escape hatch must be loud about what it is doing
+            with self.assertWarns(RuntimeWarning):
+                checkpoint = load_checkpoint(self.path)
+
+        self.assertEqual(checkpoint["payload"], UnsupportedPayload("legacy"))
+
+    def test_env_var_escape_hatch_off_by_default(self):
+        # anything other than an explicit opt-in keeps the safe path
+        torch.save({"model_state": OrderedDict(), "payload": UnsupportedPayload()}, self.path)
+
+        for value in ["0", "false", "no", ""]:
+            with self.subTest(value=value):
+                with mock.patch.dict(os.environ, {UNSAFE_LOAD_ENV_VAR: value}):
+                    with self.assertRaises(RuntimeError):
+                        load_checkpoint(self.path)
 
 
 if __name__ == "__main__":

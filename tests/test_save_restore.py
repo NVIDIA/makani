@@ -25,7 +25,7 @@ from torch import nn
 
 from makani.models.common import MLP
 from makani.utils.driver import Driver
-from makani.utils.checkpoint_helpers import get_latest_checkpoint_version
+from makani.utils.checkpoint_helpers import get_latest_checkpoint_version, load_checkpoint
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from .testutils import disable_tf32, set_seed, get_default_parameters, compare_arrays
@@ -138,6 +138,76 @@ class TestSaveRestore(unittest.TestCase):
 
         # compare
         self.assertTrue(compare_arrays("output", out_before, out_after, rtol=1e-6, atol=1e-6, verbose=verbose))
+
+    @parameterized.expand(["legacy", "flexible"])
+    def test_saved_checkpoint_loads_with_safe_unpickler(self, checkpoint_mode):
+        """
+        Everything ``Driver.save_checkpoint`` writes must be readable by the restricted
+        (``weights_only=True``) unpickler used in ``load_checkpoint``, otherwise checkpoints
+        written by makani could not be read back by makani.
+
+        This exercises the full store dict -- model state carrying the ``sharded_dims_mp``
+        sharding metadata, comm grid, loss/optimizer/scheduler state and the counters.
+        """
+
+        model = MLP(
+            self.params.N_in_channels,
+            hidden_features=2 * self.params.N_in_channels,
+            out_features=self.params.N_out_channels,
+            act_layer=nn.GELU,
+            output_bias=True,
+            input_format="nchw",
+            drop_rate=0.0,
+        )
+
+        # tag a parameter as sharded. In a single-rank test no layer sets this by itself, but the
+        # attribute is what convert_checkpoint keys off, so the round-trip has to preserve it.
+        sharded_name, sharded_param = next(iter(model.named_parameters()))
+        sharded_param.sharded_dims_mp = ["matmul", None]
+
+        loss = nn.MSELoss()
+        optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1)
+        counters = {"iters": 7, "epoch": 3}
+
+        # take one step so the optimizer actually carries state tensors
+        inp = torch.randn(
+            self.params.batch_size, self.params.N_in_channels, self.params.img_shape_x, self.params.img_shape_y
+        )
+        loss(model(inp), torch.zeros_like(model(inp))).backward()
+        optimizer.step()
+        scheduler.step()
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            checkpoint_path = os.path.join(tempdir, "ckpt_mp{mp_rank}.tar")
+
+            Driver.save_checkpoint(
+                checkpoint_path,
+                model=model,
+                loss=loss,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                counters=counters,
+                checkpoint_mode=checkpoint_mode,
+            )
+
+            # load it back through the safe loader. A raise here means the safe globals
+            # allowlist is out of sync with what save_checkpoint writes.
+            checkpoint = load_checkpoint(checkpoint_path.format(mp_rank=0))
+
+        self.assertIn("model_state", checkpoint)
+        self.assertEqual(checkpoint["iters"], 7)
+        self.assertEqual(checkpoint["epoch"], 3)
+        self.assertIn("optimizer_state_dict", checkpoint)
+        self.assertIn("scheduler_state_dict", checkpoint)
+
+        # the sharding metadata must survive the round-trip, otherwise convert_checkpoint
+        # would silently treat a sharded tensor as unsharded
+        restored = checkpoint["model_state"][sharded_name]
+        self.assertTrue(
+            hasattr(restored, "sharded_dims_mp"), f"sharding metadata lost for {sharded_name} in {checkpoint_mode} mode"
+        )
+        self.assertEqual(restored.sharded_dims_mp, ["matmul", None])
 
 
 if __name__ == "__main__":

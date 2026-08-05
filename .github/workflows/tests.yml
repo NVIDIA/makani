@@ -24,7 +24,11 @@ jobs:
         # with, otherwise the prebuilt _C.so will hit ABI-mismatch import errors.
         python -m pip install torch==2.7.1 --extra-index-url https://download.pytorch.org/whl/cpu
         python -m pip install setuptools_scm
-        python -m pip install --no-build-isolation git+https://github.com/NVIDIA/torch-harmonics.git@main
+        # All git dependencies are pinned to immutable commit SHAs rather than branches
+        # or tags, so that a force-push or a repointed tag upstream cannot change what
+        # runs in CI. Bump these deliberately.
+        # torch-harmonics main as of 2026-08-04; move to the next release tag's SHA once it is cut.
+        python -m pip install --no-build-isolation git+https://github.com/NVIDIA/torch-harmonics.git@887006c640f1d61c3f80590ecc2b207bbb647072
         # Freeze whatever torch version TH just compiled against. Strip the
         # local label (+cpu) so the constraint matches any build of that
         # public version.
@@ -35,10 +39,10 @@ jobs:
         # Make the constraint visible to later workflow steps so physicsnemo
         # or any transitive dep can't silently upgrade torch and break TH's _C.so.
         echo "PIP_CONSTRAINT=${GITHUB_WORKSPACE}/constraints.txt" >> "$GITHUB_ENV"
-        # Pin physicsnemo to the git tag before installing the package so the
-        # `nvidia-physicsnemo>=1.1.1` dep in pyproject.toml resolves to this
-        # build rather than whatever PyPI offers.
-        python -m pip install git+https://github.com/NVIDIA/physicsnemo.git@v1.1.1
+        # Pin physicsnemo before installing the package so the `nvidia-physicsnemo>=1.1.1`
+        # dep in pyproject.toml resolves to this build rather than whatever PyPI offers.
+        # This is the SHA of tag v1.3.0.
+        python -m pip install git+https://github.com/NVIDIA/physicsnemo.git@14e0874847ffb56b35abf7708a1665e71605999c
     - name: Install package
       run: |
         python -m pip install -e .[test,vis]
@@ -48,7 +52,9 @@ jobs:
         # avoid pulling a numpy version that breaks the stack.
         # Note: NVIDIA DALI has no CPU-only wheel and requires CUDA runtime, so
         # DALI tests are skipped on this runner (guarded by skipUnless(_have_dali)).
-        python -m pip install --no-deps git+https://github.com/google-research/weatherbench2.git
+        # weatherbench2 main as of 2026-08-04. Third-party repo, so the SHA pin matters
+        # more here than for the NVIDIA-owned dependencies above.
+        python -m pip install --no-deps git+https://github.com/google-research/weatherbench2.git@95c36d547b22abc2d191451a580b0b194fde67ef
     - name: Test with pytest
       run: |
         python -m pytest -ra ./tests --cov=makani --cov-report=term-missing

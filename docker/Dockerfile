@@ -64,21 +64,30 @@ RUN pip install --upgrade wandb ruamel.yaml tqdm
 # scoring tools
 RUN pip install xskillscore properscoring
 
+# Git dependencies are pinned to immutable commit SHAs rather than branches or tags,
+# so that an upstream force-push or a repointed tag cannot change what lands in the
+# image. SHAs below are the respective default branches as of 2026-08-04; bump them
+# deliberately.
+
 # weatherbench2
-RUN pip install "git+https://github.com/google-research/weatherbench2.git"
+RUN pip install "git+https://github.com/google-research/weatherbench2.git@95c36d547b22abc2d191451a580b0b194fde67ef"
 
 # some useful scripts from mlperf
-RUN pip install --ignore-installed "git+https://github.com/NVIDIA/mlperf-common.git"
+RUN pip install --ignore-installed "git+https://github.com/NVIDIA/mlperf-common.git@c02c93c0414071400a10716d9cd5cb8f668b78d4"
 
-# physicsnemo
-RUN pip install git+https://github.com/NVIDIA/physicsnemo.git@v1.3.0
+# physicsnemo (SHA of tag v1.3.0)
+RUN pip install git+https://github.com/NVIDIA/physicsnemo.git@14e0874847ffb56b35abf7708a1665e71605999c
 
 # torch-harmonics
 RUN pip install setuptools_scm
-ENV FORCE_CUDA_EXTENSION=1
+# torch-harmonics gates the CUDA build on this variable; without it BUILD_CUDA falls back
+# to torch.cuda.is_available(), which is False inside docker build (no GPU on the builder),
+# and TH silently compiles CPU-only kernels. The old name FORCE_CUDA_EXTENSION is dead.
+ENV TORCH_HARMONICS_BUILD_CUDA_EXTENSION=1
 ENV TORCH_CUDA_ARCH_LIST="8.0 8.6 8.7 9.0a 10.0a+PTX"
 RUN cd /opt && git clone https://github.com/NVIDIA/torch-harmonics.git && \
     cd torch-harmonics && \
+    git checkout 887006c640f1d61c3f80590ecc2b207bbb647072 && \
     pip install --no-build-isolation -e .
 
 # copy source code

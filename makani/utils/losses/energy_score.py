@@ -532,9 +532,6 @@ class SpectralL2EnergyScoreLoss(SpectralBaseLoss):
         if forecasts.dim() != 5:
             raise ValueError(f"Error, forecasts tensor expected to have 5 dimensions but found {forecasts.dim()}.")
 
-        # get the data type before stripping amp types
-        dtype = forecasts.dtype
-
         # before anything else compute the transform
         # as the CDF definition doesn't generalize well to more than one-dimensional variables, we treat complex and imaginary part as the same
         forecasts = forecasts.float()
@@ -544,8 +541,12 @@ class SpectralL2EnergyScoreLoss(SpectralBaseLoss):
             forecasts = self.sht(forecasts) / math.sqrt(4.0 * math.pi)
             observations = self.sht(observations) / math.sqrt(4.0 * math.pi)
 
-        forecasts = forecasts.to(dtype)
-        observations = observations.to(dtype)
+        # the SH coefficients stay COMPLEX from here on. Casting them back to the input
+        # (real) dtype would silently discard the imaginary part, and the score below is
+        # built around the squared modulus |z|^2 via .abs().square(): the m_weights in
+        # SpectralBaseLoss carry the factor 2 for m > 0 that accounts for the conjugate-
+        # symmetric negative-m modes, so dropping Im(z) would both halve the information
+        # in every m > 0 mode and break that Parseval normalization.
 
         # we assume the following shapes:
         # forecasts: batch, ensemble, channels, mmax, lmax
@@ -935,15 +936,14 @@ class CorrectedSpectralL2EnergyScoreLoss(SpectralBaseLoss):
         if forecasts.dim() != 5:
             raise ValueError(f"Error, forecasts tensor expected to have 5 dimensions but found {forecasts.dim()}.")
 
-        dtype = forecasts.dtype
         forecasts = forecasts.float()
         observations = observations.float()
         with amp.autocast(device_type="cuda", enabled=False):
             forecasts = self.sht(forecasts) / math.sqrt(4.0 * math.pi)
             observations = self.sht(observations) / math.sqrt(4.0 * math.pi)
 
-        forecasts = forecasts.to(dtype)
-        observations = observations.to(dtype)
+        # the SH coefficients stay COMPLEX from here on -- see the note in
+        # SpectralL2EnergyScoreLoss.forward for why casting back to a real dtype is wrong.
 
         B, E, C, H, W = forecasts.shape
 
