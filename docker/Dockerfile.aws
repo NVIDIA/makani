@@ -151,7 +151,7 @@ ENV PATH=/opt/hdf5/bin:${PATH}
 RUN pip install cdsapi>=0.7.2
 
 # install zarr and data stuff
-RUN pip install more_itertools zarr xarray gcsfs boto3
+RUN pip install more_itertools zarr xarray gcsfs s3fs boto3
 
 # moviepy for wandb video logging
 RUN pip install moviepy

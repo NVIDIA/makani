@@ -183,6 +183,7 @@ The folder `data_process` contains a collection of scripts in order to modify da
 * `annotate_dataset.py` - Adds metadata annotations to HDF5 files including timestamps, latitude/longitude coordinates, and channel names. Ensures uniform time information across datasets by converting to UTC timezone.
 * `concatenate_dataset.py` - Creates virtual HDF5 datasets by combining multiple year files into a single dataset without physical copying, reducing disk overhead.
 * `h5_convert.py` - Reformats HDF5 files to enable compression and chunking. Supports various compression modes (LZF, GZIP, SZIP, scale-offset) and chunking strategies for optimized storage and access.
+* `convert_ncar_era5_to_makani_input.py` - Converts NSF NCAR ERA5 (RDA dataset d633000, hosted on the public `s3://nsf-ncar-era5` bucket) to Makani-compatible HDF5 format. Streams directly from S3 with optional local caching and supports MPI for distributed processing. Total precipitation is reconstructed as the sum of large-scale and convective precipitation.
 Statistics and Analysis
 * `get_stats.py` - Computes comprehensive statistics from datasets including global means, standard deviations, min/max values, time means, and time-difference statistics. Supports MPI for distributed processing.
 * `get_histograms.py` - Generates histograms from dataset distributions, useful for data analysis and validation. Also supports MPI for distributed processing.
