@@ -98,6 +98,7 @@ data_process = [
     "mpi4py",
     "xarray>=2025.1.0",
     "gcsfs",
+    "s3fs",
     "dask",
     "tqdm",
 ]
