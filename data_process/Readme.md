@@ -112,8 +112,25 @@ Flags you may want to use:
   larger than the converted output; without this flag nothing is staged locally.
 - `--accumulation_hours` sets the window used for accumulated channels such as `tp`.
   It defaults to `dhours`, so a 6-hourly dataset gets 6-hourly accumulations.
+- `--prefetch_workers` gives each rank that many background threads fetching upcoming
+  objects, overlapping transfer with decompression and opening several concurrent S3
+  streams per rank. Default 0, i.e. lazy on-demand reads.
 - `--skip_missing_channels` drops channels that have no NCAR counterpart instead of failing.
 - `--force_overwrite` to replace existing yearly files.
+
+Tuning throughput:
+- Concurrency has to sit outside h5py. h5py serializes every HDF5 call behind a global
+  lock, and since the file object is a Python fsspec stream the network waits happen
+  inside that lock too, so threading the reads themselves buys nothing. `--prefetch_workers`
+  instead fetches whole objects in the background.
+- It only helps when reads are latency bound. If aggregate bandwidth is already saturated
+  it adds memory pressure for no gain, so measure before raising it. While streaming, peak
+  memory grows by roughly `prefetch_workers` times the object size, and pressure level
+  objects are on the order of a gigabyte, so weigh it against ranks per node. With
+  `--cache_dir` the prefetch lands on disk and costs no memory.
+- The bucket is in `us-west-2`. Pulling it across a WAN is usually the dominant cost, and
+  running the conversion in-region and shipping only the converted output back beats any
+  reader-side tuning.
 
 Notes on the source data:
 - Data is streamed with byte-range reads. The pressure level files are chunked as one
