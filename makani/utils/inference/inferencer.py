@@ -261,6 +261,7 @@ class Inferencer(Driver):
             zonal_spectrum_file=zonal_spectrum_file,
             wb2_compatible=wb2_compatible,
             enable_odirect=enable_odirect,
+            odirect_alignment=odirect_alignment,
             profiler=profiler,
         )
 
