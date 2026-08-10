@@ -29,7 +29,7 @@ class DistributedRealFFT1(nn.Module):
     """
     Helper routine to wrap FFT similarly to the SHT
     """
-    
+
     def __init__(self, nlon: int, lmax: Optional[int] = None, mmax: Optional[int] = None):
         super().__init__()
 
@@ -80,7 +80,7 @@ class DistributedInverseRealFFT1(nn.Module):
     def __init__(self, nlon: int, lmax: Optional[int] = None, mmax: Optional[int] = None):
         super().__init__()
 
-         # get the comms grid:
+        # get the comms grid:
         self.comm_size_w = comm.get_size("w")
         self.comm_rank_w = comm.get_rank("w")
 
@@ -287,7 +287,7 @@ class DistributedRealFFT3(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
 
         # make sure input is 5D
-        assert x.dim() == 5
+        torch._check(x.dim() == 5, lambda: f"expected a 5D input, got {x.dim()}D")
 
         # store number of chans
         num_chans = x.shape[1]
@@ -364,7 +364,7 @@ class DistributedInverseRealFFT3(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
 
         # make sure input is 5D
-        assert x.dim() == 5
+        torch._check(x.dim() == 5, lambda: f"expected a 5D input, got {x.dim()}D")
 
         # store number of chans
         num_chans = x.shape[1]

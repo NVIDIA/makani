@@ -25,6 +25,28 @@ from makani.models.common import ComplexReLU, PatchEmbed2D, DropPath, MLP
 
 @torch.compile
 def compl_mul_add_fwd(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    r"""
+    Block-diagonal complex matmul over real-viewed tensors.
+
+    Computes :math:`y_{b,k,o,x,y} = \sum_i a_{b,k,i,x,y} w_{k,i,o}` with complex
+    arithmetic expressed on the real and imaginary components explicitly rather
+    than on complex dtypes. Complex kernels are not always supported by the
+    compiler backends, so this variant keeps the whole block compilable;
+    :func:`compl_mul_add_fwd_c` is the complex-dtype equivalent.
+
+    Parameters
+    ----------
+    a : torch.Tensor
+        Input of shape ``(B, num_blocks, in_block, H, W, 2)``, where the
+        trailing axis holds the real and imaginary parts.
+    b : torch.Tensor
+        Weight of shape ``(num_blocks, in_block, out_block, 2)``.
+
+    Returns
+    -------
+    torch.Tensor
+        Output of shape ``(B, num_blocks, out_block, H, W, 2)``.
+    """
     tmp = torch.einsum("bkixys,kior->srbkoxy", a, b)
     res = torch.stack([tmp[0, 0, ...] - tmp[1, 1, ...], tmp[1, 0, ...] + tmp[0, 1, ...]], dim=-1)
     return res
@@ -32,6 +54,26 @@ def compl_mul_add_fwd(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 
 @torch.compile
 def compl_mul_add_fwd_c(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    r"""
+    Block-diagonal complex matmul using native complex dtypes.
+
+    Same contraction as :func:`compl_mul_add_fwd`, but performed with
+    ``complex64`` tensors instead of explicit real/imaginary bookkeeping. Faster
+    where the backend supports complex arithmetic; selected via the
+    ``use_complex_kernels`` flag on :class:`AFNO2D`.
+
+    Parameters
+    ----------
+    a : torch.Tensor
+        Input of shape ``(B, num_blocks, in_block, H, W, 2)``, real-viewed.
+    b : torch.Tensor
+        Weight of shape ``(num_blocks, in_block, out_block, 2)``, real-viewed.
+
+    Returns
+    -------
+    torch.Tensor
+        Output of shape ``(B, num_blocks, out_block, H, W, 2)``, real-viewed.
+    """
     ac = torch.view_as_complex(a)
     bc = torch.view_as_complex(b)
     resc = torch.einsum("bkixy,kio->bkoxy", ac, bc)
@@ -40,9 +82,53 @@ def compl_mul_add_fwd_c(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 
 
 class AFNO2D(nn.Module):
-    def __init__(self, hidden_size, num_blocks=8, sparsity_threshold=0.0, hard_thresholding_fraction=1, hidden_size_factor=1, use_complex_kernels=False):
+    r"""
+    Adaptive Fourier Neural Operator token mixer, channels-first variant.
+
+    Same idea as :class:`makani.models.networks.afnonet.AFNO2D` -- FFT, a
+    block-diagonal complex MLP over the coefficients, soft-shrink, inverse FFT
+    -- with three practical differences: it operates on ``(B, C, H, W)`` inputs
+    instead of channels-last, it uses a complex activation
+    (:class:`~makani.models.common.activations.ComplexReLU`) rather than a
+    real one applied componentwise, and truncation is two-sided along the
+    unhalved axis so both positive and negative frequencies are retained.
+
+    Parameters
+    ----------
+    hidden_size : int
+        Channel dimension. Must be divisible by ``num_blocks``.
+    num_blocks : int, optional
+        Number of independently mixed channel blocks, by default ``8``.
+    sparsity_threshold : float, optional
+        Soft-shrink threshold on the output coefficients, by default ``0.0``
+        (no sparsification).
+    hard_thresholding_fraction : float, optional
+        Fraction of Fourier modes retained, by default ``1`` (keep all).
+    hidden_size_factor : int, optional
+        Width of the spectral MLP's hidden layer as a multiple of the block
+        size, by default ``1``.
+    use_complex_kernels : bool, optional
+        Use native complex arithmetic for the contraction rather than explicit
+        real/imaginary bookkeeping, by default ``False``.
+
+    Raises
+    ------
+    ValueError
+        If ``hidden_size`` is not divisible by ``num_blocks``.
+    """
+
+    def __init__(
+        self,
+        hidden_size,
+        num_blocks=8,
+        sparsity_threshold=0.0,
+        hard_thresholding_fraction=1,
+        hidden_size_factor=1,
+        use_complex_kernels=False,
+    ):
         super(AFNO2D, self).__init__()
-        assert hidden_size % num_blocks == 0, f"hidden_size {hidden_size} should be divisble by num_blocks {num_blocks}"
+        if hidden_size % num_blocks != 0:
+            raise ValueError(f"hidden_size {hidden_size} should be divisble by num_blocks {num_blocks}")
 
         self.hidden_size = hidden_size
         self.sparsity_threshold = sparsity_threshold
@@ -54,15 +140,33 @@ class AFNO2D(nn.Module):
         self.mult_handle = compl_mul_add_fwd_c if use_complex_kernels else compl_mul_add_fwd
 
         # new
-        self.w1 = nn.Parameter(self.scale * torch.randn(self.num_blocks, self.block_size, self.block_size * self.hidden_size_factor, 2))
+        self.w1 = nn.Parameter(
+            self.scale * torch.randn(self.num_blocks, self.block_size, self.block_size * self.hidden_size_factor, 2)
+        )
         self.b1 = nn.Parameter(self.scale * torch.randn(1, self.num_blocks * self.block_size, 1, 1))
-        self.w2 = nn.Parameter(self.scale * torch.randn(self.num_blocks, self.block_size * self.hidden_size_factor, self.block_size, 2))
+        self.w2 = nn.Parameter(
+            self.scale * torch.randn(self.num_blocks, self.block_size * self.hidden_size_factor, self.block_size, 2)
+        )
         # self.b2 = nn.Parameter(self.scale * torch.randn(self.num_blocks, self.block_size, 1, 1, 2))
 
         # self.act = nn.ReLU()
         self.act = ComplexReLU(negative_slope=0.0, mode="cartesian")
 
     def forward(self, x):
+        r"""
+        Mix channels in Fourier space and add the input back as a residual.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input of shape ``(B, hidden_size, H, W)``.
+
+        Returns
+        -------
+        torch.Tensor
+            Tensor of the same shape as ``x``, with a learned bias and the
+            input added back.
+        """
         bias = x
 
         dtype = x.dtype
@@ -105,6 +209,58 @@ class AFNO2D(nn.Module):
 
 
 class Block(nn.Module):
+    r"""
+    AFNO block with configurable skip connections, channels-first variant.
+
+    Spectral mixing via :class:`AFNO2D` followed by a channel MLP, each behind a
+    normalization. Compared with
+    :class:`makani.models.networks.afnonet.Block`, the skip around the filter is
+    configurable -- it can be a learned 1x1 convolution, an identity, or absent
+    entirely -- and ``nested_skip_fno`` controls whether the MLP's residual
+    starts from the block input or from the filter output.
+
+    Parameters
+    ----------
+    h : int
+        Height of the token grid. Recorded for the normalization layers.
+    w : int
+        Width of the token grid.
+    dim : int
+        Channel dimension.
+    mlp_ratio : float, optional
+        Hidden width of the MLP as a multiple of ``dim``, by default ``4.0``.
+    drop : float, optional
+        Dropout probability inside the MLP, by default ``0.0``.
+    drop_path : float, optional
+        Stochastic depth probability, by default ``0.0``.
+    act_layer : callable, optional
+        Activation constructor, by default :class:`torch.nn.GELU`.
+    norm_layer : callable, optional
+        Normalization constructor, called with no arguments. By default
+        :class:`torch.nn.LayerNorm`.
+    num_blocks : int, optional
+        Number of channel blocks in the AFNO mixer, by default ``8``.
+    sparsity_threshold : float, optional
+        Soft-shrink threshold in the AFNO mixer, by default ``0.01``.
+    hard_thresholding_fraction : float, optional
+        Fraction of Fourier modes retained, by default ``1.0``.
+    use_complex_kernels : bool, optional
+        Use native complex arithmetic in the mixer, by default ``True``.
+    skip_fno : str, optional
+        Skip connection around the filter: ``"linear"`` (default),
+        ``"identity"``, or ``None`` for none. Unrecognized values are treated
+        as ``None``.
+    nested_skip_fno : bool, optional
+        If ``True`` (the default), the MLP's residual is the block input, so
+        the two skips nest. If ``False``, it is the filter output, so they are
+        sequential.
+    checkpointing_level : int, optional
+        Gradient checkpointing aggressiveness; the MLP is checkpointed at level
+        2 and above. By default ``0``.
+    verbose : bool, optional
+        Print which skip configuration was selected, by default ``True``.
+    """
+
     def __init__(
         self,
         h,
@@ -146,22 +302,45 @@ class Block(nn.Module):
 
         else:
             if verbose:
-                print(f"Got skip_fno={skip_fno}, not using any skip around FNO -- use linear or identity to change this.")
+                print(
+                    f"Got skip_fno={skip_fno}, not using any skip around FNO -- use linear or identity to change this."
+                )
         self.skip_fno = skip_fno
 
         self.nested_skip_fno = nested_skip_fno
 
         # filter
-        self.filter = AFNO2D(dim, num_blocks, sparsity_threshold, hard_thresholding_fraction, use_complex_kernels=use_complex_kernels)
+        self.filter = AFNO2D(
+            dim, num_blocks, sparsity_threshold, hard_thresholding_fraction, use_complex_kernels=use_complex_kernels
+        )
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
         # norm layer
         self.norm2 = norm_layer()  # ((h,w))
 
         mlp_hidden_dim = int(dim * mlp_ratio)
-        self.mlp = MLP(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop_rate=drop, checkpointing=(checkpointing_level>=2))
+        self.mlp = MLP(
+            in_features=dim,
+            hidden_features=mlp_hidden_dim,
+            act_layer=act_layer,
+            drop_rate=drop,
+            checkpointing=(checkpointing_level >= 2),
+        )
 
     def forward(self, x):
+        r"""
+        Apply spectral mixing and the channel MLP with the configured skips.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input of shape ``(B, dim, h, w)``.
+
+        Returns
+        -------
+        torch.Tensor
+            Tensor of the same shape as ``x``.
+        """
         residual = x
 
         x = self.norm1(x)
@@ -180,6 +359,69 @@ class Block(nn.Module):
 
 
 class AdaptiveFourierNeuralOperatorNet(nn.Module):
+    r"""
+    Adaptive Fourier Neural Operator network, revised implementation.
+
+    Same architecture as
+    :class:`makani.models.networks.afnonet.AdaptiveFourierNeuralOperatorNet` --
+    patch embedding, a stack of AFNO blocks, a linear decode head -- but working
+    in channels-first layout with a configurable normalization layer,
+    configurable skip connections around each filter, and gradient
+    checkpointing.
+
+    Parameters
+    ----------
+    inp_shape : (int, int), optional
+        Input grid as ``(nlat, nlon)``, by default ``(720, 1440)``. Must be
+        divisible by ``patch_size``.
+    patch_size : (int, int), optional
+        Patch size, by default ``(6, 6)``.
+    inp_chans : int, optional
+        Number of input channels, by default ``2``.
+    out_chans : int, optional
+        Number of output channels, by default ``2``.
+    embed_dim : int, optional
+        Token dimension, by default ``768``.
+    num_layers : int, optional
+        Number of AFNO blocks, by default ``12``.
+    mlp_ratio : float, optional
+        Hidden width of the block MLPs as a multiple of ``embed_dim``, by
+        default ``4.0``.
+    drop_rate : float, optional
+        Dropout probability, by default ``0.0``.
+    drop_path_rate : float, optional
+        Maximum stochastic depth probability, ramped linearly across the depth,
+        by default ``0.0``.
+    num_blocks : int, optional
+        Number of channel blocks in each AFNO mixer, by default ``16``.
+    sparsity_threshold : float, optional
+        Soft-shrink threshold in the AFNO mixers, by default ``0.01``.
+    normalization_layer : str, optional
+        ``"instance_norm"`` (default) or ``"layer_norm"``.
+    skip_fno : str, optional
+        Skip connection around each filter: ``"linear"`` (default),
+        ``"identity"``, or ``None``.
+    nested_skip_fno : bool, optional
+        Whether the block's two skips nest rather than run sequentially, by
+        default ``True``.
+    hard_thresholding_fraction : float, optional
+        Fraction of Fourier modes retained, by default ``1.0``.
+    checkpointing_level : int, optional
+        Gradient checkpointing aggressiveness, by default ``0``.
+    use_complex_kernels : bool, optional
+        Use native complex arithmetic in the mixers, by default ``True``.
+    verbose : bool, optional
+        Print the skip configuration of each block, by default ``False``.
+    **kwargs
+        Ignored; present so model configs can pass extra keys.
+
+    Raises
+    ------
+    ValueError
+        If ``patch_size`` does not have two entries, if it does not divide the
+        image dimensions evenly, or if ``normalization_layer`` is unsupported.
+    """
+
     def __init__(
         self,
         inp_shape=(720, 1440),
@@ -210,12 +452,16 @@ class AdaptiveFourierNeuralOperatorNet(nn.Module):
         self.embed_dim = embed_dim
 
         # some sanity checks
-        assert len(patch_size) == 2, f"Expected patch_size to have two entries but got {patch_size} instead"
-        assert (self.img_size[0] % self.patch_size[0] == 0) and (
-            self.img_size[1] % self.patch_size[1] == 0
-        ), f"Error, the patch size {self.patch_size} does not divide the image dimensions {self.img_size} evenly."
+        if len(patch_size) != 2:
+            raise ValueError(f"Expected patch_size to have two entries but got {patch_size} instead")
+        if not ((self.img_size[0] % self.patch_size[0] == 0) and (self.img_size[1] % self.patch_size[1] == 0)):
+            raise ValueError(
+                f"the patch size {self.patch_size} does not divide the image dimensions {self.img_size} evenly."
+            )
 
-        self.patch_embed = PatchEmbed2D(img_size=self.img_size, patch_size=self.patch_size, in_chans=self.inp_chans, embed_dim=self.embed_dim)
+        self.patch_embed = PatchEmbed2D(
+            img_size=self.img_size, patch_size=self.patch_size, in_chans=self.inp_chans, embed_dim=self.embed_dim
+        )
         num_patches = self.patch_embed.num_patches
 
         self.pos_embed = nn.Parameter(torch.zeros(1, embed_dim, num_patches))
@@ -231,7 +477,9 @@ class AdaptiveFourierNeuralOperatorNet(nn.Module):
         if normalization_layer == "layer_norm":
             norm_layer = partial(nn.LayerNorm, normalized_shape=(self.h, self.w), eps=1e-6)
         elif normalization_layer == "instance_norm":
-            norm_layer = partial(nn.InstanceNorm2d, num_features=embed_dim, eps=1e-6, affine=True, track_running_stats=False)
+            norm_layer = partial(
+                nn.InstanceNorm2d, num_features=embed_dim, eps=1e-6, affine=True, track_running_stats=False
+            )
         else:
             raise NotImplementedError(f"Error, normalization {normalization_layer} not implemented.")
 
@@ -277,9 +525,35 @@ class AdaptiveFourierNeuralOperatorNet(nn.Module):
 
     @torch.compiler.disable(recursive=False)
     def no_weight_decay(self):
+        r"""
+        Parameters that should be excluded from weight decay.
+
+        Position embeddings and class tokens encode location and identity
+        rather than a learned transformation, so decaying them degrades the
+        model instead of regularizing it.
+
+        Returns
+        -------
+        set of str
+            Names of the parameters to exclude.
+        """
         return {"pos_embed", "cls_token"}
 
     def forward_features(self, x):
+        r"""
+        Tokenize the input and run it through the AFNO blocks.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input field of shape ``(B, inp_chans, nlat, nlon)``.
+
+        Returns
+        -------
+        torch.Tensor
+            Latent grid of shape ``(B, embed_dim, h, w)``, where ``h`` and ``w``
+            are the patched grid dimensions.
+        """
         B = x.shape[0]
         x = self.patch_embed(x)
         x = x + self.pos_embed
@@ -294,6 +568,19 @@ class AdaptiveFourierNeuralOperatorNet(nn.Module):
         return x
 
     def forward(self, x):
+        r"""
+        Map an input field to the predicted output field.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input of shape ``(B, inp_chans, nlat, nlon)``.
+
+        Returns
+        -------
+        torch.Tensor
+            Prediction of shape ``(B, out_chans, nlat, nlon)``.
+        """
         x = self.forward_features(x)
         x = self.head(x)
 

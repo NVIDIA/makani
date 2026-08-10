@@ -34,20 +34,28 @@ from makani.utils import MetricsHandler
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
-from .distributed_helpers import _init_grid, _split_helper, get_default_parameters, set_image_shape
+from .distributed_helpers import (
+    _split_helper,
+    get_default_parameters,
+    set_image_shape,
+    reduce_success,
+    sync_and_barrier,
+)
 from ..testutils import disable_tf32, set_seed, compare_arrays
 
 # because of physicsnemo/NCCL tear down issues, we can only run one test at a time
 _metric_handler_params = [
     ("equiangular", 4, 16, 3, "mean"),
-    #("equiangular", 4, 16, 3, "sum"),
+    # ("equiangular", 4, 16, 3, "sum"),
 ]
+
 
 class TestDistributedMetricHandler(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls, path="/tmp"):
         from mpi4py import MPI
+
         cls.mpi_comm = MPI.COMM_WORLD.Dup()
         cls.mpi_comm_rank = cls.mpi_comm.Get_rank()
         cls.mpi_comm_size = cls.mpi_comm.Get_size()
@@ -59,7 +67,7 @@ class TestDistributedMetricHandler(unittest.TestCase):
             cls.device = torch.device(f"cuda:{local_rank}")
             torch.cuda.set_device(cls.device)
         else:
-            if self.mpi_comm_rank == 0:
+            if cls.mpi_comm_rank == 0:
                 print("Running test on CPU")
             cls.device = torch.device("cpu")
         set_seed(333)
@@ -67,16 +75,18 @@ class TestDistributedMetricHandler(unittest.TestCase):
         # create temporary directory
         cls.tmpdir = tempfile.TemporaryDirectory(dir=path)
 
+        sync_and_barrier()
+
         return
 
     @classmethod
     def tearDownClass(cls):
+        sync_and_barrier()
         cls.tmpdir.cleanup()
         # Free the duplicated communicator. mpi_comm is an mpi4py Intracomm
         # (returned by MPI.COMM_WORLD.Dup()), whose disposal API is Free(),
         # not the previously-used (and non-existent) finalize().
         cls.mpi_comm.Free()
-
 
     def _init_comms(self):
 
@@ -89,8 +99,8 @@ class TestDistributedMetricHandler(unittest.TestCase):
 
         # init groups
         comm.init(
-            model_parallel_sizes=[self.grid_size_h, self.grid_size_w, 1, 1],
-            model_parallel_names=["h", "w", "fin", "fout"],
+            model_parallel_sizes=[self.grid_size_h, self.grid_size_w, 1],
+            model_parallel_names=["h", "w", "matmul"],
             data_parallel_sizes=[self.grid_size_e, self.grid_size_b],
             data_parallel_names=["ensemble", "batch"],
         )
@@ -109,7 +119,9 @@ class TestDistributedMetricHandler(unittest.TestCase):
         thd.init(self.h_group, self.w_group)
 
         if self.world_rank == 0:
-            print(f"Running distributed tests on grid H x W x E x B = {self.grid_size_h} x {self.grid_size_w} x {self.grid_size_e} x {self.grid_size_b}")
+            print(
+                f"Running distributed tests on grid H x W x E x B = {self.grid_size_h} x {self.grid_size_w} x {self.grid_size_e} x {self.grid_size_b}"
+            )
 
         return
 
@@ -144,7 +156,9 @@ class TestDistributedMetricHandler(unittest.TestCase):
         return
 
     @parameterized.expand(_metric_handler_params, skip_on_empty=True)
-    def test_metric_handler_aggregation(self, grid_type, batch_size, ensemble_size, num_rollout_steps, bred, verbose=False):
+    def test_metric_handler_aggregation(
+        self, grid_type, batch_size, ensemble_size, num_rollout_steps, bred, verbose=False
+    ):
         # create dummy climatology
         num_steps = 4
         num_channels = len(self.params.channel_names)
@@ -160,25 +174,52 @@ class TestDistributedMetricHandler(unittest.TestCase):
         self.params.batch_size = batch_size
         self.params.ensemble_size = ensemble_size
 
-        metric_handler_local = MetricsHandler(self.params,
-                                              clim,
-                                              num_rollout_steps,
-                                              self.device,
-                                              l1_var_names=self.params.channel_names,
-                                              rmse_var_names=self.params.channel_names,
-                                              acc_var_names=self.params.channel_names,
-                                              crps_var_names=self.params.channel_names,
-                                              spread_var_names=self.params.channel_names,
-                                              ssr_var_names=self.params.channel_names,
-                                              rh_var_names=self.params.channel_names,
-                                              wb2_compatible=False)
+        metric_handler_local = MetricsHandler(
+            self.params,
+            clim,
+            num_rollout_steps,
+            self.device,
+            l1_var_names=self.params.channel_names,
+            rmse_var_names=self.params.channel_names,
+            acc_var_names=self.params.channel_names,
+            crps_var_names=self.params.channel_names,
+            spread_var_names=self.params.channel_names,
+            ssr_var_names=self.params.channel_names,
+            rh_var_names=self.params.channel_names,
+            wb2_compatible=False,
+        )
         metric_handler_local.initialize_buffers()
         metric_handler_local.zero_buffers()
 
-        inplist = [torch.randn((num_rollout_steps, batch_size, ensemble_size, num_channels, self.params.img_local_shape_x, self.params.img_local_shape_y),
-                               dtype=torch.float32, device=self.device) for _ in range(num_steps)]
-        tarlist = [torch.randn((num_rollout_steps, batch_size, num_channels, self.params.img_local_shape_x, self.params.img_local_shape_y),
-                               dtype=torch.float32, device=self.device) for _ in range(num_steps)]
+        inplist = [
+            torch.randn(
+                (
+                    num_rollout_steps,
+                    batch_size,
+                    ensemble_size,
+                    num_channels,
+                    self.params.img_local_shape_x,
+                    self.params.img_local_shape_y,
+                ),
+                dtype=torch.float32,
+                device=self.device,
+            )
+            for _ in range(num_steps)
+        ]
+        tarlist = [
+            torch.randn(
+                (
+                    num_rollout_steps,
+                    batch_size,
+                    num_channels,
+                    self.params.img_local_shape_x,
+                    self.params.img_local_shape_y,
+                ),
+                dtype=torch.float32,
+                device=self.device,
+            )
+            for _ in range(num_steps)
+        ]
 
         for inp, tar in zip(inplist, tarlist):
             for idt in range(num_rollout_steps):
@@ -186,7 +227,7 @@ class TestDistributedMetricHandler(unittest.TestCase):
                 tarp = tar[idt, ...]
 
                 # dummy loss
-                loss = torch.tensor(1., dtype=torch.float32, device=self.device)
+                loss = torch.tensor(1.0, dtype=torch.float32, device=self.device)
 
                 # update metric handler
                 metric_handler_local.update(inpp, tarp, loss, idt)
@@ -201,11 +242,11 @@ class TestDistributedMetricHandler(unittest.TestCase):
         self._init_comms()
 
         # distributed
-        #set up shapes
+        # set up shapes
         h_shapes = compute_split_shapes(self.params.img_shape_x, comm.get_size("h"))
         h_off = [0] + np.cumsum(h_shapes).tolist()[:-1]
         w_shapes = compute_split_shapes(self.params.img_shape_y, comm.get_size("w"))
-        w_off =	[0] + np.cumsum(w_shapes).tolist()[:-1]
+        w_off = [0] + np.cumsum(w_shapes).tolist()[:-1]
 
         self.params.img_local_shape_x = h_shapes[comm.get_rank("h")]
         self.params.img_local_offset_x = h_off[comm.get_rank("h")]
@@ -217,18 +258,20 @@ class TestDistributedMetricHandler(unittest.TestCase):
         tarlist_split = [self._split_helper(tensor) for tensor in tarlist]
 
         # init metric handler
-        metric_handler_dist = MetricsHandler(self.params,
-                                             clim,
-                                             num_rollout_steps,
-                                             self.device,
-                                             l1_var_names=self.params.channel_names,
-                                             rmse_var_names=self.params.channel_names,
-                                             acc_var_names=self.params.channel_names,
-                                             crps_var_names=self.params.channel_names,
-                                             spread_var_names=self.params.channel_names,
-                                             ssr_var_names=self.params.channel_names,
-                                             rh_var_names=self.params.channel_names,
-                                             wb2_compatible=False)
+        metric_handler_dist = MetricsHandler(
+            self.params,
+            clim,
+            num_rollout_steps,
+            self.device,
+            l1_var_names=self.params.channel_names,
+            rmse_var_names=self.params.channel_names,
+            acc_var_names=self.params.channel_names,
+            crps_var_names=self.params.channel_names,
+            spread_var_names=self.params.channel_names,
+            ssr_var_names=self.params.channel_names,
+            rh_var_names=self.params.channel_names,
+            wb2_compatible=False,
+        )
         metric_handler_dist.initialize_buffers()
         metric_handler_dist.zero_buffers()
 
@@ -238,7 +281,7 @@ class TestDistributedMetricHandler(unittest.TestCase):
                 tarp = tar[idt, ...]
 
                 # dummy loss
-                loss = torch.tensor(1., dtype=torch.float32, device=self.device)
+                loss = torch.tensor(1.0, dtype=torch.float32, device=self.device)
 
                 # update metric handler
                 metric_handler_dist.update(inpp, tarp, loss, idt)
@@ -251,14 +294,19 @@ class TestDistributedMetricHandler(unittest.TestCase):
         metrics_dist = logs_dist["metrics"]
 
         # compare scalar metrics
-        for key in  metrics_local.keys():
+        for key in metrics_local.keys():
             if key == "rollouts":
                 continue
             val_local = metrics_local[key]
             val_dist = metrics_dist[key]
             if verbose:
                 print(f"log metric {key}: local={val_local}, dist={val_dist}")
-            self.assertTrue(compare_arrays(f"log metric {key}", np.asarray(val_local), np.asarray(val_dist), verbose=verbose))
+            self.assertTrue(
+                reduce_success(
+                    compare_arrays(f"log metric {key}", np.asarray(val_local), np.asarray(val_dist), verbose=verbose),
+                    self.device,
+                )
+            )
 
         # compare rollouts
         rollouts_local = logs_local["metrics"]["rollouts"]
@@ -276,7 +324,9 @@ class TestDistributedMetricHandler(unittest.TestCase):
         data_dist = np.array(data_dist)
 
         with self.subTest(desc="rollouts"):
-            self.assertTrue(compare_arrays("rollouts", data_dist, data_local, verbose=verbose))
+            self.assertTrue(
+                reduce_success(compare_arrays("rollouts", data_dist, data_local, verbose=verbose), self.device)
+            )
 
         # save output files and compare
         if comm.get_world_rank() == 0:
@@ -290,6 +340,8 @@ class TestDistributedMetricHandler(unittest.TestCase):
                 data_local = file_local[key]["metric_data"][...]
                 data_dist = file_dist[key]["metric_data"][...]
                 with self.subTest(desc=f"file metric {key}"):
+                    # rank-0-only block (only rank 0 saved/reads the files): must NOT use
+                    # reduce_success here -- a collective inside `if rank == 0` deadlocks.
                     self.assertTrue(compare_arrays(f"file metric {key}", data_dist, data_local, verbose=verbose))
 
             # close files

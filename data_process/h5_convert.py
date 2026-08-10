@@ -16,23 +16,25 @@
 import os
 from typing import Optional
 import glob
-import argparse as ap 
+import argparse as ap
 import h5py as h5
+import numpy as np
 from tqdm import tqdm
 
 
-def h5_convert(input_dir: str,
-               output_dir: str,
-               chunksize: str,
-               compression_mode: str,
-               compression_parameter: Optional[int]=None,
-               batchsize: Optional[int]=100,
-               transpose: Optional[bool]=False,
-               overwrite: Optional[bool]=False,
-               entry_key: Optional[str]="fields"):
-
+def h5_convert(
+    input_dir: str,
+    output_dir: str,
+    chunksize: str,
+    compression_mode: str,
+    compression_parameter: Optional[int] = None,
+    batchsize: Optional[int] = 100,
+    transpose: Optional[bool] = False,
+    overwrite: Optional[bool] = False,
+    entry_key: Optional[str] = "fields",
+):
     """Function to reformat HDF5 dataset, e.g. enabling chunking or compression.
-    
+
     ...
 
     Parameters
@@ -44,7 +46,7 @@ def h5_convert(input_dir: str,
     chunksize : str
         Chunksize specified as string for the HDF5 dataset in the new file, The following values are supported:
         none: no chunking, the whole dataset is in a single chunk
-        auto: use HDF5 automatic chunking. 
+        auto: use HDF5 automatic chunking.
         <some number>MB: set chunk size to <some number> megabytes
         (chunk_0, chunk_1, chunk_2, chunk_3): set chunk size independently for the individual dimensions.
     compression_mode : str
@@ -65,7 +67,7 @@ def h5_convert(input_dir: str,
     entry_key: str
         This is the HDF5 dataset name of the data in the files. Defaults to "fields".
     """
-    
+
     # set chunksize
     if chunksize == "auto":
         chunksize = True
@@ -81,7 +83,7 @@ def h5_convert(input_dir: str,
         print(f"Setting chunksize to {chunksize}")
     else:
         raise ValueError(f"Error, chunksize {chunksize} not supported.")
-    
+
     # get files
     files = glob.glob(os.path.join(input_dir, "*.h5"))
 
@@ -92,7 +94,7 @@ def h5_convert(input_dir: str,
     elif compression_mode == "lzf":
         kwargs["compression"] = "lzf"
     elif compression_mode == "gzip":
-        kwargs["compression"] =	"gzip"
+        kwargs["compression"] = "gzip"
         if compression_parameter is not None:
             kwargs["compression_opts"] = compression_parameter
     elif compression_mode == "scaleoffset":
@@ -102,7 +104,7 @@ def h5_convert(input_dir: str,
     # loop over files
     for ifname in files:
 
-        #construct output file name
+        # construct output file name
         ofname = os.path.join(output_dir, os.path.basename(ifname))
 
         # check if output file exists
@@ -114,7 +116,7 @@ def h5_convert(input_dir: str,
                 os.remove(ofname)
 
         print(f"Converting {ifname} -> {ofname}", flush=True)
-        with h5.File(ifname, 'r') as fin:
+        with h5.File(ifname, "r") as fin:
 
             # input data handle
             data_handle = fin[entry_key]
@@ -127,7 +129,7 @@ def h5_convert(input_dir: str,
             lat = fin["lat"]
             lon = fin["lon"]
 
-            with h5.File(ofname, 'w') as fout:
+            with h5.File(ofname, "w") as fout:
 
                 # output dataset
                 fout.create_dataset(entry_key, data_handle.shape, dtype=data_handle.dtype, **kwargs)
@@ -136,7 +138,7 @@ def h5_convert(input_dir: str,
                 fout.create_dataset("timestamp", data=timestamps)
                 fout.create_dataset("channel", len(channel_names), dtype=h5.string_dtype(length=chanlen))
                 fout["channel"][...] = channel_names
-		fout.create_dataset("lat", data=lat)
+                fout.create_dataset("lat", data=lat)
                 fout.create_dataset("lon", data=lon)
 
                 # create scales
@@ -152,19 +154,19 @@ def h5_convert(input_dir: str,
                 fout[entry_key].dims[3].label = fin[entry_key].dims[3].label
 
                 # attach scales
-                fout[entry_key].dims[0].attach_scale(f["timestamp"])
-                fout[entry_key].dims[1].attach_scale(f["channel"])
-                fout[entry_key].dims[2].attach_scale(f["lat"])
-                fout[entry_key].dims[3].attach_scale(f["lon"])
+                fout[entry_key].dims[0].attach_scale(fout["timestamp"])
+                fout[entry_key].dims[1].attach_scale(fout["channel"])
+                fout[entry_key].dims[2].attach_scale(fout["lat"])
+                fout[entry_key].dims[3].attach_scale(fout["lon"])
 
                 # write data in batched fashion
                 for start in tqdm(range(0, data_handle.shape[0], batchsize)):
-                    end = min(start+batchsize, data_handle.shape[0])
+                    end = min(start + batchsize, data_handle.shape[0])
                     data = data_handle[start:end, ...]
 
                     if transpose:
                         data = np.transpose(data, (0, 2, 3, 1))
-                    
+
                     # write data
                     fout[entry_key][start:end, ...] = data[...]
 
@@ -172,14 +174,16 @@ def h5_convert(input_dir: str,
 
 
 def main(args):
-    h5_convert(input_dir=args.input_dir,
-	       output_dir=args.output_dir,
-               chunksize=args.chunksize,
-	       compression_mode=args.compression_mode,
-	       compression_parameter=args.compression_parameter,
-               batchsize=args.batchsize,
-               transpose=args.transpose,
-               overwriteargs.overwrite)
+    h5_convert(
+        input_dir=args.input_dir,
+        output_dir=args.output_dir,
+        chunksize=args.chunksize,
+        compression_mode=args.compression_mode,
+        compression_parameter=args.compression_parameter,
+        batchsize=args.batchsize,
+        transpose=args.transpose,
+        overwrite=args.overwrite,
+    )
 
     return
 
@@ -191,12 +195,24 @@ if __name__ == "__main__":
     parser.add_argument("--output_dir", type=str, help="Directory for output files.", required=True)
     parser.add_argument("--chunksize", type=str, default="auto", help="Default chunksize.")
     parser.add_argument("--batchsize", type=int, default=100, help="Batch size for IO.")
-    parser.add_argument("--scaleoffset", type=int, default=-1, help="Value for scaleoffset filter, negative values disable the filter..")
-    parser.add_argument("--compression_mode", type=str, default=None, choices=["gzip", "szip", "scaleoffset", "lzf"], help="Which compression mode to use.")
-    parser.add_argument("--compression_parameter", type=int, default=None, help="Value for compression filters, ignored when compression_mode is None")
-    parser.add_argument("--transpose", action='store_true')
-    parser.add_argument("--overwrite", action='store_true')
+    parser.add_argument(
+        "--scaleoffset", type=int, default=-1, help="Value for scaleoffset filter, negative values disable the filter.."
+    )
+    parser.add_argument(
+        "--compression_mode",
+        type=str,
+        default=None,
+        choices=["gzip", "szip", "scaleoffset", "lzf"],
+        help="Which compression mode to use.",
+    )
+    parser.add_argument(
+        "--compression_parameter",
+        type=int,
+        default=None,
+        help="Value for compression filters, ignored when compression_mode is None",
+    )
+    parser.add_argument("--transpose", action="store_true")
+    parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
 
     main(args)
-        

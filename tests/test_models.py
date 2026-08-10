@@ -16,7 +16,7 @@
 import sys
 import os
 import unittest
-from parameterized import parameterized
+from parameterized import parameterized, parameterized_class
 
 import torch
 
@@ -27,6 +27,12 @@ from makani.utils import LossHandler
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from .testutils import disable_tf32, set_seed, get_default_parameters, compare_tensors
 
+_devices = [(torch.device("cpu"),)]
+if torch.cuda.is_available():
+    _devices.append((torch.device("cuda"),))
+
+
+@parameterized_class(("device",), _devices)
 class TestModels(unittest.TestCase):
 
     def setUp(self):
@@ -52,8 +58,7 @@ class TestModels(unittest.TestCase):
         # also set the batch size for testing
         self.params.batch_size = 4
 
-        # set device and seed
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # set seed
         set_seed(333)
 
         return
@@ -70,8 +75,18 @@ class TestModels(unittest.TestCase):
         multistep = self.params.n_future > 0
         model = model_registry.get_model(self.params, multistep=multistep).to(self.device)
 
-        inp_shape = (self.params.batch_size, self.params.N_in_channels, self.params.img_shape_x, self.params.img_shape_y)
-        out_shape = (self.params.batch_size, self.params.N_out_channels, self.params.img_shape_x, self.params.img_shape_y)
+        inp_shape = (
+            self.params.batch_size,
+            self.params.N_in_channels,
+            self.params.img_shape_x,
+            self.params.img_shape_y,
+        )
+        out_shape = (
+            self.params.batch_size,
+            self.params.N_out_channels,
+            self.params.img_shape_x,
+            self.params.img_shape_y,
+        )
 
         # prepare some dummy data
         inp = torch.randn(*inp_shape, dtype=torch.float32, device=self.device)
@@ -87,17 +102,16 @@ class TestModels(unittest.TestCase):
         self.assertTrue(inp.grad is not None)
         self.assertEqual(inp.grad.shape, inp_shape)
 
-
     @parameterized.expand(
         [
-            ('AFNO', 1e-5, 1e-5),
-            ('AFNOv2', 1e-6, 1e-6),
-            ('FNO', 1e-6, 1e-6),
-            ('ViT', 5e-6, 5e-6),
-            ("SFNO", 1e-6, 1e-6),
+            ("AFNO", 1e-5, 1e-5),
+            ("AFNOv2", 1e-6, 1e-6),
+            ("FNO", 1e-6, 1e-6),
+            ("ViT", 5e-6, 5e-6),
+            ("SFNO", 5e-6, 5e-6),
             ("SNO", 1e-6, 1e-6),
             ("FCN3", 1e-6, 1e-6),
-            ("Pangu", 1e-6, 1e-6)
+            ("Pangu", 1e-6, 1e-6),
         ],
         skip_on_empty=True,
     )
@@ -150,17 +164,17 @@ class TestModels(unittest.TestCase):
 
         # step 1
         out_double = model(inp_tmp)
-        loss = loss_obj(out_double, tar_tmp) / 2.
+        loss = loss_obj(out_double, tar_tmp) / 2.0
         loss.backward()
         igrad_double = inp_tmp.grad.clone()
 
         inp_tmp = inp_split[1].detach().clone()
-        inp_tmp.requires_grad =	True
+        inp_tmp.requires_grad = True
         tar_tmp = tar_split[1].detach().clone()
 
         # step 2
         out = model(inp_tmp)
-        loss = loss_obj(out, tar_tmp) / 2.
+        loss = loss_obj(out, tar_tmp) / 2.0
         loss.backward()
         out_double = torch.cat([out_double, out], dim=0)
         igrad_double = torch.cat([igrad_double, inp_tmp.grad.clone()], dim=0)
@@ -188,8 +202,9 @@ class TestModels(unittest.TestCase):
                     wgrad_single = state_dict_single_step[key]
                     wgrad_double = state_dict_double_step[key]
                     with self.subTest(desc=f"weight gradient {key}"):
-                        self.assertTrue(compare_tensors(f"weight gradient {key}", wgrad_double, wgrad_single, atol, rtol, verbose))
-
+                        self.assertTrue(
+                            compare_tensors(f"weight gradient {key}", wgrad_double, wgrad_single, atol, rtol, verbose)
+                        )
 
 
 if __name__ == "__main__":

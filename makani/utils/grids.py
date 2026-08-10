@@ -26,7 +26,13 @@ from makani.mpu.mappings import reduce_from_parallel_region
 
 def grid_to_quadrature_rule(grid_type):
 
-    grid_to_quad_dict = {"euclidean" : "uniform", "equiangular" : "naive", "legendre-gauss" : "legendre-gauss", "clenshaw-curtiss" : "clenshaw-curtiss", "weatherbench2" : "weatherbench2"}
+    grid_to_quad_dict = {
+        "euclidean": "uniform",
+        "equiangular": "naive",
+        "legendre-gauss": "legendre-gauss",
+        "clenshaw-curtiss": "clenshaw-curtiss",
+        "weatherbench2": "weatherbench2",
+    }
 
     if grid_type not in grid_to_quad_dict.keys():
         raise NotImplementedError(f"Grid type {grid_type} does not have a quadrature rule")
@@ -69,7 +75,9 @@ class GridConverter(torch.nn.Module):
                 self.indices = jj[permutation]
 
                 # compute weights
-                self.interp_weights = ((self.dst_lat - lat_rad[self.indices]) / torch.diff(lat_rad)[self.indices]).reshape(-1, 1)
+                self.interp_weights = (
+                    (self.dst_lat - lat_rad[self.indices]) / torch.diff(lat_rad)[self.indices]
+                ).reshape(-1, 1)
             else:
                 raise NotImplementedError(f"Error, destination grid type {self.dst} not implemented.")
         else:
@@ -86,11 +94,15 @@ class GridConverter(torch.nn.Module):
         if self.src == self.dst:
             return data
         else:
-            return torch.lerp(data[..., self.indices, :], data[..., self.indices + 1, :], self.interp_weights.to(dtype=data.dtype))
+            return torch.lerp(
+                data[..., self.indices, :], data[..., self.indices + 1, :], self.interp_weights.to(dtype=data.dtype)
+            )
 
 
 class GridQuadrature(torch.nn.Module):
-    def __init__(self, quadrature_rule, img_shape, crop_shape=None, crop_offset=(0, 0), normalize=False, distributed=False):
+    def __init__(
+        self, quadrature_rule, img_shape, crop_shape=None, crop_offset=(0, 0), normalize=False, distributed=False
+    ):
         super().__init__()
 
         self.distributed = comm.is_distributed("spatial") and distributed
@@ -157,7 +169,9 @@ class GridQuadrature(torch.nn.Module):
 
         # crop globally if requested
         if crop_shape is not None:
-            quad_weight = quad_weight[local_offset_h : local_offset_h + local_shape_h, local_offset_w : local_offset_w + local_shape_w]
+            quad_weight = quad_weight[
+                local_offset_h : local_offset_h + local_shape_h, local_offset_w : local_offset_w + local_shape_w
+            ]
 
         # make it contiguous
         quad_weight = quad_weight.contiguous()
@@ -178,7 +192,7 @@ class GridQuadrature(torch.nn.Module):
 
 
 class BandLimitMask(torch.nn.Module):
-    def __init__(self, img_shape, grid_type, lmax = None, type="sht"):
+    def __init__(self, img_shape, grid_type, lmax=None, type="sht"):
         super().__init__()
         self.img_shape = img_shape
         self.grid_type = grid_type
@@ -187,15 +201,18 @@ class BandLimitMask(torch.nn.Module):
 
         if self.type == "sht":
             # SHT for the computation of SH coefficients
-            if (comm.get_size("spatial") > 1):
+            if comm.get_size("spatial") > 1:
                 from torch_harmonics.distributed import DistributedRealSHT, DistributedInverseRealSHT
                 import torch_harmonics.distributed as thd
+
                 if not thd.is_initialized():
                     polar_group = None if (comm.get_size("h") == 1) else comm.get_group("h")
                     azimuth_group = None if (comm.get_size("w") == 1) else comm.get_group("w")
                     thd.init(polar_group, azimuth_group)
                 self.forward_transform = DistributedRealSHT(*img_shape, lmax=lmax, mmax=lmax, grid=grid_type).float()
-                self.inverse_transform = DistributedInverseRealSHT(*img_shape, lmax=lmax, mmax=lmax, grid=grid_type).float()
+                self.inverse_transform = DistributedInverseRealSHT(
+                    *img_shape, lmax=lmax, mmax=lmax, grid=grid_type
+                ).float()
             else:
                 from torch_harmonics import RealSHT, InverseRealSHT
 
@@ -207,20 +224,22 @@ class BandLimitMask(torch.nn.Module):
             # get the cutoff frequency in m for each latitude
             lats, _ = precompute_latitudes(self.img_shape[0], grid=self.grid_type)
             # get the grid spacing at the equator
-            delta_equator = 2 * torch.pi / (self.lmax-1)
+            delta_equator = 2 * torch.pi / (self.lmax - 1)
             mlim = torch.ceil(2 * torch.pi * torch.sin(lats) / delta_equator).reshape(self.img_shape[0], 1)
             ms = torch.arange(self.lmax).reshape(1, -1)
-            mask = (ms <= mlim)
+            mask = ms <= mlim
             mask = split_tensor_along_dim(mask, dim=-1, num_chunks=comm.get_size("w"))[comm.get_rank("w")]
             mask = split_tensor_along_dim(mask, dim=-2, num_chunks=comm.get_size("h"))[comm.get_rank("h")]
             self.register_buffer("mask", mask, persistent=False)
 
-            if (comm.get_size("spatial") > 1):
+            if comm.get_size("spatial") > 1:
                 from makani.mpu.fft import DistributedRealFFT1, DistributedInverseRealFFT1
+
                 self.forward_transform = DistributedRealFFT1(img_shape[1], lmax=lmax, mmax=lmax).float()
                 self.inverse_transform = DistributedInverseRealFFT1(img_shape[1], lmax=lmax, mmax=lmax).float()
             else:
                 from makani.models.common.fft import RealFFT1, InverseRealFFT1
+
                 self.forward_transform = RealFFT1(img_shape[1], lmax=lmax, mmax=lmax).float()
                 self.inverse_transform = InverseRealFFT1(img_shape[1], lmax=lmax, mmax=lmax).float()
         else:

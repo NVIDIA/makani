@@ -28,7 +28,7 @@ from makani import Trainer, EnsembleTrainer, StochasticTrainer, AutoencoderTrain
 from makani.utils import comm
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from .testutils import disable_tf32, set_seed, get_default_parameters, init_dataset
+from .testutils import disable_tf32, set_seed, get_default_parameters, init_hdf5_dataset
 from .testutils import H5_PATH, compare_tensors
 
 
@@ -127,7 +127,15 @@ class TestTrainer(unittest.TestCase):
         data_path = cls.datadir.name
 
         # init datasets and stats
-        cls.train_path, cls.n_train_samples, cls.valid_path, cls.n_eval_samples, cls.stats_path, cls.metadata_path, _ = init_dataset(data_path)
+        (
+            cls.train_path,
+            cls.n_train_samples,
+            cls.valid_path,
+            cls.n_eval_samples,
+            cls.stats_path,
+            cls.metadata_path,
+            _,
+        ) = init_hdf5_dataset(data_path)
 
     def setUp(self, path: Optional[str] = "/tmp"):
 
@@ -143,7 +151,17 @@ class TestTrainer(unittest.TestCase):
         os.mkdir(os.path.join(exp_path, "training_checkpoints"))
 
         self.params = init_params(
-            exp_path, self.train_path, self.valid_path, self.stats_path, batch_size=2, ensemble_size=3, stochastic_size=5, n_history=0, n_future=0, normalization="zscore", num_data_workers=0
+            exp_path,
+            self.train_path,
+            self.valid_path,
+            self.stats_path,
+            batch_size=2,
+            ensemble_size=3,
+            stochastic_size=5,
+            n_history=0,
+            n_future=0,
+            normalization="zscore",
+            num_data_workers=0,
         )
 
         self.params.multifiles = True
@@ -156,7 +174,6 @@ class TestTrainer(unittest.TestCase):
 
         # self.num_steps = 5
         self.params.print_timings_frequency = 0
-        
 
     @classmethod
     def tearDownClass(cls):
@@ -178,7 +195,7 @@ class TestTrainer(unittest.TestCase):
             (StochasticTrainer, False, False, "cuda"),
             (AutoencoderTrainer, False, False, "cuda"),
         ]
-    
+
     @parameterized.expand(test_parameters, skip_on_empty=True)
     def test_trainer(self, trainer_handle, test_train, test_eval, devstring, verbose=False):
 
@@ -200,8 +217,18 @@ class TestTrainer(unittest.TestCase):
             self.assertEqual(self.trainer.epoch, self.params.max_epochs)
 
         # setup some dummy and remember the output of the model
-        inp_shape = (self.params.batch_size, self.params.N_in_channels, self.params.img_shape_x, self.params.img_shape_y)
-        out_shape = (self.params.batch_size, self.params.N_out_channels, self.params.img_shape_x, self.params.img_shape_y)
+        inp_shape = (
+            self.params.batch_size,
+            self.params.N_in_channels,
+            self.params.img_shape_x,
+            self.params.img_shape_y,
+        )
+        out_shape = (
+            self.params.batch_size,
+            self.params.N_out_channels,
+            self.params.img_shape_x,
+            self.params.img_shape_y,
+        )
 
         # we do not need to remember gradients
         self.trainer._set_eval()

@@ -23,96 +23,92 @@ from makani.models.common.contractions import (
     _contract_lwise,
     _contract_sep_lmwise,
     _contract_sep_lwise,
-    _contract_lmwise_real,
-    _contract_lwise_real,
-    _contract_sep_lmwise_real,
-    _contract_sep_lwise_real,
     _contract_dense_pytorch,
 )
 
-import sys, os
+import sys
+import os
+
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from .testutils import disable_tf32, set_seed, compare_tensors
 
 # ---------------------------------------------------------------------------
 # Fixed small dimensions — tests run on CPU
 # ---------------------------------------------------------------------------
-B = 2   # batch
-G = 2   # groups
-I = 4   # in-channels per group  (== O for separable)
-O = 3   # out-channels per group (non-separable only)
-H = 6   # lmax  (l-modes)
-W = 5   # mmax  (m-modes)
+B = 2  # batch
+G = 2  # groups
+I = 4  # in-channels per group  (== O for separable)
+O = 3  # out-channels per group (non-separable only)
+H = 6  # lmax  (l-modes)
+W = 5  # mmax  (m-modes)
 
 
 def _cx(*shape):
     return torch.randn(*shape, dtype=torch.complex64)
 
-def _re(*shape):
-    return torch.randn(*shape, dtype=torch.float32)
-
 
 # ---------------------------------------------------------------------------
 # Reference implementations (plain torch.einsum, no @torch.compile).
-# These are used both for compile-correctness checks and as the mathematical
-# ground truth in the consistency tests.
-#
-# Complex kernels: x is complex64, weight is complex64.
-# Real kernels:    x is float32 with an extra trailing s=2 dim (view_as_real);
-#                  weight is float32 with no s-dim (applied equally to real
-#                  and imaginary parts).
 # ---------------------------------------------------------------------------
 
-def _ref_lmwise(x, w):            return torch.einsum("bgixy,gioxy->bgoxy",  x, w)
-def _ref_lwise(x, w):             return torch.einsum("bgixy,giox->bgoxy",   x, w)
-def _ref_sep_lmwise(x, w):        return torch.einsum("bgixy,gixy->bgixy",   x, w)
-def _ref_sep_lwise(x, w):         return torch.einsum("bgixy,gix->bgixy",    x, w)
-def _ref_lmwise_real(x, w):       return torch.einsum("bgixys,gioxy->bgoxys", x, w)
-def _ref_lwise_real(x, w):        return torch.einsum("bgixys,giox->bgoxys",  x, w)
-def _ref_sep_lmwise_real(x, w):   return torch.einsum("bgixys,gixy->bgixys",  x, w)
-def _ref_sep_lwise_real(x, w):    return torch.einsum("bgixys,gix->bgixys",   x, w)
+
+def _ref_lmwise(x, w):
+    return torch.einsum("bgixy,gioxy->bgoxy", x, w)
+
+
+def _ref_lwise(x, w):
+    return torch.einsum("bgixy,giox->bgoxy", x, w)
+
+
+def _ref_sep_lmwise(x, w):
+    return torch.einsum("bgixy,gixy->bgixy", x, w)
+
+
+def _ref_sep_lwise(x, w):
+    return torch.einsum("bgixy,gix->bgixy", x, w)
+
 
 # ---------------------------------------------------------------------------
 # Input / weight factories
 # ---------------------------------------------------------------------------
 
-def _mk_lmwise():          return _cx(B, G, I, H, W), _cx(G, I, O, H, W)
-def _mk_lwise():           return _cx(B, G, I, H, W), _cx(G, I, O, H)
-def _mk_sep_lmwise():      return _cx(B, G, I, H, W), _cx(G, I, H, W)
-def _mk_sep_lwise():       return _cx(B, G, I, H, W), _cx(G, I, H)
-def _mk_lmwise_real():     return _re(B, G, I, H, W, 2), _re(G, I, O, H, W)
-def _mk_lwise_real():      return _re(B, G, I, H, W, 2), _re(G, I, O, H)
-def _mk_sep_lmwise_real(): return _re(B, G, I, H, W, 2), _re(G, I, H, W)
-def _mk_sep_lwise_real():  return _re(B, G, I, H, W, 2), _re(G, I, H)
+
+def _mk_lmwise():
+    return _cx(B, G, I, H, W), _cx(G, I, O, H, W)
+
+
+def _mk_lwise():
+    return _cx(B, G, I, H, W), _cx(G, I, O, H)
+
+
+def _mk_sep_lmwise():
+    return _cx(B, G, I, H, W), _cx(G, I, H, W)
+
+
+def _mk_sep_lwise():
+    return _cx(B, G, I, H, W), _cx(G, I, H)
+
 
 # ---------------------------------------------------------------------------
 # Master table: (name, compiled_fn, ref_fn, input_factory, expected_output_shape)
 # ---------------------------------------------------------------------------
 _KERNEL_CASES = [
-    ("lmwise",          _contract_lmwise,          _ref_lmwise,         _mk_lmwise,           (B, G, O, H, W)),
-    ("lwise",           _contract_lwise,           _ref_lwise,          _mk_lwise,            (B, G, O, H, W)),
-    ("sep_lmwise",      _contract_sep_lmwise,      _ref_sep_lmwise,     _mk_sep_lmwise,       (B, G, I, H, W)),
-    ("sep_lwise",       _contract_sep_lwise,       _ref_sep_lwise,      _mk_sep_lwise,        (B, G, I, H, W)),
-    ("lmwise_real",     _contract_lmwise_real,     _ref_lmwise_real,    _mk_lmwise_real,      (B, G, O, H, W, 2)),
-    ("lwise_real",      _contract_lwise_real,      _ref_lwise_real,     _mk_lwise_real,       (B, G, O, H, W, 2)),
-    ("sep_lmwise_real", _contract_sep_lmwise_real, _ref_sep_lmwise_real, _mk_sep_lmwise_real, (B, G, I, H, W, 2)),
-    ("sep_lwise_real",  _contract_sep_lwise_real,  _ref_sep_lwise_real, _mk_sep_lwise_real,   (B, G, I, H, W, 2)),
+    ("lmwise", _contract_lmwise, _ref_lmwise, _mk_lmwise, (B, G, O, H, W)),
+    ("lwise", _contract_lwise, _ref_lwise, _mk_lwise, (B, G, O, H, W)),
+    ("sep_lmwise", _contract_sep_lmwise, _ref_sep_lmwise, _mk_sep_lmwise, (B, G, I, H, W)),
+    ("sep_lwise", _contract_sep_lwise, _ref_sep_lwise, _mk_sep_lwise, (B, G, I, H, W)),
 ]
 
 # Lookup helpers
-_MAKER = {name: mk  for name, _, _, mk,  _ in _KERNEL_CASES}
-_REF   = {name: ref for name, _, ref, _, _ in _KERNEL_CASES}
+_MAKER = {name: mk for name, _, _, mk, _ in _KERNEL_CASES}
+_REF = {name: ref for name, _, ref, _, _ in _KERNEL_CASES}
 
-# Dispatcher: (separable, operator_type, complex) → kernel name
+# Dispatcher: (separable, operator_type) → kernel name
 _DISPATCHER_CASES = [
-    (False, "diagonal", True,  "lmwise"),
-    (False, "dhconv",   True,  "lwise"),
-    (True,  "diagonal", True,  "sep_lmwise"),
-    (True,  "dhconv",   True,  "sep_lwise"),
-    (False, "diagonal", False, "lmwise_real"),
-    (False, "dhconv",   False, "lwise_real"),
-    (True,  "diagonal", False, "sep_lmwise_real"),
-    (True,  "dhconv",   False, "sep_lwise_real"),
+    (False, "diagonal", "lmwise"),
+    (False, "dhconv", "lwise"),
+    (True, "diagonal", "sep_lmwise"),
+    (True, "dhconv", "sep_lwise"),
 ]
 
 
@@ -131,7 +127,8 @@ class TestContractionShape(unittest.TestCase):
         x, w = make_inputs()
         out = fn(x, w)
         self.assertEqual(
-            tuple(out.shape), expected_shape,
+            tuple(out.shape),
+            expected_shape,
             f"{name}: got {tuple(out.shape)}, expected {expected_shape}",
         )
 
@@ -159,35 +156,33 @@ class TestContractionCorrectness(unittest.TestCase):
 # 3. Dispatcher routing
 # ===========================================================================
 class TestContractionDispatcher(unittest.TestCase):
-    """_contract_dense_pytorch routes every (separable, operator_type, complex)
+    """_contract_dense_pytorch routes every (separable, operator_type)
     combination to the correct kernel."""
 
     def setUp(self):
         disable_tf32()
         set_seed(333)
 
-    @parameterized.expand(
-        [(f"sep{s}_op{op}_cx{cx}", s, op, cx, kname) for s, op, cx, kname in _DISPATCHER_CASES]
-    )
-    def test_routing(self, _label, separable, operator_type, complex_, kernel_name, verbose=False):
+    @parameterized.expand([(f"sep{s}_op{op}", s, op, kname) for s, op, kname in _DISPATCHER_CASES])
+    def test_routing(self, _label, separable, operator_type, kernel_name, verbose=False):
         set_seed(333)
         x, w = _MAKER[kernel_name]()
         expected = _REF[kernel_name](x, w)
-        got = _contract_dense_pytorch(x, w, separable=separable, operator_type=operator_type, complex=complex_)
+        got = _contract_dense_pytorch(x, w, separable=separable, operator_type=operator_type)
         self.assertTrue(
             compare_tensors(f"dispatcher {kernel_name}", got, expected, atol=1e-5, rtol=1e-4, verbose=verbose),
-            f"dispatcher mismatch: separable={separable}, op={operator_type}, complex={complex_}",
+            f"dispatcher mismatch: separable={separable}, op={operator_type}",
         )
 
     def test_unknown_operator_nonsep_raises(self):
         x, w = _mk_lmwise()
         with self.assertRaises(ValueError):
-            _contract_dense_pytorch(x, w, separable=False, operator_type="unknown", complex=True)
+            _contract_dense_pytorch(x, w, separable=False, operator_type="unknown")
 
     def test_unknown_operator_sep_raises(self):
         x, w = _mk_sep_lmwise()
         with self.assertRaises(ValueError):
-            _contract_dense_pytorch(x, w, separable=True, operator_type="unknown", complex=True)
+            _contract_dense_pytorch(x, w, separable=True, operator_type="unknown")
 
 
 # ===========================================================================
@@ -202,7 +197,7 @@ class TestContractionConsistency(unittest.TestCase):
 
     def test_lmwise_diagonal_weight_equals_sep_lmwise(self, verbose=False):
         """Non-separable lmwise with diagonal (I==O) weight must equal sep_lmwise."""
-        x     = _cx(B, G, I, H, W)
+        x = _cx(B, G, I, H, W)
         w_sep = _cx(G, I, H, W)
         w_full = torch.zeros(G, I, I, H, W, dtype=torch.complex64)
         for i in range(I):
@@ -212,13 +207,15 @@ class TestContractionConsistency(unittest.TestCase):
                 "lmwise diag == sep_lmwise",
                 _contract_lmwise(x, w_full),
                 _contract_sep_lmwise(x, w_sep),
-                atol=1e-5, rtol=1e-4, verbose=verbose,
+                atol=1e-5,
+                rtol=1e-4,
+                verbose=verbose,
             )
         )
 
     def test_lwise_diagonal_weight_equals_sep_lwise(self, verbose=False):
         """Non-separable lwise with diagonal weight must equal sep_lwise."""
-        x     = _cx(B, G, I, H, W)
+        x = _cx(B, G, I, H, W)
         w_sep = _cx(G, I, H)
         w_full = torch.zeros(G, I, I, H, dtype=torch.complex64)
         for i in range(I):
@@ -228,36 +225,26 @@ class TestContractionConsistency(unittest.TestCase):
                 "lwise diag == sep_lwise",
                 _contract_lwise(x, w_full),
                 _contract_sep_lwise(x, w_sep),
-                atol=1e-5, rtol=1e-4, verbose=verbose,
+                atol=1e-5,
+                rtol=1e-4,
+                verbose=verbose,
             )
         )
 
     def test_lwise_equals_lmwise_mconst_weight(self, verbose=False):
         """lwise (no m-dim in weight) must equal lmwise when the weight is
         constant across m."""
-        x    = _cx(B, G, I, H, W)
-        w_l  = _cx(G, I, O, H)
+        x = _cx(B, G, I, H, W)
+        w_l = _cx(G, I, O, H)
         w_lm = w_l.unsqueeze(-1).expand(G, I, O, H, W).contiguous()
         self.assertTrue(
             compare_tensors(
                 "lwise == lmwise mconst",
                 _contract_lwise(x, w_l),
                 _contract_lmwise(x, w_lm),
-                atol=1e-5, rtol=1e-4, verbose=verbose,
-            )
-        )
-
-    def test_lwise_real_equals_lmwise_real_mconst_weight(self, verbose=False):
-        """Same m-constant consistency check for the real-valued kernel pair."""
-        x    = _re(B, G, I, H, W, 2)
-        w_l  = _re(G, I, O, H)
-        w_lm = w_l.unsqueeze(-1).expand(G, I, O, H, W).contiguous()
-        self.assertTrue(
-            compare_tensors(
-                "lwise_real == lmwise_real mconst",
-                _contract_lwise_real(x, w_l),
-                _contract_lmwise_real(x, w_lm),
-                atol=1e-5, rtol=1e-4, verbose=verbose,
+                atol=1e-5,
+                rtol=1e-4,
+                verbose=verbose,
             )
         )
 
@@ -279,7 +266,7 @@ class TestContractionBackward(unittest.TestCase):
         w = w.detach().requires_grad_(True)
         fn(x, w).sum().abs().backward()
         for tensor, label in ((x, "x"), (w, "w")):
-            self.assertIsNotNone(tensor.grad,                f"{name}: {label}.grad is None")
+            self.assertIsNotNone(tensor.grad, f"{name}: {label}.grad is None")
             self.assertFalse(torch.isnan(tensor.grad).any(), f"{name}: NaN in {label}.grad")
             self.assertFalse(torch.isinf(tensor.grad).any(), f"{name}: Inf in {label}.grad")
 

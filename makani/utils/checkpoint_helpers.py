@@ -16,12 +16,16 @@
 import os
 import glob
 import re
+import zlib
+import pickle
 
 from collections import OrderedDict
-from typing import Optional, Dict, Any
+from typing import Any, Dict, Optional
+from warnings import warn
 
 import torch
 import torch.nn as nn
+import torch.distributed as dist
 from torch.optim import Optimizer
 
 from makani.utils import comm
@@ -30,9 +34,82 @@ from makani.mpu.helpers import gather_uneven
 from torch_harmonics.distributed import split_tensor_along_dim
 
 
+# escape hatch for loading legacy checkpoints which contain pickled objects that are not
+# on the allowlist below. Only set this for checkpoints from a trusted source: it restores
+# the unrestricted (arbitrary code execution) unpickler.
+UNSAFE_LOAD_ENV_VAR = "MAKANI_ALLOW_UNSAFE_CHECKPOINT_LOAD"
+
+_safe_globals_registered = False
+
+
+def _register_checkpoint_safe_globals():
+    """Allowlist the non-tensor types makani stores inside checkpoints.
+
+    ``torch.load(weights_only=True)`` uses a restricted unpickler which only knows about
+    tensors and a handful of builtin containers. Everything makani writes into a checkpoint
+    beyond that has to be declared here. Note that the sharding metadata (``sharded_dims_mp``)
+    attached to the checkpoint tensors needs no entry: it is a plain list of strings/None and
+    is restored through ``torch._tensor._rebuild_from_type_v2``, which the restricted
+    unpickler permits.
+    """
+
+    global _safe_globals_registered
+    if _safe_globals_registered:
+        return
+
+    # imported lazily to avoid a circular import through makani.utils
+    from makani.utils.YParams import ParamsBase, YParams
+
+    torch.serialization.add_safe_globals([ParamsBase, YParams])
+
+    _safe_globals_registered = True
+
+
+def load_checkpoint(checkpoint_fname: str, map_location: str = "cpu", mmap: bool = False) -> Dict[str, Any]:
+    """Load a makani checkpoint with the safe (``weights_only=True``) unpickler.
+
+    Parameters
+    ============
+    checkpoint_fname: str
+        Path of the checkpoint file to load
+    map_location: str
+        Device to map the storages to, forwarded to ``torch.load``
+    mmap: bool
+        Whether to memory-map the tensor storages instead of reading them eagerly
+
+    Returns
+    ========
+    Dict[str, Any]
+        The deserialized checkpoint dictionary
+    """
+
+    _register_checkpoint_safe_globals()
+
+    if os.environ.get(UNSAFE_LOAD_ENV_VAR, "0").lower() in ("1", "true", "yes"):
+        warn(
+            f"{UNSAFE_LOAD_ENV_VAR} is set, loading {checkpoint_fname} with the unrestricted unpickler. "
+            "This executes arbitrary code contained in the checkpoint file and should only be done for "
+            "checkpoints from a trusted source.",
+            RuntimeWarning,
+        )
+        return torch.load(checkpoint_fname, map_location=map_location, weights_only=False, mmap=mmap)
+
+    try:
+        return torch.load(checkpoint_fname, map_location=map_location, weights_only=True, mmap=mmap)
+    except pickle.UnpicklingError as err:
+        raise RuntimeError(
+            f"Checkpoint {checkpoint_fname} contains pickled objects which are not on the allowlist in "
+            f"{__name__}._register_checkpoint_safe_globals. If the type reported below is a legitimate "
+            "makani type, add it to that allowlist. If the checkpoint comes from a trusted source, loading "
+            f"can be forced by setting {UNSAFE_LOAD_ENV_VAR}=1, which disables the safety check entirely."
+        ) from err
+
+
 def get_latest_checkpoint_version(checkpoint_path):
     try:
-        checkpoint_path = max(glob.glob(checkpoint_path.format(mp_rank=0, checkpoint_version="*")), key=os.path.getmtime)
+        checkpoint_path = max(
+            glob.glob(checkpoint_path.format(mp_rank=0, checkpoint_version="*")), key=os.path.getmtime
+        )
         pathname, _ = os.path.splitext(checkpoint_path)
         latest_version = int(re.match(r"^.*?_v(\d{1,})$", pathname).groups()[0])
     except:
@@ -42,7 +119,32 @@ def get_latest_checkpoint_version(checkpoint_path):
     return latest_version
 
 
-def gather_model_state_dict(model: nn.Module, grads: Optional[bool]=False) -> OrderedDict:
+def gather_model_state_dict(model: nn.Module, grads: Optional[bool] = False) -> OrderedDict:
+    # precondition: every rank in the model group must issue the SAME ordered
+    # sequence of gather_uneven calls, otherwise the all_gather inside
+    # gather_uneven deadlocks (600s NCCL timeout instead of a readable error).
+    if comm.get_size("model") > 1:
+        plan = [
+            f"{name}:{d}:{group}"
+            for name, param in model.named_parameters()
+            if hasattr(param, "sharded_dims_mp")
+            for d, group in enumerate(param.sharded_dims_mp)
+            if group is not None
+        ]
+        # deterministic hash (Python's hash() is per-process randomized)
+        sig = zlib.crc32(("|".join(plan)).encode())
+        device = next(model.parameters()).device
+        sig_t = torch.tensor([sig], dtype=torch.int64, device=device)
+        sig_list = [torch.empty_like(sig_t) for _ in range(comm.get_size("model"))]
+        dist.all_gather(sig_list, sig_t, group=comm.get_group("model"))
+        sigs = [int(s.item()) for s in sig_list]
+        if len(set(sigs)) != 1:
+            raise RuntimeError(
+                f"[rank {comm.get_world_rank()}] checkpoint gather plan mismatch "
+                f"across model group: per-rank crc32 = {sigs}. "
+                f"This rank's plan has {len(plan)} gather ops."
+            )
+
     # create empty dict to hold the state
     state_dict = OrderedDict()
 
@@ -68,7 +170,7 @@ def gather_model_state_dict(model: nn.Module, grads: Optional[bool]=False) -> Or
             else:
                 grad = None
 
-            state_dict[name + ".grad"] = grad            
+            state_dict[name + ".grad"] = grad
 
     return state_dict
 
@@ -93,14 +195,16 @@ def scatter_model_state_dict(model: nn.Module, state_dict: OrderedDict, strict: 
                     if (group is None) or (comm.get_size(group) == 1):
                         continue
 
-                    weight = split_tensor_along_dim(weight, dim=d, num_chunks=comm.get_size(group))[comm.get_rank(group)]
+                    weight = split_tensor_along_dim(weight, dim=d, num_chunks=comm.get_size(group))[
+                        comm.get_rank(group)
+                    ]
 
                 # update state dict
                 state_dict[name] = weight
 
         elif strict:
             # TODO: maybe do at least a warning for non-strict mode
-            raise ValueError(f"Missing key {k}")
+            raise ValueError(f"Missing key {name}")
 
     return state_dict
 
@@ -125,31 +229,51 @@ def gather_optimizer_state_dict(model: nn.Module, optimizer: Optimizer) -> Order
         pdict = {key: value for key, value in pgroup.items()}
         optimizer_dict["param_groups"].append(pdict)
 
-    # check whether the corresponding model paramter is distributed.
-    # if yes, we need to gather it
+    # The integer keys in state_dict["state"] follow torch.optim's own packing order:
+    # parameters are numbered group-by-group, in optimizer.param_groups order (deduplicated).
+    # We reconstruct the index -> param map from optimizer.param_groups so each state entry is
+    # paired with the parameter that actually owns it. This is correct for any number of param
+    # groups, unlike indexing by enumerate(model.parameters()), which only matches when there is
+    # a single group built directly from model.parameters().
     optimizer_dict["state"] = {}
-    for index, param in enumerate(model.parameters()):
-        optimizer_dict["state"][index] = {"step": state_dict["state"][index]["step"].clone()}
-        if hasattr(param, "sharded_dims_mp"):
-            exp_avg = state_dict["state"][index]["exp_avg"].clone()
-            exp_avg_sq = state_dict["state"][index]["exp_avg_sq"].clone()
+    seen = set()
+    index = 0
+    for pgroup in optimizer.param_groups:
+        for param in pgroup["params"]:
+            if id(param) in seen:
+                continue
+            seen.add(id(param))
 
-            # gather the optimizer state across all sharded dimensions
-            for d, group in enumerate(param.sharded_dims_mp):
-                if group is not None:
-                    exp_avg = gather_uneven(exp_avg, d, group)
-                    exp_avg_sq = gather_uneven(exp_avg_sq, d, group)
+            # params without optimizer state (e.g. never received a gradient) carry no state,
+            # but still consume an index so we stay aligned with the packing
+            if index not in state_dict["state"]:
+                index += 1
+                continue
 
-            optimizer_dict["state"][index]["exp_avg"] = exp_avg
-            optimizer_dict["state"][index]["exp_avg_sq"] = exp_avg_sq
-        else:
-            optimizer_dict["state"][index]["exp_avg"] = state_dict["state"][index]["exp_avg"].clone()
-            optimizer_dict["state"][index]["exp_avg_sq"] = state_dict["state"][index]["exp_avg_sq"].clone()
+            pstate = state_dict["state"][index]
+            exp_avg = pstate["exp_avg"].clone()
+            exp_avg_sq = pstate["exp_avg_sq"].clone()
+
+            # if the parameter is sharded, gather its optimizer moments across all sharded dims
+            if hasattr(param, "sharded_dims_mp"):
+                for d, group in enumerate(param.sharded_dims_mp):
+                    if group is not None:
+                        exp_avg = gather_uneven(exp_avg, d, group)
+                        exp_avg_sq = gather_uneven(exp_avg_sq, d, group)
+
+            optimizer_dict["state"][index] = {
+                "step": pstate["step"].clone(),
+                "exp_avg": exp_avg,
+                "exp_avg_sq": exp_avg_sq,
+            }
+            index += 1
 
     return optimizer_dict
 
 
-def scatter_optimizer_state_dict(model: nn.Module, optimizer: Optimizer, optimizer_state_dict: OrderedDict) -> OrderedDict():
+def scatter_optimizer_state_dict(
+    model: nn.Module, optimizer: Optimizer, optimizer_state_dict: OrderedDict
+) -> OrderedDict():
 
     # some sanity checks
     # if optimizer is SGD, we can just return the local dict:
@@ -157,29 +281,45 @@ def scatter_optimizer_state_dict(model: nn.Module, optimizer: Optimizer, optimiz
         return optimizer_state_dict
 
     if not (isinstance(optimizer, torch.optim.Adam) or isinstance(optimizer, torch.optim.AdamW)):
-        raise NotImplementedError("Error, only Adam and AdamW state can be restored from flexible format at the moment.")
+        raise NotImplementedError(
+            "Error, only Adam and AdamW state can be restored from flexible format at the moment."
+        )
 
-    # iterate over model parameters and split accordingly
-    for idp, param in enumerate(model.parameters()):
+    # Reconstruct the index -> param map from optimizer.param_groups (matching torch.optim's
+    # packing order) so each saved state entry is split with the sharding of its true owner,
+    # for any number of parameter groups. See gather_optimizer_state_dict for details.
+    seen = set()
+    index = 0
+    for pgroup in optimizer.param_groups:
+        for param in pgroup["params"]:
+            if id(param) in seen:
+                continue
+            seen.add(id(param))
 
-        # in this case, we need to distribute the weight
-        if hasattr(param, "sharded_dims_mp"):
+            # in this case, we need to distribute the state
+            if (index in optimizer_state_dict["state"]) and hasattr(param, "sharded_dims_mp"):
 
-            # clone the state
-            exp_avg = optimizer_state_dict["state"][idp]["exp_avg"].clone()
-            exp_avg_sq = optimizer_state_dict["state"][idp]["exp_avg_sq"].clone()
+                # clone the state
+                exp_avg = optimizer_state_dict["state"][index]["exp_avg"].clone()
+                exp_avg_sq = optimizer_state_dict["state"][index]["exp_avg_sq"].clone()
 
-            for d, group in enumerate(param.sharded_dims_mp):
-                # continue if there is nothing to do
-                if (group is None) or (comm.get_size(group) == 1):
-                    continue
+                for d, group in enumerate(param.sharded_dims_mp):
+                    # continue if there is nothing to do
+                    if (group is None) or (comm.get_size(group) == 1):
+                        continue
 
-                exp_avg = split_tensor_along_dim(exp_avg, dim=d, num_chunks=comm.get_size(group))[comm.get_rank(group)]
-                exp_avg_sq = split_tensor_along_dim(exp_avg_sq, dim=d, num_chunks=comm.get_size(group))[comm.get_rank(group)]
+                    exp_avg = split_tensor_along_dim(exp_avg, dim=d, num_chunks=comm.get_size(group))[
+                        comm.get_rank(group)
+                    ]
+                    exp_avg_sq = split_tensor_along_dim(exp_avg_sq, dim=d, num_chunks=comm.get_size(group))[
+                        comm.get_rank(group)
+                    ]
 
-            # update the state dict
-            optimizer_state_dict["state"][idp]["exp_avg"] = exp_avg
-            optimizer_state_dict["state"][idp]["exp_avg_sq"] = exp_avg_sq
+                # update the state dict
+                optimizer_state_dict["state"][index]["exp_avg"] = exp_avg
+                optimizer_state_dict["state"][index]["exp_avg_sq"] = exp_avg_sq
+
+            index += 1
 
     return optimizer_state_dict
 

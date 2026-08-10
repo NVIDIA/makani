@@ -92,7 +92,7 @@ class YParams(ParamsBase):
             print("------------------ Configuration ------------------")
 
         with open(yaml_filename) as _file:
-            token = YAML().load(_file)
+            token = YAML(typ="safe").load(_file)
             if config_name is not None:
                 d = token[config_name]
             else:
@@ -113,3 +113,34 @@ class YParams(ParamsBase):
         for key, val in self.to_dict().items():
             logger.info(str(key) + " " + str(val))
         logger.info("---------------------------------------------------")
+
+
+def ensure_resampled_shapes(params):
+    """Fill in ``img_shape_{x,y}_resampled`` from the unresampled shapes if absent.
+
+    The resampled shapes are a training-time concept: the dataloader sets them and
+    ``Driver`` copies them into params, so they differ from ``img_shape_{x,y}`` only
+    when resampling is actually configured. They are therefore missing from any
+    model package written before resampling existed, and from params assembled by
+    external callers such as earth2studio, which do not pass input shapes.
+
+    Consumers on the inference path (``model_registry.get_model``,
+    ``Preprocessor2D``, ``ModelWrapper``) read them unconditionally, so normalize
+    once here rather than patching each call site. Falling back to the unresampled
+    shape is exactly right in both cases above, since no resampling took place.
+
+    Mutates and returns ``params`` for convenience. A no-op when the values are
+    already set.
+    """
+    for axis in ("x", "y"):
+        resampled = f"img_shape_{axis}_resampled"
+        if getattr(params, resampled, None) is None:
+            base = getattr(params, f"img_shape_{axis}", None)
+            if base is None:
+                raise AttributeError(
+                    f"cannot determine {resampled}: neither it nor img_shape_{axis} is set on the parameters. "
+                    f"Pass the input shape explicitly."
+                )
+            params[resampled] = base
+
+    return params

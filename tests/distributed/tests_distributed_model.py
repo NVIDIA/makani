@@ -32,7 +32,14 @@ from makani.mpu.mappings import init_gradient_reduction_hooks
 from makani.mpu.mappings import reduce_from_parallel_region
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-from .distributed_helpers import get_default_parameters, set_image_shape, _split_helper, _gather_helper
+from .distributed_helpers import (
+    get_default_parameters,
+    set_image_shape,
+    _split_helper,
+    _gather_helper,
+    reduce_success,
+    sync_and_barrier,
+)
 from ..testutils import disable_tf32, set_seed, compare_tensors
 
 
@@ -41,6 +48,7 @@ class TestDistributedModel(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         from mpi4py import MPI
+
         cls.mpi_comm = MPI.COMM_WORLD.Dup()
         cls.mpi_comm_rank = cls.mpi_comm.Get_rank()
         cls.mpi_comm_size = cls.mpi_comm.Get_size()
@@ -57,10 +65,13 @@ class TestDistributedModel(unittest.TestCase):
             cls.device = torch.device("cpu")
         set_seed(333)
 
+        sync_and_barrier()
+
         return
 
     @classmethod
     def tearDownClass(cls):
+        sync_and_barrier()
         # Free the duplicated communicator. mpi_comm is an mpi4py Intracomm
         # (returned by MPI.COMM_WORLD.Dup()), whose disposal API is Free()
         # — release the duplicated comm explicitly rather than relying on
@@ -82,19 +93,19 @@ class TestDistributedModel(unittest.TestCase):
         # also set the batch size for testing
         self.params.batch_size = 4
 
-
     def _init_comms(self):
 
         # set up distributed
         self.grid_size_h = int(os.getenv("GRID_H", 1))
         self.grid_size_w = int(os.getenv("GRID_W", 1))
+        self.grid_size_m = int(os.getenv("GRID_M", 1))
         self.grid_size_e = int(os.getenv("GRID_E", 1))
-        self.world_size = self.grid_size_h * self.grid_size_w * self.grid_size_e
+        self.world_size = self.grid_size_h * self.grid_size_w * self.grid_size_m * self.grid_size_e
 
         # init groups
         comm.init(
-            model_parallel_sizes=[self.grid_size_h, self.grid_size_w, 1, 1],
-            model_parallel_names=["h", "w", "fin", "fout"],
+            model_parallel_sizes=[self.grid_size_h, self.grid_size_w, self.grid_size_m],
+            model_parallel_names=["h", "w", "matmul"],
             data_parallel_sizes=[self.grid_size_e, -1],
             data_parallel_names=["ensemble", "batch"],
         )
@@ -112,22 +123,21 @@ class TestDistributedModel(unittest.TestCase):
         thd.init(self.h_group, self.w_group)
 
         if self.world_rank == 0:
-            print(f"Running distributed tests on grid H x W x E = {self.grid_size_h} x {self.grid_size_w} x {self.grid_size_e}")
+            print(
+                f"Running distributed tests on grid H x W x E = {self.grid_size_h} x {self.grid_size_w} x {self.grid_size_e}"
+            )
 
         return
-
 
     def _destroy_comms(self):
         comm.cleanup()
         return
-
 
     def _split_helper(self, tensor, hdim=None, wdim=None):
         tensor_local = _split_helper(tensor, dim=hdim, group=self.h_group)
         tensor_local = _split_helper(tensor_local, dim=wdim, group=self.w_group)
 
         return tensor_local
-
 
     def _gather_helper(self, tensor, hdim=-2, wdim=-1):
         tensor_gather = _gather_helper(tensor, dim=hdim, group=self.h_group)
@@ -137,8 +147,8 @@ class TestDistributedModel(unittest.TestCase):
 
     @parameterized.expand(
         [
-            #"SNO",
-            #"FCN3",
+            # "SNO",
+            # "FCN3",
         ],
         skip_on_empty=True,
     )
@@ -166,9 +176,9 @@ class TestDistributedModel(unittest.TestCase):
         state_dict_full = checkpoint_helpers.gather_model_state_dict(model, grads=False)
 
         if self.mpi_comm_rank == 0:
-            driver.Driver.save_checkpoint(checkpoint_path=os.path.join(tmp_path, "checkpoint.pt"),
-                                          model=model,
-                                          checkpoint_mode="flexible")
+            driver.Driver.save_checkpoint(
+                checkpoint_path=os.path.join(tmp_path, "checkpoint.pt"), model=model, checkpoint_mode="flexible"
+            )
         self.mpi_comm.Barrier()
 
         # now init comms
@@ -177,14 +187,16 @@ class TestDistributedModel(unittest.TestCase):
         model_dist = model_registry.get_model(self.params, multistep=False).to(self.device)
 
         # load checkpoint
-        driver.Driver.restore_from_checkpoint(checkpoint_path=os.path.join(tmp_path, "checkpoint.pt"),
-                                              model=model_dist,
-                                              loss=None,
-                                              optimizer=None,
-                                              scheduler=None,
-                                              counters=None,
-                                              checkpoint_mode="flexible",
-                                              strict=False)
+        driver.Driver.restore_from_checkpoint(
+            checkpoint_path=os.path.join(tmp_path, "checkpoint.pt"),
+            model=model_dist,
+            loss=None,
+            optimizer=None,
+            scheduler=None,
+            counters=None,
+            checkpoint_mode="flexible",
+            strict=False,
+        )
 
         # compare parameters
         state_dict_gather_full = checkpoint_helpers.gather_model_state_dict(model_dist, grads=False)
@@ -192,17 +204,20 @@ class TestDistributedModel(unittest.TestCase):
             with self.subTest(desc=f"parameter {key}"):
                 param_full = state_dict_full[key].cpu()
                 param_gather_full = state_dict_gather_full[key]
-                self.assertTrue(compare_tensors(f"parameter {key}", param_full, param_gather_full, verbose=verbose))
+                self.assertTrue(
+                    reduce_success(
+                        compare_tensors(f"parameter {key}", param_full, param_gather_full, verbose=verbose), self.device
+                    )
+                )
 
         self.mpi_comm.Barrier()
 
         # cleanup
         self._destroy_comms()
 
-
     @parameterized.expand(
         [
-            #("SNO", 1e-4),
+            # ("SNO", 1e-4),
             ("FCN3", 1e-4),
         ],
         skip_on_empty=True,
@@ -229,7 +244,12 @@ class TestDistributedModel(unittest.TestCase):
         multistep = self.params.n_future > 0
         model = model_registry.get_model(self.params, multistep=multistep).to(self.device)
 
-        inp_shape = (self.params.batch_size, self.params.N_in_channels, self.params.img_shape_x, self.params.img_shape_y)
+        inp_shape = (
+            self.params.batch_size,
+            self.params.N_in_channels,
+            self.params.img_shape_x,
+            self.params.img_shape_y,
+        )
 
         # prepare some dummy data
         inp_full = torch.randn(*inp_shape, dtype=torch.float32, device=self.device)
@@ -247,9 +267,9 @@ class TestDistributedModel(unittest.TestCase):
         if self.mpi_comm_rank == 0:
             torch.save(out_full, os.path.join(tmp_path, "out_full.pt"))
             torch.save(igrad_full, os.path.join(tmp_path, "igrad_full.pt"))
-            driver.Driver.save_checkpoint(checkpoint_path=os.path.join(tmp_path, "checkpoint.pt"),
-                                          model=model,
-                                          checkpoint_mode="flexible")
+            driver.Driver.save_checkpoint(
+                checkpoint_path=os.path.join(tmp_path, "checkpoint.pt"), model=model, checkpoint_mode="flexible"
+            )
         self.mpi_comm.Barrier()
 
         # get also grad output
@@ -277,14 +297,16 @@ class TestDistributedModel(unittest.TestCase):
         )
 
         # load checkpoint
-        driver.Driver.restore_from_checkpoint(checkpoint_path=os.path.join(tmp_path, "checkpoint.pt"),
-                                              model=model_dist,
-                                              loss=None,
-                                              optimizer=None,
-                                              scheduler=None,
-                                              counters=None,
-                                              checkpoint_mode="flexible",
-                                              strict=False)
+        driver.Driver.restore_from_checkpoint(
+            checkpoint_path=os.path.join(tmp_path, "checkpoint.pt"),
+            model=model_dist,
+            loss=None,
+            optimizer=None,
+            scheduler=None,
+            counters=None,
+            checkpoint_mode="flexible",
+            strict=False,
+        )
 
         # split input
         inp_local = self._split_helper(inp_full, hdim=-2, wdim=-1)
@@ -303,11 +325,17 @@ class TestDistributedModel(unittest.TestCase):
         # output
         with self.subTest(desc="output"):
             out_gather_full = self._gather_helper(out_local, hdim=-2, wdim=-1)
-            self.assertTrue(compare_tensors("output", out_gather_full, out_full, tol, tol, verbose=verbose))
+            self.assertTrue(
+                reduce_success(
+                    compare_tensors("output", out_gather_full, out_full, tol, tol, verbose=verbose), self.device
+                )
+            )
 
         # loss
         with self.subTest(desc="loss"):
-            self.assertTrue(compare_tensors("loss", loss_dist, loss_full, tol, tol, verbose=verbose))
+            self.assertTrue(
+                reduce_success(compare_tensors("loss", loss_dist, loss_full, tol, tol, verbose=verbose), self.device)
+            )
 
         #############################################################
         # evaluate BWD pass
@@ -315,7 +343,12 @@ class TestDistributedModel(unittest.TestCase):
         # dgrad
         with self.subTest(desc="input gradients"):
             igrad_gather_full = self._gather_helper(igrad_local, hdim=-2, wdim=-1)
-            self.assertTrue(compare_tensors("input gradients", igrad_gather_full, igrad_full, tol, tol, verbose=verbose))
+            self.assertTrue(
+                reduce_success(
+                    compare_tensors("input gradients", igrad_gather_full, igrad_full, tol, tol, verbose=verbose),
+                    self.device,
+                )
+            )
 
         # wgrads
         for key in state_dict_full.keys():
@@ -323,17 +356,23 @@ class TestDistributedModel(unittest.TestCase):
                 with self.subTest(desc=f"weight gradient {key}"):
                     wgrad_full = state_dict_full[key]
                     wgrad_gather_full = state_dict_gather_full["module." + key]
-                    self.assertTrue(compare_tensors(f"weight gradient {key}", wgrad_gather_full, wgrad_full, tol, tol, verbose=verbose))
+                    self.assertTrue(
+                        reduce_success(
+                            compare_tensors(
+                                f"weight gradient {key}", wgrad_gather_full, wgrad_full, tol, tol, verbose=verbose
+                            ),
+                            self.device,
+                        )
+                    )
 
         # cleanup
         self._destroy_comms()
 
-
     @parameterized.expand(
         [
-            #("SFNO", 1e-6, 1e-6),
-            #("SNO", 1e-6, 1e-6),
-            #("FCN3", 1e-6, 1e-6),
+            # ("SFNO", 1e-6, 1e-6),
+            # ("SNO", 1e-6, 1e-6),
+            # ("FCN3", 1e-6, 1e-6),
         ],
         skip_on_empty=True,
     )
@@ -406,7 +445,7 @@ class TestDistributedModel(unittest.TestCase):
         # step 1
         with model_dist.no_sync():
             out_double_local = model_dist(inp_local_tmp)
-            loss = loss_obj(out_double_local, tar_local_tmp) / 2.
+            loss = loss_obj(out_double_local, tar_local_tmp) / 2.0
         loss.backward()
 
         inp_local_tmp = inp_local_split[1].detach().clone()
@@ -415,7 +454,7 @@ class TestDistributedModel(unittest.TestCase):
 
         # step 2
         out = model_dist(inp_local_tmp)
-        loss = loss_obj(out, tar_local_tmp) / 2.
+        loss = loss_obj(out, tar_local_tmp) / 2.0
         loss.backward()
         out_double_local = torch.cat([out_double_local, out], dim=0)
 
@@ -429,7 +468,12 @@ class TestDistributedModel(unittest.TestCase):
         with self.subTest(desc="output"):
             out_single_gather = self._gather_helper(out_single_local, hdim=-2, wdim=-1)
             out_double_gather = self._gather_helper(out_double_local, hdim=-2, wdim=-1)
-            self.assertTrue(compare_tensors("output", out_double_gather, out_single_gather, atol, rtol, verbose=verbose))
+            self.assertTrue(
+                reduce_success(
+                    compare_tensors("output", out_double_gather, out_single_gather, atol, rtol, verbose=verbose),
+                    self.device,
+                )
+            )
 
         #############################################################
         # evaluate BWD pass
@@ -440,9 +484,15 @@ class TestDistributedModel(unittest.TestCase):
                 with self.subTest(desc=f"weight gradient {key}"):
                     wgrad_single = state_dict_single_step[key]
                     wgrad_double = state_dict_double_step[key]
-                    self.assertTrue(compare_tensors(f"weight gradient {key}", wgrad_double, wgrad_single, atol, rtol, verbose=verbose))
+                    self.assertTrue(
+                        reduce_success(
+                            compare_tensors(
+                                f"weight gradient {key}", wgrad_double, wgrad_single, atol, rtol, verbose=verbose
+                            ),
+                            self.device,
+                        )
+                    )
 
 
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

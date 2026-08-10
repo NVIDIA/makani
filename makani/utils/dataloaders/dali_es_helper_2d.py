@@ -33,7 +33,24 @@ import torch
 from torch_harmonics.distributed import compute_split_shapes
 
 # data helpers
-from .data_helpers import get_lat_lon_grid, get_date_from_string, get_timestamp, get_date_from_timestamp, get_date_ranges, get_default_aws_connector
+from .data_helpers import (
+    get_lat_lon_grid,
+    get_date_from_string,
+    get_timestamp,
+    get_date_from_timestamp,
+    get_date_ranges,
+    get_default_aws_connector,
+)
+from .wb2_helpers import build_wb2_channel_map
+
+# zarr v3 requires the `out` target of get_basic_selection to be an NDBuffer rather than a raw
+# numpy array. from_ndarray_like wraps the (possibly strided) view without copying, so decoded
+# data still lands directly in the preallocated buffer (zero-copy read).
+from zarr.core.buffer.cpu import NDBuffer as _ZarrNDBuffer
+
+
+def _zarr_out(arr):
+    return _ZarrNDBuffer.from_ndarray_like(arr)
 
 
 class GeneralES(object):
@@ -69,8 +86,11 @@ class GeneralES(object):
         zenith_angle=True,
         return_timestamp=False,
         lat_lon=None,
-        dataset_path="fields",
+        dataset_name="fields",
+        timestamp_name="timestamp",
+        channel_names=None,
         enable_odirect=False,
+        odirect_alignment=0,
         enable_s3=False,
         seed=333,
         is_parallel=True,
@@ -100,7 +120,9 @@ class GeneralES(object):
         self.is_parallel = is_parallel
         self.zenith_angle = zenith_angle
         self.return_timestamp = return_timestamp
-        self.dataset_path = dataset_path
+        self.dataset_name = dataset_name
+        self.timestamp_name = timestamp_name
+        self.channel_names = channel_names
         self.lat_lon = lat_lon
 
         # also obtain an ordered channels list, required for h5py:
@@ -124,6 +146,8 @@ class GeneralES(object):
         self.aws_connector = None
         if enable_odirect:
             self.file_driver = "direct"
+            if odirect_alignment > 0:
+                self.file_driver_kwargs = dict(alignment=odirect_alignment, block_size=odirect_alignment)
 
         if enable_s3:
             self.file_driver = "ros3"
@@ -139,7 +163,8 @@ class GeneralES(object):
 
         # set the read slices
         # we do not support channel parallelism yet
-        assert io_grid[0] == 1
+        if io_grid[0] != 1:
+            raise ValueError(f"channel parallelism is not supported, expected io_grid[0] == 1 but got {io_grid[0]}")
         self.io_grid = io_grid[1:]
         self.io_rank = io_rank[1:]
 
@@ -168,22 +193,30 @@ class GeneralES(object):
         latitude = np.array(self.lat_lon[0])
         longitude = np.array(self.lat_lon[1])
         self.lon_grid, self.lat_grid = np.meshgrid(longitude, latitude)
-        self.lat_grid_local = self.lat_grid[self.read_anchor[0] : self.read_anchor[0] + self.read_shape[0], self.read_anchor[1] : self.read_anchor[1] + self.read_shape[1]]
-        self.lon_grid_local = self.lon_grid[self.read_anchor[0] : self.read_anchor[0] + self.read_shape[0], self.read_anchor[1] : self.read_anchor[1] + self.read_shape[1]]
+        self.lat_grid_local = self.lat_grid[
+            self.read_anchor[0] : self.read_anchor[0] + self.read_shape[0],
+            self.read_anchor[1] : self.read_anchor[1] + self.read_shape[1],
+        ]
+        self.lon_grid_local = self.lon_grid[
+            self.read_anchor[0] : self.read_anchor[0] + self.read_shape[0],
+            self.read_anchor[1] : self.read_anchor[1] + self.read_shape[1],
+        ]
         self.lat_lon_local = (
             latitude[self.read_anchor[0] : self.read_anchor[0] + self.read_shape[0]].tolist(),
             longitude[self.read_anchor[1] : self.read_anchor[1] + self.read_shape[1]].tolist(),
         )
 
         # incorporate subsampling factor
-        self.lat_grid_local = self.lat_grid_local[::self.subsampling_factor, ::self.subsampling_factor]
-        self.lon_grid_local = self.lon_grid_local[::self.subsampling_factor, ::self.subsampling_factor]
+        self.lat_grid_local = self.lat_grid_local[:: self.subsampling_factor, :: self.subsampling_factor]
+        self.lon_grid_local = self.lon_grid_local[:: self.subsampling_factor, :: self.subsampling_factor]
         self.lat_lon_local = (
-            self.lat_lon_local[0][::self.subsampling_factor],
-            self.lat_lon_local[1][::self.subsampling_factor],
+            self.lat_lon_local[0][:: self.subsampling_factor],
+            self.lat_lon_local[1][:: self.subsampling_factor],
         )
-        self.img_shape_resampled = (math.ceil(self.img_shape[0] / self.subsampling_factor), 
-                                    math.ceil(self.img_shape[1] / self.subsampling_factor))
+        self.img_shape_resampled = (
+            math.ceil(self.img_shape[0] / self.subsampling_factor),
+            math.ceil(self.img_shape[1] / self.subsampling_factor),
+        )
 
         # datetime logic
         self.date_fn = np.vectorize(get_date_from_timestamp)
@@ -194,14 +227,25 @@ class GeneralES(object):
 
         dt_total = self.dhours * self.dt
         if timestamp_boundary_list:
-            #compute list of allowed timestamps
-            timestamp_boundary_list = [get_date_from_string(timestamp_string) for timestamp_string in timestamp_boundary_list]
+            # compute list of allowed timestamps
+            timestamp_boundary_list = [
+                get_date_from_string(timestamp_string) for timestamp_string in timestamp_boundary_list
+            ]
 
             # now, based on dt, dh, n_history and n_future, we can build regions where no data is allowed
-            timestamp_exclusion_list = get_date_ranges(timestamp_boundary_list, lookback_hours = dt_total * (self.n_future + 1), lookahead_hours = dt_total * self.n_history)
+            timestamp_exclusion_list = get_date_ranges(
+                timestamp_boundary_list,
+                lookback_hours=dt_total * (self.n_future + 1),
+                lookahead_hours=dt_total * self.n_history,
+            )
 
             # now, check which of the timestamps fall within these excluded ranges
-            range_fn = np.vectorize(lambda date: not any(date >= exclusion_range[0] and date < exclusion_range[1] for exclusion_range in timestamp_exclusion_list))
+            range_fn = np.vectorize(
+                lambda date: not any(
+                    date >= exclusion_range[0] and date < exclusion_range[1]
+                    for exclusion_range in timestamp_exclusion_list
+                )
+            )
             timestamps_selected = np.array(self.timestamps)[self.indices_full]
             good_indices = np.vectorize(range_fn)(timestamps_selected)
 
@@ -219,15 +263,14 @@ class GeneralES(object):
         year_idx = np.searchsorted(year_offsets_arr, self.indices_select, side="right") - 1
         local_idx = self.indices_select - year_offsets_arr[year_idx]
         year_lengths = n_samples_year_arr[year_idx]
-        window_ok = (
-            (local_idx >= self.dt * self.n_history) &
-            (local_idx + self.dt * (self.n_future + 1) <= year_lengths - 1)
+        window_ok = (local_idx >= self.dt * self.n_history) & (
+            local_idx + self.dt * (self.n_future + 1) <= year_lengths - 1
         )
         self.indices_select = self.indices_select[window_ok]
 
     def _reorder_channels(self, inp, tar):
         # reorder data if requested:
-	# inp
+        # inp
         if not self.in_channels_is_sorted:
             inp_re = inp[:, self.in_channels_unsort, ...].copy()
         else:
@@ -255,27 +298,37 @@ class GeneralES(object):
             if enable_logging:
                 logging.info("Getting file stats from {}".format(self.files_paths[0]))
             # original image shape (before padding)
-            dset = _f[self.dataset_path]
+            dset = _f[self.dataset_name]
             self.img_shape = dset.shape[2:4]
             self.total_channels = dset.shape[1]
             self.n_samples_year.append(dset.shape[0])
             # read timestamps
-            if "timestamp" in dset.dims[0]:
-                self.timestamps.append(self.timezone_fn(dset.dims[0]["timestamp"][...]))
+            if self.timestamp_name in dset.dims[0]:
+                self.timestamps.append(self.timezone_fn(dset.dims[0][self.timestamp_name][...]))
             else:
-                timestamps = np.asarray([get_timestamp(self.years[0], hour=(idx * self.dhours)).timestamp() for idx in range(0, dset.shape[0], self.dhours)])
+                timestamps = np.asarray(
+                    [
+                        get_timestamp(self.years[0], hour=(idx * self.dhours)).timestamp()
+                        for idx in range(0, dset.shape[0], self.dhours)
+                    ]
+                )
                 self.timestamps.append(self.timezone_fn(timestamps))
 
         # get all sample counts
         for idf, filename in enumerate(self.files_paths[1:], start=1):
             with fopen_handle(filename) as _f:
-                dset = _f[self.dataset_path]
+                dset = _f[self.dataset_name]
                 self.n_samples_year.append(dset.shape[0])
                 # read timestamps
-                if "timestamp" in dset.dims[0]:
-                    self.timestamps.append(self.timezone_fn(dset.dims[0]["timestamp"][...]))
+                if self.timestamp_name in dset.dims[0]:
+                    self.timestamps.append(self.timezone_fn(dset.dims[0][self.timestamp_name][...]))
                 else:
-                    timestamps = np.asarray([get_timestamp(self.years[idf], hour=(idx * self.dhours)).timestamp() for idx in range(0, dset.shape[0], self.dhours)])
+                    timestamps = np.asarray(
+                        [
+                            get_timestamp(self.years[idf], hour=(idx * self.dhours)).timestamp()
+                            for idx in range(0, dset.shape[0], self.dhours)
+                        ]
+                    )
                     self.timestamps.append(self.timezone_fn(timestamps))
 
         self.timestamps = np.concatenate(self.timestamps, axis=0)
@@ -284,8 +337,10 @@ class GeneralES(object):
 
     def _get_year_h5(self, year_idx):
         # here we want to use the specific file driver
-        self.files[year_idx] = h5py.File(self.files_paths[year_idx], "r", driver=self.file_driver, **self.file_driver_kwargs)
-        self.dsets[year_idx] = self.files[year_idx][self.dataset_path]
+        self.files[year_idx] = h5py.File(
+            self.files_paths[year_idx], "r", driver=self.file_driver, **self.file_driver_kwargs
+        )
+        self.dsets[year_idx] = self.files[year_idx][self.dataset_name]
         return
 
     def _get_data_h5(self, dset, local_idx, start_x, end_x, start_y, end_y):
@@ -299,21 +354,21 @@ class GeneralES(object):
             # read the data
             if self.read_direct:
                 dset.read_direct(
-                    self.inp_buff, 
+                    self.inp_buff,
                     np.s_[
-                        (local_idx - self.dt * self.n_history) : (local_idx + 1) : self.dt, 
-                        slice_in, 
-                        start_x:end_x:self.subsampling_factor, 
-                        start_y:end_y:self.subsampling_factor
-                    ], 
-                    np.s_[:, start:end, ...]
+                        (local_idx - self.dt * self.n_history) : (local_idx + 1) : self.dt,
+                        slice_in,
+                        start_x : end_x : self.subsampling_factor,
+                        start_y : end_y : self.subsampling_factor,
+                    ],
+                    np.s_[:, start:end, ...],
                 )
             else:
                 self.inp_buff[:, start:end, ...] = dset[
-                    (local_idx - self.dt * self.n_history) : (local_idx + 1) : self.dt, 
-                    slice_in, 
-                    start_x:end_x:self.subsampling_factor, 
-                    start_y:end_y:self.subsampling_factor
+                    (local_idx - self.dt * self.n_history) : (local_idx + 1) : self.dt,
+                    slice_in,
+                    start_x : end_x : self.subsampling_factor,
+                    start_y : end_y : self.subsampling_factor,
                 ]
 
             # update offset
@@ -328,21 +383,21 @@ class GeneralES(object):
             # read the data
             if self.read_direct:
                 dset.read_direct(
-                    self.tar_buff, 
+                    self.tar_buff,
                     np.s_[
                         (local_idx + self.dt) : (local_idx + self.dt * (self.n_future + 1) + 1) : self.dt,
                         slice_out,
-                        start_x:end_x:self.subsampling_factor,
-                        start_y:end_y:self.subsampling_factor
-                    ], 
-                    np.s_[:, start:end, ...]
+                        start_x : end_x : self.subsampling_factor,
+                        start_y : end_y : self.subsampling_factor,
+                    ],
+                    np.s_[:, start:end, ...],
                 )
             else:
                 self.tar_buff[:, start:end, ...] = dset[
                     (local_idx + self.dt) : (local_idx + self.dt * (self.n_future + 1) + 1) : self.dt,
                     slice_out,
-                    start_x:end_x:self.subsampling_factor,
-                    start_y:end_y:self.subsampling_factor
+                    start_x : end_x : self.subsampling_factor,
+                    start_y : end_y : self.subsampling_factor,
                 ]
 
             # update offset
@@ -354,44 +409,162 @@ class GeneralES(object):
         return inp, tar
 
     # zarr functions
+    @staticmethod
+    def _zarr_open(path, mode="r"):
+        # prefer consolidated metadata (one round trip for all array metadata) but
+        # fall back gracefully when the store hasn't been consolidated yet
+        try:
+            return zarr.open_consolidated(path, mode=mode)
+        except KeyError:
+            return zarr.open_group(path, mode=mode)
+
     def _get_stats_zarr(self, enable_logging):
-        with zarr.convenience.open(self.files_paths[0], "r") as _f:
-            if enable_logging:
-                logging.info("Getting file stats from {}".format(self.files_paths[0]))
-            # original image shape (before padding)
-            self.img_shape = _f[f"/{self.dataset_path}"].shape[2:4]
-            self.total_channels = _f[f"/{self.dataset_path}"].shape[1]
-
         self.n_samples_year = []
-        for filename in self.files_paths:
-            with zarr.convenience.open(filename, "r") as _f:
-                self.n_samples_year.append(_f[f"/{self.dataset_path}"].shape[0])
+        self.timestamps = []
+        self.zarr_format = "makani"
 
+        # zarr groups are lazy views over the store and are not context managers in zarr v3;
+        # open and use them directly (no close needed).
+        _f = self._zarr_open(self.files_paths[0])
+        if enable_logging:
+            logging.info("Getting file stats from {}".format(self.files_paths[0]))
+
+        if self.dataset_name in _f:
+            # makani format: single (time, channels, lat, lon) array
+            dset = _f[self.dataset_name]
+            self.img_shape = dset.shape[2:4]
+            self.total_channels = dset.shape[1]
+            self.n_samples_year.append(dset.shape[0])
+            self.timestamps.append(self._zarr_read_timestamps(_f, dset, self.years[0]))
+        else:
+            # WB2 format: one variable array per field, levels stored separately
+            if self.channel_names is None:
+                raise ValueError(
+                    f"WB2 zarr format detected ('{self.dataset_name}' not found in store) "
+                    "but channel_names was not provided to the dataloader."
+                )
+            self.zarr_format = "wb2"
+            level_values = np.asarray(_f["level"]) if "level" in _f else None
+            self.wb2_channel_map = build_wb2_channel_map(self.channel_names, level_values)
+            # derive shape from any variable in the store
+            probe_name = self.wb2_channel_map[0][0]
+            probe = _f[probe_name]
+            self.img_shape = (probe.shape[-2], probe.shape[-1])
+            self.total_channels = len(self.channel_names)
+            self.n_samples_year.append(probe.shape[0])
+            self.timestamps.append(self._zarr_read_timestamps(_f, probe, self.years[0]))
+
+        for idf, filename in enumerate(self.files_paths[1:], start=1):
+            _f = self._zarr_open(filename)
+            if self.zarr_format == "wb2":
+                probe = _f[self.wb2_channel_map[0][0]]
+                self.n_samples_year.append(probe.shape[0])
+                self.timestamps.append(self._zarr_read_timestamps(_f, probe, self.years[idf]))
+            else:
+                dset = _f[self.dataset_name]
+                self.n_samples_year.append(dset.shape[0])
+                self.timestamps.append(self._zarr_read_timestamps(_f, dset, self.years[idf]))
+
+        self.timestamps = np.concatenate(self.timestamps, axis=0)
         return
+
+    def _zarr_read_timestamps(self, group, dset, year):
+        # try timestamp_name first, then "time" as a fallback for the xarray convention
+        keys_to_try = [self.timestamp_name]
+        if "time" != self.timestamp_name:
+            keys_to_try.append("time")
+        for key in keys_to_try:
+            if key in group:
+                raw = np.asarray(group[key])
+                # WB2 stores use datetime64[ns]; convert to float Unix seconds
+                if np.issubdtype(raw.dtype, np.datetime64):
+                    raw = raw.astype("datetime64[s]").astype(np.float64)
+                return self.timezone_fn(raw)
+        # fall back to computing timestamps from year + dhours cadence
+        ts = np.asarray(
+            [get_timestamp(year, hour=(idx * self.dhours)).timestamp() for idx in range(0, dset.shape[0], self.dhours)]
+        )
+        return self.timezone_fn(ts)
 
     def _get_year_zarr(self, year_idx):
-        self.files[year_idx] = zarr.convenience.open(self.files_paths[year_idx], "r")
-        self.dsets[year_idx] = self.files[year_idx][f"/{self.dataset_path}"]
+        self.files[year_idx] = self._zarr_open(self.files_paths[year_idx])
+        self.dsets[year_idx] = self.files[year_idx][self.dataset_name]
         return
 
+    def _get_year_zarr_wb2(self, year_idx):
+        self.files[year_idx] = self._zarr_open(self.files_paths[year_idx])
+        # store the group itself — _get_data_zarr_wb2 reads individual variables
+        self.dsets[year_idx] = self.files[year_idx]
+        return
+
+    def _get_data_zarr_wb2(self, group, local_idx, start_x, end_x, start_y, end_y):
+        sf = self.subsampling_factor
+        t_inp = np.s_[(local_idx - self.dt * self.n_history) : (local_idx + 1) : self.dt]
+        t_tar = np.s_[(local_idx + self.dt) : (local_idx + self.dt * (self.n_future + 1) + 1) : self.dt]
+
+        for out_ch, src_ch in enumerate(self.in_channels_sorted):
+            zarr_name, level_idx = self.wb2_channel_map[src_ch]
+            if level_idx is None:
+                group[zarr_name].get_basic_selection(
+                    np.s_[t_inp, start_x:end_x:sf, start_y:end_y:sf],
+                    out=_zarr_out(self.inp_buff[:, out_ch, ...]),
+                )
+            else:
+                group[zarr_name].get_basic_selection(
+                    np.s_[t_inp, level_idx, start_x:end_x:sf, start_y:end_y:sf],
+                    out=_zarr_out(self.inp_buff[:, out_ch, ...]),
+                )
+
+        for out_ch, src_ch in enumerate(self.out_channels_sorted):
+            zarr_name, level_idx = self.wb2_channel_map[src_ch]
+            if level_idx is None:
+                group[zarr_name].get_basic_selection(
+                    np.s_[t_tar, start_x:end_x:sf, start_y:end_y:sf],
+                    out=_zarr_out(self.tar_buff[:, out_ch, ...]),
+                )
+            else:
+                group[zarr_name].get_basic_selection(
+                    np.s_[t_tar, level_idx, start_x:end_x:sf, start_y:end_y:sf],
+                    out=_zarr_out(self.tar_buff[:, out_ch, ...]),
+                )
+
+        inp, tar = self._reorder_channels(self.inp_buff, self.tar_buff)
+        return inp, tar
+
     def _get_data_zarr(self, dset, local_idx, start_x, end_x, start_y, end_y):
+        sf = self.subsampling_factor
+
         off = 0
         for slice_in in self.in_channels_slices:
             start = off
             end = start + (slice_in.stop - slice_in.start)
-            self.inp_buff[:, start:end, ...] = dset[(local_idx - self.dt * self.n_history) : (local_idx + 1) : self.dt, slice_in, start_x:end_x, start_y:end_y]
+            dset.get_basic_selection(
+                np.s_[
+                    (local_idx - self.dt * self.n_history) : (local_idx + 1) : self.dt,
+                    slice_in,
+                    start_x:end_x:sf,
+                    start_y:end_y:sf,
+                ],
+                out=_zarr_out(self.inp_buff[:, start:end, ...]),
+            )
             off = end
 
         off = 0
         for slice_out in self.out_channels_slices:
             start = off
             end = start + (slice_out.stop - slice_out.start)
-            self.tar_buff[:, start:end, ...] = dset[(local_idx + self.dt) : (local_idx + self.dt * (self.n_future + 1) + 1) : self.dt, slice_out, start_x:end_x, start_y:end_y]
+            dset.get_basic_selection(
+                np.s_[
+                    (local_idx + self.dt) : (local_idx + self.dt * (self.n_future + 1) + 1) : self.dt,
+                    slice_out,
+                    start_x:end_x:sf,
+                    start_y:end_y:sf,
+                ],
+                out=_zarr_out(self.tar_buff[:, start:end, ...]),
+            )
             off = end
 
-        # reorder data if requested:
         inp, tar = self._reorder_channels(self.inp_buff, self.tar_buff)
-
         return inp, tar
 
     def _get_files_stats(self, enable_logging):
@@ -451,8 +624,14 @@ class GeneralES(object):
             self.crop_size[0] = self.img_shape[0]
         if self.crop_size[1] is None:
             self.crop_size[1] = self.img_shape[1]
-        assert self.crop_anchor[0] + self.crop_size[0] <= self.img_shape[0]
-        assert self.crop_anchor[1] + self.crop_size[1] <= self.img_shape[1]
+        if self.crop_anchor[0] + self.crop_size[0] > self.img_shape[0]:
+            raise ValueError(
+                f"crop in dimension 0 (anchor {self.crop_anchor[0]} + size {self.crop_size[0]}) exceeds image shape {self.img_shape[0]}"
+            )
+        if self.crop_anchor[1] + self.crop_size[1] > self.img_shape[1]:
+            raise ValueError(
+                f"crop in dimension 1 (anchor {self.crop_anchor[1]} + size {self.crop_size[1]}) exceeds image shape {self.img_shape[1]}"
+            )
         # for x
         split_shapes_x = compute_split_shapes(self.crop_size[0], self.io_grid[0])
         read_shape_x = split_shapes_x[self.io_rank[0]]
@@ -463,8 +642,10 @@ class GeneralES(object):
         read_anchor_y = self.crop_anchor[1] + sum(split_shapes_y[: self.io_rank[1]])
         self.read_anchor = [read_anchor_x, read_anchor_y]
         self.read_shape = [read_shape_x, read_shape_y]
-        self.return_shape = (math.ceil(self.read_shape[0] / self.subsampling_factor), 
-                             math.ceil(self.read_shape[1] / self.subsampling_factor))
+        self.return_shape = (
+            math.ceil(self.read_shape[0] / self.subsampling_factor),
+            math.ceil(self.read_shape[1] / self.subsampling_factor),
+        )
 
         # do some sample indexing gymnastics
         self.year_offsets = list(accumulate(self.n_samples_year, operator.add))[:-1]
@@ -479,11 +660,18 @@ class GeneralES(object):
 
         # compute global offset
         if self.truncate_old:
-            self.samples_start = max(self.dt * self.n_history, self.n_samples_available - n_samples_total_tmp - self.dt * (self.n_future + 1) - 1)
-            self.samples_end = min(self.samples_start + n_samples_total_tmp, self.n_samples_available) - self.dt * (self.n_future + 1)
+            self.samples_start = max(
+                self.dt * self.n_history,
+                self.n_samples_available - n_samples_total_tmp - self.dt * (self.n_future + 1) - 1,
+            )
+            self.samples_end = min(self.samples_start + n_samples_total_tmp, self.n_samples_available) - self.dt * (
+                self.n_future + 1
+            )
         else:
             self.samples_start = self.dt * self.n_history
-            self.samples_end = min(self.samples_start + n_samples_total_tmp, self.n_samples_available) - self.dt * (self.n_future + 1)
+            self.samples_end = min(self.samples_start + n_samples_total_tmp, self.n_samples_available) - self.dt * (
+                self.n_future + 1
+            )
 
         # create an unshuffled list of valid indices:
         self._generate_indexlist(timestamp_boundary_list)
@@ -491,8 +679,12 @@ class GeneralES(object):
         # some sanity checks
         min_sample_idx = self.indices_select.min()
         max_sample_idx = self.indices_select.max()
-        if ( (min_sample_idx < self.dt * self.n_history) or (max_sample_idx >= (self.n_samples_available - self.dt * (self.n_future + 1))) ):
-            raise IndexError(f"Sample index {min_sample_idx} or {max_sample_idx} is out of bounds [{self.dt * self.n_history}, {self.n_samples_available - self.dt * (self.n_future + 1)}). Please check your index list.")
+        if (min_sample_idx < self.dt * self.n_history) or (
+            max_sample_idx >= (self.n_samples_available - self.dt * (self.n_future + 1))
+        ):
+            raise IndexError(
+                f"Sample index {min_sample_idx} or {max_sample_idx} is out of bounds [{self.dt * self.n_history}, {self.n_samples_available - self.dt * (self.n_future + 1)}). Please check your index list."
+            )
 
         # update the actual total count with the actual number of included
         self.n_samples_total = self.indices_select.shape[0]
@@ -513,25 +705,47 @@ class GeneralES(object):
         self.files = [None for _ in range(self.n_years)]
         self.dsets = [None for _ in range(self.n_years)]
         if enable_logging:
-            logging.info("Average number of samples per year: {:.1f}".format(float(self.n_samples_total) / float(self.n_years)))
+            logging.info(
+                "Average number of samples per year: {:.1f}".format(float(self.n_samples_total) / float(self.n_years))
+            )
             logging.info(
                 "Found data at path {}. Number of examples: {} (distributed over {} files). Full image Shape: {} x {} x {}. Read Shape: {} x {} x {}".format(
-                    self.location, self.n_samples_available, len(self.files_paths), self.img_shape[0], self.img_shape[1], self.total_channels, self.read_shape[0], self.read_shape[1], self.n_in_channels
+                    self.location,
+                    self.n_samples_available,
+                    len(self.files_paths),
+                    self.img_shape[0],
+                    self.img_shape[1],
+                    self.total_channels,
+                    self.read_shape[0],
+                    self.read_shape[1],
+                    self.n_in_channels,
                 )
             )
             logging.info(
                 "Using {} from the total number of available samples with {} samples per epoch (corresponds to {} steps for {} shards with local batch size {})".format(
-                    self.n_samples_total, self.n_samples_per_epoch, self.num_steps_per_epoch, self.num_shards, self.batch_size
+                    self.n_samples_total,
+                    self.n_samples_per_epoch,
+                    self.num_steps_per_epoch,
+                    self.num_shards,
+                    self.batch_size,
                 )
             )
             start_lidx, start_yidx = self._get_local_year_index_from_global_index(self.samples_start)
-            end_lidx, end_yidx = self._get_local_year_index_from_global_index(self.n_samples_available-1)
+            end_lidx, end_yidx = self._get_local_year_index_from_global_index(self.n_samples_available - 1)
             start_date = get_timestamp(self.years[start_yidx], hour=(start_lidx * self.dhours))
             end_date = get_timestamp(self.years[end_yidx], hour=(end_lidx * self.dhours))
             logging.info(f"Date range for data set: {start_date} to {end_date}.")
             logging.info("Delta t: {} hours".format(self.dhours * self.dt))
-            logging.info("Including {} hours of past history in training at a frequency of {} hours".format(self.dhours * self.dt * (self.n_history + 1), self.dhours * self.dt))
-            logging.info("Including {} hours of future targets in training at a frequency of {} hours".format(self.dhours * self.dt * (self.n_future + 1), self.dhours * self.dt))
+            logging.info(
+                "Including {} hours of past history in training at a frequency of {} hours".format(
+                    self.dhours * self.dt * (self.n_history + 1), self.dhours * self.dt
+                )
+            )
+            logging.info(
+                "Including {} hours of future targets in training at a frequency of {} hours".format(
+                    self.dhours * self.dt * (self.n_future + 1), self.dhours * self.dt
+                )
+            )
 
         # some state variables
         self.last_cycle_epoch = None
@@ -542,16 +756,30 @@ class GeneralES(object):
             self._init_buffers()
 
     def _init_buffers(self):
-        self.inp_buff = np.zeros((self.n_history + 1, self.n_in_channels, self.return_shape[0], self.return_shape[1]), dtype=np.float32)
-        self.tar_buff = np.zeros((self.n_future + 1, self.n_out_channels, self.return_shape[0], self.return_shape[1]), dtype=np.float32)
+        self.inp_buff = np.zeros(
+            (self.n_history + 1, self.n_in_channels, self.return_shape[0], self.return_shape[1]), dtype=np.float32
+        )
+        self.tar_buff = np.zeros(
+            (self.n_future + 1, self.n_out_channels, self.return_shape[0], self.return_shape[1]), dtype=np.float32
+        )
 
     def _compute_timestamps(self, local_idx, year_idx):
         # compute hours into the year
         year = self.years[year_idx]
 
-        inp_time = np.asarray([get_timestamp(year, hour=(idx * self.dhours)).timestamp() for idx in range(local_idx - self.dt * self.n_history, local_idx + 1, self.dt)])
+        inp_time = np.asarray(
+            [
+                get_timestamp(year, hour=(idx * self.dhours)).timestamp()
+                for idx in range(local_idx - self.dt * self.n_history, local_idx + 1, self.dt)
+            ]
+        )
 
-        tar_time = np.asarray([get_timestamp(year, hour=(idx * self.dhours)).timestamp() for idx in range(local_idx + self.dt, local_idx + self.dt * (self.n_future + 1) + 1, self.dt)])
+        tar_time = np.asarray(
+            [
+                get_timestamp(year, hour=(idx * self.dhours)).timestamp()
+                for idx in range(local_idx + self.dt, local_idx + self.dt * (self.n_future + 1) + 1, self.dt)
+            ]
+        )
 
         return inp_time, tar_time
 
@@ -560,17 +788,21 @@ class GeneralES(object):
         torch.cuda.nvtx.range_push("GeneralES:_compute_zenith_angle")
 
         # import
-        from makani.third_party.climt.zenith_angle import cos_zenith_angle
+        from makani.third_party.climt.zenith_angle_v2 import cos_zenith_angle
 
         # convert to datetimes:
         inp_times_dt = self.date_fn(inp_times)
         tar_times_dt = self.date_fn(tar_times)
 
         # zenith angle for input
-        cos_zenith_inp = np.expand_dims(cos_zenith_angle(inp_times_dt, self.lon_grid_local, self.lat_grid_local).astype(np.float32), axis=1)
+        cos_zenith_inp = np.expand_dims(
+            cos_zenith_angle(inp_times_dt, self.lon_grid_local, self.lat_grid_local).astype(np.float32), axis=1
+        )
 
         # zenith angle for target:
-        cos_zenith_tar = np.expand_dims(cos_zenith_angle(tar_times_dt, self.lon_grid_local, self.lat_grid_local).astype(np.float32), axis=1)
+        cos_zenith_tar = np.expand_dims(
+            cos_zenith_angle(tar_times_dt, self.lon_grid_local, self.lat_grid_local).astype(np.float32), axis=1
+        )
 
         # nvtx range
         torch.cuda.nvtx.range_pop()
@@ -578,9 +810,12 @@ class GeneralES(object):
         return cos_zenith_inp, cos_zenith_tar
 
     def __getstate__(self):
-        del self.aws_connector
-        self.aws_connector = None
-        return self.__dict__.copy()
+        state = self.__dict__.copy()
+        state["aws_connector"] = None
+        # drop file handles — they can't cross process boundaries
+        state["files"] = [None] * self.n_years
+        state["dsets"] = [None] * self.n_years
+        return state
 
     def __setstate__(self, state):
         self.__dict__.update(state)
@@ -588,6 +823,9 @@ class GeneralES(object):
         if self.file_format == "h5":
             self.get_year_handle = self._get_year_h5
             self.get_data_handle = self._get_data_h5
+        elif getattr(self, "zarr_format", "makani") == "wb2":
+            self.get_year_handle = self._get_year_zarr_wb2
+            self.get_data_handle = self._get_data_zarr_wb2
         else:
             self.get_year_handle = self._get_year_zarr
             self.get_data_handle = self._get_data_zarr
@@ -599,14 +837,30 @@ class GeneralES(object):
         if self.is_parallel:
             self._init_buffers()
 
+        # pre-open all file handles eagerly so __call__ never retries mid-training.
+        # round-robin by shard_id so concurrent ranks hit different files first,
+        # reducing O_DIRECT thundering-herd collisions at worker startup.
+        start = self.shard_id % self.n_years
+        for i in range(self.n_years):
+            year_idx = (start + i) % self.n_years
+            for _ in range(self.num_retries):
+                try:
+                    self.get_year_handle(year_idx)
+                    break
+                except Exception as err:
+                    print(f"Cannot get year handle {year_idx}. Reason {err}, retrying.", flush=True)
+                    time.sleep(5)
+            else:
+                raise OSError(f"Unable to retrieve year handle {year_idx} after {self.num_retries} attempts, aborting.")
+
     def __len__(self):
         return self.n_samples_shard
 
     def __del__(self):
-        # close files
+        # close files — zarr groups have no close(), only HDF5 handles do
         if hasattr(self, "files"):
             for f in self.files:
-                if f is not None:
+                if f is not None and hasattr(f, "close"):
                     f.close()
 
     def _get_local_year_index_from_global_index(self, sample_idx):

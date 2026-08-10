@@ -16,6 +16,7 @@ makani
 │   ├── annotate_dataset.py              # annotation of the dataset
 │   ├── concatenate_dataset.py           # concatenation of data files across several years
 │   ├── convert_makani_output_to_wb2.py  # converting makani output to wb2 format
+│   ├── convert_ncar_era5_to_makani_input.py # convert NSF NCAR ERA5 (RDA d633000) in makani format
 │   ├── convert_wb2_to_makani_input.py   # convert wb2 input in makani format
 │   ├── data_process_helpers.py          # helper functions for distributed Welford reductions
 │   ├── generate_wb2_climatology.py      # generate mask and dataset for climatology data
@@ -88,6 +89,46 @@ data into Makani-compatible yearly `.h5` files.
 The command writes one Makani-format `.h5` file per requested year in `output_dir`
 with shared dimension scales (`timestamp`, `channel`, `lat`, `lon`) and a
 `valid_data` mask that tracks imputed or missing values.
+
+### Creating a Makani dataset from NSF NCAR ERA5 (RDA d633000):
+
+`convert_ncar_era5_to_makani_input.py` reads the public, anonymously accessible bucket
+`s3://nsf-ncar-era5`, which hosts ERA5 from 1940 to the present as netCDF4 on its native
+0.25 degree grid. That grid is already the grid makani expects (latitude 90 to -90,
+longitude 0 to 359.75), so no regridding or latitude flipping takes place and a mismatch
+against the metadata grid is reported as an error rather than silently corrected.
+
+The converter takes the same metadata json as the Weatherbench converter and writes the
+same yearly files, so the two are interchangeable as dataset sources:
+```
+mpirun -n 8 python convert_ncar_era5_to_makani_input.py \
+  --output_dir "/path/to/output/makani_era5" \
+  --metadata_file "/path/to/metadata.json" \
+  --years 2018 2019
+```
+Flags you may want to use:
+- `--cache_dir` keeps the raw NCAR files on local disk, so an interrupted run and any
+  later re-conversion do not refetch them. Note that the raw files are considerably
+  larger than the converted output; without this flag nothing is staged locally.
+- `--accumulation_hours` sets the window used for accumulated channels such as `tp`.
+  It defaults to `dhours`, so a 6-hourly dataset gets 6-hourly accumulations.
+- `--skip_missing_channels` drops channels that have no NCAR counterpart instead of failing.
+- `--force_overwrite` to replace existing yearly files.
+
+Notes on the source data:
+- Data is streamed with byte-range reads. The pressure level files are chunked as one
+  chunk per timestep holding all 37 levels, so subsetting in time is nearly free while
+  subsetting in level is not: a 6-hourly dataset transfers roughly a sixth of the bytes
+  an hourly one would, but requesting fewer pressure levels does not reduce transfer.
+- Work is distributed over whole days rather than individual timestamps, so that two
+  ranks never fetch and decompress the same pressure level chunk.
+- d633000 does not ship total precipitation, so `tp` is reconstructed as `lsp + cp`
+  (large-scale plus convective precipitation, both in metres). Unlike the ECMWF forecast
+  archive, these fields arrive already de-accumulated, one value per forecast hour, and
+  the converter sums the hours spanned by the window. Windows longer than the 12 hour
+  forecast run are stitched together from consecutive runs.
+- Fields that are undefined over part of the globe, most notably `sst`, carry a netCDF
+  `_FillValue` that the converter translates to NaN.
 
 ### Concatenate individual years into a single dataset
 

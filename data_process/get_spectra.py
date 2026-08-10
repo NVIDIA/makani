@@ -35,7 +35,7 @@ import torch.distributed as dist
 from torch_harmonics import RealSHT
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from data_process.wb2_helpers import DistributedProgressBar
+from data_process.data_process_helpers import DistributedProgressBar
 from data_process.data_process_helpers import welford_combine, collective_reduce, binary_reduce
 
 
@@ -49,19 +49,19 @@ def compute_powerspectrum(x, sht):
 
 
 def get_file_power_spectra(
-        filename,
-        file_slice,
-        sht,
-        batch_size: Optional[int]=16,
-        device: Optional[torch.device]=torch.device("cpu"),
-        progress: Optional[DistributedProgressBar]=None,
-    ) -> dict:
+    filename,
+    file_slice,
+    sht,
+    batch_size: Optional[int] = 16,
+    device: Optional[torch.device] = torch.device("cpu"),
+    progress: Optional[DistributedProgressBar] = None,
+) -> dict:
 
     power_spectra = None
-    with h5.File(filename, 'r') as f:
+    with h5.File(filename, "r") as f:
 
         # get dataset
-        dset= f['fields']
+        dset = f["fields"]
 
         # create batch
         slc_start = file_slice.start
@@ -71,9 +71,9 @@ def get_file_power_spectra(
 
         if batch_size is None:
             batch_size = slc_stop - slc_start
-        
+
         for batch_start in range(slc_start, slc_stop, batch_size):
-            batch_stop = min(batch_start+batch_size, slc_stop)
+            batch_stop = min(batch_start + batch_size, slc_stop)
             sub_slc = slice(batch_start, batch_stop)
 
             # get slice
@@ -89,17 +89,19 @@ def get_file_power_spectra(
 
             # # define counts
             counts_time = torch.as_tensor(tdata.shape[0], dtype=torch.float64, device=device)
-            
+
             # Basic observables
             # compute mean and variance
             # the mean needs to be divided by number of valid samples:
             power_spectrum_mean = torch.sum(power_spectrum, dim=0, keepdim=False) / counts_time
             # we compute m2 directly, so we do not need to divide by number of valid samples:
-            power_spectrum_m2 = torch.sum(torch.square(power_spectrum - power_spectrum_mean[None, ...]), dim=0, keepdim=False)
+            power_spectrum_m2 = torch.sum(
+                torch.square(power_spectrum - power_spectrum_mean[None, ...]), dim=0, keepdim=False
+            )
 
             # fill the dict
             tmpspectra = dict(
-                global_meanvar = {
+                global_meanvar={
                     "type": "meanvar",
                     "counts": counts_time.clone(),
                     "values": torch.stack([power_spectrum_mean, power_spectrum_m2], dim=0).contiguous(),
@@ -112,16 +114,20 @@ def get_file_power_spectra(
                 power_spectra = tmpspectra
 
             if progress is not None:
-                progress.update_counter(batch_stop-batch_start)
+                progress.update_counter(batch_stop - batch_start)
                 progress.update_progress()
 
     return power_spectra
 
 
-def get_power_spectra(input_path: str, output_path: str, metadata_file: str,
-                      batch_size: Optional[int]=16, reduction_group_size: Optional[int]=8):
-
-    """Function to compute power spectra of all variables of a makani HDF5 dataset. 
+def get_power_spectra(
+    input_path: str,
+    output_path: str,
+    metadata_file: str,
+    batch_size: Optional[int] = 16,
+    reduction_group_size: Optional[int] = 8,
+):
+    """Function to compute power spectra of all variables of a makani HDF5 dataset.
 
     This function reads data from input_path and computes power spectra
     for all variables in the dataset. This is done globally, meaning averaged over space and time.
@@ -146,7 +152,7 @@ def get_power_spectra(input_path: str, output_path: str, metadata_file: str,
         coords: this is a dictionary which contains two lists, latitude and longitude coordinates in degrees as well as channel names.
         Example: coords = dict(lat=[-90.0, ..., 90.], lon=[0, ..., 360], channel=["t2m", "u500", "v500", ...])
         Note that the number of entries in coords["lat"] has to match dimension -2 of the dataset, and coords["lon"] dimension -1.
-        The length of the channel names has to match dimension -3 (or dimension 1, which is the same) of the dataset. 
+        The length of the channel names has to match dimension -3 (or dimension 1, which is the same) of the dataset.
     batch_size : int
         Batch size in which the samples are processed. This does not have any effect on the statistics (besides small numerical changes because of order of operations), but
         is merely a performance setting. Bigger batches are more efficient but require more memory.
@@ -175,14 +181,14 @@ def get_power_spectra(input_path: str, output_path: str, metadata_file: str,
     # init torch distributed
     device = torch.device(f"cuda:{comm_local_rank}") if torch.cuda.is_available() else torch.device("cpu")
     dist.init_process_group(
-        backend="nccl" if torch.cuda.is_available() else "gloo", 
+        backend="nccl" if torch.cuda.is_available() else "gloo",
         init_method="env://",
         world_size=comm_size,
         rank=comm_rank,
         device_id=device,
     )
     mesh = dist.init_device_mesh(
-        device_type=device.type, 
+        device_type=device.type,
         mesh_shape=[reduction_group_size, comm_size // reduction_group_size],
         mesh_dim_names=["reduction", "tree"],
     )
@@ -203,23 +209,23 @@ def get_power_spectra(input_path: str, output_path: str, metadata_file: str,
             # open the first file to check for stats
             num_samples = []
             for filename in filelist:
-                with h5.File(filename, 'r') as f:
-                    data_shape = f['fields'].shape
+                with h5.File(filename, "r") as f:
+                    data_shape = f["fields"].shape
                     num_samples.append(data_shape[0])
 
         else:
             combined_file = True
             filelist = [input_path]
-            with h5.File(filelist[0], 'r') as f:
-                data_shape = f['fields'].shape
+            with h5.File(filelist[0], "r") as f:
+                data_shape = f["fields"].shape
                 num_samples = [data_shape[0]]
 
         # open metadata file
-        with open(metadata_file, 'r') as f:
+        with open(metadata_file, "r") as f:
             metadata = json.load(f)
 
         # read channel names
-        channel_names = metadata['coords']['channel']
+        channel_names = metadata["coords"]["channel"]
 
     # communicate important information
     combined_file = comm.bcast(combined_file, root=0)
@@ -237,7 +243,9 @@ def get_power_spectra(input_path: str, output_path: str, metadata_file: str,
     sht = RealSHT(nlat=height, nlon=width, grid="equiangular").to(device)
 
     if comm_rank == 0:
-        print(f"Found {len(filelist)} files with a total of {num_samples_total} samples. Each sample has the shape {num_channels}x{height}x{width} (CxHxW).")
+        print(
+            f"Found {len(filelist)} files with a total of {num_samples_total} samples. Each sample has the shape {num_channels}x{height}x{width} (CxHxW)."
+        )
 
     # do the sharding:
     num_samples_chunk = (num_samples_total + comm_size - 1) // comm_size
@@ -245,12 +253,12 @@ def get_power_spectra(input_path: str, output_path: str, metadata_file: str,
     samples_end = min([samples_start + num_samples_chunk, num_samples_total])
     sample_offsets = list(accumulate(num_samples, operator.add))[:-1]
     sample_offsets.insert(0, 0)
-    #num_samples_local = samples_end - samples_start
+    # num_samples_local = samples_end - samples_start
 
     if comm_rank == 0:
         print("Loading data with the following chunking:")
-    for	rank in	range(comm_size):
-        if comm_rank ==	rank:
+    for rank in range(comm_size):
+        if comm_rank == rank:
             print(f"Rank {comm_rank}, working on samples [{samples_start}, {samples_end})", flush=True)
         comm.Barrier()
 
@@ -268,16 +276,15 @@ def get_power_spectra(input_path: str, output_path: str, metadata_file: str,
             filename = filelist[file_idx]
             if filename in mapping:
                 # update upper and lower bounds
-                mapping[filename] = ( min(local_idx, mapping[filename][0]),
-                                      max(local_idx, mapping[filename][1]) )
+                mapping[filename] = (min(local_idx, mapping[filename][0]), max(local_idx, mapping[filename][1]))
             else:
                 mapping[filename] = (local_idx, local_idx)
 
     # initialize arrays
     stats = dict(
-        global_meanvar = {
-            "type": "meanvar", 
-            "counts": torch.as_tensor(0.0, dtype=torch.float64, device=device), 
+        global_meanvar={
+            "type": "meanvar",
+            "counts": torch.as_tensor(0.0, dtype=torch.float64, device=device),
             "values": torch.zeros((2, num_channels, sht.lmax), dtype=torch.float64, device=device),
         },
     )
@@ -286,7 +293,9 @@ def get_power_spectra(input_path: str, output_path: str, metadata_file: str,
     progress = DistributedProgressBar(num_samples_total, comm)
     start = time.time()
     for filename, index_bounds in mapping.items():
-        tmpstats = get_file_power_spectra(filename, slice(index_bounds[0], index_bounds[1]+1), sht, batch_size, device, progress)
+        tmpstats = get_file_power_spectra(
+            filename, slice(index_bounds[0], index_bounds[1] + 1), sht, batch_size, device, progress
+        )
         stats = welford_combine(stats, tmpstats)
 
     # wait for everybody else
@@ -320,16 +329,24 @@ def get_power_spectra(input_path: str, output_path: str, metadata_file: str,
 
         # move stats to cpu and convert to numpy
         for varname, substats in stats.items():
-            for k,v in substats.items():
+            for k, v in substats.items():
                 if isinstance(v, torch.Tensor):
                     stats[varname][k] = v.cpu().numpy()
 
         # compute global stds:
-        stats["global_meanvar"]["values"][1, ...] = np.sqrt(stats["global_meanvar"]["values"][1, ...] / stats["global_meanvar"]["counts"])
+        stats["global_meanvar"]["values"][1, ...] = np.sqrt(
+            stats["global_meanvar"]["values"][1, ...] / stats["global_meanvar"]["counts"]
+        )
 
         # save the stats
-        np.save(os.path.join(output_path, 'power_spectra_means.npy'), stats["global_meanvar"]["values"][0, ...].astype(np.float32))
-        np.save(os.path.join(output_path, 'power_spectra_stds.npy'), stats["global_meanvar"]["values"][1, ...].astype(np.float32))
+        np.save(
+            os.path.join(output_path, "power_spectra_means.npy"),
+            stats["global_meanvar"]["values"][0, ...].astype(np.float32),
+        )
+        np.save(
+            os.path.join(output_path, "power_spectra_stds.npy"),
+            stats["global_meanvar"]["values"][1, ...].astype(np.float32),
+        )
 
         duration = time.time() - start
         print(f"Saving stats done. Duration: {duration:.2f}s", flush=True)
@@ -349,11 +366,12 @@ def get_power_spectra(input_path: str, output_path: str, metadata_file: str,
 
 
 def main(args):
-    get_power_spectra(input_path=args.input_path,
-                      output_path=args.output_path,
-                      metadata_file=args.metadata_file,
-                      batch_size=args.batch_size,
-                      reduction_group_size=args.reduction_group_size,
+    get_power_spectra(
+        input_path=args.input_path,
+        output_path=args.output_path,
+        metadata_file=args.metadata_file,
+        batch_size=args.batch_size,
+        reduction_group_size=args.reduction_group_size,
     )
 
     return
@@ -362,15 +380,21 @@ def main(args):
 if __name__ == "__main__":
     # argparse
     parser = ap.ArgumentParser()
-    parser.add_argument("--input_path", type=str, help="Directory with input files or a virtual hdf5 file with the combined input.", required=True)
+    parser.add_argument(
+        "--input_path",
+        type=str,
+        help="Directory with input files or a virtual hdf5 file with the combined input.",
+        required=True,
+    )
     parser.add_argument("--metadata_file", type=str, help="File containing dataset metadata.", required=True)
     parser.add_argument("--output_path", type=str, help="Directory for saving stats files.", required=True)
     parser.add_argument("--reduction_group_size", type=int, default=8, help="Size of collective reduction groups.")
-    parser.add_argument("--batch_size", type=int, default=16, help="Batch size used for reading chunks from a file at a time to avoid OOM errors.")
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=16,
+        help="Batch size used for reading chunks from a file at a time to avoid OOM errors.",
+    )
     args = parser.parse_args()
 
     main(args)
-
-
-
-

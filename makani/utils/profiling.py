@@ -22,6 +22,8 @@ def trace_handler(prof, print_stats=True, export_trace_prefix=None):
     print(prof.key_averages().table(sort_by="self_cuda_time_total", row_limit=-1))
     if export_trace_prefix is not None:
         prof.export_chrome_trace(export_trace_prefix + "_" + str(prof.step_num) + ".json")
+        device = f"cuda:{torch.cuda.current_device()}" if torch.cuda.is_available() else "cpu"
+        prof.export_memory_timeline(export_trace_prefix + "_mem_" + str(prof.step_num) + ".html", device=device)
 
     return
 
@@ -55,7 +57,7 @@ class CUDAProfiler(object):
 
     def __enter__(self):
         if not self.enabled:
-            return
+            return self
         if self.entered:
             raise RuntimeError("CUDA context manager is not reentrant")
         self.entered = True
@@ -81,11 +83,11 @@ class CUDAProfiler(object):
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         if not self.enabled:
-            return
+            return False
 
         torch.cuda.synchronize()
         if self.profiling_started:
-            libcudart.cudaProfilerStop()
+            self.libcudart.cudaProfilerStop()
             self.profiling_started = False
 
         return False

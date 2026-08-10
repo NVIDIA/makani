@@ -17,7 +17,6 @@ from typing import Optional, Tuple, List
 from dataclasses import dataclass
 
 from abc import ABCMeta, abstractmethod
-import math
 
 import torch
 import torch.nn as nn
@@ -28,10 +27,12 @@ import torch_harmonics.distributed as thd
 from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature, compute_spherical_bandlimit
 from makani.utils import comm
 from makani.utils.features import get_wind_channels
-from torch_harmonics.distributed import compute_split_shapes, split_tensor_along_dim
+from torch_harmonics.distributed import split_tensor_along_dim
 
 
-def _compute_channel_weighting_helper(channel_names: List[str], channel_weight_type: str, time_diff_scale: torch.Tensor = None) -> torch.Tensor:
+def _compute_channel_weighting_helper(
+    channel_names: List[str], channel_weight_type: str, time_diff_scale: torch.Tensor = None
+) -> torch.Tensor:
     """
     auxiliary routine for predetermining channel weighting
     """
@@ -279,7 +280,7 @@ def compute_alpha_per_step(
         if annealing == "linear":
             g = training_progress
         elif annealing == "quadratic":
-            g = training_progress ** 2
+            g = training_progress**2
         else:
             g = training_progress
         alpha = alpha * g
@@ -330,10 +331,14 @@ class GeometricBaseLoss(nn.Module, metaclass=ABCMeta):
 
     @torch.compiler.disable(recursive=False)
     def compute_channel_weighting(self, channel_weight_type: str, time_diff_scale: torch.Tensor = None) -> torch.Tensor:
-        return _compute_channel_weighting_helper(self.channel_names, channel_weight_type, time_diff_scale=time_diff_scale)
+        return _compute_channel_weighting_helper(
+            self.channel_names, channel_weight_type, time_diff_scale=time_diff_scale
+        )
 
     @abstractmethod
-    def forward(self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor:
+    def forward(
+        self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None, **kwargs
+    ) -> torch.Tensor:
         pass
 
 
@@ -408,16 +413,22 @@ class SpectralBaseLoss(nn.Module, metaclass=ABCMeta):
 
     @torch.compiler.disable(recursive=False)
     def compute_channel_weighting(self, channel_weight_type: str, time_diff_scale: torch.Tensor = None) -> torch.Tensor:
-        return _compute_channel_weighting_helper(self.channel_names, channel_weight_type, time_diff_scale=time_diff_scale)
+        return _compute_channel_weighting_helper(
+            self.channel_names, channel_weight_type, time_diff_scale=time_diff_scale
+        )
 
     @abstractmethod
-    def forward(self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor:
+    def forward(
+        self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None, **kwargs
+    ) -> torch.Tensor:
         pass
 
 
 class VortDivBaseLoss(nn.Module, metaclass=ABCMeta):
     """
-    Geometric base loss class used by all geometric losses
+    Base loss class for losses that score the wind channels in vorticity/divergence
+    space (via a vector-SHT round-trip on each u/v pair). All non-wind channels are
+    passed through unchanged so they still contribute to the loss.
     """
 
     def __init__(
@@ -448,10 +459,14 @@ class VortDivBaseLoss(nn.Module, metaclass=ABCMeta):
                 azimuth_group = None if (comm.get_size("w") == 1) else comm.get_group("w")
                 thd.init(polar_group, azimuth_group)
             self.vsht = thd.DistributedRealVectorSHT(*img_shape, lmax=lmax, mmax=lmax, grid=grid_type)
-            self.isht = thd.DistributedInverseRealVectorSHT(nlat=self.vsht.nlat, nlon=self.vsht.nlon, lmax=lmax, mmax=lmax, grid=grid_type)
+            self.isht = thd.DistributedInverseRealVectorSHT(
+                nlat=self.vsht.nlat, nlon=self.vsht.nlon, lmax=lmax, mmax=lmax, grid=grid_type
+            )
         else:
             self.vsht = th.RealVectorSHT(*img_shape, lmax=lmax, mmax=lmax, grid=grid_type)
-            self.isht = th.InverseRealVectorSHT(nlat=self.vsht.nlat, nlon=self.vsht.nlon, lmax=lmax, mmax=lmax, grid=grid_type)
+            self.isht = th.InverseRealVectorSHT(
+                nlat=self.vsht.nlat, nlon=self.vsht.nlon, lmax=lmax, mmax=lmax, grid=grid_type
+            )
 
         # get the quadrature rule for the corresponding grid
         quadrature_rule = grid_to_quadrature_rule(grid_type)
@@ -470,22 +485,33 @@ class VortDivBaseLoss(nn.Module, metaclass=ABCMeta):
 
     @property
     def n_channels(self):
-        return self.wind_chans.shape[0]
+        # the loss is scored over all channels: wind pairs in vort/div space plus every
+        # other channel passed through unchanged
+        return len(self.channel_names)
 
     @torch.compiler.disable(recursive=False)
     def compute_channel_weighting(self, channel_weight_type: str, time_diff_scale: torch.Tensor = None) -> torch.Tensor:
 
-        chw = _compute_channel_weighting_helper(self.channel_names, channel_weight_type, time_diff_scale=time_diff_scale)
-        chw = chw[self.wind_chans.to(chw.device)]
+        # weighting for ALL channels (in the original channel order); non-wind channels
+        # keep their normal weight
+        chw = _compute_channel_weighting_helper(
+            self.channel_names, channel_weight_type, time_diff_scale=time_diff_scale
+        )
 
-        # average u and v component weightings to weight vort and div equally
-        chw[1::2] = (chw[1::2] + chw[0::2]) / 2
-        chw[0::2] = chw[1::2]
+        # average the u and v component weightings so the vorticity and divergence
+        # derived from each wind pair are weighted equally
+        wind = self.wind_chans.to(chw.device)
+        u_idx, v_idx = wind[0::2], wind[1::2]
+        avg = (chw[u_idx] + chw[v_idx]) / 2
+        chw[u_idx] = avg
+        chw[v_idx] = avg
 
         return chw
 
     @abstractmethod
-    def forward(self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor:
+    def forward(
+        self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None, **kwargs
+    ) -> torch.Tensor:
         pass
 
 
@@ -518,10 +544,14 @@ class GradientBaseLoss(nn.Module, metaclass=ABCMeta):
                 azimuth_group = None if (comm.get_size("w") == 1) else comm.get_group("w")
                 thd.init(polar_group, azimuth_group)
             self.sht = thd.DistributedRealSHT(*img_shape, lmax=lmax, mmax=lmax, grid=grid_type)
-            self.ivsht = thd.DistributedInverseRealVectorSHT(nlat=self.sht.nlat, nlon=self.sht.nlon, lmax=lmax, mmax=lmax, grid=grid_type)
+            self.ivsht = thd.DistributedInverseRealVectorSHT(
+                nlat=self.sht.nlat, nlon=self.sht.nlon, lmax=lmax, mmax=lmax, grid=grid_type
+            )
         else:
             self.sht = th.RealSHT(*img_shape, lmax=lmax, mmax=lmax, grid=grid_type)
-            self.ivsht = th.InverseRealVectorSHT(nlat=self.sht.nlat, nlon=self.sht.nlon, lmax=lmax, mmax=lmax, grid=grid_type)
+            self.ivsht = th.InverseRealVectorSHT(
+                nlat=self.sht.nlat, nlon=self.sht.nlon, lmax=lmax, mmax=lmax, grid=grid_type
+            )
 
         # get the quadrature rule for the corresponding grid
         quadrature_rule = grid_to_quadrature_rule(grid_type)
@@ -544,9 +574,12 @@ class GradientBaseLoss(nn.Module, metaclass=ABCMeta):
 
     @torch.compiler.disable(recursive=False)
     def compute_channel_weighting(self, channel_weight_type: str, time_diff_scale: torch.Tensor = None) -> torch.Tensor:
-        return _compute_channel_weighting_helper(self.channel_names, channel_weight_type, time_diff_scale=time_diff_scale)
-
+        return _compute_channel_weighting_helper(
+            self.channel_names, channel_weight_type, time_diff_scale=time_diff_scale
+        )
 
     @abstractmethod
-    def forward(self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor:
+    def forward(
+        self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None, **kwargs
+    ) -> torch.Tensor:
         pass

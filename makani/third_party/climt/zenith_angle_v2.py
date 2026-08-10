@@ -12,6 +12,7 @@ from typing import Tuple
 
 dtype = np.float32
 
+
 def _days_from_2000(model_time: np.ndarray) -> np.ndarray:
     """Days since 2000-01-01 12:00 UTC."""
     time_diff = model_time - dt.datetime(2000, 1, 1, 12, 0, tzinfo=dt.timezone.utc)
@@ -20,10 +21,7 @@ def _days_from_2000(model_time: np.ndarray) -> np.ndarray:
 
 def _greenwich_mean_sidereal_time(jc: np.ndarray) -> np.ndarray:
     """GMST in radians. `jc` = julian centuries since 2000."""
-    theta = dtype(
-        67310.54841
-        + jc * (876600 * 3600 + 8640184.812866 + jc * (0.093104 - jc * 6.2e-5))
-    )
+    theta = dtype(67310.54841 + jc * (876600 * 3600 + 8640184.812866 + jc * (0.093104 - jc * 6.2e-5)))
     return (np.deg2rad(theta / 240.0) % (2 * np.pi)).astype(dtype)
 
 
@@ -32,9 +30,7 @@ def _sun_ecliptic_longitude(jc: np.ndarray) -> np.ndarray:
         357.52910 + 35999.05030 * jc - 0.0001559 * jc * jc - 0.00000048 * jc * jc * jc,
         dtype=dtype,
     )
-    mean_longitude = np.deg2rad(
-        280.46645 + 36000.76983 * jc + 0.0003032 * jc * jc, dtype=dtype
-    )
+    mean_longitude = np.deg2rad(280.46645 + 36000.76983 * jc + 0.0003032 * jc * jc, dtype=dtype)
     d_l = np.deg2rad(
         (1.914600 - 0.004817 * jc - 0.000014 * jc * jc) * np.sin(mean_anomaly)
         + (0.019993 - 0.000101 * jc) * np.sin(2 * mean_anomaly)
@@ -46,14 +42,10 @@ def _sun_ecliptic_longitude(jc: np.ndarray) -> np.ndarray:
 
 def _obliquity_star(jc: np.ndarray) -> np.ndarray:
     return np.deg2rad(
-        23.0 + 26.0 / 60 + 21.406 / 3600.0
-        - (
-            46.836769 * jc
-            - 0.0001831 * jc ** 2
-            + 0.00200340 * jc ** 3
-            - 0.576e-6 * jc ** 4
-            - 4.34e-8 * jc ** 5
-        ) / 3600.0,
+        23.0
+        + 26.0 / 60
+        + 21.406 / 3600.0
+        - (46.836769 * jc - 0.0001831 * jc**2 + 0.00200340 * jc**3 - 0.576e-6 * jc**4 - 4.34e-8 * jc**5) / 3600.0,
         dtype=dtype,
     )
 
@@ -121,18 +113,3 @@ def cos_zenith_angle(
 
     cos_h = np.cos(gmst_minus_ra + lon_rad)
     return sin_lat * sin_dec + cos_lat * cos_dec * cos_h
-
-
-if __name__ == "__main__":
-    lon = np.arange(0, 360, 20.0)
-    lat = np.arange(-90, 90.25, 10.0)[::-1]
-    lon_grid, lat_grid = np.meshgrid(lon, lat)
-
-    model_time = np.asarray([
-        dt.datetime(2002, 1, 1, 12, 0, 0, tzinfo=dt.timezone.utc),
-        dt.datetime(2002, 6, 1, 12, 0, 0, tzinfo=dt.timezone.utc),
-        dt.datetime(2003, 1, 1, 12, 0, 0, tzinfo=dt.timezone.utc),
-    ])
-    za = cos_zenith_angle(model_time, lon=lon_grid, lat=lat_grid)
-    print("zenith angle shape:", za.shape, "dtype:", za.dtype)
-    print(za)

@@ -16,6 +16,7 @@
 from typing import Tuple, List, Optional
 
 import torch
+from torch import amp
 
 from makani.utils.losses.base_loss import GeometricBaseLoss
 import makani.utils.constants as const
@@ -55,7 +56,9 @@ class HydrostaticBalanceLoss(GeometricBaseLoss):
             self.q_idx, _, p_tmp = get_matching_channels_pl(channel_names, "q", "t", p_min, p_max)
 
         if len(self.pressures) < 2:
-            raise ValueError("Warning, we could not find at least two pressure levels which are common among z and t and inside the specified limits")
+            raise ValueError(
+                "Warning, we could not find at least two pressure levels which are common among z and t and inside the specified limits"
+            )
 
         if self.use_moist_air_formula:
             for p1, p2 in zip(self.pressures, p_tmp):
@@ -71,7 +74,7 @@ class HydrostaticBalanceLoss(GeometricBaseLoss):
         self.prefact = 1.0 / const.R_DRY_AIR
 
         if self.use_moist_air_formula:
-            # the factor 1000. arises from converting q-units from kg / kg to g / kg
+            # virtual-temperature correction coefficient; q is specific humidity in kg/kg
             self.q_prefact = const.Q_CORRECTION_MOIST_AIR
 
         # we need to interpolate in p:
@@ -106,7 +109,11 @@ class HydrostaticBalanceLoss(GeometricBaseLoss):
         indices = torch.as_tensor([row_indices, col_indices], dtype=torch.long)
         values = torch.as_tensor(values, dtype=torch.float32)
         with torch.sparse.check_sparse_tensor_invariants(enable=False):
-            cmat = torch.sparse_coo_tensor(indices, values, size=(len(self.t_idx) - 1, len(channel_names))).coalesce().to_dense()
+            cmat = (
+                torch.sparse_coo_tensor(indices, values, size=(len(self.t_idx) - 1, len(channel_names)))
+                .coalesce()
+                .to_dense()
+            )
 
         # register buffer
         self.register_buffer("cmat", cmat, persistent=False)
@@ -125,32 +132,46 @@ class HydrostaticBalanceLoss(GeometricBaseLoss):
         channel_weights = torch.ones(self.n_channels, dtype=torch.float32)
 
         if not channel_weight_type == "constant":
-            raise NotImplementedError(f"Error, channel_weight_type {channel_weight_type} not supported for hydrostatic loss")
+            raise NotImplementedError(
+                f"Error, channel_weight_type {channel_weight_type} not supported for hydrostatic loss"
+            )
 
         # normalize
         channel_weights = channel_weights / torch.sum(channel_weights)
 
         return channel_weights
 
-    def forward(self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor:
+    def forward(
+        self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None, **kwargs
+    ) -> torch.Tensor:
 
-        # undo normalization
-        prdun = prd * self.scale + self.bias
+        ptype = prd.dtype
 
-        if self.use_moist_air_formula:
-            prdun[:, self.t_idx, ...] = prdun[:, self.t_idx, ...] * (1.0 + self.q_prefact * prdun[:, self.q_idx, ...])
+        # The residual is a catastrophic cancellation of large geopotential terms
+        # (Z / R_d), so it must be evaluated in fp32. matmul is autocast-eligible and
+        # would otherwise run in low precision under AMP, destroying the residual.
+        with amp.autocast(device_type=prd.device.type, enabled=False):
+            # undo normalization
+            prdun = prd.to(torch.float32) * self.scale + self.bias
 
-        # use sparse matmul
-        prdf = prdun.permute([1, 0, 2, 3])
-        C, B, H, W = prdf.shape
-        prdf = prdf.reshape(C, B * H * W)
+            if self.use_moist_air_formula:
+                prdun[:, self.t_idx, ...] = prdun[:, self.t_idx, ...] * (
+                    1.0 + self.q_prefact * prdun[:, self.q_idx, ...]
+                )
 
-        # we need to disable autocast here
-        res = torch.square(torch.matmul(self.cmat, prdf).reshape(-1, B, H, W).permute([1, 0, 2, 3])).contiguous()
+            # use sparse matmul
+            prdf = prdun.permute([1, 0, 2, 3])
+            C, B, H, W = prdf.shape
+            prdf = prdf.reshape(C, B * H * W)
 
-        if wgt is not None:
-            res = res * wgt
+            res = torch.square(torch.matmul(self.cmat, prdf).reshape(-1, B, H, W).permute([1, 0, 2, 3])).contiguous()
 
-        loss = self.quadrature(res)
+            if wgt is not None:
+                res = res * wgt
+
+            loss = self.quadrature(res)
+
+        # cast back to the input dtype, consistent with the other losses
+        loss = loss.to(ptype)
 
         return loss

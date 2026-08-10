@@ -21,6 +21,7 @@ import torch.nn as nn
 from makani.utils import comm
 from torch_harmonics.distributed import compute_split_shapes
 
+
 class PositionEmbedding(nn.Module, metaclass=abc.ABCMeta):
     """
     Abstract base class for position embeddings.
@@ -45,11 +46,26 @@ class PositionEmbedding(nn.Module, metaclass=abc.ABCMeta):
         self.num_chans = num_chans
 
     def forward(self):
+        r"""
+        Return the position embedding tensor.
+
+        Takes no input: the embedding depends only on grid position, so callers
+        add the returned tensor to their features themselves. Subclasses are
+        expected to override this if the embedding needs to be materialized or
+        broadcast before use.
+
+        Returns
+        -------
+        torch.Tensor
+            Embedding of shape ``(1, num_chans, H, W)``, broadcastable against a
+            feature tensor on the same grid.
+        """
 
         return self.position_embeddings
 
+
 class LearnablePositionEmbedding(PositionEmbedding):
-    """
+    r"""
     Learnable position embeddings for spherical transformers.
 
     This module provides learnable position embeddings that can be either
@@ -65,6 +81,27 @@ class LearnablePositionEmbedding(PositionEmbedding):
         Number of channels, by default 1
     embed_type : str, optional
         Embedding type ("lat" or "latlon"), by default "lat"
+
+    Raises
+    ------
+    ValueError
+        If ``embed_type`` is neither ``"lat"`` nor ``"latlon"``.
+
+    Notes
+    -----
+    ``"lat"`` learns one vector per latitude ring and broadcasts it along
+    longitude. This is the natural choice on a sphere: the physics is
+    zonally symmetric, so tying parameters along longitude cuts the parameter
+    count by a factor of ``nlon`` without giving up the pole-to-equator
+    structure the model actually needs. ``"latlon"`` learns an independent
+    vector per grid point and is only worth it when longitude-dependent
+    features (land-sea contrast, orography) must be memorized.
+
+    Under model parallelism the embedding is allocated at each rank's *local*
+    shape and tagged with its sharding, so it is sharded over ``h`` (and over
+    ``w`` for ``"latlon"``) rather than replicated. For ``"lat"`` the parameter
+    is marked shared across the ``w`` group, which keeps gradients consistent
+    across the ranks that hold the same latitudes.
     """
 
     def __init__(self, img_shape=(480, 960), grid="equiangular", num_chans=1, embed_type="lat"):
@@ -85,7 +122,9 @@ class LearnablePositionEmbedding(PositionEmbedding):
             self.local_shape_w = img_shape[1]
 
         if embed_type == "latlon":
-            self.position_embeddings = nn.Parameter(torch.zeros(1, self.num_chans, self.local_shape_h, self.local_shape_w))
+            self.position_embeddings = nn.Parameter(
+                torch.zeros(1, self.num_chans, self.local_shape_h, self.local_shape_w)
+            )
             self.position_embeddings.is_shared_mp = []
             self.position_embeddings.sharded_dims_mp = [None, None, "h", "w"]
         elif embed_type == "lat":
@@ -96,4 +135,17 @@ class LearnablePositionEmbedding(PositionEmbedding):
             raise ValueError(f"Unknown learnable position embedding type {embed_type}")
 
     def forward(self):
-        return self.position_embeddings.expand(-1,-1,self.local_shape_h, self.local_shape_w)
+        r"""
+        Return the learned embedding, expanded to the local grid shape.
+
+        For ``embed_type="lat"`` the stored parameter has a singleton longitude
+        dimension; expanding it here gives callers a tensor matching the local
+        feature map without materializing ``nlon`` copies of the parameter.
+
+        Returns
+        -------
+        torch.Tensor
+            Embedding of shape ``(1, num_chans, local_shape_h, local_shape_w)``.
+            This is a view of the parameter, not a copy.
+        """
+        return self.position_embeddings.expand(-1, -1, self.local_shape_h, self.local_shape_w)

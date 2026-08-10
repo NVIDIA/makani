@@ -14,7 +14,7 @@
 # limitations under the License.
 
 import unittest
-from parameterized import parameterized
+from parameterized import parameterized, parameterized_class
 import tempfile
 import os
 import sys
@@ -27,7 +27,21 @@ from makani.utils.inference.rollout_buffer import MeanStdBuffer, RolloutBuffer, 
 from makani.utils.dataloaders.data_helpers import get_lat_lon_grid
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from .testutils import disable_tf32, set_seed, init_dataset, get_default_parameters, compare_arrays, compare_tensors, H5_PATH, IMG_SIZE_H, IMG_SIZE_W
+from .testutils import (
+    disable_tf32,
+    set_seed,
+    init_hdf5_dataset,
+    get_default_parameters,
+    compare_arrays,
+    compare_tensors,
+    H5_PATH,
+    IMG_SIZE_H,
+    IMG_SIZE_W,
+)
+
+_devices = [(torch.device("cpu"),)]
+if torch.cuda.is_available():
+    _devices.append((torch.device("cuda"),))
 
 
 def init_dataset_params(
@@ -67,11 +81,13 @@ def init_dataset_params(
     # performance parameters
     params.num_data_workers = num_data_workers
     params.enable_odirect = False
+    params.odirect_alignment = 0
     params.enable_s3 = False
 
     return params
 
 
+@parameterized_class(("device",), _devices)
 class TestTemporalAverageBufferIntegration(unittest.TestCase):
     """
     End-to-end test for ``TemporalAverageBuffer``: feeds real HDF5 data through
@@ -88,9 +104,7 @@ class TestTemporalAverageBufferIntegration(unittest.TestCase):
     @classmethod
     def setUpClass(cls, path: Optional[str] = "/tmp"):
         """Set up test environment using class-level setup like test_dataloader.py"""
-        
-        cls.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        
+
         # Set random seed for reproducibility
         set_seed(333)
 
@@ -99,7 +113,9 @@ class TestTemporalAverageBufferIntegration(unittest.TestCase):
         tmp_path = cls.tmpdir.name
 
         # init datasets and stats using the same approach as test_dataloader.py
-        cls.train_path, cls.num_train, cls.valid_path, cls.num_valid, cls.stats_path, cls.metadata_path, _ = init_dataset(tmp_path)
+        cls.train_path, cls.num_train, cls.valid_path, cls.num_valid, cls.stats_path, cls.metadata_path, _ = (
+            init_hdf5_dataset(tmp_path)
+        )
 
     @classmethod
     def tearDownClass(cls):
@@ -108,19 +124,19 @@ class TestTemporalAverageBufferIntegration(unittest.TestCase):
 
     def setUp(self):
         """Set up test parameters for each test method"""
-        
+
         disable_tf32()
 
         # Initialize parameters using the same approach as test_dataloader.py
         self.params = init_dataset_params(
-            self.train_path, 
-            self.valid_path, 
-            self.stats_path, 
-            batch_size=2, 
-            n_history=0, 
-            n_future=0, 
-            normalization="zscore", 
-            num_data_workers=1
+            self.train_path,
+            self.valid_path,
+            self.stats_path,
+            batch_size=2,
+            n_history=0,
+            n_future=0,
+            normalization="zscore",
+            num_data_workers=1,
         )
 
         self.params.multifiles = True
@@ -134,26 +150,36 @@ class TestTemporalAverageBufferIntegration(unittest.TestCase):
         # Set rollout parameters
         self.rollout_dt = 6  # 6 hours
         self.ensemble_size = 4
-        
+
         # Channel configuration - use the same channels as testutils
         self.channel_names = ["u10m", "t2m", "u500", "z500", "t500"]
         self.output_channels = ["u10m", "t2m", "u500"]  # Only track some channels
         self.num_channels = len(self.channel_names)
         self.num_output_channels = len(self.output_channels)
-        
+
         # Set image dimensions - use the same as testutils
         self.img_shape = (IMG_SIZE_H, IMG_SIZE_W)  # (lat, lon)
         self.local_shape = (IMG_SIZE_H, IMG_SIZE_W)  # Same as img_shape for non-distributed test
         self.local_offset = (0, 0)
-        
+
         # Create lat/lon grid
         self.latitude, self.longitude = get_lat_lon_grid(self.img_shape)
         self.lat_lon = (self.latitude.tolist(), self.longitude.tolist())
 
     @parameterized.expand(
         [
-            (1, 1, False), (2, 1, False), (4, 1, False), (1, 2, False), (2, 2, False), (4, 2, False),
-            (1, 1, True), (2, 1, True), (4, 1, True), (1, 2, True), (2, 2, True), (4, 2, True),
+            (1, 1, False),
+            (2, 1, False),
+            (4, 1, False),
+            (1, 2, False),
+            (2, 2, False),
+            (4, 2, False),
+            (1, 1, True),
+            (2, 1, True),
+            (4, 1, True),
+            (1, 2, True),
+            (2, 2, True),
+            (4, 2, True),
         ],
         skip_on_empty=True,
     )
@@ -171,7 +197,7 @@ class TestTemporalAverageBufferIntegration(unittest.TestCase):
         else:
             scale = torch.ones((self.num_channels,), dtype=torch.float32)
             bias = torch.zeros((self.num_channels,), dtype=torch.float32)
-            
+
         # Initialize TemporalAverageBuffer
         buffer = TemporalAverageBuffer(
             num_rollout_steps=num_rollout_steps,
@@ -187,58 +213,60 @@ class TestTemporalAverageBufferIntegration(unittest.TestCase):
             scale=scale,
             bias=bias,
         )
-        
+
         # Load test data from the dummy dataset
         test_file = os.path.join(self.valid_path, "2019.h5")
         with h5.File(test_file, "r") as hf:
             # Load all data from the test file
             data = hf[H5_PATH][:]  # Shape: (num_samples, num_channels, lat, lon)
-        
+
         # Convert to torch tensor
         data_tensor = torch.from_numpy(data).to(self.device)
-        
+
         # Get channel indices for output channels
         output_channel_indices = [self.channel_names.index(ch) for ch in self.output_channels]
-        
+
         # Prepare manual calculation arrays
         manual_data = []  # Will store all data for manual calculation
-        
+
         # Feed data one tensor at a time to the buffer
         num_samples = (data_tensor.shape[0] // batch_size // num_rollout_steps) * num_rollout_steps * batch_size
-        
+
         for idt, step in enumerate(range(0, num_samples, batch_size)):
             # Extract single sample and reshape for buffer
             # Buffer expects: (batch_size, num_channels, lat, lon)
-            sample = data_tensor[step:step+batch_size, ...]  # Add batch and ensemble dimension
+            sample = data_tensor[step : step + batch_size, ...]  # Add batch and ensemble dimension
 
             # Update buffer
             idte = idt % num_rollout_steps
             buffer.update(sample, idte)
-            
+
             # Store for manual calculation
             manual_data.append(sample[:, output_channel_indices, :, :].cpu().numpy())
-        
+
         # Finalize buffer
         buffer.finalize()
-        
+
         # Manual calculation
         manual_data = np.stack(manual_data, axis=0)
         manual_data = manual_data.reshape(-1, num_rollout_steps, batch_size, self.num_output_channels, *self.img_shape)
-        manual_data = np.transpose(manual_data, axes=(0, 2, 1, 3, 4, 5)).reshape(-1, num_rollout_steps, self.num_output_channels, *self.img_shape)
-        
+        manual_data = np.transpose(manual_data, axes=(0, 2, 1, 3, 4, 5)).reshape(
+            -1, num_rollout_steps, self.num_output_channels, *self.img_shape
+        )
+
         # Calculate manual mean and std for output channels only
         manual_mean = np.mean(manual_data, axis=0)
         manual_std = np.std(manual_data, axis=0, ddof=1)  # ddof=1 for sample std
-        
+
         # Read results from HDF5 file
         with h5.File(output_file, "r") as hf:
             buffer_mean = hf["mean"][:]  # Shape: (num_rollout_steps, num_channels, lat, lon)
-            buffer_std = hf["std"][:]     # Shape: (num_rollout_steps, num_channels, lat, lon)
+            buffer_std = hf["std"][:]  # Shape: (num_rollout_steps, num_channels, lat, lon)
             lead_time = hf["lead_time"][:]
             channels = [x.decode() for x in hf["channel"][:]]
             lats = hf["lat"][:]
             lons = hf["lon"][:]
-        
+
         # Verify file structure
         with self.subTest(desc="buffer shapes"):
             self.assertEqual(buffer_mean.shape, (num_rollout_steps, len(self.output_channels), *self.img_shape))
@@ -253,9 +281,13 @@ class TestTemporalAverageBufferIntegration(unittest.TestCase):
             self.assertEqual(channels, self.output_channels)
 
         # Verify lead times
-        expected_lead_times = np.arange(self.rollout_dt, (num_rollout_steps + 1) * self.rollout_dt, self.rollout_dt, dtype=np.float64)
+        expected_lead_times = np.arange(
+            self.rollout_dt, (num_rollout_steps + 1) * self.rollout_dt, self.rollout_dt, dtype=np.float64
+        )
         with self.subTest(desc="lead times"):
-            self.assertTrue(compare_arrays("lead times", lead_time, expected_lead_times, atol=0.0, rtol=1e-6, verbose=verbose))
+            self.assertTrue(
+                compare_arrays("lead times", lead_time, expected_lead_times, atol=0.0, rtol=1e-6, verbose=verbose)
+            )
 
         # Verify lat/lon coordinates
         with self.subTest(desc="latitudes"):
@@ -300,7 +332,7 @@ class TestMeanStdBuffer(unittest.TestCase):
             device="cpu",
             scale=scale,
             bias=bias,
-            output_channels=channel_names,   # output all channels
+            output_channels=channel_names,  # output all channels
             output_file=None,
         )
 
@@ -329,7 +361,9 @@ class TestMeanStdBuffer(unittest.TestCase):
         expected_m2 = (data - expected_mean).pow(2).sum(dim=0)
 
         with self.subTest(desc="mean"):
-            self.assertTrue(compare_tensors("running_mean", buf.running_mean[0], expected_mean, atol=1e-5, verbose=verbose))
+            self.assertTrue(
+                compare_tensors("running_mean", buf.running_mean[0], expected_mean, atol=1e-5, verbose=verbose)
+            )
         with self.subTest(desc="m2"):
             self.assertTrue(compare_tensors("running_var", buf.running_var[0], expected_m2, atol=1e-4, verbose=verbose))
         with self.subTest(desc="count"):
@@ -350,9 +384,13 @@ class TestMeanStdBuffer(unittest.TestCase):
         expected_m2 = (joined - expected_mean).pow(2).sum(dim=0)
 
         with self.subTest(desc="mean"):
-            self.assertTrue(compare_tensors("two-batch mean", buf.running_mean[0], expected_mean, atol=1e-5, verbose=verbose))
+            self.assertTrue(
+                compare_tensors("two-batch mean", buf.running_mean[0], expected_mean, atol=1e-5, verbose=verbose)
+            )
         with self.subTest(desc="m2"):
-            self.assertTrue(compare_tensors("two-batch m2", buf.running_var[0], expected_m2, atol=1e-3, verbose=verbose))
+            self.assertTrue(
+                compare_tensors("two-batch m2", buf.running_var[0], expected_m2, atol=1e-3, verbose=verbose)
+            )
         with self.subTest(desc="count"):
             self.assertEqual(buf.num_samples_tracked[0].item(), 12)
 
@@ -369,9 +407,13 @@ class TestMeanStdBuffer(unittest.TestCase):
         expected_m2 = (joined - expected_mean).pow(2).sum(dim=0)
 
         with self.subTest(desc="mean"):
-            self.assertTrue(compare_tensors("three-batch mean", buf.running_mean[0], expected_mean, atol=1e-5, verbose=verbose))
+            self.assertTrue(
+                compare_tensors("three-batch mean", buf.running_mean[0], expected_mean, atol=1e-5, verbose=verbose)
+            )
         with self.subTest(desc="m2"):
-            self.assertTrue(compare_tensors("three-batch m2", buf.running_var[0], expected_m2, atol=1e-3, verbose=verbose))
+            self.assertTrue(
+                compare_tensors("three-batch m2", buf.running_var[0], expected_m2, atol=1e-3, verbose=verbose)
+            )
         with self.subTest(desc="count"):
             self.assertEqual(buf.num_samples_tracked[0].item(), 15)
 
@@ -386,9 +428,17 @@ class TestMeanStdBuffer(unittest.TestCase):
             self.assertEqual(buf.num_samples_tracked[1].item(), 4)
             self.assertEqual(buf.num_samples_tracked[2].item(), 0)
         with self.subTest(desc="mean step 0 untouched"):
-            self.assertTrue(compare_tensors("step 0 mean", buf.running_mean[0], torch.zeros_like(buf.running_mean[0]), verbose=verbose))
+            self.assertTrue(
+                compare_tensors(
+                    "step 0 mean", buf.running_mean[0], torch.zeros_like(buf.running_mean[0]), verbose=verbose
+                )
+            )
         with self.subTest(desc="mean step 2 untouched"):
-            self.assertTrue(compare_tensors("step 2 mean", buf.running_mean[2], torch.zeros_like(buf.running_mean[2]), verbose=verbose))
+            self.assertTrue(
+                compare_tensors(
+                    "step 2 mean", buf.running_mean[2], torch.zeros_like(buf.running_mean[2]), verbose=verbose
+                )
+            )
 
     def test_zero_buffers_resets_all_state(self, verbose=False):
         buf = self._make_buffer(num_rollout_steps=2, num_channels=2, variable_shape=(4, 4))
@@ -401,9 +451,13 @@ class TestMeanStdBuffer(unittest.TestCase):
         with self.subTest(desc="counts"):
             self.assertEqual(buf.num_samples_tracked.sum().item(), 0)
         with self.subTest(desc="running_mean reset"):
-            self.assertTrue(compare_tensors("running_mean", buf.running_mean, torch.zeros_like(buf.running_mean), verbose=verbose))
+            self.assertTrue(
+                compare_tensors("running_mean", buf.running_mean, torch.zeros_like(buf.running_mean), verbose=verbose)
+            )
         with self.subTest(desc="running_var reset"):
-            self.assertTrue(compare_tensors("running_var", buf.running_var, torch.zeros_like(buf.running_var), verbose=verbose))
+            self.assertTrue(
+                compare_tensors("running_var", buf.running_var, torch.zeros_like(buf.running_var), verbose=verbose)
+            )
 
 
 class TestTemporalAverageBufferUnit(unittest.TestCase):
@@ -456,7 +510,9 @@ class TestTemporalAverageBufferUnit(unittest.TestCase):
         expected_m2 = (sub - expected_mean).pow(2).sum(dim=0)
 
         with self.subTest(desc="mean"):
-            self.assertTrue(compare_tensors("subset mean", buf.running_mean[0], expected_mean, atol=1e-5, verbose=verbose))
+            self.assertTrue(
+                compare_tensors("subset mean", buf.running_mean[0], expected_mean, atol=1e-5, verbose=verbose)
+            )
         with self.subTest(desc="m2"):
             self.assertTrue(compare_tensors("subset m2", buf.running_var[0], expected_m2, atol=1e-3, verbose=verbose))
         with self.subTest(desc="count"):
@@ -483,12 +539,18 @@ class TestTemporalAverageBufferUnit(unittest.TestCase):
 
         # mean per channel = scale*1 + bias = [3.0, -0.5], spatially constant.
         with self.subTest(desc="ch_a mean = scale*1 + bias"):
-            self.assertTrue(compare_tensors("ch_a", buf.running_mean[0, 0], 3.0 * torch.ones(2, 2), atol=1e-6, verbose=verbose))
+            self.assertTrue(
+                compare_tensors("ch_a", buf.running_mean[0, 0], 3.0 * torch.ones(2, 2), atol=1e-6, verbose=verbose)
+            )
         with self.subTest(desc="ch_b mean = scale*1 + bias"):
-            self.assertTrue(compare_tensors("ch_b", buf.running_mean[0, 1], -0.5 * torch.ones(2, 2), atol=1e-6, verbose=verbose))
+            self.assertTrue(
+                compare_tensors("ch_b", buf.running_mean[0, 1], -0.5 * torch.ones(2, 2), atol=1e-6, verbose=verbose)
+            )
         with self.subTest(desc="m2 zero for constant input"):
             # constant input → zero variance → m2 = 0
-            self.assertTrue(compare_tensors("zero m2", buf.running_var[0], torch.zeros_like(buf.running_var[0]), verbose=verbose))
+            self.assertTrue(
+                compare_tensors("zero m2", buf.running_var[0], torch.zeros_like(buf.running_var[0]), verbose=verbose)
+            )
 
     def test_rollout_steps_independent(self, verbose=False):
         # Updates to different rollout steps must not contaminate each other.
@@ -506,11 +568,19 @@ class TestTemporalAverageBufferUnit(unittest.TestCase):
         buf.update(5.0 * torch.ones(4, 1, 2, 2), idt=2)
 
         with self.subTest(desc="step 0"):
-            self.assertTrue(compare_tensors("step 0", buf.running_mean[0], torch.ones_like(buf.running_mean[0]), verbose=verbose))
+            self.assertTrue(
+                compare_tensors("step 0", buf.running_mean[0], torch.ones_like(buf.running_mean[0]), verbose=verbose)
+            )
         with self.subTest(desc="step 1 untouched"):
-            self.assertTrue(compare_tensors("step 1", buf.running_mean[1], torch.zeros_like(buf.running_mean[1]), verbose=verbose))
+            self.assertTrue(
+                compare_tensors("step 1", buf.running_mean[1], torch.zeros_like(buf.running_mean[1]), verbose=verbose)
+            )
         with self.subTest(desc="step 2"):
-            self.assertTrue(compare_tensors("step 2", buf.running_mean[2], 5.0 * torch.ones_like(buf.running_mean[2]), verbose=verbose))
+            self.assertTrue(
+                compare_tensors(
+                    "step 2", buf.running_mean[2], 5.0 * torch.ones_like(buf.running_mean[2]), verbose=verbose
+                )
+            )
         with self.subTest(desc="step 1 count"):
             self.assertEqual(buf.num_samples_tracked[1].item(), 0)
 
@@ -526,14 +596,15 @@ class TestTemporalAverageBufferUnit(unittest.TestCase):
         )
 
         # Two-sample batch with values [-1, +1] → mean=0, m2 = 2 (two unit deltas).
-        data = torch.tensor([[[-1.0, -1.0], [-1.0, -1.0]],
-                             [[ 1.0,  1.0], [ 1.0,  1.0]]]).reshape(2, 1, 2, 2)
+        data = torch.tensor([[[-1.0, -1.0], [-1.0, -1.0]], [[1.0, 1.0], [1.0, 1.0]]]).reshape(2, 1, 2, 2)
         buf.update(data, idt=0)
 
         with self.subTest(desc="post-update mean"):
             self.assertTrue(compare_tensors("mean", buf.running_mean[0], torch.zeros(2, 2), atol=1e-6, verbose=verbose))
         with self.subTest(desc="post-update m2"):
-            self.assertTrue(compare_tensors("m2", buf.running_var[0], 2.0 * torch.ones(2, 2), atol=1e-6, verbose=verbose))
+            self.assertTrue(
+                compare_tensors("m2", buf.running_var[0], 2.0 * torch.ones(2, 2), atol=1e-6, verbose=verbose)
+            )
 
         # finalize is in-place math + (no-op write) — should not raise
         buf.finalize()
@@ -616,9 +687,9 @@ class TestRolloutBuffer(unittest.TestCase):
         )
 
         pred = torch.zeros(2, 2, 3, 4, 6)
-        pred[..., 0, :, :] = 1.0   # 'a'
-        pred[..., 1, :, :] = 2.0   # 'b' (NOT in output_channels, must be dropped)
-        pred[..., 2, :, :] = 3.0   # 'c'
+        pred[..., 0, :, :] = 1.0  # 'a'
+        pred[..., 1, :, :] = 2.0  # 'b' (NOT in output_channels, must be dropped)
+        pred[..., 2, :, :] = 3.0  # 'c'
         tstamps = torch.tensor([100.0, 200.0])
 
         buf.update(pred, tstamps, idt=0)
@@ -725,7 +796,9 @@ class TestRolloutBuffer(unittest.TestCase):
         # Timestamps for a given IC should be captured at idt=0 and NOT
         # overwritten by subsequent rollout steps that pass different values.
         buf = self._make_buffer(
-            num_samples=1, batch_size=1, num_rollout_steps=2,
+            num_samples=1,
+            batch_size=1,
+            num_rollout_steps=2,
         )
 
         pred = torch.zeros(1, 1, 1, 2, 2)
@@ -748,7 +821,7 @@ class TestRolloutBuffer(unittest.TestCase):
         buf = self._make_buffer(num_samples=2, batch_size=1, num_rollout_steps=0)
 
         pred = torch.full((1, 1, 1, 2, 2), 5.0)
-        buf.update(pred, torch.tensor([100.0]), idt=0)   # finishes rollout (R=0)
+        buf.update(pred, torch.tensor([100.0]), idt=0)  # finishes rollout (R=0)
 
         with self.subTest(desc="pre-zero state"):
             self.assertEqual(buf.buffer_offset, 1)
@@ -796,7 +869,7 @@ class TestRolloutBuffer(unittest.TestCase):
         # Step-granular buffering: with R+1=3 steps per IC and buffer_size=2 (below R+1),
         # the buffer cannot hold even one full rollout. The flush must happen mid-rollout
         # and the carry-over chunk must point at the in-flight batch's next leadtime.
-        num_rollout_steps = 2   # R+1 = 3
+        num_rollout_steps = 2  # R+1 = 3
         buf = self._make_buffer(
             num_samples=1,
             batch_size=1,
@@ -841,8 +914,10 @@ class TestRolloutBuffer(unittest.TestCase):
         # full batch would never fit).
         with self.subTest(desc="clamps below batch_size"):
             buf = self._make_buffer(
-                num_samples=10, batch_size=4, num_rollout_steps=1,
-                output_memory_buffer_size=2,    # below floor (batch_size=4)
+                num_samples=10,
+                batch_size=4,
+                num_rollout_steps=1,
+                output_memory_buffer_size=2,  # below floor (batch_size=4)
             )
             self.assertEqual(buf.num_buffered_samples, 4)
 
@@ -850,7 +925,9 @@ class TestRolloutBuffer(unittest.TestCase):
         # in over-allocating beyond the full run).
         with self.subTest(desc="clamps above num_samples * (R + 1)"):
             buf = self._make_buffer(
-                num_samples=10, batch_size=2, num_rollout_steps=1,
+                num_samples=10,
+                batch_size=2,
+                num_rollout_steps=1,
                 output_memory_buffer_size=100,  # above ceiling (10 * 2 = 20)
             )
             self.assertEqual(buf.num_buffered_samples, 20)
@@ -962,7 +1039,7 @@ class TestRolloutBufferIO(unittest.TestCase):
         # Feed enough zero data to fill all ICs through full rollouts.
         zero_batches = [
             torch.zeros(2, num_rollout_steps + 1, ensemble_size, 3, *img_shape)
-            for _ in range(2)   # 2 batches × 2 ICs each = 4 ICs total
+            for _ in range(2)  # 2 batches × 2 ICs each = 4 ICs total
         ]
         tstamps = [torch.tensor([1.0, 2.0]), torch.tensor([3.0, 4.0])]
         self._drive_full_rollout(buf, ic_data_per_batch=zero_batches, tstamps_per_batch=tstamps)
@@ -996,9 +1073,12 @@ class TestRolloutBufferIO(unittest.TestCase):
 
         buf = self._make_buffer(
             output_file=out_path,
-            num_samples=num_samples, batch_size=2,
-            num_rollout_steps=R, ensemble_size=E,
-            img_shape=(H, W), channel_names=("a",),
+            num_samples=num_samples,
+            batch_size=2,
+            num_rollout_steps=R,
+            ensemble_size=E,
+            img_shape=(H, W),
+            channel_names=("a",),
         )
 
         # batch 0: ICs 0, 1; batch 1: ICs 2, 3
@@ -1042,10 +1122,13 @@ class TestRolloutBufferIO(unittest.TestCase):
 
         buf = self._make_buffer(
             output_file=out_path,
-            num_samples=num_samples, batch_size=2,
-            num_rollout_steps=R, ensemble_size=1,
-            img_shape=(H, W), channel_names=("a",),
-            output_memory_buffer_size=2,   # forces auto-flush every batch
+            num_samples=num_samples,
+            batch_size=2,
+            num_rollout_steps=R,
+            ensemble_size=1,
+            img_shape=(H, W),
+            channel_names=("a",),
+            output_memory_buffer_size=2,  # forces auto-flush every batch
         )
 
         # 3 batches × 2 ICs each = 6 ICs. Same encoding as single-flush case.
@@ -1084,15 +1167,18 @@ class TestRolloutBufferIO(unittest.TestCase):
         # Mirrors the production motivation: long rollouts that overflow CPU memory.
         out_path = os.path.join(self.tmpdir, "mid_rollout_flush.h5")
         num_samples = 4
-        R = 6                      # R+1 = 7 steps per IC
+        R = 6  # R+1 = 7 steps per IC
         H, W = 2, 3
-        buffer_steps = 3           # below R+1 — forces multiple mid-rollout flushes
+        buffer_steps = 3  # below R+1 — forces multiple mid-rollout flushes
 
         buf = self._make_buffer(
             output_file=out_path,
-            num_samples=num_samples, batch_size=2,
-            num_rollout_steps=R, ensemble_size=1,
-            img_shape=(H, W), channel_names=("a",),
+            num_samples=num_samples,
+            batch_size=2,
+            num_rollout_steps=R,
+            ensemble_size=1,
+            img_shape=(H, W),
+            channel_names=("a",),
             output_memory_buffer_size=buffer_steps,
         )
 
@@ -1140,10 +1226,14 @@ class TestRolloutBufferIO(unittest.TestCase):
 
         buf = self._make_buffer(
             output_file=out_path,
-            num_samples=2, batch_size=2,
-            num_rollout_steps=R, rollout_dt=rollout_dt,
-            ensemble_size=1, img_shape=(H, W),
-            channel_names=channel_names, output_channels=output_channels,
+            num_samples=2,
+            batch_size=2,
+            num_rollout_steps=R,
+            rollout_dt=rollout_dt,
+            ensemble_size=1,
+            img_shape=(H, W),
+            channel_names=channel_names,
+            output_channels=output_channels,
             lat_lon=(lat, lon),
         )
 
@@ -1179,19 +1269,23 @@ class TestRolloutBufferIO(unittest.TestCase):
 
         buf = self._make_buffer(
             output_file=out_path,
-            num_samples=2, batch_size=2,
-            num_rollout_steps=0, ensemble_size=1,
+            num_samples=2,
+            batch_size=2,
+            num_rollout_steps=0,
+            ensemble_size=1,
             img_shape=(2, 2),
-            channel_names=("a", "b"), output_channels=["a", "b"],
-            scale=scale, bias=bias,
+            channel_names=("a", "b"),
+            output_channels=["a", "b"],
+            scale=scale,
+            bias=bias,
         )
 
-        ones = torch.ones(2, 1, 1, 2, 2, 2)   # (batch, R+1, E, C, H, W)
+        ones = torch.ones(2, 1, 1, 2, 2, 2)  # (batch, R+1, E, C, H, W)
         self._drive_full_rollout(buf, ic_data_per_batch=[ones], tstamps_per_batch=[torch.tensor([0.0, 1.0])])
         buf.finalize()
 
         with h5.File(out_path, "r") as f:
-            data = f["fields"][...]   # (2, 1, 1, 2, 2, 2)
+            data = f["fields"][...]  # (2, 1, 1, 2, 2, 2)
 
         with self.subTest(desc="channel a = 2*1 + 1 = 3"):
             self.assertTrue(np.all(data[:, :, :, 0, :, :] == 3.0))
@@ -1205,17 +1299,20 @@ class TestRolloutBufferIO(unittest.TestCase):
 
         buf = self._make_buffer(
             output_file=out_path,
-            num_samples=2, batch_size=2,
-            num_rollout_steps=0, ensemble_size=1,
+            num_samples=2,
+            batch_size=2,
+            num_rollout_steps=0,
+            ensemble_size=1,
             img_shape=(2, 2),
-            channel_names=("a", "b", "c"), output_channels=["a", "c"],
+            channel_names=("a", "b", "c"),
+            output_channels=["a", "c"],
         )
 
         # full pred has 3 channels; values 100/200/300 per channel
         pred = torch.zeros(2, 1, 1, 3, 2, 2)
-        pred[..., 0, :, :] = 100.0   # a → kept
-        pred[..., 1, :, :] = 200.0   # b → dropped
-        pred[..., 2, :, :] = 300.0   # c → kept
+        pred[..., 0, :, :] = 100.0  # a → kept
+        pred[..., 1, :, :] = 200.0  # b → dropped
+        pred[..., 2, :, :] = 300.0  # c → kept
 
         self._drive_full_rollout(buf, ic_data_per_batch=[pred], tstamps_per_batch=[torch.tensor([0.0, 1.0])])
         buf.finalize()
@@ -1301,6 +1398,7 @@ class TestRolloutBufferStreaming(unittest.TestCase):
         streaming_mode=False,
         buffer_device=torch.device("cpu"),
         enable_odirect=False,
+        odirect_alignment=0,
     ):
         if output_channels is None:
             output_channels = list(channel_names)
@@ -1329,6 +1427,7 @@ class TestRolloutBufferStreaming(unittest.TestCase):
             streaming_mode=streaming_mode,
             buffer_device=buffer_device,
             enable_odirect=enable_odirect,
+            odirect_alignment=odirect_alignment,
         )
 
     def _drive_full_rollout(self, buf, *, ic_data_per_batch, tstamps_per_batch):
@@ -1375,8 +1474,10 @@ class TestRolloutBufferStreaming(unittest.TestCase):
         # control
         buf_ctrl = self._make_buffer(
             output_file=ctrl_path,
-            num_samples=num_samples, batch_size=2,
-            num_rollout_steps=R, ensemble_size=1,
+            num_samples=num_samples,
+            batch_size=2,
+            num_rollout_steps=R,
+            ensemble_size=1,
             img_shape=(H, W),
         )
         self._drive_full_rollout(buf_ctrl, ic_data_per_batch=batches, tstamps_per_batch=tstamps)
@@ -1386,10 +1487,13 @@ class TestRolloutBufferStreaming(unittest.TestCase):
         try:
             buf_od = self._make_buffer(
                 output_file=odirect_path,
-                num_samples=num_samples, batch_size=2,
-                num_rollout_steps=R, ensemble_size=1,
+                num_samples=num_samples,
+                batch_size=2,
+                num_rollout_steps=R,
+                ensemble_size=1,
                 img_shape=(H, W),
                 enable_odirect=True,
+                odirect_alignment=4096,
             )
         except (ValueError, OSError, RuntimeError) as e:
             self.skipTest(f"HDF5 build does not support the direct VFD: {e}")
@@ -1471,9 +1575,12 @@ class TestRolloutBufferStreaming(unittest.TestCase):
         for path, streaming in [(out_streaming, True), (out_buffered, False)]:
             buf = self._make_buffer(
                 output_file=path,
-                num_samples=num_samples, batch_size=2,
-                num_rollout_steps=R, ensemble_size=1,
-                img_shape=img_shape, channel_names=("a",),
+                num_samples=num_samples,
+                batch_size=2,
+                num_rollout_steps=R,
+                ensemble_size=1,
+                img_shape=img_shape,
+                channel_names=("a",),
                 streaming_mode=streaming,
             )
             self._drive_full_rollout(buf, ic_data_per_batch=batches, tstamps_per_batch=tstamps)
@@ -1561,7 +1668,7 @@ class TestRolloutBufferStreaming(unittest.TestCase):
     def test_buffer_device_cuda_keeps_buffer_on_gpu(self, verbose=False):
         # When buffer_device is CUDA, the buffer tensors must live on GPU and
         # pin_memory must be False (pinning only applies to host memory).
-        cuda_dev = torch.device("cuda:0")
+        cuda_dev = torch.device("cuda", torch.cuda.current_device())
         buf = self._make_buffer(output_file=None, buffer_device=cuda_dev)
         with self.subTest(desc="rollout_data on cuda"):
             self.assertEqual(buf.rollout_data.device.type, "cuda")
@@ -1575,7 +1682,7 @@ class TestRolloutBufferStreaming(unittest.TestCase):
         # End-to-end: CUDA-resident buffer must produce the same file as a
         # CPU buffer for identical inputs. This catches mistakes in the
         # GPU→CPU bridge inside _flush_buffer_to_disk.
-        cuda_dev = torch.device("cuda:0")
+        cuda_dev = torch.device("cuda", torch.cuda.current_device())
         num_samples = 4
         R = 1
         H, W = 2, 3
@@ -1597,9 +1704,12 @@ class TestRolloutBufferStreaming(unittest.TestCase):
         out_cpu = os.path.join(self.tmpdir, "buf_cpu.h5")
         buf_cpu = self._make_buffer(
             output_file=out_cpu,
-            num_samples=num_samples, batch_size=2,
-            num_rollout_steps=R, ensemble_size=1,
-            img_shape=(H, W), channel_names=("a",),
+            num_samples=num_samples,
+            batch_size=2,
+            num_rollout_steps=R,
+            ensemble_size=1,
+            img_shape=(H, W),
+            channel_names=("a",),
         )
         self._drive_full_rollout(buf_cpu, ic_data_per_batch=batches_cpu, tstamps_per_batch=tstamps_cpu)
         buf_cpu.finalize()

@@ -27,10 +27,58 @@ from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature
 from makani.mpu.layer_norm import _normalize_kernel, _normalize_transform_kernel
 
 
-# instance norm with S2 weights
 class GeometricInstanceNormS2(nn.Module):
-    """
-    Computes a distributed S2 weighted instance norm using Welford's online algorithm
+    r"""
+    Instance normalization with quadrature weights on the sphere :math:`S^2`.
+
+    Ordinary instance norm averages every grid point equally, which on a
+    lat-lon grid over-weights the poles: cells there cover far less area than
+    cells at the equator, so a uniform mean is not the mean of the underlying
+    field. This module instead uses the quadrature weights :math:`q_{ij}` of the
+    grid, so that the statistics approximate true spherical integrals,
+
+    .. math::
+
+        \mu_{bc} = \sum_{ij} q_{ij}\, x_{bcij},
+        \qquad
+        \sigma^2_{bc} = \sum_{ij} q_{ij}\, (x_{bcij} - \mu_{bc})^2
+
+    with :math:`\sum_{ij} q_{ij} = 1`. Mean and variance are taken per sample
+    and per channel, then applied as
+    :math:`(x - \mu)/\sqrt{\sigma^2 + \varepsilon}`, optionally followed by a
+    learned per-channel affine map.
+
+    Statistics are accumulated in fp32 regardless of the surrounding autocast
+    context and the result is cast back to the input dtype, matching how
+    PyTorch's native norm layers behave under mixed precision.
+
+    Parameters
+    ----------
+    img_shape : (int, int)
+        Latitude and longitude extent of the full grid the quadrature rule is
+        built for.
+    crop_shape : (int, int)
+        Extent of the sub-region actually normalized over.
+    crop_offset : (int, int)
+        Offset of that sub-region within the full grid.
+    grid_type : str
+        Grid the input lives on (e.g. ``"equiangular"``, ``"legendre-gauss"``);
+        determines the quadrature rule via
+        :func:`~makani.utils.grids.grid_to_quadrature_rule`.
+    num_features : int
+        Number of channels. Only used to size the affine parameters.
+    eps : float, optional
+        Constant added to the variance for numerical stability, by default ``1e-05``.
+    affine : bool, optional
+        If ``True``, apply a learned per-channel scale and shift after
+        normalizing, by default ``False``.
+
+    Notes
+    -----
+    The quadrature is constructed with ``distributed=False``, so the statistics
+    are computed over each rank's local shard. This layer is intended for the
+    non-spatially-decomposed case; under spatial model parallelism the reduction
+    would need to span the ``"spatial"`` group.
     """
 
     def __init__(
@@ -62,10 +110,25 @@ class GeometricInstanceNormS2(nn.Module):
             crop_shape=crop_shape,
             crop_offset=crop_offset,
             normalize=True,
-            distributed=False
+            distributed=False,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        r"""
+        Normalize each sample and channel by its quadrature-weighted statistics.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input of shape ``(B, C, H, W)``, where ``(H, W)`` matches the
+            ``crop_shape`` the quadrature was constructed for.
+
+        Returns
+        -------
+        torch.Tensor
+            Normalized tensor of shape ``(B, C, H, W)``, cast back to the dtype
+            of ``x``.
+        """
 
         # extract shapes
         B, C, H, W = x.shape
@@ -78,18 +141,20 @@ class GeometricInstanceNormS2(nn.Module):
             mean = self.quadrature(xf)
             var = self.quadrature(torch.square(xf - mean.reshape(B, C, 1, 1)))
 
-        # reshape
-        var = var.reshape(B, C, 1, 1)
-        mean = mean.reshape(B, C, 1, 1)
+            # reshape
+            var = var.reshape(B, C, 1, 1)
+            mean = mean.reshape(B, C, 1, 1)
 
-        # convert types
-        mean = mean.to(xtype)
-        var = var.to(xtype)
+            # normalize (and affine) in fp32 for numerical stability, matching the
+            # behaviour of PyTorch's native (autocast-fp32) norm ops
+            if self.affine:
+                xf = _normalize_transform_kernel(
+                    xf, mean, var, self.weight.reshape(-1, 1, 1), self.bias.reshape(-1, 1, 1), self.eps
+                )
+            else:
+                xf = _normalize_kernel(xf, mean, var, self.eps)
 
-        # apply the normalization
-        if self.affine:
-            x = _normalize_transform_kernel(x, mean, var, self.weight.reshape(-1, 1, 1), self.bias.reshape(-1, 1, 1), self.eps)
-        else:
-            x = _normalize_kernel(x, mean, var, self.eps)
+        # cast back to the input dtype so the layer is faithful to its input
+        x = xf.to(xtype)
 
         return x

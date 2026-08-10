@@ -16,7 +16,7 @@
 import sys
 import os
 import unittest
-from parameterized import parameterized
+from parameterized import parameterized, parameterized_class
 
 import torch
 
@@ -31,10 +31,17 @@ from makani.models.common.layers import (
 )
 from makani.models.common.imputation import MLPImputation, ConstantImputation
 from makani.models.common.pos_embedding import LearnablePositionEmbedding
+from makani.mpu.layers import StochasticMLP
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from .testutils import disable_tf32, set_seed, get_default_parameters, compare_tensors
 
+_devices = [(torch.device("cpu"),)]
+if torch.cuda.is_available():
+    _devices.append((torch.device("cuda"),))
+
+
+@parameterized_class(("device",), _devices)
 class TestLayers(unittest.TestCase):
 
     def setUp(self):
@@ -60,8 +67,7 @@ class TestLayers(unittest.TestCase):
         # also set the batch size for testing
         self.params.batch_size = 4
 
-        # set device and seed
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # set seed
         set_seed(333)
 
         return
@@ -71,7 +77,8 @@ class TestLayers(unittest.TestCase):
             (1, 16, 1, 1e-7, 1e-5),
             (4, 16, 1, 1e-7, 1e-5),
             (1, 16, 2, 1e-7, 1e-5),
-        ], skip_on_empty=True
+        ],
+        skip_on_empty=True,
     )
     def test_earth_attention_3d(self, batch_size, num_channels, num_heads, atol, rtol, verbose=False):
         """
@@ -80,26 +87,30 @@ class TestLayers(unittest.TestCase):
 
         # some parameters
         pressure_levels = 11
-        
-        ea_naive = EarthAttention3D(dim=num_channels,
-                                    input_resolution=(2, 6, 12),
-                                    window_size=(2, 6, 12),
-                                    num_heads=num_heads,
-                                    qkv_bias=True,
-	                            qk_scale=None,
-                                    attn_drop=0.0,
-                                    proj_drop=0.0,
-                                    use_sdpa=False).to(self.device)
 
-        ea_sdpa = EarthAttention3D(dim=num_channels,
-                                    input_resolution=(2, 6, 12),
-                                    window_size=(2, 6, 12),
-                                    num_heads=num_heads,
-                                    qkv_bias=True,
-                                    qk_scale=None,
-                                    attn_drop=0.0,
-                                    proj_drop=0.0,
-                                    use_sdpa=True).to(self.device)
+        ea_naive = EarthAttention3D(
+            dim=num_channels,
+            input_resolution=(2, 6, 12),
+            window_size=(2, 6, 12),
+            num_heads=num_heads,
+            qkv_bias=True,
+            qk_scale=None,
+            attn_drop=0.0,
+            proj_drop=0.0,
+            use_sdpa=False,
+        ).to(self.device)
+
+        ea_sdpa = EarthAttention3D(
+            dim=num_channels,
+            input_resolution=(2, 6, 12),
+            window_size=(2, 6, 12),
+            num_heads=num_heads,
+            qkv_bias=True,
+            qk_scale=None,
+            attn_drop=0.0,
+            proj_drop=0.0,
+            use_sdpa=True,
+        ).to(self.device)
 
         # copy weights
         with torch.no_grad():
@@ -113,11 +124,11 @@ class TestLayers(unittest.TestCase):
             ea_sdpa.proj.bias.copy_(ea_naive.proj.bias)
 
         # prepare some dummy data
-        #[8, 1, 144, 8]
+        # [8, 1, 144, 8]
         inp_shape = (8 * batch_size, 1, 144, num_channels)
         inp = torch.randn(*inp_shape, dtype=torch.float32, device=self.device)
         inp.requires_grad = True
-        
+
         # forward/backward pass naive
         inp.grad = None
         out_naive = ea_naive(inp)
@@ -131,26 +142,29 @@ class TestLayers(unittest.TestCase):
         loss = torch.sum(out_sdpa)
         loss.backward()
         igrad_sdpa = inp.grad.clone()
-        
+
         #############################################################
         # evaluate FWD pass
         #############################################################
         with self.subTest(desc="output"):
             self.assertTrue(compare_tensors("output", out_sdpa, out_naive, atol=atol, rtol=rtol, verbose=verbose))
-        
+
         #############################################################
         # evaluate BWD pass
         #############################################################
         # igrads
         with self.subTest(desc="input gradient"):
-            self.assertTrue(compare_tensors("input gradient", igrad_sdpa, igrad_naive, atol=atol, rtol=rtol, verbose=verbose))
-        
+            self.assertTrue(
+                compare_tensors("input gradient", igrad_sdpa, igrad_naive, atol=atol, rtol=rtol, verbose=verbose)
+            )
+
         # wgrads
         with torch.no_grad():
             for (_, ngrad), (skey, sgrad) in zip(ea_naive.named_parameters(), ea_sdpa.named_parameters()):
                 with self.subTest(desc=f"weight gradient {skey}"):
-                    self.assertTrue(compare_tensors(f"weight gradient {skey}", sgrad, ngrad, atol=atol, rtol=rtol, verbose=verbose))
-
+                    self.assertTrue(
+                        compare_tensors(f"weight gradient {skey}", sgrad, ngrad, atol=atol, rtol=rtol, verbose=verbose)
+                    )
 
     def test_seeded_dropout2d_deterministic_mask(self, atol=1e-8, rtol=1e-8, verbose=False):
         """Two dropout layers with the same seed should produce identical masks."""
@@ -184,8 +198,7 @@ class TestLayers(unittest.TestCase):
         layer = LayerScale(num_chans=C, init_value=v).to(self.device)
         x = torch.randn(3, C, H, W, device=self.device)
         out = layer(x)
-        self.assertTrue(compare_tensors("layerscale init v*x", out, v * x,
-                                        atol=1e-6, rtol=1e-5, verbose=verbose))
+        self.assertTrue(compare_tensors("layerscale init v*x", out, v * x, atol=1e-6, rtol=1e-5, verbose=verbose))
 
     def test_layerscale_per_channel_weight(self, verbose=False):
         """Setting a distinct weight per channel scales each channel independently."""
@@ -193,14 +206,13 @@ class TestLayers(unittest.TestCase):
         layer = LayerScale(num_chans=C, init_value=0.0).to(self.device)
         # inject distinct values [1, 2, 3]
         with torch.no_grad():
-            layer.weight.copy_(torch.arange(1, C + 1, dtype=torch.float32,
-                                            device=self.device).reshape(C, 1, 1, 1))
+            layer.weight.copy_(torch.arange(1, C + 1, dtype=torch.float32, device=self.device).reshape(C, 1, 1, 1))
         x = torch.randn(2, C, H, W, device=self.device)
         out = layer(x)
-        scale = torch.arange(1, C + 1, dtype=torch.float32,
-                             device=self.device).reshape(1, C, 1, 1)
-        self.assertTrue(compare_tensors("layerscale per-channel", out, x * scale,
-                                        atol=1e-6, rtol=1e-5, verbose=verbose))
+        scale = torch.arange(1, C + 1, dtype=torch.float32, device=self.device).reshape(1, C, 1, 1)
+        self.assertTrue(
+            compare_tensors("layerscale per-channel", out, x * scale, atol=1e-6, rtol=1e-5, verbose=verbose)
+        )
 
     def test_layerscale_gradients_flow(self):
         """LayerScale is differentiable w.r.t. both input and weight."""
@@ -241,7 +253,7 @@ class TestLayers(unittest.TestCase):
         in_res, out_res = (4, 6), (6, 10)
         layer = UpSample2D(in_dim, out_dim, in_res, out_res).to(self.device)
         bad = torch.randn(2, 5, 6, in_dim, device=self.device)
-        with self.assertRaises(AssertionError):
+        with self.assertRaises(RuntimeError):
             layer(bad)
 
     def test_upsample2d_gradients_flow(self):
@@ -249,8 +261,7 @@ class TestLayers(unittest.TestCase):
         in_dim, out_dim = 16, 8
         in_res, out_res = (4, 6), (6, 10)
         layer = UpSample2D(in_dim, out_dim, in_res, out_res).to(self.device)
-        x = torch.randn(2, in_res[0] * in_res[1], in_dim,
-                        device=self.device, requires_grad=True)
+        x = torch.randn(2, in_res[0] * in_res[1], in_dim, device=self.device, requires_grad=True)
         layer(x).sum().backward()
         self.assertIsNotNone(x.grad)
         self.assertTrue(torch.isfinite(x.grad).all().item())
@@ -283,7 +294,7 @@ class TestLayers(unittest.TestCase):
         in_res, out_res = (6, 10), (4, 8)
         layer = DownSample2D(in_dim, in_res, out_res).to(self.device)
         bad = torch.randn(2, 7, 10, in_dim, device=self.device)
-        with self.assertRaises(AssertionError):
+        with self.assertRaises(RuntimeError):
             layer(bad)
 
     def test_downsample2d_gradients_flow(self):
@@ -291,8 +302,7 @@ class TestLayers(unittest.TestCase):
         in_dim = 8
         in_res, out_res = (6, 10), (4, 8)
         layer = DownSample2D(in_dim, in_res, out_res).to(self.device)
-        x = torch.randn(2, in_res[0] * in_res[1], in_dim,
-                        device=self.device, requires_grad=True)
+        x = torch.randn(2, in_res[0] * in_res[1], in_dim, device=self.device, requires_grad=True)
         layer(x).sum().backward()
         self.assertIsNotNone(x.grad)
         self.assertTrue(torch.isfinite(x.grad).all().item())
@@ -304,7 +314,7 @@ class TestLayers(unittest.TestCase):
     def test_upsample3d_shape(self):
         """3-D output shape: (B, out_pl*out_lat*out_lon, out_dim)."""
         in_dim, out_dim = 16, 8
-        in_res  = (3, 4, 6)
+        in_res = (3, 4, 6)
         out_res = (3, 6, 10)
         layer = UpSample3D(in_dim, out_dim, in_res, out_res).to(self.device)
         N = in_res[0] * in_res[1] * in_res[2]
@@ -331,7 +341,7 @@ class TestLayers(unittest.TestCase):
     def test_downsample3d_shape(self):
         """3-D output shape: (B, out_pl*out_lat*out_lon, 2*in_dim)."""
         in_dim = 8
-        in_res  = (3, 6, 10)
+        in_res = (3, 6, 10)
         out_res = (3, 4, 8)
         layer = DownSample3D(in_dim, in_res, out_res).to(self.device)
         N = in_res[0] * in_res[1] * in_res[2]
@@ -374,8 +384,8 @@ class TestMLPImputation(unittest.TestCase):
         disable_tf32()
         set_seed(333)
         self.B = 4
-        self.C = 6                      # total channels
-        self.imputable = [1, 4]         # channels to impute
+        self.C = 6  # total channels
+        self.imputable = [1, 4]  # channels to impute
         self.H = 8
         self.W = 12
 
@@ -414,8 +424,7 @@ class TestMLPImputation(unittest.TestCase):
         fn = self._fn()
         x, _ = self._make_input_with_nans(batch_size=self.B)
         out = fn(x)
-        self.assertFalse(torch.isnan(out).any(),
-                         "MLPImputation output still contains NaN — imputation failed")
+        self.assertFalse(torch.isnan(out).any(), "MLPImputation output still contains NaN — imputation failed")
 
     # -- pass-through guarantees: only NaN positions in imputable channels change ---
 
@@ -428,7 +437,10 @@ class TestMLPImputation(unittest.TestCase):
         self.assertTrue(
             compare_tensors(
                 "non-imputable channels passthrough",
-                out[:, non_imputable], x[:, non_imputable], atol=0.0, rtol=0.0,
+                out[:, non_imputable],
+                x[:, non_imputable],
+                atol=0.0,
+                rtol=0.0,
             ),
             "non-imputable channels were modified by MLPImputation",
         )
@@ -445,11 +457,14 @@ class TestMLPImputation(unittest.TestCase):
         for ic_idx, c in enumerate(self.imputable):
             in_chan = x[:, c]
             out_chan = out[:, c]
-            keep = ~nan_mask_sub[:, ic_idx]      # True where input was NOT NaN
+            keep = ~nan_mask_sub[:, ic_idx]  # True where input was NOT NaN
             self.assertTrue(
                 compare_tensors(
                     f"non-NaN positions preserved (channel {c})",
-                    out_chan[keep], in_chan[keep], atol=0.0, rtol=0.0,
+                    out_chan[keep],
+                    in_chan[keep],
+                    atol=0.0,
+                    rtol=0.0,
                 ),
                 f"channel {c}: non-NaN positions were modified by MLPImputation",
             )
@@ -478,7 +493,7 @@ class TestMLPImputation(unittest.TestCase):
         value at that position (with overwhelming probability for randn inputs
         whose value is not equal to the MLP output)."""
         fn = self._fn()
-        x = torch.randn(self.B, self.C, self.H, self.W)   # no NaNs
+        x = torch.randn(self.B, self.C, self.H, self.W)  # no NaNs
         # flag a single position in each imputable channel
         extra_mask = torch.zeros(self.B, len(self.imputable), self.H, self.W, dtype=torch.bool)
         extra_mask[:, :, 0, 0] = True
@@ -490,7 +505,10 @@ class TestMLPImputation(unittest.TestCase):
             self.assertTrue(
                 compare_tensors(
                     f"non-flagged positions preserved (channel {c})",
-                    out[:, c][keep], x[:, c][keep], atol=0.0, rtol=0.0,
+                    out[:, c][keep],
+                    x[:, c][keep],
+                    atol=0.0,
+                    rtol=0.0,
                 )
             )
 
@@ -513,7 +531,11 @@ class TestMLPImputation(unittest.TestCase):
         out_single = fn(x_full[:1])
         self.assertTrue(
             compare_tensors(
-                "batch size consistency", out_single, out_full[:1], atol=1e-6, rtol=1e-5,
+                "batch size consistency",
+                out_single,
+                out_full[:1],
+                atol=1e-6,
+                rtol=1e-5,
             )
         )
 
@@ -597,7 +619,11 @@ class TestConstantImputation(unittest.TestCase):
         keep = ~nan_mask
         self.assertTrue(
             compare_tensors(
-                "non-NaN positions preserved", out[keep], x[keep], atol=0.0, rtol=0.0,
+                "non-NaN positions preserved",
+                out[keep],
+                x[keep],
+                atol=0.0,
+                rtol=0.0,
             ),
             "non-NaN positions were modified by ConstantImputation",
         )
@@ -607,7 +633,10 @@ class TestConstantImputation(unittest.TestCase):
         self.assertTrue(
             compare_tensors(
                 "NaN positions replaced by weight",
-                out[nan_mask], weight_bcast[nan_mask], atol=0.0, rtol=0.0,
+                out[nan_mask],
+                weight_bcast[nan_mask],
+                atol=0.0,
+                rtol=0.0,
             )
         )
 
@@ -615,7 +644,7 @@ class TestConstantImputation(unittest.TestCase):
         """Passing an explicit mask logical-OR's with torch.isnan(x); positions
         flagged by either source get replaced."""
         fn = self._fn()
-        x = torch.randn(self.B, self.C, self.H, self.W)   # no NaNs
+        x = torch.randn(self.B, self.C, self.H, self.W)  # no NaNs
         # flag specific (b, c, h, w) positions explicitly
         explicit_mask = torch.zeros_like(x, dtype=torch.bool)
         explicit_mask[0, 0, 0, 0] = True
@@ -625,14 +654,21 @@ class TestConstantImputation(unittest.TestCase):
         keep = ~explicit_mask
         self.assertTrue(
             compare_tensors(
-                "non-flagged positions preserved", out[keep], x[keep], atol=0.0, rtol=0.0,
+                "non-flagged positions preserved",
+                out[keep],
+                x[keep],
+                atol=0.0,
+                rtol=0.0,
             )
         )
         weight_bcast = fn.weight.expand(self.B, self.C, self.H, self.W)
         self.assertTrue(
             compare_tensors(
                 "flagged positions replaced by weight",
-                out[explicit_mask], weight_bcast[explicit_mask], atol=0.0, rtol=0.0,
+                out[explicit_mask],
+                weight_bcast[explicit_mask],
+                atol=0.0,
+                rtol=0.0,
             )
         )
 
@@ -719,7 +755,9 @@ class TestLearnablePositionEmbedding(unittest.TestCase):
         """forward() returns (1, C, H, W) regardless of embed_type — downstream
         code can treat the two modes identically at the call site."""
         emb = LearnablePositionEmbedding(
-            img_shape=(self.H, self.W), num_chans=self.C, embed_type=embed_type,
+            img_shape=(self.H, self.W),
+            num_chans=self.C,
+            embed_type=embed_type,
         )
         out = emb()
         self.assertEqual(out.shape, (1, self.C, self.H, self.W))
@@ -730,21 +768,27 @@ class TestLearnablePositionEmbedding(unittest.TestCase):
         the mode (latitude-only embedding) and a contract regression here would
         silently inflate parameter count."""
         emb = LearnablePositionEmbedding(
-            img_shape=(self.H, self.W), num_chans=self.C, embed_type="lat",
+            img_shape=(self.H, self.W),
+            num_chans=self.C,
+            embed_type="lat",
         )
         self.assertEqual(emb.position_embeddings.shape, (1, self.C, self.H, 1))
 
     def test_latlon_parameter_shape(self):
         """In 'latlon' mode every spatial position is its own free parameter."""
         emb = LearnablePositionEmbedding(
-            img_shape=(self.H, self.W), num_chans=self.C, embed_type="latlon",
+            img_shape=(self.H, self.W),
+            num_chans=self.C,
+            embed_type="latlon",
         )
         self.assertEqual(emb.position_embeddings.shape, (1, self.C, self.H, self.W))
 
     def test_unknown_embed_type_raises(self):
         with self.assertRaises(ValueError):
             LearnablePositionEmbedding(
-                img_shape=(self.H, self.W), num_chans=self.C, embed_type="bogus",
+                img_shape=(self.H, self.W),
+                num_chans=self.C,
+                embed_type="bogus",
             )
 
     # -- initial values ----------------------------------------------------
@@ -753,12 +797,12 @@ class TestLearnablePositionEmbedding(unittest.TestCase):
     def test_initial_values_zero(self, embed_type):
         """nn.Parameter(torch.zeros(...)) ⇒ initial output is all zeros."""
         emb = LearnablePositionEmbedding(
-            img_shape=(self.H, self.W), num_chans=self.C, embed_type=embed_type,
+            img_shape=(self.H, self.W),
+            num_chans=self.C,
+            embed_type=embed_type,
         )
         out = emb()
-        self.assertTrue(
-            compare_tensors(f"{embed_type} init zero", out, torch.zeros_like(out), atol=0.0, rtol=0.0)
-        )
+        self.assertTrue(compare_tensors(f"{embed_type} init zero", out, torch.zeros_like(out), atol=0.0, rtol=0.0))
 
     # -- mode semantics: the testable difference between lat and latlon ----
 
@@ -767,7 +811,9 @@ class TestLearnablePositionEmbedding(unittest.TestCase):
         position in the same row must be exactly equal — the broadcast is the
         whole point of this mode."""
         emb = LearnablePositionEmbedding(
-            img_shape=(self.H, self.W), num_chans=self.C, embed_type="lat",
+            img_shape=(self.H, self.W),
+            num_chans=self.C,
+            embed_type="lat",
         )
         with torch.no_grad():
             emb.position_embeddings.copy_(torch.randn_like(emb.position_embeddings))
@@ -779,7 +825,10 @@ class TestLearnablePositionEmbedding(unittest.TestCase):
                 self.assertTrue(
                     compare_tensors(
                         f"lat row uniform (c={c}, h={h})",
-                        row, row[0].expand_as(row), atol=0.0, rtol=0.0,
+                        row,
+                        row[0].expand_as(row),
+                        atol=0.0,
+                        rtol=0.0,
                     )
                 )
 
@@ -789,7 +838,9 @@ class TestLearnablePositionEmbedding(unittest.TestCase):
         for randn). This is the negation of the 'lat' invariant and confirms
         the latlon mode actually has per-pixel freedom."""
         emb = LearnablePositionEmbedding(
-            img_shape=(self.H, self.W), num_chans=self.C, embed_type="latlon",
+            img_shape=(self.H, self.W),
+            num_chans=self.C,
+            embed_type="latlon",
         )
         with torch.no_grad():
             emb.position_embeddings.copy_(torch.randn_like(emb.position_embeddings))
@@ -808,11 +859,12 @@ class TestLearnablePositionEmbedding(unittest.TestCase):
     def test_parameter_is_learnable(self, embed_type):
         """position_embeddings is an nn.Parameter; gradient flows through .sum().backward()."""
         emb = LearnablePositionEmbedding(
-            img_shape=(self.H, self.W), num_chans=self.C, embed_type=embed_type,
+            img_shape=(self.H, self.W),
+            num_chans=self.C,
+            embed_type=embed_type,
         )
         emb().sum().backward()
-        self.assertIsNotNone(emb.position_embeddings.grad,
-                             f"{embed_type}: position_embeddings has no gradient")
+        self.assertIsNotNone(emb.position_embeddings.grad, f"{embed_type}: position_embeddings has no gradient")
         self.assertFalse(torch.isnan(emb.position_embeddings.grad).any())
         self.assertFalse(torch.isinf(emb.position_embeddings.grad).any())
 
@@ -823,7 +875,9 @@ class TestLearnablePositionEmbedding(unittest.TestCase):
         only H is sharded. Distributed model-parallel code reads these
         attributes — a regression here silently breaks spatial parallelism."""
         emb = LearnablePositionEmbedding(
-            img_shape=(self.H, self.W), num_chans=self.C, embed_type="lat",
+            img_shape=(self.H, self.W),
+            num_chans=self.C,
+            embed_type="lat",
         )
         self.assertEqual(emb.position_embeddings.is_shared_mp, ["w"])
         self.assertEqual(emb.position_embeddings.sharded_dims_mp, [None, None, "h", None])
@@ -832,10 +886,95 @@ class TestLearnablePositionEmbedding(unittest.TestCase):
         """In 'latlon' mode: nothing is shared — both H and W get sharded
         across their respective spatial groups."""
         emb = LearnablePositionEmbedding(
-            img_shape=(self.H, self.W), num_chans=self.C, embed_type="latlon",
+            img_shape=(self.H, self.W),
+            num_chans=self.C,
+            embed_type="latlon",
         )
         self.assertEqual(emb.position_embeddings.is_shared_mp, [])
         self.assertEqual(emb.position_embeddings.sharded_dims_mp, [None, None, "h", "w"])
+
+
+class TestStochasticMLP(unittest.TestCase):
+    """Tests for the variational StochasticMLP (mpu/layers.py).
+
+    The stochastic weight is  weight = scale * exp(log_std) * eps + mean,  eps ~ N(0, 1),
+    so the std is parametrized in log space (see issue #98): log_std is initialized to 0
+    (effective std == scale, stable init) and is always positive via exp.
+    """
+
+    def setUp(self):
+        disable_tf32()
+        set_seed(333)
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    def _make(self, in_features=16, hidden_features=32, out_features=16, **kw):
+        return StochasticMLP(
+            in_features=in_features,
+            hidden_features=hidden_features,
+            out_features=out_features,
+            **kw,
+        ).to(self.device)
+
+    def test_output_shape(self):
+        mlp = self._make()
+        x = torch.randn(2, 16, 8, 8, device=self.device)
+        out = mlp(x)
+        self.assertEqual(tuple(out.shape), (2, 16, 8, 8))
+
+    def test_log_std_initialized_to_zero(self):
+        """#98: std is stored in log space and initialized to 0 (so effective std == scale)."""
+        mlp = self._make()
+        self.assertTrue(torch.count_nonzero(mlp.fc1_weight_log_std) == 0)
+        self.assertTrue(torch.count_nonzero(mlp.fc2_weight_log_std) == 0)
+
+    def test_effective_std_positive(self):
+        """exp(log_std) is strictly positive for any log_std value (incl. negative)."""
+        mlp = self._make()
+        with torch.no_grad():
+            mlp.fc1_weight_log_std.uniform_(-5.0, 5.0)
+            mlp.fc2_weight_log_std.uniform_(-5.0, 5.0)
+        std1 = mlp.fc1_weight_std_scale * torch.exp(mlp.fc1_weight_log_std)
+        std2 = mlp.fc2_weight_std_scale * torch.exp(mlp.fc2_weight_log_std)
+        self.assertTrue((std1 > 0).all())
+        self.assertTrue((std2 > 0).all())
+
+    def test_init_does_not_blow_up(self):
+        """Regression for #98: at init the output std must stay O(input std), not be
+        amplified by ~sqrt(fan_in) (which a literal std=1 init would produce)."""
+        in_features = 64
+        mlp = self._make(in_features=in_features, hidden_features=64, out_features=in_features, gain=1.0)
+        x = torch.randn(8, in_features, 16, 16, device=self.device)
+        out = mlp(x)
+        self.assertTrue(torch.isfinite(out).all())
+        self.assertLess(out.std().item(), 5.0, f"init output std too large: {out.std().item()}")
+
+    def test_stochastic_and_reproducible(self):
+        """Successive forwards differ (weights are resampled), and resetting the seeded
+        generators reproduces the exact output."""
+        mlp = self._make(seed=1234)
+        x = torch.randn(2, 16, 8, 8, device=self.device)
+        out1 = mlp(x)
+        out2 = mlp(x)
+        self.assertFalse(torch.allclose(out1, out2), "two forwards were identical (no stochasticity)")
+
+        mlp.set_rng(seed=1234)
+        out1b = mlp(x)
+        self.assertTrue(compare_tensors("stochastic reproducible", out1, out1b, atol=1e-5, rtol=1e-5))
+
+    def test_backward_finite(self):
+        mlp = self._make()
+        x = torch.randn(2, 16, 8, 8, device=self.device, requires_grad=True)
+        mlp(x).sum().backward()
+        for name, p in [
+            ("fc1_weight_mean", mlp.fc1_weight_mean),
+            ("fc1_weight_log_std", mlp.fc1_weight_log_std),
+            ("fc2_weight_mean", mlp.fc2_weight_mean),
+            ("fc2_weight_log_std", mlp.fc2_weight_log_std),
+        ]:
+            self.assertIsNotNone(p.grad, f"{name} has no grad")
+            self.assertTrue(torch.isfinite(p.grad).all(), f"{name} grad not finite")
+        self.assertIsNotNone(x.grad)
+        self.assertTrue(torch.isfinite(x.grad).all())
 
 
 if __name__ == "__main__":

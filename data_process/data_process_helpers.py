@@ -13,9 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
+
+import mpi4py
+from mpi4py.util import dtlib
+from tqdm import tqdm
+import numpy as np
+
 import torch
 import torch.distributed as dist
-import math
+
 
 def mask_data(data):
     # check for NaNs and return a FP valued mask where
@@ -41,7 +48,7 @@ def allgather_dict(stats, group):
 
     # iterate over full dict
     for varname, substats in stats.items():
-        for k,v in substats.items():
+        for k, v in substats.items():
             if isinstance(v, torch.Tensor):
                 vcont = v.contiguous()
                 v_gather = [torch.empty_like(vcont) for _ in range(dist.get_world_size(group))]
@@ -62,7 +69,7 @@ def send_recv_dict(stats, src_rank, dst_rank, group):
     stats_recv = {varname: {} for varname in stats.keys()}
     count = 0
     for varname, substats in stats.items():
-        for k,v in substats.items():
+        for k, v in substats.items():
             if isinstance(v, torch.Tensor):
                 # send/recv
                 tag = src_rank + group_size * count
@@ -101,14 +108,14 @@ def binary_reduce(stats, group, device):
     crank = dist.get_rank(group)
 
     # check for power of two
-    assert((csize & (csize-1) == 0) and csize != 0)
+    assert (csize & (csize - 1) == 0) and csize != 0
 
     # how many steps do we need:
-    nsteps = int(math.log(csize,2))
+    nsteps = int(math.log(csize, 2))
 
     # init step 1
-    recv_ranks = range(0,csize,2)
-    send_ranks = range(1,csize,2)
+    recv_ranks = range(0, csize, 2)
+    send_ranks = range(1, csize, 2)
 
     for step in range(nsteps):
         for rrank, srank in zip(recv_ranks, send_ranks):
@@ -120,7 +127,7 @@ def binary_reduce(stats, group, device):
         dist.barrier(group=group, device_ids=[device.index])
 
         # shrink the list
-        if (step < nsteps-1):
+        if step < nsteps - 1:
             recv_ranks = recv_ranks[0::2]
             send_ranks = recv_ranks[1::2]
 
@@ -162,18 +169,13 @@ def welford_combine(stats1, stats2):
             delta = mean_b - mean_a
 
             values = torch.stack(
-                [
-                    (mean_a * n_a + mean_b * n_b) / n_ab,
-                    m2_a + m2_b + delta * delta * n_a * n_b / n_ab
-                ], dim=0
+                [(mean_a * n_a + mean_b * n_b) / n_ab, m2_a + m2_b + delta * delta * n_a * n_b / n_ab], dim=0
             ).contiguous()
 
         if reshape:
             n_ab = n_ab.reshape(-1)
 
-        stats[k] = {"counts": n_ab,
-                    "type": s_a["type"],
-                    "values": values}
+        stats[k] = {"counts": n_ab, "type": s_a["type"], "values": values}
 
     return stats
 
@@ -192,10 +194,60 @@ def get_wind_channels(channel_names):
             error = True
 
     if error:
-        raise ValueError("Error, cannot group wind channels together because not all pairs of wind channels are in the dataset.")
+        raise ValueError(
+            "Error, cannot group wind channels together because not all pairs of wind channels are in the dataset."
+        )
 
     # find the indices of the channels in the original channel names:
     uchannels = [channel_names.index(u) for u in u_variables]
     vchannels = [channel_names.index(v) for v in v_variables]
 
     return (uchannels, vchannels), (u_variables, v_variables)
+
+
+class DistributedProgressBar(object):
+
+    def __init__(self, num_entries: int, comm: mpi4py.MPI.Comm):
+        self.comm = comm
+
+        datatype = mpi4py.MPI.INT64_T
+        np_dtype = dtlib.to_numpy_dtype(datatype)
+        itemsize = datatype.Get_size()
+        self.win = mpi4py.MPI.Win.Allocate(itemsize, comm=comm)
+        self.counts = np.zeros([1], dtype=np_dtype)
+        self.comm.Barrier()
+
+        if self.comm.Get_rank() == 0:
+            self.pbar = tqdm(total=num_entries)
+        self.reset()
+
+    def __del__(self):
+        self.comm.Barrier()
+        self.win.Free()
+        if self.comm.Get_rank() == 0:
+            self.pbar.close()
+
+    def reset(self):
+        if self.comm.Get_rank() == 0:
+            self.pbar.n = 0
+            self.pbar.refresh()
+
+    def update_counter(self, count: int):
+        self.counts[0] = count
+        self.win.Lock(rank=0)
+        self.win.Accumulate(self.counts, target_rank=0)
+        self.win.Flush_local(rank=0)
+        self.win.Unlock(rank=0)
+
+    def get_counter(self) -> int:
+        self.win.Lock(rank=0, lock_type=mpi4py.MPI.LOCK_SHARED)
+        self.win.Get(self.counts, target_rank=0)
+        self.win.Flush(rank=0)
+        self.win.Unlock(rank=0)
+        return int(self.counts[0])
+
+    def update_progress(self):
+        if self.comm.Get_rank() == 0:
+            count = self.get_counter()
+            self.pbar.n = min(count, self.pbar.total)
+            self.pbar.refresh()

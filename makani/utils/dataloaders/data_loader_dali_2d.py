@@ -16,7 +16,6 @@
 import os
 import torch
 import numpy as np
-import torch
 
 # DALI stuff
 from nvidia.dali.pipeline import Pipeline
@@ -92,9 +91,23 @@ class ERA5DaliESDataloader(object):
 
             # normalize if requested
             if self.normalize:
-                inp = fn.normalize(inp, device=self.dali_device, axis_names=self.norm_channels, batch=self.norm_batch, mean=self.in_bias, stddev=self.in_scale)
+                inp = fn.normalize(
+                    inp,
+                    device=self.dali_device,
+                    axis_names=self.norm_channels,
+                    batch=self.norm_batch,
+                    mean=self.in_bias,
+                    stddev=self.in_scale,
+                )
 
-                tar = fn.normalize(tar, device=self.dali_device, axis_names=self.norm_channels, batch=self.norm_batch, mean=self.out_bias, stddev=self.out_scale)
+                tar = fn.normalize(
+                    tar,
+                    device=self.dali_device,
+                    axis_names=self.norm_channels,
+                    batch=self.norm_batch,
+                    mean=self.out_bias,
+                    stddev=self.out_scale,
+                )
 
             # add zenith angle if requested
             pout = (inp, tar)
@@ -112,6 +125,12 @@ class ERA5DaliESDataloader(object):
     def __init__(self, params, location, train, seed=333, dali_device="gpu"):
         # set up workers and devices
         self.num_data_workers = params.num_data_workers
+        # The parallel external_source path requires py_num_workers >= 1 and uses
+        # num_data_workers as the ES prefetch_queue_depth (must be >= 1 too). With 0,
+        # DALI silently disables the worker pool while parallel=True still requests
+        # parallel scheduling, which is an inconsistent configuration.
+        if self.num_data_workers < 1:
+            raise ValueError(f"num_data_workers must be >= 1 for the DALI loader, got {self.num_data_workers}.")
         self.dali_device = dali_device
         if self.dali_device == "gpu":
             self.device_index = torch.cuda.current_device()
@@ -150,7 +169,7 @@ class ERA5DaliESDataloader(object):
             self.lat_lon = (params.lat, params.lon)
         else:
             self.lat_lon = None
-        self.dataset_path = params.h5_path
+        self.dataset_name = params.h5_path
         if train:
             self.n_samples = params.get("n_train_samples", None)
             self.n_samples_per_epoch = params.get("n_train_samples_per_epoch", None)
@@ -215,8 +234,11 @@ class ERA5DaliESDataloader(object):
             zenith_angle=self.add_zenith,
             return_timestamp=self.return_timestamp,
             lat_lon=self.lat_lon,
-            dataset_path=self.dataset_path,
+            dataset_name=self.dataset_name,
+            timestamp_name=params.get("timestamp_name", "timestamp"),
+            channel_names=params.get("channel_names", None),
             enable_odirect=params.enable_odirect,
+            odirect_alignment=params.get("odirect_alignment", 0),
             enable_s3=params.enable_s3,
             enable_logging=params.log_to_screen,
             seed=self.global_seed,
@@ -299,10 +321,12 @@ class ERA5DaliESDataloader(object):
             self.out_bias = None
             self.out_scale = None
 
-        # create pipeline
+        # create pipeline; build() is auto-called by DALIGenericIterator on
+        # first run since DALI 1.46 (#5754). start_py_workers() is still
+        # explicit to keep worker startup ordered before any CUDA context is
+        # acquired in this process.
         self.pipeline = self.get_pipeline()
         self.pipeline.start_py_workers()
-        self.pipeline.build()
 
         # create iterator
         outnames = ["inp", "tar"]
@@ -311,7 +335,14 @@ class ERA5DaliESDataloader(object):
         if self.return_timestamp:
             outnames += ["itime", "ttime"]
 
-        self.iterator = DALIGenericIterator([self.pipeline], outnames, auto_reset=True, size=-1, last_batch_policy=LastBatchPolicy.DROP, prepare_first_batch=True)
+        self.iterator = DALIGenericIterator(
+            [self.pipeline],
+            outnames,
+            auto_reset=True,
+            size=-1,
+            last_batch_policy=LastBatchPolicy.DROP,
+            prepare_first_batch=True,
+        )
 
     def get_input_normalization(self):
         if self.norm_mode == "offline":

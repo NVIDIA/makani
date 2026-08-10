@@ -22,9 +22,9 @@ import shutil
 import json
 import numpy as np
 import torch
-from makani.utils.YParams import ParamsBase
+from makani.utils.YParams import ParamsBase, ensure_resampled_shapes
 from makani.utils.driver import Driver
-from makani.third_party.climt.zenith_angle import cos_zenith_angle
+from makani.third_party.climt.zenith_angle_v2 import cos_zenith_angle
 from makani.utils.dataloaders.data_helpers import get_data_normalization
 from makani.models import model_registry
 import datetime
@@ -34,10 +34,20 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-
 class LocalPackage:
-    """
-    Implements the modulus Package interface.
+    r"""
+    Filesystem-backed model package, implementing the PhysicsNeMo Package interface.
+
+    A model package bundles everything needed to run a trained model outside the
+    training environment: the checkpoint, the config, the normalization
+    statistics, and the static fields. This class resolves the well-known
+    filenames within a package directory, so consumers refer to package members
+    by name rather than hard-coding the layout.
+
+    Parameters
+    ----------
+    root : str
+        Path to the package directory.
     """
 
     # These define the model package in terms of where makani expects the files to be located
@@ -48,13 +58,27 @@ class LocalPackage:
     MEANS_FILE = "global_means.npy"
     STDS_FILE = "global_stds.npy"
     OROGRAPHY_FILE = "orography.nc"
-    LANDMASK_FILE = "land_sea_mask.nc"
+    LANDMASK_FILE = "land_mask.nc"
     SOILTYPE_FILE = "soil_type.nc"
 
     def __init__(self, root):
         self.root = root
 
     def get(self, path):
+        r"""
+        Resolve a package-relative path to an absolute one.
+
+        Parameters
+        ----------
+        path : str
+            Path relative to the package root, typically one of the class-level
+            filename constants.
+
+        Returns
+        -------
+        str
+            The absolute path. Existence is not checked.
+        """
         return os.path.join(self.root, path)
 
     @staticmethod
@@ -78,8 +102,25 @@ class LocalPackage:
 
 
 class ModelWrapper(torch.nn.Module):
-    """
+    r"""
     Model wrapper to make inference simple outside of makani.
+
+    Presents a trained model as a plain callable that takes physical fields and
+    a valid time, so downstream consumers do not need makani's training
+    machinery. The wrapper owns the pieces that would otherwise be the caller's
+    problem: input and output normalization, the lat-lon grid definition, and
+    the solar zenith angle channel, which has to be computed from the valid time
+    rather than read from the data.
+
+    Parameters
+    ----------
+    model : torch.nn.Module
+        ML model that is wrapped.
+    params : ParamsBase
+        Parameter object containing information on how the model was
+        initialized in makani. Params assembled outside
+        :func:`load_model_package` (e.g. by earth2studio) are tolerated and do
+        not need to carry the resampled shapes.
 
     Attributes
     ----------
@@ -87,6 +128,12 @@ class ModelWrapper(torch.nn.Module):
         ML model that is wrapped.
     params : ParamsBase
         parameter object containing information on how the model was initialized in makani
+    lats : numpy.ndarray
+        Latitudes of the model grid, taken from ``params`` if present and
+        otherwise assumed equiangular from 90 to -90.
+    lons : numpy.ndarray
+        Longitudes of the model grid, taken from ``params`` if present and
+        otherwise assumed equiangular from 0 to 360.
 
     Methods
     -------
@@ -98,6 +145,9 @@ class ModelWrapper(torch.nn.Module):
         super().__init__()
         self.model = model
         self.params = params
+        # tolerate params assembled outside load_model_package (e.g. earth2studio),
+        # which need not carry the resampled shapes
+        ensure_resampled_shapes(params)
         nlat = params.img_shape_x_resampled
         nlon = params.img_shape_y_resampled
 
@@ -109,7 +159,7 @@ class ModelWrapper(torch.nn.Module):
 
         # configure lons
         if "lon" in self.params:
-            self.lons =	np.asarray(self.params.lon)
+            self.lons = np.asarray(self.params.lon)
         else:
             self.lons = np.linspace(0, 360, nlon, endpoint=False)
 
@@ -134,36 +184,210 @@ class ModelWrapper(torch.nn.Module):
 
     @property
     def in_channels(self):
+        r"""
+        Names of the input channels.
+
+        Returns
+        -------
+        list of str or None
+            Channel names, or ``None`` if the config does not record them.
+        """
         return self.params.get("channel_names", None)
 
     @property
     def out_channels(self):
+        r"""
+        Names of the output channels.
+
+        Returns
+        -------
+        list of str or None
+            Channel names, or ``None`` if the config does not record them.
+        """
         return self.params.get("channel_names", None)
 
     @property
     def timestep(self):
+        r"""
+        Model time step in hours.
+
+        Returns
+        -------
+        int or float
+            ``dt * dhours``: the number of data steps per model step times the
+            spacing of the data in hours.
+        """
         return self.params.dt * self.params.dhours
 
-    def update_state(self, replace_state=True):
-        self.model.preprocessor.update_internal_state(replace_state=replace_state)
+    def update_state(self, replace_state=True, batch_size=None):
+        """Advance the stochastic state without running a forward pass.
+
+        ``batch_size`` sizes the noise state; pass the batch you intend to run
+        with. Leaving it None keeps whatever size the state currently has, which
+        for a freshly loaded package is ``params.batch_size`` (usually 1).
+        :meth:`forward` sizes the state itself, so this is only needed when
+        priming the state ahead of the first call.
+        """
+        self.model.preprocessor.update_internal_state(replace_state=replace_state, batch_size=batch_size)
         return
 
     def set_rng(self, reset=True, seed=333):
+        r"""
+        Re-seed the model's stochastic noise, optionally clearing its state.
+
+        Use this to make an ensemble member reproducible, or to decorrelate
+        members by giving each a distinct seed.
+
+        Parameters
+        ----------
+        reset : bool, optional
+            Also zero the noise state, by default ``True``.
+        seed : int, optional
+            New seed, by default ``333``.
+        """
         self.model.preprocessor.set_rng(reset=reset, seed=seed)
         return
 
-    def forward(self, x, time, normalized_data=True, replace_state=None):
+    def _zenith_features(self, x, time):
+        """Build the cached cosine-zenith channel for ``x`` at valid time(s) ``time``.
+
+        Returns a tensor of shape ``(B, nhist, H, W)`` where ``B == x.shape[0]``
+        and ``nhist == n_history + 1``. That is the layout
+        :meth:`Preprocessor2D._append_channels` requires: it calls
+        ``expand_history`` on the cached tensor, which reshapes ``(B, nhist, H, W)``
+        into ``(B, nhist, 1, H, W)`` before concatenating along the channel axis.
+
+        See :meth:`forward` for the ``time`` contract this enforces.
+        """
+        # Only the zenith path depends on the input rank: history has to live in the
+        # flattened channel axis for (B, nhist, H, W) to line up with it. The rest of
+        # the pipeline broadcasts over other ranks, so this stays scoped here rather
+        # than becoming a blanket check in _prepare_input.
+        if x.ndim != 4:
+            raise ValueError(
+                f"add_zenith: expected a 4D (B, (n_history+1)*C, H, W) input, got {x.ndim}D. "
+                f"History is carried in the flattened channel axis, not a separate dim."
+            )
+
+        nhist = self.model.preprocessor.n_history + 1
+        batch_size = x.shape[0]
+
+        # cos_zenith_angle promotes scalars via np.atleast_1d, so this is always
+        # (T, H, W) -- never (H, W).
+        cosz = cos_zenith_angle(time, self.lon_grid, self.lat_grid).astype(np.float32)
+        z = torch.as_tensor(cosz).to(device=x.device)
+        n_times = z.shape[0]
+
+        if n_times == batch_size * nhist:
+            # one time per (member, history step), member-major
+            z = z.reshape(batch_size, nhist, *z.shape[-2:])
+        elif n_times == nhist:
+            # a single history window shared by every member (e.g. a
+            # perturbed-initial-condition ensemble, all valid at the same time)
+            z = z.reshape(1, nhist, *z.shape[-2:]).expand(batch_size, -1, -1, -1)
+        else:
+            raise ValueError(
+                f"add_zenith: got {n_times} time(s) for a batch of {batch_size} with "
+                f"n_history={nhist - 1}. Pass either {batch_size * nhist} times (one per "
+                f"member per history step, member-major) or {nhist} time(s) to share one "
+                f"history window across the whole batch."
+            )
+
+        return z
+
+    def _prepare_input(self, x, time, normalized_data):
+        """Normalize the input and cache the time-dependent unpredicted features.
+
+        ``x`` is normally ``(B, (n_history + 1) * C, H, W)``; that layout is
+        required when ``add_zenith`` is set, but not otherwise. See :meth:`forward`
+        for the batching contract on ``time``.
+        """
         if not normalized_data:
             x = (x - self.in_bias) / self.in_scale
 
         if self.add_zenith:
-            cosz = cos_zenith_angle(time, self.lon_grid, self.lat_grid)
-            cosz = cosz.astype(np.float32)
-            z = torch.as_tensor(cosz).to(device=x.device)
-            while z.ndim != x.ndim:
-                z = z[None]
+            z = self._zenith_features(x, time)
             self.model.preprocessor.cache_unpredicted_features(None, None, xz=z, yz=None)
 
+        return x
+
+    def encode_process(self, x, time, normalized_data=True, replace_state=None):
+        """Return the backbone's processed latent state without running its decoder.
+
+        Input normalization, zenith-angle generation, history handling, and
+        static-feature preparation are identical to :meth:`forward` -- including
+        the batching contract documented there. Only the decoder, bias
+        correction, and output denormalization are skipped, so the result stays
+        in the backbone's latent feature space and ``normalized_data`` affects
+        only how ``x`` is interpreted, never the output.
+
+        Raises
+        ------
+        NotImplementedError
+            If the wrapped step wrapper or backbone does not implement
+            ``encode_process`` (currently only :class:`SingleStepWrapper` around
+            FCN3 does; ``MultiStepWrapper`` and ``ConstraintsWrapper`` do not).
+        """
+        if not hasattr(self.model, "encode_process"):
+            raise NotImplementedError(f"{type(self.model).__name__} does not expose encode_process().")
+        x = self._prepare_input(x, time, normalized_data)
+        return self.model.encode_process(x, replace_state=replace_state)
+
+    def forward(self, x, time, normalized_data=True, replace_state=None):
+        """Advance the model state by one timestep.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input state, shape ``(B, (n_history + 1) * C, H, W)``. History is
+            carried in the flattened channel axis, oldest first.
+        time : datetime or array of datetimes
+            Valid time(s) for ``x``; see the contract below.
+        normalized_data : bool, optional
+            If False, ``x`` is normalized on the way in and the prediction is
+            denormalized on the way out. If True (default), both are assumed to
+            already be in normalized space.
+        replace_state : bool or None, optional
+            Forwarded to the step wrapper's stochastic-state update.
+
+        Returns
+        -------
+        torch.Tensor
+            Prediction for the next timestep, shape ``(B, C_out, H, W)``,
+            denormalized unless ``normalized_data`` is ``True``.
+
+        Notes
+        -----
+        **Batching contract.**
+        Any batch size ``B`` is supported. Two pieces of internal state are
+        sized from ``B`` on every call:
+
+        * The cached cosine-zenith channel, built to ``(B, n_history + 1, H, W)``.
+        * The stochastic noise state, resized by the step wrapper. Note this is
+          independent of ``params.batch_size``, which is a *training* setting and
+          is typically 1 in a packaged model.
+
+        For a model with input noise, the first call at a new ``B`` must draw a
+        fresh state: pass ``replace_state=True``, or prime once up front with
+        ``update_state(replace_state=True, batch_size=B)``. Resizing the noise
+        state mid-sequence is refused rather than silently restarting the
+        autoregressive noise from zero -- see
+        :meth:`Preprocessor2D.update_internal_state`. Models without input noise
+        are unaffected.
+
+        ``time`` must supply either one time per member per history step
+        (``B * (n_history + 1)`` entries, ordered member-major), or exactly
+        ``n_history + 1`` entries to share a single history window across the
+        whole batch -- the natural form for a perturbed-initial-condition
+        ensemble in which every member is valid at the same time. Any other
+        count raises rather than silently mis-broadcasting. At ``B == 1`` the two
+        forms coincide.
+
+        Keep ``B`` fixed across a rollout. Changing it mid-rollout reallocates
+        the noise state, which discards the autoregressive noise history for
+        stateful noise modules.
+        """
+        x = self._prepare_input(x, time, normalized_data)
         out = self.model(x, replace_state=replace_state)
 
         if not normalized_data:
@@ -184,24 +408,27 @@ def save_model_package(params):
         msg = json.dumps(params.to_dict(), indent=4, sort_keys=True)
         f.write(msg)
 
+    # copy static data into the package under the canonical file names expected
+    # by LocalPackage, so packages are self-consistent regardless of how the
+    # source files happen to be named on a given system
     if params.get("add_orography", False):
-        shutil.copy(params.orography_path, os.path.join(params.experiment_dir, os.path.basename(params.orography_path)))
+        shutil.copy(params.orography_path, os.path.join(params.experiment_dir, LocalPackage.OROGRAPHY_FILE))
 
     if params.get("add_landmask", False):
-        shutil.copy(params.landmask_path, os.path.join(params.experiment_dir, os.path.basename(params.landmask_path)))
+        shutil.copy(params.landmask_path, os.path.join(params.experiment_dir, LocalPackage.LANDMASK_FILE))
 
     if params.get("add_soiltype", False):
-        shutil.copy(params.soiltype_path, os.path.join(params.experiment_dir, os.path.basename(params.soiltype_path)))
+        shutil.copy(params.soiltype_path, os.path.join(params.experiment_dir, LocalPackage.SOILTYPE_FILE))
 
-    # always save out all normalization files
+    # always save out all normalization files under their canonical names
     if params.get("global_means_path", None) is not None:
-        shutil.copy(params.global_means_path, os.path.join(params.experiment_dir, os.path.basename(params.global_means_path)))
+        shutil.copy(params.global_means_path, os.path.join(params.experiment_dir, LocalPackage.MEANS_FILE))
     if params.get("global_stds_path", None) is not None:
-        shutil.copy(params.global_stds_path, os.path.join(params.experiment_dir, os.path.basename(params.global_stds_path)))
+        shutil.copy(params.global_stds_path, os.path.join(params.experiment_dir, LocalPackage.STDS_FILE))
     if params.get("min_path", None) is not None:
-        shutil.copy(params.min_path, os.path.join(params.experiment_dir, os.path.basename(params.min_path)))
+        shutil.copy(params.min_path, os.path.join(params.experiment_dir, LocalPackage.MINS_FILE))
     if params.get("max_path", None) is not None:
-        shutil.copy(params.max_path, os.path.join(params.experiment_dir, os.path.basename(params.max_path)))
+        shutil.copy(params.max_path, os.path.join(params.experiment_dir, LocalPackage.MAXS_FILE))
 
     # write out earth2mip metadata.json
     fcn_mip_data = {
@@ -219,11 +446,9 @@ def load_model_package(package, pretrained=True, device="cpu", multistep=False):
     """
     path = package.get("config.json")
     params = ParamsBase.from_json(path)
-    # ensure resampled shapes exist (set at runtime from dataset in training; missing when loading from package)
-    if not hasattr(params, "img_shape_x_resampled") or params.img_shape_x_resampled is None:
-        params.img_shape_x_resampled = params.img_shape_x
-    if not hasattr(params, "img_shape_y_resampled") or params.img_shape_y_resampled is None:
-        params.img_shape_y_resampled = params.img_shape_y
+    # resampled shapes are set at runtime from the dataset during training and are
+    # absent from packages written before resampling existed
+    ensure_resampled_shapes(params)
     LocalPackage._load_static_data(package, params)
 
     # assume we are not distributed
@@ -261,7 +486,6 @@ def load_time_loop(package, device=None, time_step_hours=None):
 
     from earth2mip.networks import Inference
     from earth2mip.grid import equiangular_lat_lon_grid
-    from physicsnemo.distributed.manager import DistributedManager
 
     config = package.get("config.json")
     params = ParamsBase.from_json(config)
@@ -281,7 +505,9 @@ def load_time_loop(package, device=None, time_step_hours=None):
     shape = (params.img_crop_shape_x, params.img_crop_shape_y)
 
     # TODO: insert a check to see if the grid e2mip computes is the same that makani uses
-    grid = equiangular_lat_lon_grid(nlat=params.img_crop_shape_x, nlon=params.img_crop_shape_y, includes_south_pole=True)
+    grid = equiangular_lat_lon_grid(
+        nlat=params.img_crop_shape_x, nlon=params.img_crop_shape_y, includes_south_pole=True
+    )
 
     if time_step_hours is None:
         hour = datetime.timedelta(hours=1)

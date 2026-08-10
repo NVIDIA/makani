@@ -19,7 +19,6 @@ import glob
 import torch
 import numpy as np
 import h5py
-import torch
 import math
 
 # distributed stuff
@@ -49,36 +48,37 @@ class DummyLoader(object):
     device (e.g. ``cuda:<local_rank>``); the loader does not infer it.
     """
 
-    def __init__(self,
-                 location: str,
-                 batch_size: int,
-                 dt: int,
-                 dhours: int,
-                 in_channels: List[int],
-                 out_channels: List[int],
-                 img_shape: Optional[Tuple[int,int]]=None,
-                 max_samples: Optional[int]=None,
-                 n_samples_per_epoch: Optional[int]=None,
-                 n_history: Optional[int]=0,
-                 n_future: Optional[int]=0,
-                 add_zenith: Optional[bool]=False,
-                 latitudes: Optional[np.array]=None,
-                 longitudes: Optional[np.array]=None,
-                 data_grid_type: Optional[str]="equiangular",
-                 model_grid_type: Optional[str]="equiangular",
-                 return_timestamp: Optional[bool]=False,
-                 return_target: Optional[bool]=True,
-                 dataset_path: Optional[str]="fields",
-                 crop_size: Optional[Tuple[int, int]]=(None, None),
-                 crop_anchor: Optional[Tuple[int, int]]=(0, 0),
-                 subsampling_factor: Optional[int]=1,
-                 io_grid: Optional[List[int]]=[1, 1, 1],
-                 io_rank: Optional[List[int]]=[0, 0, 0],
-                 device: Optional[torch.device]=torch.device("cpu"),
-                 enable_logging: Optional[bool]=True,
-                 **kwargs
+    def __init__(
+        self,
+        location: str,
+        batch_size: int,
+        dt: int,
+        dhours: int,
+        in_channels: List[int],
+        out_channels: List[int],
+        img_shape: Optional[Tuple[int, int]] = None,
+        max_samples: Optional[int] = None,
+        n_samples_per_epoch: Optional[int] = None,
+        n_history: Optional[int] = 0,
+        n_future: Optional[int] = 0,
+        add_zenith: Optional[bool] = False,
+        latitudes: Optional[np.array] = None,
+        longitudes: Optional[np.array] = None,
+        data_grid_type: Optional[str] = "equiangular",
+        model_grid_type: Optional[str] = "equiangular",
+        return_timestamp: Optional[bool] = False,
+        return_target: Optional[bool] = True,
+        dataset_name: Optional[str] = "fields",
+        crop_size: Optional[Tuple[int, int]] = (None, None),
+        crop_anchor: Optional[Tuple[int, int]] = (0, 0),
+        subsampling_factor: Optional[int] = 1,
+        io_grid: Optional[List[int]] = [1, 1, 1],
+        io_rank: Optional[List[int]] = [0, 0, 0],
+        device: Optional[torch.device] = torch.device("cpu"),
+        enable_logging: Optional[bool] = True,
+        **kwargs,
     ):
-        
+
         self.location = location
         self.dt = dt
         self.dhours = dhours
@@ -110,12 +110,19 @@ class DummyLoader(object):
         self._get_files_stats()
 
         # get local lat lon (overrides the read_anchor-based slice from _get_files_stats)
-        self.lat_lon_local = (self.lat_lon[0][self.crop_anchor[0] : self.crop_anchor[0] + self.crop_shape[0]], self.lat_lon[1][self.crop_anchor[1] : self.crop_anchor[1] + self.crop_shape[1]])
+        self.lat_lon_local = (
+            self.lat_lon[0][self.crop_anchor[0] : self.crop_anchor[0] + self.crop_shape[0]],
+            self.lat_lon[1][self.crop_anchor[1] : self.crop_anchor[1] + self.crop_shape[1]],
+        )
 
         # zenith angle yes or no?
         self.add_zenith = add_zenith
         if self.add_zenith:
-            self.zen_dummy = torch.zeros((self.batch_size, self.n_history + 1, 1, self.return_shape[0], self.return_shape[1]), dtype=torch.float32, device=self.device)
+            self.zen_dummy = torch.zeros(
+                (self.batch_size, self.n_history + 1, 1, self.return_shape[0], self.return_shape[1]),
+                dtype=torch.float32,
+                device=self.device,
+            )
 
         # grid types (lat_lon_local may be a list if auto-created; coerce to tensor)
         self.grid_converter = GridConverter(
@@ -131,7 +138,9 @@ class DummyLoader(object):
             self.files_paths = glob.glob(self.location + "/*.h5")
 
             if not self.files_paths:
-                raise RuntimeError(f"You have to specify img_shape if you do not provide a data path from which shapes can be deferred.")
+                raise RuntimeError(
+                    "You have to specify img_shape if you do not provide a data path from which shapes can be deferred."
+                )
 
             self.files_paths.sort()
 
@@ -158,7 +167,7 @@ class DummyLoader(object):
 
         # perform a sanity check here
         if (self.n_samples_per_epoch == 0) or (self.n_samples_per_epoch is None):
-            raise RuntimeError(f"You have noit specified a valid number of samples per epoch.")
+            raise RuntimeError("You have noit specified a valid number of samples per epoch.")
 
         # determine local read size:
         # sanitize the crops first
@@ -169,11 +178,17 @@ class DummyLoader(object):
         if self.crop_shape[1] is None:
             self.crop_shape_y = self.img_shape[1]
         else:
-            self.crop_shape_y =	self.crop_shape[1]
+            self.crop_shape_y = self.crop_shape[1]
         self.crop_shape = (self.crop_shape_x, self.crop_shape_y)
-            
-        assert self.crop_anchor[0] + self.crop_shape[0] <= self.img_shape[0]
-        assert self.crop_anchor[1] + self.crop_shape[1] <= self.img_shape[1]
+
+        if self.crop_anchor[0] + self.crop_shape[0] > self.img_shape[0]:
+            raise ValueError(
+                f"crop in dimension 0 (anchor {self.crop_anchor[0]} + shape {self.crop_shape[0]}) exceeds image shape {self.img_shape[0]}"
+            )
+        if self.crop_anchor[1] + self.crop_shape[1] > self.img_shape[1]:
+            raise ValueError(
+                f"crop in dimension 1 (anchor {self.crop_anchor[1]} + shape {self.crop_shape[1]}) exceeds image shape {self.img_shape[1]}"
+            )
 
         # for x
         split_shapes_x = compute_split_shapes(self.crop_shape[0], self.io_grid[0])
@@ -188,8 +203,10 @@ class DummyLoader(object):
         # store exposed variables
         self.read_anchor = (read_anchor_x, read_anchor_y)
         self.read_shape = (read_shape_x, read_shape_y)
-        self.return_shape = (math.ceil(self.read_shape[0] / self.subsampling_factor), 
-                             math.ceil(self.read_shape[1] / self.subsampling_factor))
+        self.return_shape = (
+            math.ceil(self.read_shape[0] / self.subsampling_factor),
+            math.ceil(self.read_shape[1] / self.subsampling_factor),
+        )
 
         # set properties for compatibility
         self.img_shape_x = self.img_shape[0]
@@ -206,8 +223,10 @@ class DummyLoader(object):
         self.img_local_offset_y = self.read_anchor[1]
 
         # resampling stuff
-        self.img_shape_resampled = (math.ceil(self.img_shape[0] / self.subsampling_factor), 
-                                    math.ceil(self.img_shape[1] / self.subsampling_factor))
+        self.img_shape_resampled = (
+            math.ceil(self.img_shape[0] / self.subsampling_factor),
+            math.ceil(self.img_shape[1] / self.subsampling_factor),
+        )
         self.img_local_shape_x_resampled = self.return_shape[0]
         self.img_local_shape_y_resampled = self.return_shape[1]
         self.img_shape_x_resampled = self.img_shape_resampled[0]
@@ -220,7 +239,10 @@ class DummyLoader(object):
             self.lat_lon = (latitude.tolist(), longitude.tolist())
 
         # lat lon coords
-        self.lat_lon_local = (self.lat_lon[0][self.read_anchor[0] : self.read_anchor[0] + self.read_shape[0]], self.lat_lon[1][self.read_anchor[1] : self.read_anchor[1] + self.read_shape[1]])
+        self.lat_lon_local = (
+            self.lat_lon[0][self.read_anchor[0] : self.read_anchor[0] + self.read_shape[0]],
+            self.lat_lon[1][self.read_anchor[1] : self.read_anchor[1] + self.read_shape[1]],
+        )
 
         # sharding
         self.n_samples_total = self.n_samples_per_epoch
@@ -230,14 +252,24 @@ class DummyLoader(object):
         self.n_in_channels_local = self.n_in_channels
         self.n_out_channels_local = self.n_out_channels
 
-        logging.info(f"Number of examples: {self.n_samples_per_epoch}. Image Shape: {self.img_shape[0]} x {self.img_shape[1]} x {self.n_in_channels_local}")
-        logging.info(f"Including {self.dhours*self.dt*self.n_history} hours of past history in training at a frequency of {self.dhours*self.dt} hours")
+        logging.info(
+            f"Number of examples: {self.n_samples_per_epoch}. Image Shape: {self.img_shape[0]} x {self.img_shape[1]} x {self.n_in_channels_local}"
+        )
+        logging.info(
+            f"Including {self.dhours*self.dt*self.n_history} hours of past history in training at a frequency of {self.dhours*self.dt} hours"
+        )
         logging.info("WARNING: using dummy data")
 
         # create tensors for dummy data on the device passed at construction time
-        self.inp = torch.zeros((self.batch_size, self.n_history + 1, self.n_in_channels, self.return_shape[0], self.return_shape[1]), dtype=torch.float32, device=self.device)
+        self.inp = torch.zeros(
+            (self.batch_size, self.n_history + 1, self.n_in_channels, self.return_shape[0], self.return_shape[1]),
+            dtype=torch.float32,
+            device=self.device,
+        )
         self.tar = torch.zeros(
-            (self.batch_size, self.n_future + 1, self.n_out_channels_local, self.return_shape[0], self.return_shape[1]), dtype=torch.float32, device=self.device
+            (self.batch_size, self.n_future + 1, self.n_out_channels_local, self.return_shape[0], self.return_shape[1]),
+            dtype=torch.float32,
+            device=self.device,
         )
 
         # initialize output

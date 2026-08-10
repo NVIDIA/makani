@@ -16,6 +16,7 @@
 import math
 import numpy as np
 import sys
+
 if sys.version_info >= (3, 12):
     from typing import override
 else:
@@ -29,10 +30,62 @@ import torch_harmonics as th
 import torch_harmonics.distributed as thd
 
 from makani.utils import comm
-from torch_harmonics.distributed import split_tensor_along_dim, compute_split_shapes
+from torch_harmonics.distributed import split_tensor_along_dim
 
 
 class BaseNoiseS2(nn.Module):
+    r"""
+    Abstract base class for random fields on the sphere :math:`S^2`.
+
+    Noise for an ensemble weather model has to be spatially correlated: white
+    noise on a lat-lon grid is neither isotropic (grid cells shrink toward the
+    poles) nor physically plausible as a perturbation. All subclasses therefore
+    generate noise in *spectral* space and transform it to the grid with an
+    inverse SHT, which makes the correlation structure an explicit choice of
+    angular power spectrum and keeps the field isotropic by construction.
+
+    This base class owns the machinery every variant needs: the inverse SHT
+    (distributed when spatial model parallelism is active), private RNGs, and a
+    ``state`` buffer holding the current spectral coefficients. Subclasses
+    define the spectrum and decide whether they are stateful (the field evolves
+    from step to step, as in :class:`DiffusionNoiseS2`) or stateless (each draw
+    is independent, as in :class:`IsotropicGaussianRandomFieldS2`).
+
+    The state buffer is non-persistent: it is a per-run scratch tensor and is
+    deliberately kept out of checkpoints, so restoring one does not resurrect a
+    stale noise realization.
+
+    Parameters
+    ----------
+    img_shape : (int, int)
+        Output grid as ``(nlat, nlon)``.
+    batch_size : int
+        Initial batch size of the state buffer. Automatically resized when a
+        different batch size is passed to ``update`` or ``reset``.
+    num_channels : int
+        Number of noise channels.
+    num_time_steps : int
+        Number of time steps held in the state.
+    grid_type : str, optional
+        Grid the noise is generated on, by default ``"equiangular"``.
+    lmax : int, optional
+        Spectral truncation. Defaults to the maximum supported by the grid;
+        lowering it produces a smoother field.
+    seed : int, optional
+        Seed for the private CPU and CUDA generators, by default ``333``.
+    reflect : bool, optional
+        If ``True``, negate every draw. Used for antithetic ensemble pairing:
+        two members sharing a seed but differing in this flag produce exactly
+        opposite perturbations, which cancels first-order sampling error in the
+        ensemble mean. By default ``False``.
+    **kwargs
+        Ignored; present so noise configs can pass extra keys.
+
+    See Also
+    --------
+    build_noise : factory constructing the right subclass from a config dict.
+    """
+
     def __init__(
         self,
         img_shape,
@@ -45,10 +98,6 @@ class BaseNoiseS2(nn.Module):
         reflect=False,
         **kwargs,
     ):
-        r"""
-        Abstract base class for noise on the sphere. Initializes the inverse SHT needed by many of the
-        noise classes. Derived noise classes can be stateful or stateless.
-        """
         super().__init__()
 
         # Number of latitudinal modes.
@@ -117,9 +166,35 @@ class BaseNoiseS2(nn.Module):
             )
 
     def is_stateful(self):
+        r"""
+        Whether the noise carries state across calls.
+
+        Callers use this to decide whether the noise module must be
+        checkpointed, reset between rollouts, or kept in sync across ensemble
+        members. Must be overridden by subclasses.
+
+        Returns
+        -------
+        bool
+            ``True`` if successive draws depend on the previous state.
+
+        Raises
+        ------
+        NotImplementedError
+            Always, unless overridden.
+        """
         raise NotImplementedError("is_stateful method not implemented for this noise class")
 
     def extra_repr(self):
+        r"""
+        Extra fields shown in the module's ``repr``.
+
+        Returns
+        -------
+        str
+            Grid shape, channel and time step counts, spectral truncation and
+            reflection flag.
+        """
         return (
             f"img_shape=({self.nlat}, {self.nlon}), "
             f"num_channels={self.num_channels}, num_time_steps={self.num_time_steps}, "
@@ -127,21 +202,61 @@ class BaseNoiseS2(nn.Module):
         )
 
     def set_rng(self, seed=333):
+        r"""
+        Re-seed the module's private CPU and CUDA generators.
+
+        The noise stream is deliberately independent of the global RNG, so
+        seeding it explicitly is the only way to make a run reproducible or to
+        decorrelate ensemble members from one another.
+
+        Parameters
+        ----------
+        seed : int, optional
+            Seed applied to both generators, by default ``333``. The CUDA
+            generator is only created when CUDA is available.
+        """
         self.rng_cpu = torch.Generator(device=torch.device("cpu"))
         self.rng_cpu.manual_seed(seed)
         if torch.cuda.is_available():
             self.rng_gpu = torch.Generator(device=torch.device(f"cuda:{comm.get_local_rank()}"))
             self.rng_gpu.manual_seed(seed)
 
-    # Resets the internal state. Can be used to change the batch size if required.
     def reset(self, batch_size=None):
+        r"""
+        Zero the internal state, optionally resizing it.
+
+        Call this between rollouts so a new forecast does not inherit the noise
+        trajectory of the previous one.
+
+        Parameters
+        ----------
+        batch_size : int, optional
+            New batch size. If given and different from the current one, the
+            state buffer is reallocated; otherwise the existing buffer is
+            zeroed in place.
+        """
         if batch_size is not None:
             self._ensure_state(batch_size)
         with torch.no_grad():
             self.state.zero_()
 
-    # this routine generates a noise sample for a single time step and updates the state accordingly, by appending the last time step
     def update(self, replace_state=False, batch_size=None):
+        r"""
+        Draw a fresh set of spectral coefficients into the state.
+
+        The base implementation is memoryless: it overwrites the state with new
+        standard normal coefficients. Stateful subclasses override this to
+        propagate the previous state forward in time instead.
+
+        Parameters
+        ----------
+        replace_state : bool, optional
+            Accepted for interface compatibility with stateful subclasses,
+            where it selects whether the new sample replaces the state or is
+            appended to it. Ignored here, since the base class always replaces.
+        batch_size : int, optional
+            If given, resize the state buffer to this batch size before drawing.
+        """
 
         if batch_size is not None:
             self._ensure_state(batch_size)
@@ -161,6 +276,22 @@ class BaseNoiseS2(nn.Module):
         return
 
     def set_rng_state(self, cpu_state, gpu_state):
+        r"""
+        Restore the generators from previously captured states.
+
+        Together with :meth:`get_rng_state` this makes a run resumable: without
+        it, restarting from a checkpoint would continue with a different noise
+        stream than an uninterrupted run would have produced.
+
+        Parameters
+        ----------
+        cpu_state : torch.ByteTensor or None
+            State for the CPU generator, as returned by :meth:`get_rng_state`.
+            ``None`` leaves the CPU generator untouched.
+        gpu_state : torch.ByteTensor or None
+            State for the CUDA generator. Ignored if CUDA is unavailable or if
+            ``None``.
+        """
         if cpu_state is not None:
             self.rng_cpu.set_state(cpu_state)
         if torch.cuda.is_available() and (gpu_state is not None):
@@ -169,6 +300,20 @@ class BaseNoiseS2(nn.Module):
         return
 
     def get_rng_state(self):
+        r"""
+        Capture the current generator states for checkpointing.
+
+        Returns
+        -------
+        cpu_state : torch.ByteTensor
+            State of the CPU generator.
+        gpu_state : torch.ByteTensor or None
+            State of the CUDA generator, or ``None`` if CUDA is unavailable.
+
+        See Also
+        --------
+        set_rng_state : restores what this returns.
+        """
         cpu_state = self.rng_cpu.get_state()
         gpu_state = None
         if torch.cuda.is_available():
@@ -177,9 +322,36 @@ class BaseNoiseS2(nn.Module):
         return cpu_state, gpu_state
 
     def get_tensor_state(self):
+        r"""
+        Return a detached copy of the current spectral state.
+
+        Returns
+        -------
+        torch.Tensor
+            Copy of the state buffer, shape
+            ``(batch, *self._state_shape_suffix)``. A copy rather than a view,
+            so the caller can hold on to it across further ``update`` calls.
+        """
         return self.state.detach().clone()
 
     def set_tensor_state(self, newstate):
+        r"""
+        Overwrite the spectral state, resizing the batch dimension if needed.
+
+        Parameters
+        ----------
+        newstate : torch.Tensor
+            Replacement state. Everything beyond the batch dimension must match
+            the module's expected layout; only the batch size may differ, and
+            the buffer is reallocated to accommodate it.
+
+        Raises
+        ------
+        ValueError
+            If the shape beyond the batch dimension does not match. Checked
+            up front so a mismatch reports the expected and actual layouts,
+            rather than failing later inside the copy.
+        """
         # Validate the state layout (everything beyond the batch dim) matches this
         # noise module's expected suffix BEFORE touching `self.state`. Only the batch
         # dim may differ — it is auto-resized via `_ensure_state`. Any other
@@ -202,6 +374,77 @@ class BaseNoiseS2(nn.Module):
 
 
 class IsotropicGaussianRandomFieldS2(BaseNoiseS2):
+    r"""
+    Isotropic Gaussian random field on the unit sphere. Stateless.
+
+    Draws standard normal spherical harmonic coefficients, scales them by a
+    per-degree standard deviation, and transforms to the grid. Because the
+    scaling depends only on the degree :math:`l` and not the order :math:`m`,
+    the resulting field is statistically isotropic -- no direction or location
+    on the sphere is special, which a field generated directly on a lat-lon
+    grid would not satisfy.
+
+    The angular power spectrum follows a power law,
+
+    .. math::
+
+        \sigma_l = \sigma \sqrt{\frac{(2l+1)^{-\alpha}}{Z}},
+        \qquad
+        Z = \sum_l \frac{(2l+1)\,(2l+1)^{-\alpha}}{4\pi}
+
+    where the normalization :math:`Z` fixes the pointwise variance of the field
+    at :math:`\sigma^2` regardless of :math:`\alpha` or the truncation, so
+    changing the correlation length does not silently change the amplitude.
+    :math:`\alpha = 0` gives white noise; larger :math:`\alpha` damps high
+    degrees and yields a smoother, longer-correlated field.
+
+    Each call to ``update`` draws an independent realization, so the noise is
+    stateless and :meth:`is_stateful` returns ``False``.
+
+    Parameters
+    ----------
+    img_shape : (int, int)
+        Output grid as ``(nlat, nlon)``.
+    batch_size : int
+        Initial batch size of the state buffer.
+    num_channels : int
+        Number of noise channels.
+    num_time_steps : int, optional
+        Number of time steps held in the state, by default ``1``.
+    sigma : float, default is 1.0
+        Scale parameter corresponding to the diagonal entry of the covariance
+        kernel, i.e. the pointwise standard deviation of the field.
+    alpha : float, default is 0.0
+        Decay factor in the angular power spectrum. White noise corresponds to
+        ``alpha = 0.0``.
+    grid_type : string, default is "equiangular"
+        Grid type. Currently supports ``"equiangular"`` and ``"legendre-gauss"``.
+    lmax : int, optional
+        Spectral truncation. Defaults to the maximum supported by the grid;
+        lowering it produces a smoother field.
+    seed : int, optional
+        Seed for the private generators, by default ``333``.
+    reflect : bool, optional
+        Negate every draw, for antithetic ensemble pairing. By default ``False``.
+    learnable : bool, default is False
+        Parameter which enables learnable Gaussian noise: the per-degree
+        standard deviations become trainable instead of fixed, letting the
+        model adapt the correlation structure during training.
+    **kwargs
+        Ignored; present so noise configs can pass extra keys.
+
+    References
+    ----------
+    [1] Lang, A.; Schwab C.; Isotropic Gaussian random fields on the sphere:
+    regularity, fast simulation and stochastic partial differential equations;
+    The Annals of Applied Probability; 2015, Vol. 25, No. 6, 3047-3094;
+    DOI: 10.1214/14-AAP1067
+
+    See Also
+    --------
+    DiffusionNoiseS2 : stateful noise with temporal correlation.
+    """
+
     def __init__(
         self,
         img_shape,
@@ -211,37 +454,22 @@ class IsotropicGaussianRandomFieldS2(BaseNoiseS2):
         sigma=1.0,
         alpha=0.0,
         grid_type="equiangular",
+        lmax=None,
         seed=333,
         reflect=False,
         learnable=False,
         **kwargs,
     ):
-        r"""
-        GRF on the unit sphere. This implementation follows [1]. This noise is stateless.
-
-        References
-        ============
-        [1] Lang, A.; Schwab C.; ISOTROPIC GAUSSIAN RANDOM FIELDS ON THE SPHERE: REGULARITY, FAST SIMULATION AND STOCHASTIC PARTIAL DIFFERENTIAL EQUATIONS; The Annals of Applied Probability; 2015, Vol. 25, No. 6, 3047-3094; DOI: 10.1214/14-AAP1067
-
-        Parameters
-        ============
-        img_shape : (int, int)
-            Number of latitudinal and longitudinal modes
-        batch_size: int
-            Batch size for the noise
-        num_channels: int
-            Number of channels for the noise
-        sigma : float, default is 1.0
-            Scale parameter corresponding to the diagonal entry of the covariance kernel
-        alpha: float, default is 0.0
-            Decay factor in the angular power spectrum. White noise corresponds to alpha = 0.0
-        grid_type : string, default is "equiangular"
-            Grid type. Currently supports "equiangular" and
-            "legendre-gauss".
-        learnable : bool, default is False
-            Parameter which enables learnable Gaussian noise
-        """
-        super().__init__(img_shape=img_shape, batch_size=batch_size, num_channels=num_channels, num_time_steps=num_time_steps, grid_type=grid_type, seed=seed, reflect=reflect)
+        super().__init__(
+            img_shape=img_shape,
+            batch_size=batch_size,
+            num_channels=num_channels,
+            num_time_steps=num_time_steps,
+            grid_type=grid_type,
+            lmax=lmax,
+            seed=seed,
+            reflect=reflect,
+        )
 
         # stash config for extra_repr
         self.sigma = sigma
@@ -252,7 +480,7 @@ class IsotropicGaussianRandomFieldS2(BaseNoiseS2):
             alpha = float(alpha)
 
         # Compute ls, angular power spectrum and sigma_l:
-        ls = torch.arange(self.lmax).reshape(-1 ,1)
+        ls = torch.arange(self.lmax).reshape(-1, 1)
         ms = torch.arange(self.mmax)
         power_spectrum = torch.pow(2 * ls + 1, -alpha)
         norm_factor = torch.sum((2 * ls + 1) * power_spectrum / 4.0 / math.pi)
@@ -279,19 +507,58 @@ class IsotropicGaussianRandomFieldS2(BaseNoiseS2):
 
     @override
     def is_stateful(self):
+        r"""
+        Whether the noise carries state across calls.
+
+        Returns
+        -------
+        bool
+            Always ``False``: every draw is an independent realization.
+        """
         return False
 
     def extra_repr(self):
-        return (
-            super().extra_repr()
-            + f", sigma={self.sigma}, alpha={self.alpha}, learnable={self.learnable}"
-        )
+        r"""
+        Extra fields shown in the module's ``repr``.
 
+        Returns
+        -------
+        str
+            The base class fields plus ``sigma``, ``alpha`` and ``learnable``.
+        """
+        return super().extra_repr() + f", sigma={self.sigma}, alpha={self.alpha}, learnable={self.learnable}"
+
+    # run eager: the noise field is complex-valued (torch.complex + inverse SHT), and
+    # inductor's Triton backend has no mapping for complex dtypes (KeyError: 'complex64'
+    # in signature_of). Disabling compilation graph-breaks cleanly so the complex ops
+    # execute in eager where they are supported.
+    @torch.compiler.disable
     @override
     def forward(self, update_internal_state=False):
+        r"""
+        Scale the stored coefficients by the power spectrum and transform to the grid.
+
+        Parameters
+        ----------
+        update_internal_state : bool, optional
+            If ``True``, draw a fresh set of coefficients *after* producing the
+            output, so the next call returns an independent realization. By
+            default ``False``, which returns the same field until ``update`` is
+            called explicitly.
+
+        Returns
+        -------
+        torch.Tensor
+            Real-valued noise of shape
+            ``(batch, num_time_steps, num_channels, nlat_local, nlon_local)``.
+        """
 
         # combine channels and time:
-        cstate = torch.view_as_complex(self.state / math.sqrt(2)) * self.sigma_l
+        # torch.view_as_complex on a registered buffer hits a torch.compile/Inductor
+        # bug (set_() size mismatch when itemsize changes float32→complex64); construct
+        # the complex tensor explicitly instead.
+        _s = self.state / math.sqrt(2)
+        cstate = torch.complex(_s[..., 0], _s[..., 1]) * self.sigma_l
         batch_size = cstate.shape[0]
 
         # flatten history
@@ -311,8 +578,36 @@ class IsotropicGaussianRandomFieldS2(BaseNoiseS2):
         return eta
 
 
-# taken from scipy: https://github.com/scipy/scipy/blob/v1.13.0/scipy/linalg/_special_matrices.py#L17-L77
 def toep(c, r=None):
+    r"""
+    Construct a Toeplitz matrix from its first column and row.
+
+    Every diagonal of the result is constant: ``T[i, j]`` depends only on
+    ``i - j``. Used here to build the discount matrix of powers of :math:`\phi`
+    that correlates a freshly drawn noise history, so that resampling the whole
+    history reproduces the temporal correlation of the process instead of
+    giving independent steps.
+
+    Vendored from SciPy to avoid a runtime dependency on it.
+
+    Parameters
+    ----------
+    c : array_like
+        First column of the matrix. Flattened if not already 1D.
+    r : array_like, optional
+        First row of the matrix. ``r[0]`` is ignored -- ``c[0]`` sets the
+        diagonal. Defaults to ``conj(c)``, which gives a Hermitian matrix.
+
+    Returns
+    -------
+    numpy.ndarray
+        Array of shape ``(len(c), len(r))``.
+
+    References
+    ----------
+    Taken from scipy:
+    https://github.com/scipy/scipy/blob/v1.13.0/scipy/linalg/_special_matrices.py#L17-L77
+    """
 
     c = np.asarray(c).ravel()
     if r is None:
@@ -329,6 +624,74 @@ def toep(c, r=None):
 
 
 class DiffusionNoiseS2(BaseNoiseS2):
+    r"""
+    Temporally correlated random field from a diffusion process on the sphere. Stateful.
+
+    Perturbations in an ensemble forecast should not be redrawn independently at
+    every step -- that produces noise the model damps out immediately rather
+    than a coherent perturbation that grows. This module instead evolves the
+    spectral coefficients as an Ornstein-Uhlenbeck process, so each step is
+    correlated with the last:
+
+    .. math::
+
+        \eta_{t+1} = \phi\, \eta_t + \sqrt{1 - \phi^2}\; \sigma_l\, \xi_t,
+        \qquad \phi = e^{-\lambda}
+
+    with :math:`\xi_t` standard normal. The prefactor
+    :math:`\sqrt{1-\phi^2}` keeps the process stationary: the marginal variance
+    stays at :math:`\sigma^2` for every :math:`t` instead of drifting as the
+    correlation length changes. :math:`\lambda = \Delta t / \tau` sets how fast
+    the field decorrelates in time, while ``kT`` sets the spatial correlation
+    length through the angular power spectrum.
+
+    Both ``kT`` and ``lambd`` may be given per channel, so different variables
+    can carry perturbations at different scales.
+
+    Parameters
+    ----------
+    img_shape : (int, int)
+        Output grid as ``(nlat, nlon)``.
+    batch_size : int
+        Initial batch size of the state buffer.
+    num_channels : int
+        Number of noise channels.
+    num_time_steps : int, optional
+        Number of time steps held in the state, by default ``1``.
+    sigma : float, default is 1
+        Stationary standard deviation.
+    kT : float or List, default is 0.5 * (500 km / 6370 km)^2 = 0.00308057
+        Spatial correlation length. If this is a list it has to match
+        ``num_channels``.
+    lambd : float or List, default is 1.0
+        Temporal correlation length, should be set to ``(t / tau)``. If this is
+        a list it has to match ``num_channels``.
+    grid_type : string, default is "equiangular"
+        Grid type. Currently supports ``"equiangular"`` and ``"legendre-gauss"``.
+    lmax : int, optional
+        Spectral truncation. Defaults to the maximum supported by the grid;
+        lowering it produces a smoother field.
+    seed : int, optional
+        Seed for the private generators, by default ``333``.
+    reflect : bool, optional
+        Negate every draw, for antithetic ensemble pairing. By default ``False``.
+    learnable : bool, default is False
+        Parameter which enables learnable Diffusion noise: the per-degree
+        standard deviations become trainable.
+    **kwargs
+        Ignored; present so noise configs can pass extra keys.
+
+    References
+    ----------
+    Palmer, T. et al.; Stochastic parametrization and model uncertainty; ECMWF
+    Technical Memorandum 598, 2009, appendix 8.1.
+    https://www.ecmwf.int/sites/default/files/elibrary/2009/11577-stochastic-parametrization-and-model-uncertainty.pdf
+
+    See Also
+    --------
+    IsotropicGaussianRandomFieldS2 : stateless noise with no temporal correlation.
+    """
+
     def __init__(
         self,
         img_shape,
@@ -339,37 +702,22 @@ class DiffusionNoiseS2(BaseNoiseS2):
         kT=0.5 * (500.0 / 6370.0) ** 2,
         lambd=1.0,
         grid_type="equiangular",
+        lmax=None,
         seed=333,
         reflect=False,
-        learnable =False,
+        learnable=False,
         **kwargs,
     ):
-        r"""
-        A Random Field derived from a gaussian Diffusion Process on the sphere:
-
-        For details see https://www.ecmwf.int/sites/default/files/elibrary/2009/11577-stochastic-parametrization-and-model-uncertainty.pdf,
-        appendix 8.1.
-        Supports noising multiple channels at once. This noise is stateful.
-
-        img_shape : (int, int)
-            Number of latitudinal and longitudinal modes
-        batch_size: int
-            Batch size for the noise
-        num_channels: int
-            Number of channels for the noise
-        sigma : float, default is 1
-            Stationary standard deviation
-        kT : float or List, default is 0.5 * (500 km / 6370 km)^2 = 0.00308057
-            Spatial correlation length. If this is a list it has to match num_channels.
-        lambd : float or List, default is 1.0
-            Temporal correlation length, should be set to (t / tau). If this is a list it has to match num_channels.
-        grid_type : string, default is "equiangular"
-            Grid type. Currently supports "equiangular" and
-            "legendre-gauss".
-        learnable : bool, default is False
-            Parameter which enables learnable Diffusion noise
-        """
-        super().__init__(img_shape=img_shape, batch_size=batch_size, num_channels=num_channels, num_time_steps=num_time_steps, grid_type=grid_type, seed=seed, reflect=reflect)
+        super().__init__(
+            img_shape=img_shape,
+            batch_size=batch_size,
+            num_channels=num_channels,
+            num_time_steps=num_time_steps,
+            grid_type=grid_type,
+            lmax=lmax,
+            seed=seed,
+            reflect=reflect,
+        )
 
         # stash config for extra_repr (store originals before processing into tensors below)
         self.sigma = sigma
@@ -383,8 +731,10 @@ class DiffusionNoiseS2(BaseNoiseS2):
         # make sure kT is a torch.Tensor
         if isinstance(kT, list):
             kT = torch.as_tensor(kT)
-            assert len(kT.shape) == 1
-            assert kT.shape[0] == num_channels
+            if len(kT.shape) != 1:
+                raise ValueError(f"expected kT to be a 1D tensor, got shape {tuple(kT.shape)}")
+            if kT.shape[0] != num_channels:
+                raise ValueError(f"expected kT to have {num_channels} entries (one per channel), got {kT.shape[0]}")
         else:
             kT = torch.as_tensor([kT]).repeat(num_channels)
         kT = kT.reshape(self.num_channels, 1)
@@ -392,8 +742,12 @@ class DiffusionNoiseS2(BaseNoiseS2):
         # same for lambd
         if isinstance(lambd, list):
             lambd = torch.as_tensor(lambd)
-            assert len(lambd.shape) == 1
-            assert lambd.shape[0] == num_channels
+            if len(lambd.shape) != 1:
+                raise ValueError(f"expected lambd to be a 1D tensor, got shape {tuple(lambd.shape)}")
+            if lambd.shape[0] != num_channels:
+                raise ValueError(
+                    f"expected lambd to have {num_channels} entries (one per channel), got {lambd.shape[0]}"
+                )
         else:
             lambd = torch.as_tensor([lambd]).repeat(num_channels)
         lambd = lambd.reshape(self.num_channels, 1)
@@ -442,7 +796,7 @@ class DiffusionNoiseS2(BaseNoiseS2):
         #            [phi^3, phi^2, phi, 1]
         if self.num_time_steps > 1:
             if learnable:
-                raise NotImplementedError(f"num_time_steps>1 learnable diffusion noise not supported")
+                raise NotImplementedError("num_time_steps>1 learnable diffusion noise not supported")
 
             discount = []
             phi_flat = self.phi.reshape(-1)
@@ -456,17 +810,56 @@ class DiffusionNoiseS2(BaseNoiseS2):
 
     @override
     def is_stateful(self):
+        r"""
+        Whether the noise carries state across calls.
+
+        Returns
+        -------
+        bool
+            Always ``True``: each step is correlated with the previous one, so
+            the state must be checkpointed and reset between rollouts.
+        """
         return True
 
     def extra_repr(self):
+        r"""
+        Extra fields shown in the module's ``repr``.
+
+        Returns
+        -------
+        str
+            The base class fields plus ``sigma``, ``kT``, ``lambd`` and
+            ``learnable``.
+        """
         return (
-            super().extra_repr()
-            + f", sigma={self.sigma}, kT={self.kT}, lambd={self.lambd}, learnable={self.learnable}"
+            super().extra_repr() + f", sigma={self.sigma}, kT={self.kT}, lambd={self.lambd}, learnable={self.learnable}"
         )
 
-    # this routine generates a noise sample for a single time step and updates the state accordingly, by appending the last time step
     @override
     def update(self, replace_state=False, batch_size=None):
+        r"""
+        Advance the noise process by one step, or resample the whole history.
+
+        Parameters
+        ----------
+        replace_state : bool, optional
+            If ``False`` (the default), take one autoregressive step: the
+            existing state is damped by :math:`\phi` and a fresh innovation is
+            added, so the new field stays correlated with the old one. When
+            ``num_time_steps > 1`` the oldest step is dropped and the new one
+            appended.
+
+            If ``True``, discard the state and draw a fresh history from the
+            *stationary* distribution. The first time step is scaled by
+            :math:`1/\sqrt{1-\phi^2}` and, for ``num_time_steps > 1``, the
+            history is correlated by a Toeplitz discount matrix of powers of
+            :math:`\phi`. This matters when starting a rollout: drawing
+            independent steps instead would begin from a field with the wrong
+            variance and no temporal structure, and the process would need many
+            steps to spin up.
+        batch_size : int, optional
+            If given, resize the state buffer to this batch size before drawing.
+        """
         if batch_size is not None:
             self._ensure_state(batch_size)
 
@@ -479,7 +872,8 @@ class DiffusionNoiseS2(BaseNoiseS2):
                     B = self.state.shape[0]
                     eta_l = torch.empty(
                         (B, 1, self.num_channels, self.lmax_local, self.mmax_local, 2),
-                        dtype=self.state.dtype, device=self.state.device,
+                        dtype=self.state.dtype,
+                        device=self.state.device,
                     )
                 if self.state.is_cuda:
                     eta_l.normal_(mean=0.0, std=1.0, generator=self.rng_gpu)
@@ -514,11 +908,33 @@ class DiffusionNoiseS2(BaseNoiseS2):
 
         return
 
+    # run eager: complex-valued (torch.complex + inverse SHT); inductor's Triton backend
+    # has no mapping for complex dtypes (KeyError: 'complex64'). See the note on
+    # IsotropicGaussianRandomFieldS2.forward.
+    @torch.compiler.disable
     @override
     def forward(self, update_internal_state=False):
+        r"""
+        Transform the current spectral state to a noise field on the grid.
+
+        Parameters
+        ----------
+        update_internal_state : bool, optional
+            If ``True``, advance the process by one step *after* producing the
+            output, so the next call returns the following step of the
+            trajectory. By default ``False``, leaving the caller to drive the
+            process via :meth:`update`.
+
+        Returns
+        -------
+        torch.Tensor
+            Real-valued noise of shape
+            ``(batch, num_time_steps, num_channels, nlat_local, nlon_local)``.
+        """
 
         # combine channels and time:
-        cstate = torch.view_as_complex(self.state)
+        # see IsotropicGaussianRandomFieldS2.forward for why we avoid view_as_complex
+        cstate = torch.complex(self.state[..., 0], self.state[..., 1])
         batch_size = cstate.shape[0]
 
         # flatten history
@@ -539,6 +955,55 @@ class DiffusionNoiseS2(BaseNoiseS2):
 
 
 class DummyNoiseS2(BaseNoiseS2):
+    r"""
+    Dummy noise module for testing and debugging. This noise is stateless.
+
+    The module always emits a tensor with the correct output shape
+    ``(B, T, C, H, W)`` but carries no stochastic signal beyond what the chosen
+    mode specifies. Unlike the real noise classes it stores its state in
+    *spatial* rather than spectral layout and never runs an SHT, so it is cheap
+    enough to use in tests that only care about shapes and control flow.
+
+    Supported modes:
+
+    ``constant_zero`` (default)
+        Always emits an all-zero tensor. Useful for verifying shape consistency
+        of the noise pipeline without introducing any stochastic signal. In
+        particular, when the preprocessor is configured in ``"perturb"`` mode
+        the noise is *added* to the model input channels. Returning zeros
+        guarantees that the input is not modified, so integration tests can
+        check shapes and control-flow correctness without having to account for
+        random perturbations.
+
+    ``constant_random``
+        Draws a Gaussian tensor once per :meth:`update` call and holds it fixed
+        until the next one. Useful for verifying that the model handles a
+        non-zero, reproducible noise pattern correctly without the overhead of
+        the spherical harmonic transform used by the real noise classes.
+
+    Parameters
+    ----------
+    img_shape : (int, int)
+        Number of latitudinal and longitudinal modes.
+    batch_size : int
+        Batch size for the noise.
+    num_channels : int
+        Number of channels for the noise.
+    num_time_steps : int, optional
+        Number of time steps, by default ``1``.
+    mode : str, default 'constant_zero'
+        Output mode. One of ``'constant_zero'`` or ``'constant_random'``.
+    seed : int, default 333
+        Random seed used in ``'constant_random'`` mode; ignored otherwise.
+    **kwargs
+        Ignored; present so noise configs can pass extra keys.
+
+    Raises
+    ------
+    ValueError
+        If ``mode`` is not one of the two supported values.
+    """
+
     def __init__(
         self,
         img_shape,
@@ -549,47 +1014,9 @@ class DummyNoiseS2(BaseNoiseS2):
         seed=333,
         **kwargs,
     ):
-        r"""
-        Dummy noise module for testing and debugging. This noise is stateless.
-
-        The module always emits a tensor with the correct output shape (B, T, C, H, W)
-        but carries no stochastic signal beyond what the chosen mode specifies.
-
-        Supported modes
-        ---------------
-        constant_zero (default)
-            Always emits an all-zero tensor. Useful for verifying shape consistency
-            of the noise pipeline without introducing any stochastic signal. In particular,
-            when the preprocessor is configured in 'perturb' mode the noise is *added* to
-            the model input channels. Returning zeros guarantees that the input is not
-            modified, so integration tests can check shapes and control-flow correctness
-            without having to account for random perturbations.
-
-        constant_random
-            Draws a spatially-uniform Gaussian tensor once per update() call and holds it
-            fixed until the next update(). Useful for verifying that the model handles a
-            non-zero, reproducible noise pattern correctly without the overhead of the
-            spherical-harmonic transform used by the real noise classes.
-
-        Parameters
-        ============
-        img_shape : (int, int)
-            Number of latitudinal and longitudinal modes
-        batch_size: int
-            Batch size for the noise
-        num_channels: int
-            Number of channels for the noise
-        num_time_steps: int
-            Number of time steps
-        mode : str, default 'constant_zero'
-            Output mode. One of 'constant_zero' or 'constant_random'.
-        seed : int, default 333
-            Random seed used in 'constant_random' mode; ignored otherwise.
-        """
 
         if mode not in ("constant_zero", "constant_random"):
-            raise ValueError(f"DummyNoiseS2: unknown mode '{mode}'. "
-                             f"Expected 'constant_zero' or 'constant_random'.")
+            raise ValueError(f"DummyNoiseS2: unknown mode '{mode}'. " f"Expected 'constant_zero' or 'constant_random'.")
 
         self.mode = mode
 
@@ -612,13 +1039,41 @@ class DummyNoiseS2(BaseNoiseS2):
 
     @override
     def is_stateful(self):
+        r"""
+        Whether the noise carries state across calls.
+
+        Returns
+        -------
+        bool
+            Always ``False``: the stored tensor is held fixed between updates
+            rather than evolved.
+        """
         return False
 
     def extra_repr(self):
+        r"""
+        Extra fields shown in the module's ``repr``.
+
+        Returns
+        -------
+        str
+            The base class fields plus ``mode``.
+        """
         return super().extra_repr() + f", mode={self.mode}"
 
     @override
     def update(self, replace_state=False, batch_size=None):
+        r"""
+        Refresh the stored tensor according to the selected mode.
+
+        Parameters
+        ----------
+        replace_state : bool, optional
+            Accepted for interface compatibility with the stateful noise
+            classes; ignored here, since the state is always overwritten.
+        batch_size : int, optional
+            If given, resize the state buffer to this batch size first.
+        """
         if batch_size is not None:
             self._ensure_state(batch_size)
 
@@ -639,6 +1094,23 @@ class DummyNoiseS2(BaseNoiseS2):
 
     @override
     def forward(self, update_internal_state=False):
+        r"""
+        Return the stored tensor, no transform involved.
+
+        Parameters
+        ----------
+        update_internal_state : bool, optional
+            If ``True``, refresh the stored tensor *after* returning the current
+            one, by default ``False``.
+
+        Returns
+        -------
+        torch.Tensor
+            Tensor of shape
+            ``(batch, num_time_steps, num_channels, nlat_local, nlon_local)``:
+            all zeros, or a fixed Gaussian draw, depending on ``mode``. This is
+            the live state buffer, not a copy.
+        """
 
         state = self.state
 
@@ -647,3 +1119,101 @@ class DummyNoiseS2(BaseNoiseS2):
             self.update()
 
         return state
+
+
+@torch.compiler.disable
+def run_eager(fn, *args, **kwargs):
+    """Run a callable outside torch.compile (forces a graph break).
+
+    The noise field is complex-valued (torch.complex + inverse SHT) and inductor's Triton
+    backend cannot codegen complex dtypes (KeyError: 'complex64'). A method-level
+    @torch.compiler.disable on the noise module's forward is NOT honored when dynamo inlines
+    the nn.Module call (it traces straight into it), whereas a disable on a plain function call
+    like this one is respected — so we break at the call site instead.
+    """
+    return fn(*args, **kwargs)
+
+
+def noise_seed_reflect(centered: bool, seed_offset: int = 0):
+    """Derive the per-rank base seed and reflection flag for a noise source.
+
+    Mirrors the seeding used for the input noise so that every ensemble member gets an
+    independent realization while model-parallel ranks stay consistent. ``seed_offset``
+    lets independent noise sources (e.g. input noise vs. stochastic physics) draw from
+    decorrelated streams while keeping the same per-member structure.
+
+    centered=False: each ensemble member is fully independent.
+    centered=True: antithetic pairing -- ranks (0,1), (2,3), ... share a seed and differ
+    only by a sign flip (variance reduction for the ensemble estimator).
+    """
+    if not centered:
+        seed = 333 + seed_offset + comm.get_rank("model") + comm.get_size("model") * comm.get_rank("data")
+        reflect = False
+    else:
+        ensemble_eff_rank = comm.get_rank("ensemble") // 2
+        reflect = comm.get_rank("ensemble") % 2 == 0
+        seed = (
+            333
+            + seed_offset
+            + comm.get_rank("model")
+            + comm.get_size("model") * ensemble_eff_rank
+            + comm.get_size("model") * comm.get_size("ensemble") * comm.get_rank("batch")
+        )
+    return seed, reflect
+
+
+def build_noise(
+    noise_params, *, img_shape, batch_size, num_channels, num_time_steps, grid_type, seed, reflect, default_lambd=1.0
+):
+    """Factory that constructs a noise module from a config dict.
+
+    Centralizes the type dispatch so both the input-noise path and the stochastic-physics
+    module share a single construction routine. ``num_channels`` is passed explicitly (the
+    input-noise "perturb" mode resolves it from the perturbed channel list, so it is not read
+    from ``noise_params`` here). ``default_lambd`` supplies the temporal correlation default
+    (typically dt*dhours/6h) since it depends on the dataset cadence.
+    """
+    ntype = noise_params.get("type", None)
+    if ntype is None:
+        raise ValueError("Error, please specify a noise type")
+
+    lmax = noise_params.get("lmax", None)
+
+    if ntype == "diffusion":
+        return DiffusionNoiseS2(
+            img_shape=img_shape,
+            batch_size=batch_size,
+            num_channels=num_channels,
+            num_time_steps=num_time_steps,
+            sigma=noise_params.get("sigma", 1.0),
+            kT=noise_params.get("kT", 0.5 * (100 / 6370) ** 2),
+            lambd=noise_params.get("lambd", default_lambd),
+            grid_type=grid_type,
+            lmax=lmax,
+            seed=seed,
+            reflect=reflect,
+            learnable=noise_params.get("learnable", False),
+        )
+    elif ntype == "white":
+        return IsotropicGaussianRandomFieldS2(
+            img_shape=img_shape,
+            batch_size=batch_size,
+            num_channels=num_channels,
+            num_time_steps=num_time_steps,
+            sigma=noise_params.get("sigma", 1.0),
+            alpha=noise_params.get("alpha", 0.0),
+            grid_type=grid_type,
+            lmax=lmax,
+            seed=seed,
+            reflect=reflect,
+            learnable=noise_params.get("learnable", False),
+        )
+    elif ntype == "dummy":
+        return DummyNoiseS2(
+            img_shape=img_shape,
+            batch_size=batch_size,
+            num_channels=num_channels,
+            num_time_steps=num_time_steps,
+        )
+    else:
+        raise NotImplementedError(f"Error, noise type {ntype} not supported.")

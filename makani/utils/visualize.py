@@ -15,18 +15,60 @@
 
 import os
 import io
+import re
+from typing import Optional
 import multiprocessing as mp
 import numpy as np
 import concurrent.futures as cf
-from PIL import Image
+from PIL import Image, ImageDraw
 from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
 import wandb
 
 import torch
 
+_PLACEHOLDER_RE = re.compile(r"\{(\w+)\}")
+
+
+def resolve_plot_list(plot_list, channel_names):
+    """
+    Resolve symbolic ``{name}`` channel references in functor strings.
+
+    Each functor string in ``plot_list`` may reference channels by name using
+    ``{name}`` placeholders (e.g. ``"lambda x: x[{z500}, ...]"``). This walks
+    the list, collects the union of referenced channels in first-seen order,
+    rewrites each functor to index into a stripped tensor of just those
+    channels, and returns the new plot list together with the indices into the
+    original ``channel_names`` layout.
+    """
+    ordered_refs = []
+    seen = set()
+    for item in plot_list:
+        for name in _PLACEHOLDER_RE.findall(item["functor"]):
+            if name not in seen:
+                seen.add(name)
+                ordered_refs.append(name)
+
+    stripped_index = {name: i for i, name in enumerate(ordered_refs)}
+
+    channel_indices = []
+    for name in ordered_refs:
+        if name not in channel_names:
+            raise ValueError(f"functor references channel {name!r} which is not in channel_names")
+        channel_indices.append(channel_names.index(name))
+
+    new_plot_list = []
+    for item in plot_list:
+        new_item = dict(item)
+        new_item["functor"] = _PLACEHOLDER_RE.sub(lambda m: str(stripped_index[m.group(1)]), item["functor"])
+        new_plot_list.append(new_item)
+
+    return new_plot_list, channel_indices
+
+
 # we can run matplotlib in Agg mode in the subprocesses to save some memory overhead
 def _worker_init():
     os.environ["MPLBACKEND"] = "Agg"
+
 
 # per-process cache of (figure, pred_axes, truth_axes, pred_mesh, truth_mesh)
 # keyed on (H, W, figsize, projection, cmap). Each ProcessPoolExecutor worker
@@ -85,9 +127,14 @@ def plot_comparison(
     cmap: colormap
     projection: "mollweide", "hammer", "aitoff" or None
     """
-    assert len(pred.shape) == 2
-    assert len(truth.shape) == 2
-    assert pred.shape == truth.shape
+    if len(pred.shape) != 2:
+        raise ValueError(f"expected pred to be a 2D array, got shape {tuple(pred.shape)}")
+    if len(truth.shape) != 2:
+        raise ValueError(f"expected truth to be a 2D array, got shape {tuple(truth.shape)}")
+    if pred.shape != truth.shape:
+        raise ValueError(
+            f"expected pred and truth to have the same shape, got {tuple(pred.shape)} and {tuple(truth.shape)}"
+        )
 
     H, W = pred.shape
     if (lat is None) or (lon is None):
@@ -103,7 +150,13 @@ def plot_comparison(
         vmin = truth.min()
 
     fig, ax_pred, ax_truth, mesh_pred, mesh_truth = _get_or_create_figure(
-        H, W, lat, lon, figsize, projection, cmap,
+        H,
+        W,
+        lat,
+        lon,
+        figsize,
+        projection,
+        cmap,
     )
 
     mesh_pred.set_array(pred.ravel())
@@ -118,7 +171,9 @@ def plot_comparison(
     fig.savefig(buf)
     buf.seek(0)
 
-    return Image.open(buf)
+    img = Image.open(buf)
+    img.load()
+    return img
 
 
 def plot_rollout_metrics(metric_curves, var_names, score_path=None, file_prefix="curve", dtxdh=6):
@@ -143,7 +198,6 @@ def plot_rollout_metrics(metric_curves, var_names, score_path=None, file_prefix=
         y_locator = ticker.MaxNLocator(nbins=20)
         ax.yaxis.set_major_locator(y_locator)
         ax.grid(which="major", alpha=0.5)
-        ax.legend()
         ax.set_xlabel("Time [h]")
         ax.set_ylabel(file_prefix + " " + var_name)
         plt.setp(ax.get_xticklabels(), rotation=45, horizontalalignment="right")
@@ -151,12 +205,36 @@ def plot_rollout_metrics(metric_curves, var_names, score_path=None, file_prefix=
         # write out the plot
         if score_path is not None:
             fig.savefig(os.path.join(score_path, file_prefix + "_" + var_name + ".png"))
-        # # push to wandb
-        # if params.log_to_wandb:
-        #     wandb.log({metric + "_" + var_name: wandb.Image(fig)}, step=epoch)
 
 
-def visualize_field(tag, func_string, prediction, target, lat, lon, scale, bias, diverging):
+def _draw_progress_bar(image, progress: float, y_pos: float = 0.5, margin: int = 20, thickness: int = 6):
+    """Overlay a horizontal progress bar on the seam between the pred/truth subplots."""
+    w, h = image.size
+
+    y_pos = min(max(y_pos, 0.0), 1.0)
+    progress = min(max(progress, 0.0), 1.0)
+    margin = min(max(margin, 0), w // 2 - 1)
+    thickness = max(thickness, 1)
+
+    dy_neg = thickness // 2
+    dy_pos = thickness - dy_neg
+
+    y_mid = min(max(int(y_pos * h), dy_neg), h - dy_pos)
+
+    x0, x1 = margin, w - margin
+    y0, y1 = y_mid - dy_neg, y_mid + dy_pos
+    fill_x = int(x0 + progress * (x1 - x0))
+
+    draw = ImageDraw.Draw(image)
+    draw.rectangle([x0, y0, x1, y1], fill=(225, 225, 225))
+    if fill_x > x0:
+        draw.rectangle([x0, y0, fill_x, y1], fill=(40, 40, 40))
+    return image
+
+
+def visualize_field(
+    tag, func_string, prediction, target, lat, lon, scale, bias, diverging, progress: Optional[float] = None
+):
     torch.cuda.nvtx.range_push("visualize_field")
 
     # get func handle:
@@ -171,7 +249,19 @@ def visualize_field(tag, func_string, prediction, target, lat, lon, scale, bias,
     targ = func_handle(targ)
 
     # generate image
-    image = plot_comparison(pred, targ, lat, lon, pred_title="Prediction", truth_title="Ground truth", projection="mollweide", diverging=diverging)
+    image = plot_comparison(
+        pred,
+        targ,
+        lat,
+        lon,
+        pred_title="Prediction",
+        truth_title="Ground truth",
+        projection="mollweide",
+        diverging=diverging,
+    )
+
+    if progress is not None:
+        image = _draw_progress_bar(image, progress)
 
     torch.cuda.nvtx.range_pop()
 
@@ -181,18 +271,43 @@ def visualize_field(tag, func_string, prediction, target, lat, lon, scale, bias,
 class VisualizationWrapper(object):
     "Handles visualization during training"
 
-    def __init__(self, log_to_wandb, path, prefix, plot_list, lat=None, lon=None, scale=1.0, bias=0.0, num_workers=1):
+    def __init__(
+        self,
+        log_to_wandb,
+        path,
+        prefix,
+        plot_list,
+        channel_names=None,
+        lat=None,
+        lon=None,
+        scale=1.0,
+        bias=0.0,
+        num_workers=1,
+    ):
         self.log_to_wandb = log_to_wandb
         self.generate_video = True
         self.path = path
         self.prefix = prefix
-        self.plot_list = plot_list
+
+        # If channel_names is provided, resolve {name} placeholders in functor
+        # strings to indices into a stripped tensor that contains only the
+        # referenced channels. This avoids shipping unused channels to the
+        # renderer subprocesses.
+        if channel_names is not None:
+            self.plot_list, self.channel_indices = resolve_plot_list(plot_list, channel_names)
+        else:
+            self.plot_list = plot_list
+            self.channel_indices = None
 
         # grid
         self.lat = lat
         self.lon = lon
 
-        # normalization
+        # normalization: slice along the channel axis if we have a stripped index list
+        if self.channel_indices is not None and not isinstance(scale, (int, float)):
+            scale = scale[self.channel_indices].copy()
+        if self.channel_indices is not None and not isinstance(bias, (int, float)):
+            bias = bias[self.channel_indices].copy()
         self.scale = scale
         self.bias = bias
 
@@ -204,14 +319,32 @@ class VisualizationWrapper(object):
     def reset(self):
         self.requests = []
 
-    def add(self, tag, prediction, target):
-        # go through the plot list
+    def add(self, tag, prediction, target, progress: Optional[float] = None):
+        if self.channel_indices is not None:
+            pred = prediction[self.channel_indices].copy()
+            tar = target[self.channel_indices].copy()
+        else:
+            pred = np.copy(prediction)
+            tar = np.copy(target)
+
         for item in self.plot_list:
             field_name = item["name"]
             func_string = item["functor"]
             plot_diverge = item["diverging"]
             self.requests.append(
-                self.executor.submit(visualize_field, (tag, field_name), func_string, np.copy(prediction), np.copy(target), self.lat, self.lon, self.scale, self.bias, plot_diverge)
+                self.executor.submit(
+                    visualize_field,
+                    (tag, field_name),
+                    func_string,
+                    pred,
+                    tar,
+                    self.lat,
+                    self.lon,
+                    self.scale,
+                    self.bias,
+                    plot_diverge,
+                    progress=progress,
+                )
             )
 
         return

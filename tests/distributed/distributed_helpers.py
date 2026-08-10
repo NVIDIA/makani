@@ -31,6 +31,7 @@ IMG_SIZE_H = 64
 IMG_SIZE_W = 128
 CHANNEL_NAMES = ["u10m", "t2m", "u500", "z500", "t500"]
 
+
 def get_default_parameters():
 
     # instantiate parameters
@@ -111,13 +112,14 @@ def _init_grid(cls):
     # set up distributed
     cls.grid_size_h = int(os.getenv("GRID_H", 1))
     cls.grid_size_w = int(os.getenv("GRID_W", 1))
+    cls.grid_size_m = int(os.getenv("GRID_M", 1))
     cls.grid_size_e = int(os.getenv("GRID_E", 1))
-    cls.world_size = cls.grid_size_h * cls.grid_size_w * cls.grid_size_e
+    cls.world_size = cls.grid_size_h * cls.grid_size_w * cls.grid_size_m * cls.grid_size_e
 
     # init groups
     comm.init(
-        model_parallel_sizes=[cls.grid_size_h, cls.grid_size_w, 1, 1],
-        model_parallel_names=["h", "w", "fin", "fout"],
+        model_parallel_sizes=[cls.grid_size_h, cls.grid_size_w, cls.grid_size_m],
+        model_parallel_names=["h", "w", "matmul"],
         data_parallel_sizes=[cls.grid_size_e, -1],
         data_parallel_names=["ensemble", "batch"],
     )
@@ -139,16 +141,23 @@ def _init_grid(cls):
     # store comm group parameters
     cls.wrank = comm.get_rank("w")
     cls.hrank = comm.get_rank("h")
+    cls.mrank = comm.get_rank("matmul")
     cls.erank = comm.get_rank("ensemble")
     cls.w_group = comm.get_group("w")
     cls.h_group = comm.get_group("h")
+    cls.matmul_group = comm.get_group("matmul")
     cls.e_group = comm.get_group("ensemble")
 
     # initializing sht process groups just to be sure
     thd.init(cls.h_group, cls.w_group)
 
     if cls.world_rank == 0:
-        print(f"Running distributed tests on grid H x W x E = {cls.grid_size_h} x {cls.grid_size_w} x {cls.grid_size_e}")
+        print(
+            f"Running distributed tests on grid H x W x E = {cls.grid_size_h} x {cls.grid_size_w} x {cls.grid_size_e}"
+        )
+
+    # make sure every rank finishes setup together
+    sync_and_barrier()
 
     return
 
@@ -189,3 +198,39 @@ def _gather_helper(tensor, dim=None, group=None):
         tensor_gather = tensor.clone()
 
     return tensor_gather
+
+
+def reduce_success(success, device, group=None):
+    """All-reduce a per-rank boolean check result with logical AND (via MIN).
+
+    Returns the *global* verdict on every rank so all ranks assert consistently: a
+    failure on any single rank fails the test on all ranks. This avoids one rank
+    raising (and bailing out of the test) while the others are still blocked on a
+    subsequent collective -- which would otherwise hang the job at the next
+    all-gather / teardown barrier. Combined with the rank-0-only reporting in
+    conftest, it also ensures a silenced rank can never hide a failure.
+
+    Usage (assert the reduced verdict on every rank)::
+
+        ok = compare_tensors("output", out_full, out_gather, verbose=verbose)
+        self.assertTrue(reduce_success(ok, self.device), "output")
+    """
+    if (not dist.is_initialized()) or (dist.get_world_size(group) == 1):
+        return bool(success)
+    flag = torch.tensor([1 if success else 0], dtype=torch.int32, device=device)
+    dist.all_reduce(flag, op=dist.ReduceOp.MIN, group=group)
+    return bool(flag.item())
+
+
+def sync_and_barrier():
+    """Synchronize the device and barrier across all ranks.
+
+    Called at class setup/teardown boundaries so every rank reaches the boundary
+    together -- no rank races ahead into the next test class (or out of one) while
+    another is still running its kernels / collectives. No-ops when CUDA or
+    torch.distributed are unavailable.
+    """
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    if dist.is_initialized():
+        dist.barrier()

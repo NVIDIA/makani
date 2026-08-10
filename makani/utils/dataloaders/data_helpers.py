@@ -20,7 +20,7 @@ import numpy as np
 from .aws_connector import AWSConnector
 
 
-# this is a small helper to get the latitude and longitude grid consistently across 
+# this is a small helper to get the latitude and longitude grid consistently across
 # functions
 def get_lat_lon_grid(img_shape):
     latitude = np.linspace(90, -90, img_shape[0], endpoint=True)
@@ -66,6 +66,7 @@ def get_data_normalization(params):
 
     return bias, scale
 
+
 def get_time_diff_stds(params):
 
     time_diff_stds = None
@@ -73,7 +74,7 @@ def get_time_diff_stds(params):
     if hasattr(params, "time_diff_stds_path"):
         time_diff_stds = np.load(params.time_diff_stds_path)
     else:
-        raise ValueError(f"time_diff_std_path not defined.")
+        raise ValueError("time_diff_std_path not defined.")
 
     return time_diff_stds
 
@@ -92,7 +93,7 @@ def get_psd_stats(params):
             psd_means = psd_means[..., params.out_channels, :]
             psd_stds = psd_stds[..., params.out_channels, :]
     else:
-        raise ValueError(f"psd_means_path or psd_stds_path not defined.")
+        raise ValueError("psd_means_path or psd_stds_path not defined.")
 
     return psd_means, psd_stds
 
@@ -135,6 +136,12 @@ def get_climatology(params, mask_nan=True):
     return clim
 
 
+def get_hydrostatic_balance_climatology(params):
+    hydrostatic_balance_means = np.load(params.hydrostatic_balance_means_path)
+
+    return hydrostatic_balance_means
+
+
 # compute UTC timestamp fom year and hour into year.
 def get_timestamp(year, hour):
 
@@ -143,6 +150,7 @@ def get_timestamp(year, hour):
 
     # compute offset
     return jan_01_epoch + dt.timedelta(hours=hour)
+
 
 # this is a small helper to convert datetime to correct time zone
 def get_date_from_string(isostring):
@@ -154,11 +162,14 @@ def get_date_from_string(isostring):
 
     return date
 
+
 def get_date_from_timestamp(timestamp):
     return dt.datetime.fromtimestamp(timestamp, tz=dt.timezone.utc)
 
+
 def get_timedelta_from_timestamp(timestamp):
     return dt.timedelta(seconds=timestamp)
+
 
 def get_default_aws_connector(aws_session_token):
     return AWSConnector(
@@ -169,6 +180,9 @@ def get_default_aws_connector(aws_session_token):
         aws_session_token=aws_session_token,
     )
 
+
 def get_date_ranges(dates, lookback_hours: int, lookahead_hours: int):
-    time_ranges = [((date - dt.timedelta(hours=lookback_hours)), (date + dt.timedelta(hours=lookahead_hours))) for date in dates]
+    time_ranges = [
+        ((date - dt.timedelta(hours=lookback_hours)), (date + dt.timedelta(hours=lookahead_hours))) for date in dates
+    ]
     return time_ranges

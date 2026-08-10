@@ -20,8 +20,6 @@ import torch
 from makani.utils.losses.base_loss import GeometricBaseLoss, LossType
 from makani.utils import comm
 
-import torch_harmonics as th
-import torch_harmonics.distributed as thd
 
 # distributed stuff
 from torch_harmonics.distributed import split_tensor_along_dim
@@ -63,7 +61,9 @@ class GaussianMMDLoss(GeometricBaseLoss):
         )
 
         self.spatial_distributed = comm.is_distributed("spatial") and spatial_distributed
-        self.ensemble_distributed = comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1) and ensemble_distributed
+        self.ensemble_distributed = (
+            comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1) and ensemble_distributed
+        )
         self.alpha = alpha
         self.beta = beta
         self.channel_reduction = channel_reduction
@@ -72,7 +72,9 @@ class GaussianMMDLoss(GeometricBaseLoss):
         # we also need a variant of the weights split in ensemble direction:
         quad_weight_split = self.quadrature.quad_weight.reshape(1, 1, -1)
         if self.ensemble_distributed:
-            quad_weight_split = split_tensor_along_dim(quad_weight_split, dim=-1, num_chunks=comm.get_size("ensemble"))[comm.get_rank("ensemble")]
+            quad_weight_split = split_tensor_along_dim(quad_weight_split, dim=-1, num_chunks=comm.get_size("ensemble"))[
+                comm.get_rank("ensemble")
+            ]
         quad_weight_split = quad_weight_split.contiguous()
         self.register_buffer("quad_weight_split", quad_weight_split, persistent=False)
 
@@ -96,7 +98,13 @@ class GaussianMMDLoss(GeometricBaseLoss):
     def compute_channel_weighting(self, channel_weight_type: str, time_diff_scale: str) -> torch.Tensor:
         return torch.ones(1)
 
-    def forward(self, forecasts: torch.Tensor, observations: torch.Tensor, spatial_weights: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor:
+    def forward(
+        self,
+        forecasts: torch.Tensor,
+        observations: torch.Tensor,
+        spatial_weights: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> torch.Tensor:
 
         # sanity checks
         if forecasts.dim() != 5:
@@ -106,7 +114,9 @@ class GaussianMMDLoss(GeometricBaseLoss):
         if (spatial_weights is not None) and (spatial_weights.dim() != observations.dim()):
             spdim = spatial_weights.dim()
             odim = observations.dim()
-            raise ValueError(f"the weights have to have the same number of dimensions (found {spdim}) as observations (found {odim}).")
+            raise ValueError(
+                f"the weights have to have the same number of dimensions (found {spdim}) as observations (found {odim})."
+            )
 
         # we assume the following shapes:
         # forecasts: batch, ensemble, channels, lat, lon
@@ -188,15 +198,22 @@ class GaussianMMDLoss(GeometricBaseLoss):
         eskill = torch.exp(-0.5 * torch.square(eskill) / self.sigma)
 
         # mask out the diagonal elements in the spread term
-        espread = torch.where(torch.eye(num_ensemble, device=espread.device).bool().reshape(num_ensemble, num_ensemble, 1, 1), 0.0, espread)
+        espread = torch.where(
+            torch.eye(num_ensemble, device=espread.device).bool().reshape(num_ensemble, num_ensemble, 1, 1),
+            0.0,
+            espread,
+        )
 
         # now we have reduced everything and need to sum appropriately
         eskill = eskill.sum(dim=0) / float(num_ensemble)
         if num_ensemble > 1:
-            espread = espread.sum(dim=(0,1)) * (float(num_ensemble) - 1.0 + self.alpha) / float(num_ensemble * num_ensemble * (num_ensemble - 1))
+            espread = (
+                espread.sum(dim=(0, 1))
+                * (float(num_ensemble) - 1.0 + self.alpha)
+                / float(num_ensemble * num_ensemble * (num_ensemble - 1))
+            )
         else:
             espread = torch.zeros_like(eskill)
 
         # the resulting tensor should have dimension B, C which is what we return
         return eskill - 0.5 * espread
-

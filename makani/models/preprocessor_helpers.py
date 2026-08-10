@@ -17,7 +17,33 @@ import os
 from functools import partial
 import torch
 
+
 def get_bias_correction(params):
+    r"""
+    Load and shard the bias correction field, if one is configured.
+
+    The returned tensor is already restricted to this rank's local domain and
+    subsampled to match the model grid, so the caller can subtract it directly
+    without further slicing.
+
+    Parameters
+    ----------
+    params : ParamsBase
+        Configuration. ``bias_correction`` gives the path to the correction
+        file; the ``img_local_*`` keys and ``subsampling_factor`` determine the
+        local shard.
+
+    Returns
+    -------
+    torch.Tensor or None
+        Bias correction of shape ``(1, C, H_local, W_local)``, or ``None`` if
+        no ``bias_correction`` path is configured.
+
+    Raises
+    ------
+    IOError
+        If ``bias_correction`` is set but does not point at an existing file.
+    """
     if params.get("bias_correction", None) is not None:
         from makani.utils.auxiliary_fields import get_bias_correction
 
@@ -44,6 +70,30 @@ def get_bias_correction(params):
 
 
 def get_static_features(params):
+    r"""
+    Assemble the time-invariant feature channels for the model input.
+
+    Collects whichever static fields the configuration asks for -- grid
+    coordinates, orography, land-sea mask, soil type, Copernicus embeddings --
+    into a single tensor, sharded to this rank's local domain and subsampled to
+    the model grid. These give the network the geographic context that the
+    prognostic variables alone do not carry.
+
+    Parameters
+    ----------
+    params : ParamsBase
+        Configuration. ``add_grid``, ``add_orography``, ``add_landmask``,
+        ``add_soiltype`` and ``add_copernicus_emb`` select which features are
+        included; ``normalize_static_features`` enables area-weighted
+        normalization; the ``img_local_*`` / ``img_crop_*`` keys and
+        ``subsampling_factor`` determine the shard.
+
+    Returns
+    -------
+    torch.Tensor or None
+        Static features of shape ``(1, n_static, H_local, W_local)``, or
+        ``None`` if no static features are requested.
+    """
 
     # set up normalizer
     normalize_static_features = params.get("normalize_static_features", False)
@@ -52,10 +102,20 @@ def get_static_features(params):
         from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature
 
         quadrature_rule = grid_to_quadrature_rule(params.get("data_grid_type", "equiangular"))
-        crop_shape = [params.get("img_crop_shape_x", params.img_shape_x), params.get("img_crop_shape_y", params.img_shape_y)]
+        crop_shape = [
+            params.get("img_crop_shape_x", params.img_shape_x),
+            params.get("img_crop_shape_y", params.img_shape_y),
+        ]
         crop_offset = [params.get("img_crop_offset_x", 0), params.get("img_crop_offset_y", 0)]
 
-        quadrature = GridQuadrature(quadrature_rule, img_shape=params.img_shape, crop_shape=crop_shape, crop_offset=crop_offset, normalize=True, distributed=False)
+        quadrature = GridQuadrature(
+            quadrature_rule,
+            img_shape=params.img_shape,
+            crop_shape=crop_shape,
+            crop_offset=crop_offset,
+            normalize=True,
+            distributed=False,
+        )
 
         def normalize(tensor, eps=0.0):
             mean = quadrature(tensor).reshape(1, -1, 1, 1)
@@ -82,7 +142,9 @@ def get_static_features(params):
                 lon = torch.as_tensor(params.lon).to(torch.float32)
 
                 # convert grid if required
-                gconv = GridConverter(params.data_grid_type, params.model_grid_type, torch.deg2rad(lat), torch.deg2rad(lon))
+                gconv = GridConverter(
+                    params.data_grid_type, params.model_grid_type, torch.deg2rad(lat), torch.deg2rad(lon)
+                )
                 tx, ty = gconv.get_dst_coords()
                 tx = tx.to(torch.float32)
                 ty = ty.to(torch.float32)
@@ -104,7 +166,7 @@ def get_static_features(params):
                 for freq in range(1, num_freq + 1):
                     if singrid is None:
                         if add_cos:
-                            singrid =[torch.sin(grid), torch.cos(grid)]
+                            singrid = [torch.sin(grid), torch.cos(grid)]
                         else:
                             singrid = [torch.sin(grid)]
                     else:

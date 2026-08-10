@@ -29,7 +29,9 @@ from makani.utils.dataloaders.data_helpers import (
     get_date_ranges,
 )
 
-import sys, os
+import sys
+import os
+
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from .testutils import set_seed, get_default_parameters
 
@@ -86,8 +88,8 @@ class TestGetLatLonGrid(unittest.TestCase):
         lat, lon = get_lat_lon_grid((1, 1))
         self.assertEqual(lat.shape, (1,))
         self.assertEqual(lon.shape, (1,))
-        self.assertAlmostEqual(lat[0],  90.0)
-        self.assertAlmostEqual(lon[0],   0.0)
+        self.assertAlmostEqual(lat[0], 90.0)
+        self.assertAlmostEqual(lon[0], 0.0)
 
 
 # ===========================================================================
@@ -107,7 +109,7 @@ class TestGetDataNormalization(unittest.TestCase):
     def test_no_normalization_attr_returns_none(self):
         """Without a normalization attribute at all → (None, None)."""
         params = get_default_parameters()
-        del params.normalization          # remove the attribute
+        del params.normalization  # remove the attribute
         bias, scale = get_data_normalization(params)
         self.assertIsNone(bias)
         self.assertIsNone(scale)
@@ -124,7 +126,7 @@ class TestGetDataNormalization(unittest.TestCase):
         """zscore mode raises when global_means_path does not exist."""
         self.params.normalization = "zscore"
         self.params.global_means_path = "/nonexistent/means.npy"
-        self.params.global_stds_path  = "/nonexistent/stds.npy"
+        self.params.global_stds_path = "/nonexistent/stds.npy"
         with self.assertRaises(FileNotFoundError):
             get_data_normalization(self.params)
 
@@ -138,7 +140,7 @@ class TestGetClimatology(unittest.TestCase):
         set_seed(333)
         self.params = get_default_parameters()
         self.params.enable_synthetic_data = True
-        self.params.N_out_channels  = 5
+        self.params.N_out_channels = 5
         self.params.img_crop_shape_x = 32
         self.params.img_crop_shape_y = 64
         self.params.subsampling_factor = 1
@@ -148,9 +150,7 @@ class TestGetClimatology(unittest.TestCase):
         clim = get_climatology(self.params)
         self.assertEqual(
             clim.shape,
-            (1, self.params.N_out_channels,
-             self.params.img_crop_shape_x,
-             self.params.img_crop_shape_y),
+            (1, self.params.N_out_channels, self.params.img_crop_shape_x, self.params.img_crop_shape_y),
         )
 
     def test_all_zeros(self):
@@ -331,7 +331,7 @@ class TestGetDateRanges(unittest.TestCase):
         d1 = self._date(d=1)
         d2 = self._date(d=10)
         ranges = get_date_ranges([d1, d2], lookback_hours=6, lookahead_hours=6)
-        _, end1  = ranges[0]
+        _, end1 = ranges[0]
         start2, _ = ranges[1]
         self.assertLess(end1, start2)
 

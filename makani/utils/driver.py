@@ -35,7 +35,9 @@ from makani.utils.YParams import YParams
 from makani.utils.features import get_auxiliary_channels
 from makani.utils import comm
 from makani.utils.dataloaders.data_helpers import get_data_normalization
+from makani.utils.training.training_helpers import get_parameter_groups
 from makani.utils.checkpoint_helpers import (
+    load_checkpoint,
     gather_model_state_dict,
     scatter_model_state_dict,
     gather_optimizer_state_dict,
@@ -56,8 +58,32 @@ class Driver(metaclass=abc.ABCMeta):
         print_prefix = "    "
         if self.timers and self.log_to_screen:
             self.logger.info("Initialization time breakdown:")
-            for k,v in self.timers.items():
+            for k, v in self.timers.items():
                 self.logger.info(f"{print_prefix}{k} [s]: {v:.2f}")
+
+    def _watch_model(self, log="all"):
+        """Register wandb gradient/parameter logging, unless the model will be torch.compiled.
+
+        ``wandb.watch`` installs per-module/per-parameter hooks that compute histograms via
+        ``.item()``/``.tolist()``. Under ``torch.compile`` these hooks get traced into the graph:
+        every ``.item()`` is a graph break and the parameter ``name`` is specialized as a
+        constant, so dynamo recompiles once per parameter until it hits ``recompile_limit`` and
+        abandons compilation for that frame. The hook-based design is fundamentally incompatible
+        with a single compiled graph, so we skip watching when ``jit_mode`` enables compilation.
+        (If gradient/parameter histograms are needed under compile, log them out-of-graph in the
+        training loop after ``backward()`` instead.)
+        """
+        if not self.log_to_wandb:
+            return
+        if self.params.get("jit_mode", "none") == "inductor":
+            if self.log_to_screen:
+                self.logger.info(
+                    "Skipping wandb.watch under jit_mode=inductor: its hooks would be traced into "
+                    "the compiled graph and trigger a recompile per parameter (recompile_limit). "
+                    "Gradient/parameter histograms are disabled under torch.compile."
+                )
+            return
+        wandb.watch(self.model, log=log)
 
     def __init__(self, params: YParams = None, world_rank: Optional[int] = 0, device: Optional[str] = None):
         # define timer dict
@@ -80,12 +106,16 @@ class Driver(metaclass=abc.ABCMeta):
                 self.device = torch.device("cpu")
 
         # set the logger
-        self.log_to_screen = self.params.log_to_screen if (hasattr(params, "log_to_screen") and params.log_to_screen) else False
+        self.log_to_screen = (
+            self.params.log_to_screen if (hasattr(params, "log_to_screen") and params.log_to_screen) else False
+        )
         if self.log_to_screen:
             self.logger = logging.getLogger()
 
         # set wandb
-        self.log_to_wandb = self.params.log_to_wandb if (hasattr(params, "log_to_wandb") and params.log_to_wandb) else False
+        self.log_to_wandb = (
+            self.params.log_to_wandb if (hasattr(params, "log_to_wandb") and params.log_to_wandb) else False
+        )
 
     def __del__(self):
         if hasattr(self, "log_to_wandb") and self.log_to_wandb:
@@ -136,7 +166,7 @@ class Driver(metaclass=abc.ABCMeta):
         if not hasattr(params, "load_counters"):
             params["load_counters"] = True
 
-        if not  hasattr(params, "checkpoint_num_versions"):
+        if not hasattr(params, "checkpoint_num_versions"):
             params["checkpoint_num_versions"] = 3
 
         return params
@@ -168,8 +198,12 @@ class Driver(metaclass=abc.ABCMeta):
         params.img_shape_y_resampled = dataset.img_shape_y_resampled
         params.subsampling_factor = dataset.subsampling_factor
 
-        if (params.subsampling_factor > 1) and ((params.img_crop_shape_x != params.img_shape_x) or (params.img_crop_shape_y != params.img_shape_y)):
-            raise ValueError("Image cropping and data subsampling cannot be used together. Please set the crop shape to the image shape or set subsampling factor to 1.")
+        if (params.subsampling_factor > 1) and (
+            (params.img_crop_shape_x != params.img_shape_x) or (params.img_crop_shape_y != params.img_shape_y)
+        ):
+            raise ValueError(
+                "Image cropping and data subsampling cannot be used together. Please set the crop shape to the image shape or set subsampling factor to 1."
+            )
 
         # derived quantities
         params["N_in_predicted_channels"] = params.N_in_channels
@@ -277,7 +311,13 @@ class Driver(metaclass=abc.ABCMeta):
 
                 # initialize wandb: resume=must is super strict
                 # but its better to fail than doing the wrong thing silently
-                self.wandb_run = wandb.init(dir=params.wandb_dir, project=params.wandb_project, entity=params.wandb_entity, id=params["wandb_run_id"], resume="must")
+                self.wandb_run = wandb.init(
+                    dir=params.wandb_dir,
+                    project=params.wandb_project,
+                    entity=params.wandb_entity,
+                    id=params["wandb_run_id"],
+                    resume="must",
+                )
 
             # create wandb dataset artifact
             if hasattr(params, "dataset"):
@@ -296,7 +336,9 @@ class Driver(metaclass=abc.ABCMeta):
                         print(f"Using dataset artifact {dataset_tag}")
                     else:
                         # create new one if it does not exist
-                        self.wandb_dataset = wandb.Artifact(name=dataset_string, description=params["dataset"]["description"], type="dataset")
+                        self.wandb_dataset = wandb.Artifact(
+                            name=dataset_string, description=params["dataset"]["description"], type="dataset"
+                        )
                         self.wandb_dataset.add_file(params["dataset"]["metadata_file"], name="metadata")
                         wandb.log_artifact(self.wandb_dataset)
                         print(f"Creating artifact {dataset_string}")
@@ -327,7 +369,9 @@ class Driver(metaclass=abc.ABCMeta):
                         print(f"Using normalization artifact {norm_tag}")
                     else:
                         # create normalization artifact
-                        self.wandb_normalization = wandb.Artifact(name=norm_string, description="data normalization", type="dataset_normalization")
+                        self.wandb_normalization = wandb.Artifact(
+                            name=norm_string, description="data normalization", type="dataset_normalization"
+                        )
                         bias, scale = get_data_normalization(params)
                         # filter only used channels
                         bias = bias.flatten()[params.in_channels]
@@ -361,10 +405,14 @@ class Driver(metaclass=abc.ABCMeta):
         with torch.no_grad():
             if checkpoint_mode == "legacy":
                 # legacy mode
-                Driver._restore_checkpoint_legacy(checkpoint_path, model, loss, optimizer, scheduler, counters, strict=strict)
+                Driver._restore_checkpoint_legacy(
+                    checkpoint_path, model, loss, optimizer, scheduler, counters, strict=strict
+                )
             elif checkpoint_mode == "flexible":
                 # new flexible mode allows to load models in arbitrary model-parallel configurations
-                Driver._restore_checkpoint_flexible(checkpoint_path, model, loss, optimizer, scheduler, counters, strict=strict)
+                Driver._restore_checkpoint_flexible(
+                    checkpoint_path, model, loss, optimizer, scheduler, counters, strict=strict
+                )
             else:
                 raise ValueError(f"Unknown checkoint mode {checkpoint_mode}.")
 
@@ -385,7 +433,7 @@ class Driver(metaclass=abc.ABCMeta):
         validate_comms: bool = True,
     ):
         checkpoint_fname = checkpoint_path.format(mp_rank=comm.get_rank("model"))
-        checkpoint = torch.load(checkpoint_fname, map_location="cpu", weights_only=False)
+        checkpoint = load_checkpoint(checkpoint_fname, map_location="cpu")
 
         # check compatibility of the comm grid stored inside the file
         if validate_comms:
@@ -403,13 +451,19 @@ class Driver(metaclass=abc.ABCMeta):
                 for cname in comm_names:
                     # check comm
                     if cname not in comm_dict.keys():
-                        raise RuntimeError(f"Error, communicator name {cname} not found in communicator information stored in file, but present in the current comm table.")
+                        raise RuntimeError(
+                            f"Error, communicator name {cname} not found in communicator information stored in file, but present in the current comm table."
+                        )
                     # check size
                     if comm.get_size(cname) != comm_dict[cname]["size"]:
-                        raise RuntimeError(f"Error, communicator {cname} has size {comm.get_size(cname)}, but expected size {comm_dict[cname]['size']}")
+                        raise RuntimeError(
+                            f"Error, communicator {cname} has size {comm.get_size(cname)}, but expected size {comm_dict[cname]['size']}"
+                        )
                     # check rank
                     if comm.get_rank(cname) != comm_dict[cname]["rank"]:
-                        raise RuntimeError(f"Error, communicator {cname} rank {comm.get_rank(cname)} is trying to load a file from rank {comm_dict[cname]['rank']}")
+                        raise RuntimeError(
+                            f"Error, communicator {cname} rank {comm.get_rank(cname)} is trying to load a file from rank {comm_dict[cname]['rank']}"
+                        )
 
         # if all those test pass, we are good to go
         # this is reworked to avoid loading modules related to the SHT
@@ -450,7 +504,7 @@ class Driver(metaclass=abc.ABCMeta):
     ):
         # when loading the weights in flexble mode we exclusively use mp_rank=0 and load them onto the cpu
         checkpoint_fname = checkpoint_path.format(mp_rank=0)
-        checkpoint = torch.load(checkpoint_fname, map_location="cpu", weights_only=False)
+        checkpoint = load_checkpoint(checkpoint_fname, map_location="cpu")
 
         # this is reworked to avoid loading modules related to the SHT
         state_dict = checkpoint["model_state"]
@@ -472,7 +526,9 @@ class Driver(metaclass=abc.ABCMeta):
         # If finetuning, restore checkpoint does not load optimizer state, instead uses config specified lr.
         if optimizer is not None:
             if comm.get_size("model") > 1:
-                checkpoint["optimizer_state_dict"] = scatter_optimizer_state_dict(model, optimizer, checkpoint["optimizer_state_dict"])
+                checkpoint["optimizer_state_dict"] = scatter_optimizer_state_dict(
+                    model, optimizer, checkpoint["optimizer_state_dict"]
+                )
             optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
         if scheduler is not None:
@@ -650,19 +706,42 @@ class Driver(metaclass=abc.ABCMeta):
 
         # optimizer setup
         betas = (params.optimizer_beta1, params.optimizer_beta2)
-        all_parameters = model.parameters()
+        # build parameter groups according to the weight-decay mode ("full" decays
+        # everything; "transformer" excludes biases and norm affine params). Each group
+        # carries its own weight_decay, so it is no longer passed at the optimizer level.
+        weight_decay = params.get("weight_decay", 0)
+        weight_decay_mode = params.get("weight_decay_mode", "full")
+        all_parameters = get_parameter_groups(model, weight_decay, weight_decay_mode)
         if params.optimizer_type == "Adam":
             if self.log_to_screen:
-                self.logger.info("using Adam optimizer")
-            optimizer = optim.Adam(all_parameters, lr=params.get("lr", 1e-3), betas=betas, eps=params.get("optimizer_eps", 1e-8), weight_decay=params.get("weight_decay", 0), foreach=True)
+                self.logger.info(f"using Adam optimizer (weight_decay_mode={weight_decay_mode})")
+            optimizer = optim.Adam(
+                all_parameters,
+                lr=params.get("lr", 1e-3),
+                betas=betas,
+                eps=params.get("optimizer_eps", 1e-8),
+                foreach=True,
+            )
         elif params.optimizer_type == "AdamW":
             if self.log_to_screen:
-                self.logger.info("using AdamW optimizer")
-            optimizer = optim.AdamW(all_parameters, lr=params.get("lr", 1e-3), betas=betas, eps=params.get("optimizer_eps", 1e-8), weight_decay=params.get("weight_decay", 0), foreach=True)
+                self.logger.info(f"using AdamW optimizer (weight_decay_mode={weight_decay_mode})")
+            optimizer = optim.AdamW(
+                all_parameters,
+                lr=params.get("lr", 1e-3),
+                betas=betas,
+                eps=params.get("optimizer_eps", 1e-8),
+                foreach=True,
+            )
         elif params.optimizer_type == "SGD":
             if self.log_to_screen:
-                self.logger.info("using SGD optimizer")
-            optimizer = optim.SGD(all_parameters, lr=params.get("lr", 1e-3), weight_decay=params.get("weight_decay", 0), momentum=params.get("momentum", 0), nesterov=params.get("nesterov", False), foreach=True)
+                self.logger.info(f"using SGD optimizer (weight_decay_mode={weight_decay_mode})")
+            optimizer = optim.SGD(
+                all_parameters,
+                lr=params.get("lr", 1e-3),
+                momentum=params.get("momentum", 0),
+                nesterov=params.get("nesterov", False),
+                foreach=True,
+            )
         elif params.optimizer_type == "SIRFShampoo":
             if self.log_to_screen:
                 self.logger.info("using SIRFShampoo optimizer")
@@ -682,18 +761,34 @@ class Driver(metaclass=abc.ABCMeta):
             if not hasattr(params, "scheduler_mode"):
                 params["scheduler_mode"] = "min"
             if params.get("skip_validation", False):
-                raise ValueError(f"Error, you cannot skip validation when using ReduceLROnPlateau scheduler.")
-            scheduler = lr_scheduler.ReduceLROnPlateau(optimizer, factor=params.scheduler_factor, patience=params.scheduler_patience, mode=params.scheduler_mode)
+                raise ValueError("Error, you cannot skip validation when using ReduceLROnPlateau scheduler.")
+            scheduler = lr_scheduler.ReduceLROnPlateau(
+                optimizer,
+                factor=params.scheduler_factor,
+                patience=params.scheduler_patience,
+                mode=params.scheduler_mode,
+            )
         elif params.scheduler == "StepLR":
-            scheduler = lr_scheduler.StepLR(optimizer, step_size=params.scheduler_step_size, gamma=params.scheduler_gamma)
+            scheduler = lr_scheduler.StepLR(
+                optimizer, step_size=params.scheduler_step_size, gamma=params.scheduler_gamma
+            )
         elif params.scheduler == "CosineAnnealingLR":
             if not hasattr(params, "scheduler_min_lr"):
                 params["scheduler_min_lr"] = 0.0
-            scheduler = lr_scheduler.CosineAnnealingLR(optimizer, T_max=params.scheduler_T_max, eta_min=params.scheduler_min_lr)
+            scheduler = lr_scheduler.CosineAnnealingLR(
+                optimizer, T_max=params.scheduler_T_max, eta_min=params.scheduler_min_lr
+            )
         elif params.scheduler == "OneCycleLR":
-            scheduler = lr_scheduler.OneCycleLR(optimizer, max_lr=params.lr, total_steps=params.scheduler_T_max, steps_per_epoch=1)
+            scheduler = lr_scheduler.OneCycleLR(
+                optimizer, max_lr=params.lr, total_steps=params.scheduler_T_max, steps_per_epoch=1
+            )
         elif params.scheduler == "CosineAnnealingWarmRestarts":
-            scheduler = lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=params.get("scheduler_T_0", 10), T_mult=params.get("scheduler_T_mult", 1), eta_min=params.get("scheduler_min_lr", 0.0))
+            scheduler = lr_scheduler.CosineAnnealingWarmRestarts(
+                optimizer,
+                T_0=params.get("scheduler_T_0", 10),
+                T_mult=params.get("scheduler_T_mult", 1),
+                eta_min=params.get("scheduler_min_lr", 0.0),
+            )
         else:
             scheduler = None
 
@@ -701,13 +796,21 @@ class Driver(metaclass=abc.ABCMeta):
         if params.lr_warmup_steps > 0:
             if params.scheduler == "ReduceLROnPlateau":
                 raise NotImplementedError("Error, warmup scheduler not implemented for ReduceLROnPlateau scheduler")
-            warmup_scheduler = lr_scheduler.LinearLR(optimizer, start_factor=params.get("lr_start", 1E-5), end_factor=1.0, total_iters=params.get("lr_warmup_steps", 0))
+            warmup_scheduler = lr_scheduler.LinearLR(
+                optimizer,
+                start_factor=params.get("lr_start", 1e-5),
+                end_factor=1.0,
+                total_iters=params.get("lr_warmup_steps", 0),
+            )
 
-            scheduler = lr_scheduler.SequentialLR(optimizer, [warmup_scheduler, scheduler], milestones=[params.get("lr_warmup_steps", 0)])
+            scheduler = lr_scheduler.SequentialLR(
+                optimizer, [warmup_scheduler, scheduler], milestones=[params.get("lr_warmup_steps", 0)]
+            )
 
         return scheduler
 
-    def init_visualizer(self,
+    def init_visualizer(
+        self,
         params: YParams,
         lat_lon_global: Tuple[np.ndarray, np.ndarray],
         out_bias: torch.Tensor,
@@ -719,42 +822,39 @@ class Driver(metaclass=abc.ABCMeta):
         """
         from makani.utils import visualize
 
-        # windspeed
+        # Functors reference channels symbolically via {name} placeholders. The
+        # visualizer resolves them against channel_names, ships only the
+        # referenced channels to the renderer subprocesses, and rewrites each
+        # functor to index into the stripped tensor.
         cnames = params.channel_names
-        u10m_channel_index = cnames.index("u10m") if "u10m" in cnames else None
-        v10m_channel_index = cnames.index("v10m") if "v10m" in cnames else None
-        if u10m_channel_index is not None and v10m_channel_index is not None:
-            plot_list = [
+        plot_list = []
+
+        if "u10m" in cnames and "v10m" in cnames:
+            plot_list.append(
                 {
                     "name": "windspeed_uv10",
-                    "functor": f"lambda x: np.sqrt(np.square(x[{u10m_channel_index}, ...]) + np.square(x[{v10m_channel_index}, ...]))",
-                    "diverging": False
+                    "functor": "lambda x: np.sqrt(np.square(x[{u10m}, ...]) + np.square(x[{v10m}, ...]))",
+                    "diverging": False,
                 }
-            ]
-        else:
-            plot_list = []
+            )
 
-        # z500
-        channel_index = cnames.index("z500") if "z500" in cnames else None
-        if channel_index is not None:
-            plot_list += [
+        if "z500" in cnames:
+            plot_list.append(
                 {
-                    "name": "geopotential_z500", 
-                    "functor": f"lambda x: x[{channel_index}, ...]", 
-                    "diverging": False
+                    "name": "geopotential_z500",
+                    "functor": "lambda x: x[{z500}, ...]",
+                    "diverging": False,
                 }
-            ]
+            )
 
-        # q100
-        channel_index = cnames.index("q100") if "q100" in cnames else None
-        if channel_index is not None:
-            plot_list += [
+        if "q100" in cnames:
+            plot_list.append(
                 {
-                    "name": "specific_humidity_q100", 
-                    "functor": f"lambda x: x[{channel_index}, ...]", 
-                    "diverging": False
+                    "name": "specific_humidity_q100",
+                    "functor": "lambda x: x[{q100}, ...]",
+                    "diverging": False,
                 }
-            ]
+            )
 
         if plot_list:
             visualizer = visualize.VisualizationWrapper(
@@ -762,6 +862,7 @@ class Driver(metaclass=abc.ABCMeta):
                 path=None,
                 prefix=None,
                 plot_list=plot_list,
+                channel_names=cnames,
                 lat=np.deg2rad(lat_lon_global[0]),
                 lon=np.deg2rad(lat_lon_global[1]) - np.pi,
                 scale=out_scale[0, ...],
@@ -777,12 +878,53 @@ class Driver(metaclass=abc.ABCMeta):
                 pin_memory = False
 
             visualizer.prediction_cpu = torch.empty(
-                ((params.N_target_channels // (params.n_future + 1)), params.img_shape_x_resampled, params.img_shape_y_resampled), device="cpu", pin_memory=pin_memory
-                )
+                (
+                    (params.N_target_channels // (params.n_future + 1)),
+                    params.img_shape_x_resampled,
+                    params.img_shape_y_resampled,
+                ),
+                device="cpu",
+                pin_memory=pin_memory,
+            )
             visualizer.target_cpu = torch.empty(
-                ((params.N_target_channels // (params.n_future + 1)), params.img_shape_x_resampled, params.img_shape_y_resampled), device="cpu", pin_memory=pin_memory
+                (
+                    (params.N_target_channels // (params.n_future + 1)),
+                    params.img_shape_x_resampled,
+                    params.img_shape_y_resampled,
+                ),
+                device="cpu",
+                pin_memory=pin_memory,
             )
         else:
             visualizer = None
 
         return visualizer
+
+    def _setup_visualizer(self, out_bias: torch.Tensor, out_scale: torch.Tensor):
+        """Initialize self.visualizer on rank 0; set to None on all other ranks."""
+        if self.world_rank == 0:
+            self.visualizer = self.init_visualizer(self.params, self.lat_lon_global, out_bias, out_scale, self.device)
+            if self.visualizer is None:
+                self.logger.info("No channels to visualize, skipping visualization.")
+        else:
+            self.visualizer = None
+
+    def _visualize_step(
+        self, pred_gather: torch.Tensor, targ_gather: torch.Tensor, eval_steps: int, idt: int, ndt: Optional[int] = None
+    ):
+        """Copy gathered tensors to the visualizer and queue a frame. No-op when self.visualizer is None."""
+        if self.visualizer is None:
+            return
+        if self.visualizer.stream is not None:
+            self.visualizer.stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(self.visualizer.stream):
+                self.visualizer.prediction_cpu.copy_(pred_gather, non_blocking=True)
+                self.visualizer.target_cpu.copy_(targ_gather, non_blocking=True)
+            self.visualizer.stream.synchronize()
+        else:
+            self.visualizer.prediction_cpu.copy_(pred_gather)
+            self.visualizer.target_cpu.copy_(targ_gather)
+        pred_cpu = self.visualizer.prediction_cpu.to(torch.float32).numpy()
+        targ_cpu = self.visualizer.target_cpu.to(torch.float32).numpy()
+        progress = idt / max(ndt - 1, 1) if ndt is not None else None
+        self.visualizer.add(f"step{eval_steps}_time{str(idt).zfill(3)}", pred_cpu, targ_cpu, progress=progress)

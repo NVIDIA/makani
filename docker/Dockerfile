@@ -24,10 +24,11 @@ RUN apt remove cmake -y && \
     pip install cmake --upgrade
 
 # install mpi4py
-RUN SETUPTOOLS_USE_DISTUTILS=local pip install mpi4py
+RUN pip install mpi4py
 
 # install onnx
-RUN pip install onnxruntime onnxruntime-gpu
+RUN pip install onnxruntime && \
+    if [ "$(uname -m)" = "x86_64" ]; then pip install onnxruntime-gpu; fi
 
 # hdf5 and h5py
 ENV HDF5_VERSION=2.0.0
@@ -45,39 +46,48 @@ RUN cd /tmp && wget https://support.hdfgroup.org/releases/hdf5/v2_0/v2_0_0/downl
     .. && \
     make -j 8 && make install && \
     mkdir -p /opt/hdf5/lib/plugin
-RUN CC="mpicc" HDF5_MPI=ON H5PY_DIRECT_VFD=1 HDF5_DIR=/opt/hdf5 pip install --no-build-isolation --no-binary=h5py h5py==3.15.1
+RUN CC="mpicc" HDF5_MPI=ON H5PY_DIRECT_VFD=1 HDF5_DIR=/opt/hdf5 pip install --no-build-isolation --no-binary=h5py h5py==3.16.0
 ENV PATH=/opt/hdf5/bin:${PATH}
 
 # install cdsapi for downloading the dataset
 RUN pip install cdsapi>=0.7.2
 
 # install zarr and data stuff
-RUN pip install more_itertools zarr xarray gcsfs boto3
+RUN pip install more_itertools zarr xarray gcsfs s3fs boto3
 
 # moviepy for wandb video logging
 RUN pip install moviepy
 
 # other python stuff
-RUN pip install --upgrade wandb ruamel.yaml tqdm progressbar2
+RUN pip install --upgrade wandb ruamel.yaml tqdm
 
 # scoring tools
 RUN pip install xskillscore properscoring
 
+# Git dependencies are pinned to immutable commit SHAs rather than branches or tags,
+# so that an upstream force-push or a repointed tag cannot change what lands in the
+# image. SHAs below are the respective default branches as of 2026-08-04; bump them
+# deliberately.
+
 # weatherbench2
-RUN pip install "git+https://github.com/google-research/weatherbench2.git"
+RUN pip install "git+https://github.com/google-research/weatherbench2.git@95c36d547b22abc2d191451a580b0b194fde67ef"
 
 # some useful scripts from mlperf
-RUN pip install --ignore-installed "git+https://github.com/NVIDIA/mlperf-common.git"
+RUN pip install --ignore-installed "git+https://github.com/NVIDIA/mlperf-common.git@c02c93c0414071400a10716d9cd5cb8f668b78d4"
 
-# physicsnemo
-RUN pip install git+https://github.com/NVIDIA/physicsnemo.git@v1.1.1
+# physicsnemo (SHA of tag v1.3.0)
+RUN pip install git+https://github.com/NVIDIA/physicsnemo.git@14e0874847ffb56b35abf7708a1665e71605999c
 
 # torch-harmonics
 RUN pip install setuptools_scm
-ENV FORCE_CUDA_EXTENSION 1
-ENV TORCH_CUDA_ARCH_LIST "8.0 8.6 8.7 9.0 10.0+PTX"
+# torch-harmonics gates the CUDA build on this variable; without it BUILD_CUDA falls back
+# to torch.cuda.is_available(), which is False inside docker build (no GPU on the builder),
+# and TH silently compiles CPU-only kernels. The old name FORCE_CUDA_EXTENSION is dead.
+ENV TORCH_HARMONICS_BUILD_CUDA_EXTENSION=1
+ENV TORCH_CUDA_ARCH_LIST="8.0 8.6 8.7 9.0a 10.0a+PTX"
 RUN cd /opt && git clone https://github.com/NVIDIA/torch-harmonics.git && \
     cd torch-harmonics && \
+    git checkout 887006c640f1d61c3f80590ecc2b207bbb647072 && \
     pip install --no-build-isolation -e .
 
 # copy source code

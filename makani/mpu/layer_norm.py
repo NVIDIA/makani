@@ -29,7 +29,9 @@ from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature
 
 
 @torch.compile
-def _normalize_transform_kernel(x: torch.Tensor, mean: torch.Tensor, var: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor, eps: float) -> torch.Tensor:
+def _normalize_transform_kernel(
+    x: torch.Tensor, mean: torch.Tensor, var: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor, eps: float
+) -> torch.Tensor:
 
     # normalization
     x = (x - mean) / torch.sqrt(var + eps)
@@ -50,7 +52,9 @@ def _normalize_kernel(x: torch.Tensor, mean: torch.Tensor, var: torch.Tensor, ep
 
 
 @torch.compile
-def _welford_kernel(vars: torch.Tensor, means: torch.Tensor, counts: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def _welford_kernel(
+    vars: torch.Tensor, means: torch.Tensor, counts: torch.Tensor
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 
     # for weighted welford, replace counts by
     # omega = sum_i w_i, where w_i are the individual weights
@@ -77,7 +81,9 @@ def _welford_kernel(vars: torch.Tensor, means: torch.Tensor, counts: torch.Tenso
     return var, mean, count
 
 
-def distributed_welford_variance(var: torch.Tensor, mean: torch.Tensor, count: torch.Tensor, comm_id: str) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def distributed_welford_variance(
+    var: torch.Tensor, mean: torch.Tensor, count: torch.Tensor, comm_id: str
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Computes the statistics locally, then uses the Welford online algorithm to reduce them"""
 
     # concatenate:
@@ -149,15 +155,17 @@ class DistributedInstanceNorm2d(nn.Module):
             mean = copy_to_parallel_region(mean, "spatial")
             var = copy_to_parallel_region(var, "spatial")
 
-        # convert back
-        mean = mean.to(xtype)
-        var = var.to(xtype)
+            # normalize (and affine) in fp32 for numerical stability, matching the
+            # behaviour of PyTorch's native (autocast-fp32) norm ops
+            if self.affine:
+                xf = _normalize_transform_kernel(
+                    xf, mean, var, self.weight.reshape(-1, 1, 1), self.bias.reshape(-1, 1, 1), self.eps
+                )
+            else:
+                xf = _normalize_kernel(xf, mean, var, self.eps)
 
-        # apply the normalization
-        if self.affine:
-            x = _normalize_transform_kernel(x, mean, var, self.weight.reshape(-1, 1, 1), self.bias.reshape(-1, 1, 1), self.eps)
-        else:
-            x = _normalize_kernel(x, mean, var, self.eps)
+        # cast back to the input dtype so the layer is faithful to its input
+        x = xf.to(xtype)
 
         return x
 
@@ -189,7 +197,7 @@ class DistributedGeometricInstanceNormS2(DistributedInstanceNorm2d):
             crop_shape=crop_shape,
             crop_offset=crop_offset,
             normalize=True,
-            distributed=True
+            distributed=True,
         ).quad_weight
 
         self.register_buffer("quad_weight", quad_weight, persistent=False)
@@ -203,7 +211,10 @@ class DistributedGeometricInstanceNormS2(DistributedInstanceNorm2d):
         # compute var, mean locally: those have the shapes [B, C]
         count = torch.tile(torch.sum(self.quad_weight, dim=(-2, -1), keepdim=False), (B, C))
         mean = torch.sum(x * self.quad_weight, dim=(-2, -1), keepdim=False) / count
-        var = torch.sum(torch.square(x - mean.reshape(B, C, 1, 1)) * self.quad_weight, dim=(-2, -1), keepdim=False) / count
+        var = (
+            torch.sum(torch.square(x - mean.reshape(B, C, 1, 1)) * self.quad_weight, dim=(-2, -1), keepdim=False)
+            / count
+        )
 
         # compute welford variance
         var, mean, _ = distributed_welford_variance(var, mean, count, "spatial")
@@ -227,15 +238,17 @@ class DistributedGeometricInstanceNormS2(DistributedInstanceNorm2d):
             mean = copy_to_parallel_region(mean, "spatial")
             var = copy_to_parallel_region(var, "spatial")
 
-        # convert back
-        mean = mean.to(xtype)
-        var = var.to(xtype)
+            # normalize (and affine) in fp32 for numerical stability, matching the
+            # behaviour of PyTorch's native (autocast-fp32) norm ops
+            if self.affine:
+                xf = _normalize_transform_kernel(
+                    xf, mean, var, self.weight.reshape(-1, 1, 1), self.bias.reshape(-1, 1, 1), self.eps
+                )
+            else:
+                xf = _normalize_kernel(xf, mean, var, self.eps)
 
-        # apply the normalization
-        if self.affine:
-            x = _normalize_transform_kernel(x, mean, var, self.weight.reshape(-1, 1, 1), self.bias.reshape(-1, 1, 1), self.eps)
-        else:
-            x = _normalize_kernel(x, mean, var, self.eps)
+        # cast back to the input dtype so the layer is faithful to its input
+        x = xf.to(xtype)
 
         return x
 
@@ -250,9 +263,14 @@ class DistributedLayerNorm(nn.Module):
     def __init__(self, normalized_shape, eps=1e-05, elementwise_affine=True, bias=True, device=None, dtype=None):
         super().__init__()
 
-        assert comm.get_size("matmul") == 1
+        if comm.get_size("matmul") != 1:
+            raise ValueError(
+                f"this layer norm does not support matmul parallelism, but got matmul comm size {comm.get_size('matmul')}"
+            )
 
-        self.norm = nn.LayerNorm(normalized_shape, eps=eps, elementwise_affine=elementwise_affine, bias=bias, device=device, dtype=dtype)
+        self.norm = nn.LayerNorm(
+            normalized_shape, eps=eps, elementwise_affine=elementwise_affine, bias=bias, device=device, dtype=dtype
+        )
 
         if elementwise_affine:
             # set up weight sharing and sharding

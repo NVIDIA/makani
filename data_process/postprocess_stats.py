@@ -20,14 +20,15 @@ import argparse as ap
 import json
 import glob
 
+
 def main(desc_path, input_path, output_path):
 
     # open metadata file
-    with open(args.metadata_file, 'r') as f:
+    with open(args.metadata_file, "r") as f:
         metadata = json.load(f)
 
     # read channel names
-    channel_names = metadata['coords']['channel']
+    channel_names = metadata["coords"]["channel"]
 
     # copy all stats files first
     for f in glob.iglob(os.path.join(input_path, "*.npy")):
@@ -50,7 +51,7 @@ def main(desc_path, input_path, output_path):
     stds = np.maximum(stds, 1e-4)
     np.save(stds_file, stds)
     # time diff
-    stds_file =	os.path.join(output_path, "time_diff_stds.npy")
+    stds_file = os.path.join(output_path, "time_diff_stds.npy")
     stds = np.load(stds_file)
     stds = np.maximum(stds, 1e-4)
     np.save(stds_file, stds)

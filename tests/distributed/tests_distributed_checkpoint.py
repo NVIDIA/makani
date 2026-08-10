@@ -24,8 +24,9 @@ import torch.distributed as dist
 
 from makani.utils import comm
 from makani.utils.driver import Driver
+from makani.utils.checkpoint_helpers import gather_model_state_dict
 
-from .distributed_helpers import _init_grid
+from .distributed_helpers import _init_grid, reduce_success, sync_and_barrier
 
 
 class _ShardedTestModel(nn.Module):
@@ -55,17 +56,51 @@ class _ShardedTestModel(nn.Module):
         return x  # not used; tests touch state_dict only
 
 
+class _DivergentPlanModel(_ShardedTestModel):
+    """
+    Model whose gather *plan* differs across the model group: only the model-root
+    rank registers an extra sharded parameter, so its ordered sequence of
+    gather_uneven calls has one more entry than every other rank's.
+
+    This is the artificial analog of the real failure mode behind the checkpoint
+    hang -- ``model.named_parameters()`` (and hence the per-param all_gather
+    sequence) not matching across the model-parallel ranks. The crc precondition
+    in ``gather_model_state_dict`` must catch it as a clean ``RuntimeError`` rather
+    than letting it deadlock the ``all_gather`` inside ``gather_uneven`` (the
+    600s NCCL timeout we are guarding against).
+    """
+
+    def __init__(self, local_weight: torch.Tensor, num_features: int):
+        super().__init__(local_weight, num_features)
+        if comm.get_rank("model") == 0:
+            # extra parameter sharded over "w" -> adds one entry to this rank's
+            # gather plan only. (Never actually gathered: the crc check fires first.)
+            self.extra = nn.Parameter(torch.zeros(num_features))
+            self.extra.is_shared_mp = ["spatial"]
+            self.extra.sharded_dims_mp = ["w"]
+
+
 class TestDistributedCheckpoint(unittest.TestCase):
     """
     Round-trip tests for the legacy and flexible checkpoint formats under
-    spatial model parallelism (h × w groups).
+    spatial model parallelism (h × w groups), with optional ensemble (E) and
+    batch (B) data parallelism layered on top.
 
     Run with e.g.::
 
-        GRID_H=2 GRID_W=2 mpirun -n 4 pytest tests/distributed/test_distributed_checkpoint.py
+        # pure spatial model parallel (H x W)
+        GRID_H=2 GRID_W=2 mpirun -n 4 pytest tests/distributed/tests_distributed_checkpoint.py
 
-    The test passes trivially when world_size=1 (no sharding actually happens),
-    so meaningful coverage requires multi-process launch.
+        # spatial + ensemble + batch: model=H*W*M=4, data=E*B; with -n 16 and
+        # GRID_E=2 the remaining factor (16/4/2 = 2) auto-fills the batch group,
+        # so this exercises H x W x E x B = 2 x 2 x 2 x 2.
+        GRID_H=2 GRID_W=2 GRID_E=2 mpirun -n 16 pytest tests/distributed/tests_distributed_checkpoint.py
+
+    The flexible save gathers sharded params over the *model* group only and
+    replicates the result across the data-parallel (ensemble/batch) groups, so
+    running with E,B > 1 is what exercises the desync the crc precondition guards
+    against. The tests pass trivially when world_size=1 (no sharding actually
+    happens), so meaningful coverage requires multi-process launch.
     """
 
     @classmethod
@@ -94,9 +129,8 @@ class TestDistributedCheckpoint(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        # Only rank 0 cleans up, all ranks barrier first to ensure no in-flight reads.
-        if dist.is_initialized():
-            dist.barrier()
+        # Only rank 0 cleans up; sync + barrier first to ensure no in-flight reads.
+        sync_and_barrier()
         if cls.world_rank == 0 and cls.tmpdir is not None and os.path.isdir(cls.tmpdir):
             shutil.rmtree(cls.tmpdir, ignore_errors=True)
 
@@ -137,7 +171,7 @@ class TestDistributedCheckpoint(unittest.TestCase):
         for name, param in model.named_parameters():
             ref = snapshot[name]
             self.assertTrue(
-                torch.equal(param.detach().cpu(), ref.detach().cpu()),
+                reduce_success(torch.equal(param.detach().cpu(), ref.detach().cpu()), self.device),
                 msg=f"[{label}] rank {self.world_rank} param '{name}' mismatch after restore",
             )
 
@@ -154,8 +188,13 @@ class TestDistributedCheckpoint(unittest.TestCase):
 
         # 1. Save in legacy mode: each rank writes its own slice to its own file.
         Driver.save_checkpoint(
-            ckpt_path, model, loss=None, optimizer=None,
-            scheduler=None, counters=None, checkpoint_mode="legacy",
+            ckpt_path,
+            model,
+            loss=None,
+            optimizer=None,
+            scheduler=None,
+            counters=None,
+            checkpoint_mode="legacy",
         )
         if dist.is_initialized():
             dist.barrier()
@@ -190,8 +229,13 @@ class TestDistributedCheckpoint(unittest.TestCase):
 
         # 1. Save in flexible mode: rank 0 gathers and writes; other ranks no-op write.
         Driver.save_checkpoint(
-            ckpt_path, model, loss=None, optimizer=None,
-            scheduler=None, counters=None, checkpoint_mode="flexible",
+            ckpt_path,
+            model,
+            loss=None,
+            optimizer=None,
+            scheduler=None,
+            counters=None,
+            checkpoint_mode="flexible",
         )
         if dist.is_initialized():
             dist.barrier()
@@ -234,7 +278,9 @@ class TestDistributedCheckpoint(unittest.TestCase):
         snapshot = self._snapshot_weights(original)
 
         Driver.save_checkpoint(
-            ckpt_path, original, checkpoint_mode="flexible",
+            ckpt_path,
+            original,
+            checkpoint_mode="flexible",
         )
         if dist.is_initialized():
             dist.barrier()
@@ -242,7 +288,10 @@ class TestDistributedCheckpoint(unittest.TestCase):
         # Build a fresh model with DIFFERENT initial weights (different seed).
         torch.manual_seed(99999 + self.world_rank)
         replacement_local = torch.randn(
-            1, self.num_features, self.global_h // self.grid_size_h, self.global_w // self.grid_size_w,
+            1,
+            self.num_features,
+            self.global_h // self.grid_size_h,
+            self.global_w // self.grid_size_w,
             device=self.device,
         )
         fresh = _ShardedTestModel(replacement_local, num_features=self.num_features).to(self.device)
@@ -250,16 +299,133 @@ class TestDistributedCheckpoint(unittest.TestCase):
         # Confirm the fresh model is NOT already equal to the snapshot
         with self.subTest(desc="fresh model differs from snapshot before restore"):
             with torch.no_grad():
-                self.assertFalse(torch.equal(
-                    fresh.weight.detach().cpu(),
-                    snapshot["weight"].detach().cpu(),
-                ))
+                self.assertFalse(
+                    torch.equal(
+                        fresh.weight.detach().cpu(),
+                        snapshot["weight"].detach().cpu(),
+                    )
+                )
 
         # Restore from disk into the fresh model.
         Driver._restore_checkpoint_flexible(ckpt_path, fresh, strict=True)
 
         with self.subTest(desc="fresh model matches snapshot after restore"):
             self._verify_match(fresh, snapshot, label="flexible-fresh", verbose=verbose)
+
+    # ----------------------------------------------------------------------
+    # Gather-plan consistency precondition (the checkpoint-hang guard).
+    #
+    # The flexible gather deadlocks if the ranks of a model group do not issue
+    # the SAME ordered sequence of all_gather calls (e.g. named_parameters drifts
+    # across ranks). gather_model_state_dict crc-checks the plan up front and
+    # raises instead of hanging. These two tests cover both verdicts under
+    # H x W x E x B: a matching plan passes, a divergent plan raises cleanly.
+    # ----------------------------------------------------------------------
+    def test_flexible_gather_plan_consistent(self, verbose=False):
+        """Positive: identical plan across the model group -> gather completes."""
+        if comm.get_size("model") == 1:
+            self.skipTest("requires model parallelism (set GRID_H/GRID_W/GRID_M > 1)")
+
+        model = self._build_model()
+
+        # Must not raise and must not hang: every model-group rank runs the same
+        # crc all_gather and agrees. Data-parallel (E/B) replicas each run the
+        # gather over their own model group independently.
+        state_dict = gather_model_state_dict(model)
+
+        n_params = len(list(model.named_parameters()))
+        with self.subTest(desc="gather returns one entry per parameter"):
+            self.assertTrue(
+                reduce_success(len(state_dict) == n_params, self.device),
+                msg=f"rank {self.world_rank}: gathered {len(state_dict)} entries, expected {n_params}",
+            )
+
+    def test_flexible_gather_plan_mismatch_raises(self, verbose=False):
+        """Negative: a divergent plan must raise RuntimeError, not deadlock."""
+        if comm.get_size("model") == 1:
+            self.skipTest("requires model parallelism (set GRID_H/GRID_W/GRID_M > 1)")
+
+        local_weight = self._build_local_slice()
+        model = _DivergentPlanModel(local_weight, num_features=self.num_features).to(self.device)
+
+        # Every model group has exactly one diverging rank (model-rank 0), so the
+        # crc check raises on ALL ranks symmetrically -- no rank is left waiting in
+        # a collective. assertRaises therefore fires consistently everywhere.
+        with self.assertRaises(RuntimeError):
+            gather_model_state_dict(model)
+
+    # ----------------------------------------------------------------------
+    # Optimizer state, flexible format, with MULTIPLE parameter groups.
+    #
+    # torch.optim packs optimizer-state indices group-by-group (in
+    # optimizer.param_groups order), which does NOT match model.parameters()
+    # order once parameters are split across >1 group. gather/scatter of the
+    # optimizer state must therefore pair each state entry with the parameter
+    # that actually owns it. We build the groups in REVERSE order (no-decay/bias
+    # first, then decay/weight) so the packing order differs from model order --
+    # the configuration that exposed the original index-vs-param mismatch. With
+    # the old enumerate(model.parameters()) indexing this even crashes, because
+    # the (h,w)-sharded weight's gather is applied to the 1-D bias state.
+    # ----------------------------------------------------------------------
+    def _build_reordered_param_groups(self, model):
+        decay, no_decay = [], []
+        for p in model.parameters():
+            (decay if p.ndim >= 2 else no_decay).append(p)
+        # no-decay group FIRST -> optimizer packing order != model.parameters() order
+        return [
+            {"params": no_decay, "weight_decay": 0.0},
+            {"params": decay, "weight_decay": 0.1},
+        ]
+
+    def _make_stepped_optimizer(self, model):
+        optimizer = torch.optim.AdamW(self._build_reordered_param_groups(model), lr=1e-3)
+        # populate exp_avg / exp_avg_sq with one deterministic step
+        for p in model.parameters():
+            p.grad = torch.ones_like(p)
+        optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
+        return optimizer
+
+    def _snapshot_opt_state(self, optimizer):
+        state = optimizer.state_dict()["state"]
+        return {i: {k: v.detach().clone() for k, v in s.items() if torch.is_tensor(v)} for i, s in state.items()}
+
+    def test_flexible_optimizer_state_roundtrip_multigroup(self, verbose=False):
+        ckpt_path = os.path.join(self.tmpdir, "flexible_optstate_mp{mp_rank}_v0.tar")
+
+        model = self._build_model()
+        optimizer = self._make_stepped_optimizer(model)
+        opt_snapshot = self._snapshot_opt_state(optimizer)
+
+        # 1. Save flexible: rank 0 gathers the (sharded) optimizer moments into a global dict.
+        Driver.save_checkpoint(
+            ckpt_path,
+            model,
+            optimizer=optimizer,
+            checkpoint_mode="flexible",
+        )
+        if dist.is_initialized():
+            dist.barrier()
+
+        # 2. Corrupt the live optimizer moments so a no-op restore would be detected.
+        with torch.no_grad():
+            for s in optimizer.state.values():
+                if "exp_avg" in s:
+                    s["exp_avg"].zero_()
+                    s["exp_avg_sq"].zero_()
+
+        # 3. Restore flexible: each rank reads the global file and scatters back to its shard.
+        Driver._restore_checkpoint_flexible(ckpt_path, model, optimizer=optimizer)
+
+        # 4. Per-rank optimizer moments must match the pre-save snapshot bit-for-bit.
+        restored = optimizer.state_dict()["state"]
+        for i, ref in opt_snapshot.items():
+            for k in ("exp_avg", "exp_avg_sq"):
+                with self.subTest(desc=f"opt state[{i}][{k}] rank {self.world_rank}"):
+                    self.assertTrue(
+                        reduce_success(torch.equal(restored[i][k].cpu(), ref[k].cpu()), self.device),
+                        msg=f"rank {self.world_rank}: optimizer state[{i}][{k}] mismatch after multigroup restore",
+                    )
 
 
 if __name__ == "__main__":

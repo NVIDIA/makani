@@ -24,6 +24,10 @@ from torch_harmonics.distributed.primitives import (
     _transpose,
 )
 
+# bridge so new-style autograd.Function (separate setup_context) works with
+# torch.amp.custom_fwd/custom_bwd; see makani/mpu/_amp_utils.py (pytorch#132388).
+from makani.mpu._amp_utils import _custom_setup_context
+
 # torch utils
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 
@@ -34,6 +38,7 @@ from makani.mpu.config import config
 class _DistributedTranspose(torch.autograd.Function):
 
     @staticmethod
+    @torch.amp.custom_fwd(device_type="cuda")
     def forward(x, dims, dim1_split_sizes, comm_id):
         # WAR for a potential contig check torch bug for channels last contig tensors
         x = x.contiguous()
@@ -42,6 +47,7 @@ class _DistributedTranspose(torch.autograd.Function):
         return x
 
     @staticmethod
+    @_custom_setup_context(device_type="cuda")
     def setup_context(ctx, inputs, output):
         x, dims, dim1_split_sizes, comm_id = inputs
         ctx.dims = dims
@@ -50,6 +56,7 @@ class _DistributedTranspose(torch.autograd.Function):
         ctx.dim0_split_sizes = compute_split_shapes(x.shape[dims[0]], comm.get_size(comm_id))
 
     @staticmethod
+    @torch.amp.custom_bwd(device_type="cuda")
     def backward(ctx, go):
         dims = ctx.dims
         dim0_split_sizes = ctx.dim0_split_sizes
@@ -68,15 +75,18 @@ class _CopyToParallelRegion(torch.autograd.Function):
         return input_
 
     @staticmethod
+    @torch.amp.custom_fwd(device_type="cuda")
     def forward(input_, comm_id_):
         return input_
 
     @staticmethod
+    @_custom_setup_context(device_type="cuda")
     def setup_context(ctx, inputs, output):
         _, comm_id_ = inputs
         ctx.comm_id = comm_id_
 
     @staticmethod
+    @torch.amp.custom_bwd(device_type="cuda")
     def backward(ctx, grad_output):
         return _reduce(grad_output, group=comm.get_group(ctx.comm_id)), None
 
@@ -89,14 +99,17 @@ class _ReduceFromParallelRegion(torch.autograd.Function):
         return _reduce(input_, group=comm.get_group(comm_id_))
 
     @staticmethod
+    @torch.amp.custom_fwd(device_type="cuda")
     def forward(input_, comm_id_):
         return _reduce(input_, group=comm.get_group(comm_id_))
 
     @staticmethod
+    @_custom_setup_context(device_type="cuda")
     def setup_context(ctx, inputs, output):
         pass  # nothing needed for backward
 
     @staticmethod
+    @torch.amp.custom_bwd(device_type="cuda")
     def backward(ctx, grad_output):
         return grad_output, None
 
@@ -109,10 +122,12 @@ class _ScatterToParallelRegion(torch.autograd.Function):
         return _split(input_, dim_, group=comm.get_group(comm_id_))
 
     @staticmethod
+    @torch.amp.custom_fwd(device_type="cuda")
     def forward(input_, dim_, comm_id_):
         return _split(input_, dim_, group=comm.get_group(comm_id_))
 
     @staticmethod
+    @_custom_setup_context(device_type="cuda")
     def setup_context(ctx, inputs, output):
         input_, dim_, comm_id_ = inputs
         ctx.dim = dim_
@@ -120,6 +135,7 @@ class _ScatterToParallelRegion(torch.autograd.Function):
         ctx.split_shapes = compute_split_shapes(input_.shape[dim_], comm.get_size(comm_id_))
 
     @staticmethod
+    @torch.amp.custom_bwd(device_type="cuda")
     def backward(ctx, grad_output):
         return (
             _gather(
@@ -138,21 +154,22 @@ class _GatherFromParallelRegion(torch.autograd.Function):
 
     @staticmethod
     def symbolic(graph, input_, dim_, comm_id_, shapes_):
-        return _gather(
-            input_, dim_, shapes_, group=comm.get_group(comm_id_)
-        )
+        return _gather(input_, dim_, shapes_, group=comm.get_group(comm_id_))
 
     @staticmethod
+    @torch.amp.custom_fwd(device_type="cuda")
     def forward(input_, dim_, shapes_, comm_id_):
         return _gather(input_, dim_, shapes_, group=comm.get_group(comm_id_))
 
     @staticmethod
+    @_custom_setup_context(device_type="cuda")
     def setup_context(ctx, inputs, output):
         input_, dim_, shapes_, comm_id_ = inputs
         ctx.dim = dim_
         ctx.comm_id = comm_id_
 
     @staticmethod
+    @torch.amp.custom_bwd(device_type="cuda")
     def backward(ctx, grad_output):
         return (
             _split(grad_output, ctx.dim, group=comm.get_group(ctx.comm_id)),
@@ -191,32 +208,172 @@ def gather_from_parallel_region(input, dim, shapes, comm_id):
 
 @torch.compiler.disable
 def distributed_transpose(x, dims, shapes, comm_id):
+    r"""
+    Redistribute a tensor by swapping which dimension is sharded.
+
+    Performs an all-to-all so that the dimension currently split across the
+    group becomes local and a currently local dimension becomes split. This is
+    the primitive behind distributed transforms: an operation that needs a full
+    axis (an FFT along longitude, say) first transposes so that axis is local,
+    trading away locality of another one.
+
+    Differentiable -- the backward pass performs the inverse redistribution.
+
+    Parameters
+    ----------
+    x : torch.Tensor
+        Input tensor, sharded along ``dims[0]``.
+    dims : tuple of int
+        ``(src, dst)``: the dimension currently sharded and the one to shard
+        instead.
+    shapes : list of int
+        Per-rank sizes along the dimension being gathered, needed because the
+        split may be uneven.
+    comm_id : str
+        Name of the communicator group to redistribute over.
+
+    Returns
+    -------
+    torch.Tensor
+        The redistributed tensor, now sharded along ``dims[1]``.
+    """
     return _DistributedTranspose.apply(x, dims, shapes, comm_id)
 
+
 class gradient_print_wrapper(torch.autograd.Function):
+    r"""
+    Identity in the forward pass that prints gradient statistics in the backward.
+
+    Debugging aid: insert it anywhere in a model to see the min, max and mean of
+    the gradient flowing through that point, without altering the computation.
+    Useful for locating where gradients vanish or blow up in a deep or
+    distributed stack.
+
+    Call via ``gradient_print_wrapper.apply(x, msg)``.
+    """
 
     @staticmethod
     @torch.compiler.disable
     def forward(x, msg=""):
+        r"""
+        Return the input unchanged.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Tensor to pass through.
+        msg : str, optional
+            Label included in the backward-pass printout.
+
+        Returns
+        -------
+        torch.Tensor
+            ``x``, unchanged.
+        """
         return x
 
     @staticmethod
     def setup_context(ctx, inputs, output):
+        r"""
+        Stash the label for use in the backward pass.
+
+        Parameters
+        ----------
+        ctx : torch.autograd.function.FunctionCtx
+            Autograd context.
+        inputs : tuple
+            The forward arguments ``(x, msg)``.
+        output : torch.Tensor
+            The forward result; unused.
+        """
         _, msg = inputs
         ctx.msg = msg
 
     @staticmethod
     @torch.compiler.disable
     def backward(ctx, go):
+        r"""
+        Print gradient statistics and pass the gradient through unchanged.
+
+        Parameters
+        ----------
+        ctx : torch.autograd.function.FunctionCtx
+            Autograd context carrying the label.
+        go : torch.Tensor
+            Incoming gradient.
+
+        Returns
+        -------
+        tuple
+            ``(go, None)`` -- the gradient unchanged, and ``None`` for the
+            non-tensor ``msg`` argument.
+        """
         msg = ctx.msg
         print(f"Gradient stats for {msg}: min: {go.min()}, max: {go.max()}, mean: {go.mean()}")
         return go, None
 
+
 # weight gradient reduction helpers
+
 
 # handler for additional gradient reductions
 # helper for gradient reduction across channel parallel ranks
-def init_gradient_reduction_hooks(model, device, reduction_buffer_count=1, broadcast_buffers=True, find_unused_parameters=False, gradient_as_bucket_view=True, static_graph=False, verbose=None):
+def init_gradient_reduction_hooks(
+    model,
+    device,
+    reduction_buffer_count=1,
+    broadcast_buffers=True,
+    find_unused_parameters=False,
+    gradient_as_bucket_view=True,
+    static_graph=False,
+    verbose=None,
+):
+    r"""
+    Wrap a model in DDP with the gradient reductions model parallelism requires.
+
+    Plain DDP reduces every gradient over the data-parallel group, which is
+    wrong once model parallelism is in play: a parameter replicated across model
+    ranks accumulates a gradient contribution on each of them, so it must also
+    be reduced over the group it is shared across, while a sharded parameter
+    must not be. This function inspects the ``is_shared_mp`` annotation each
+    layer stamps on its parameters and installs a communication hook that
+    performs the right reduction per parameter.
+
+    Two cases avoid the hook entirely: with no model parallelism, or when *all*
+    parameters are shared across all model ranks. In the latter case the correct
+    result is obtained by scaling gradients by the model group size and letting
+    ordinary DDP handle the rest, which is cheaper than a custom hook.
+
+    Parameters
+    ----------
+    model : torch.nn.Module
+        Model to wrap. Parameters without an ``is_shared_mp`` annotation are
+        assumed to be shared across all model ranks.
+    device : torch.device
+        Device the model lives on.
+    reduction_buffer_count : int, optional
+        Number of DDP gradient buckets, by default ``1``. Forced to ``1`` when
+        custom hooks are needed, since the hook reduces per parameter.
+    broadcast_buffers : bool, optional
+        Broadcast buffers from rank 0 at each forward, by default ``True``.
+        Disabled automatically when custom hooks are needed, as sharded buffers
+        legitimately differ across ranks.
+    find_unused_parameters : bool, optional
+        Passed to DDP, by default ``False``.
+    gradient_as_bucket_view : bool, optional
+        Passed to DDP, by default ``True``.
+    static_graph : bool, optional
+        Passed to DDP, by default ``False``.
+    verbose : bool, optional
+        Log the sharing modes and hook setup. Defaults to the debug setting in
+        the mpu config.
+
+    Returns
+    -------
+    torch.nn.Module
+        The wrapped model, or the original model unchanged if torch.distributed
+        is not initialized.
+    """
     # early exit if we are not in a distributed setting:
     if not dist.is_initialized():
         return model
@@ -366,6 +523,7 @@ def init_gradient_reduction_hooks(model, device, reduction_buffer_count=1, broad
     model.register_comm_hook(state=None, hook=reduction_comm_hook)
 
     return model
+
 
 # deferred to avoid circular imports with makani.utils
 from makani.utils import comm

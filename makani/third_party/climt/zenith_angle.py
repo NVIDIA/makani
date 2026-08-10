@@ -37,7 +37,7 @@ OF THE POSSIBILITY OF SUCH DAMAGE.
 
 import datetime as dt
 import numpy as np
-from typing import Union, Tuple, TypeVar
+from typing import Tuple
 
 # define helper type
 dtype = np.float32
@@ -61,7 +61,10 @@ def _greenwich_mean_sidereal_time(model_time: np.ndarray) -> np.ndarray:
             http://www.celestrak.com/publications/AIAA/2006-6753/
     """
     jul_centuries = _days_from_2000(model_time) / 36525.0
-    theta = dtype(67310.54841 + jul_centuries * (876600 * 3600 + 8640184.812866 + jul_centuries * (0.093104 - jul_centuries * 6.2 * 10e-6)))
+    theta = dtype(
+        67310.54841
+        + jul_centuries * (876600 * 3600 + 8640184.812866 + jul_centuries * (0.093104 - jul_centuries * 6.2 * 10e-6))
+    )
 
     theta_radians = np.deg2rad(theta / 240.0) % (2 * np.pi)
     theta_radians = theta_radians.astype(dtype)
@@ -88,12 +91,17 @@ def _sun_ecliptic_longitude(model_time: np.ndarray) -> np.ndarray:
 
     # mean anomaly calculation
     mean_anomaly = np.deg2rad(
-        357.52910 + 35999.05030 * julian_centuries - 0.0001559 * julian_centuries * julian_centuries - 0.00000048 * julian_centuries * julian_centuries * julian_centuries,
+        357.52910
+        + 35999.05030 * julian_centuries
+        - 0.0001559 * julian_centuries * julian_centuries
+        - 0.00000048 * julian_centuries * julian_centuries * julian_centuries,
         dtype=dtype,
     )
 
     # mean longitude
-    mean_longitude = np.deg2rad(280.46645 + 36000.76983 * julian_centuries + 0.0003032 * (julian_centuries**2), dtype=dtype)
+    mean_longitude = np.deg2rad(
+        280.46645 + 36000.76983 * julian_centuries + 0.0003032 * (julian_centuries**2), dtype=dtype
+    )
 
     d_l = np.deg2rad(
         (1.914600 - 0.004817 * julian_centuries - 0.000014 * (julian_centuries**2)) * np.sin(mean_anomaly)
@@ -149,7 +157,9 @@ def _right_ascension_declination(model_time: np.ndarray) -> Tuple[np.ndarray, np
     return right_ascension, declination
 
 
-def _local_hour_angle(model_time: np.ndarray, longitude: np.ndarray, right_ascension: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+def _local_hour_angle(
+    model_time: np.ndarray, longitude: np.ndarray, right_ascension: np.ndarray
+) -> Tuple[np.ndarray, np.ndarray]:
     """
     Hour angle at model_time for the given longitude and right_ascension
     longitude in radians. Return shape: [t, lon]
@@ -216,49 +226,3 @@ def cos_zenith_angle(
     result = _star_cos_zenith(time, lon_rad, lat_rad)
 
     return result
-
-
-if __name__ == "__main__":
-    # create grid
-    lon = np.arange(0, 360, 20.0)
-    lat = np.arange(-90, 90.25, 10.0)
-    lat = lat[::-1]
-    lon_grid, lat_grid = np.meshgrid(lon, lat)
-
-    # model time
-    model_time = np.asarray(
-        [
-            dt.datetime(2002, 1, 1, 12, 0, 0, tzinfo=dt.timezone.utc),
-            dt.datetime(2002, 6, 1, 12, 0, 0, tzinfo=dt.timezone.utc),
-            dt.datetime(2003, 1, 1, 12, 0, 0, tzinfo=dt.timezone.utc),
-        ]
-    )
-
-    # test _days_from_2000
-    days = _days_from_2000(model_time)
-    print(days)
-
-    # test _greenwich_mean_sidereal_time
-    theta = _greenwich_mean_sidereal_time(model_time)
-    print(theta)
-
-    # test _local_mean_sidereal_time
-    theta = _local_mean_sidereal_time(np.reshape(model_time, (-1, 1, 1)), np.expand_dims(lon_grid, axis=0))
-    print(theta)
-
-    # test _sun_ecliptic_longitude
-    eclon = _sun_ecliptic_longitude(model_time)
-    print(eclon)
-
-    # test _obliquity_star
-    julian_centuries = _days_from_2000(model_time) / 36525.0
-    eps = _obliquity_star(julian_centuries)
-    print(eps)
-
-    # test _right_ascension_declination
-    ra, dec = _right_ascension_declination(model_time)
-    print(ra, dec)
-
-    # test cos_zenith_angle
-    za = cos_zenith_angle(model_time, lat=lat_grid, lon=lon_grid)
-    print("zenith angle", za)

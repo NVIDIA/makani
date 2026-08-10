@@ -31,7 +31,7 @@ from .data_helpers import get_lat_lon_grid, get_date_from_string, get_date_from_
 from torch_harmonics.distributed import compute_split_shapes
 
 # coszen
-from makani.third_party.climt.zenith_angle import cos_zenith_angle
+from makani.third_party.climt.zenith_angle_v2 import cos_zenith_angle
 
 
 class GeneralConcatES(object):
@@ -67,8 +67,10 @@ class GeneralConcatES(object):
         zenith_angle=True,
         return_timestamp=False,
         lat_lon=None,
-        dataset_path="fields",
+        dataset_name="fields",
+        timestamp_name="timestamp",
         enable_odirect=False,
+        odirect_alignment=0,
         enable_s3=False,
         seed=333,
         is_parallel=True,
@@ -98,11 +100,17 @@ class GeneralConcatES(object):
         self.is_parallel = is_parallel
         self.zenith_angle = zenith_angle
         self.return_timestamp = return_timestamp
-        self.dataset_path = dataset_path
+        self.dataset_name = dataset_name
+        self.timestamp_name = timestamp_name
         self.lat_lon = lat_lon
 
         # O_DIRECT specific stuff
         self.file_driver = "direct" if enable_odirect else None
+        self.file_driver_kwargs = (
+            dict(alignment=odirect_alignment, block_size=odirect_alignment)
+            if (enable_odirect and odirect_alignment > 0)
+            else {}
+        )
         self.read_direct = True  # if enable_odirect else True
         self.num_retries = 5
 
@@ -117,11 +125,12 @@ class GeneralConcatES(object):
 
         # sanity checks
         if enable_s3:
-            raise NotImplementedError(f"s3 support currently not implemented for concatenated files.")
+            raise NotImplementedError("s3 support currently not implemented for concatenated files.")
 
         # set the read slices
         # we do not support channel parallelism yet
-        assert io_grid[0] == 1
+        if io_grid[0] != 1:
+            raise ValueError(f"channel parallelism is not supported, expected io_grid[0] == 1 but got {io_grid[0]}")
         self.io_grid = io_grid[1:]
         self.io_rank = io_rank[1:]
 
@@ -146,22 +155,30 @@ class GeneralConcatES(object):
         latitude = np.array(self.lat_lon[0])
         longitude = np.array(self.lat_lon[1])
         self.lon_grid, self.lat_grid = np.meshgrid(longitude, latitude)
-        self.lat_grid_local = self.lat_grid[self.read_anchor[0] : self.read_anchor[0] + self.read_shape[0], self.read_anchor[1] : self.read_anchor[1] + self.read_shape[1]]
-        self.lon_grid_local = self.lon_grid[self.read_anchor[0] : self.read_anchor[0] + self.read_shape[0], self.read_anchor[1] : self.read_anchor[1] + self.read_shape[1]]
+        self.lat_grid_local = self.lat_grid[
+            self.read_anchor[0] : self.read_anchor[0] + self.read_shape[0],
+            self.read_anchor[1] : self.read_anchor[1] + self.read_shape[1],
+        ]
+        self.lon_grid_local = self.lon_grid[
+            self.read_anchor[0] : self.read_anchor[0] + self.read_shape[0],
+            self.read_anchor[1] : self.read_anchor[1] + self.read_shape[1],
+        ]
         self.lat_lon_local = (
             latitude[self.read_anchor[0] : self.read_anchor[0] + self.read_shape[0]].tolist(),
             longitude[self.read_anchor[1] : self.read_anchor[1] + self.read_shape[1]].tolist(),
         )
 
         # incorporate subsampling factor
-        self.lat_grid_local = self.lat_grid_local[::self.subsampling_factor, ::self.subsampling_factor]
-        self.lon_grid_local = self.lon_grid_local[::self.subsampling_factor, ::self.subsampling_factor]
+        self.lat_grid_local = self.lat_grid_local[:: self.subsampling_factor, :: self.subsampling_factor]
+        self.lon_grid_local = self.lon_grid_local[:: self.subsampling_factor, :: self.subsampling_factor]
         self.lat_lon_local = (
-            self.lat_lon_local[0][::self.subsampling_factor],
-            self.lat_lon_local[1][::self.subsampling_factor],
+            self.lat_lon_local[0][:: self.subsampling_factor],
+            self.lat_lon_local[1][:: self.subsampling_factor],
         )
-        self.img_shape_resampled = (math.ceil(self.img_shape[0] / self.subsampling_factor), 
-                                    math.ceil(self.img_shape[1] / self.subsampling_factor))
+        self.img_shape_resampled = (
+            math.ceil(self.img_shape[0] / self.subsampling_factor),
+            math.ceil(self.img_shape[1] / self.subsampling_factor),
+        )
 
     def _generate_indexlist(self, timestamp_boundary_list):
         # get list of all indices:
@@ -169,14 +186,25 @@ class GeneralConcatES(object):
 
         dt_total = self.dhours * self.dt
         if timestamp_boundary_list:
-            #compute list of allowed timestamps
-            timestamp_boundary_list = [get_date_from_string(timestamp_string) for timestamp_string in timestamp_boundary_list]
+            # compute list of allowed timestamps
+            timestamp_boundary_list = [
+                get_date_from_string(timestamp_string) for timestamp_string in timestamp_boundary_list
+            ]
 
             # now, based on dt, dh, n_history and n_future, we can build regions where no data is allowed
-            timestamp_exclusion_list = get_date_ranges(timestamp_boundary_list, lookback_hours = dt_total * (self.n_future + 1), lookahead_hours = dt_total * self.n_history)
+            timestamp_exclusion_list = get_date_ranges(
+                timestamp_boundary_list,
+                lookback_hours=dt_total * (self.n_future + 1),
+                lookahead_hours=dt_total * self.n_history,
+            )
 
             # now, check which of the timestamps fall within these excluded ranges
-            range_fn = np.vectorize(lambda date: not any(date >= exclusion_range[0] and date < exclusion_range[1] for exclusion_range in timestamp_exclusion_list))
+            range_fn = np.vectorize(
+                lambda date: not any(
+                    date >= exclusion_range[0] and date < exclusion_range[1]
+                    for exclusion_range in timestamp_exclusion_list
+                )
+            )
             timestamps_selected = np.array(self.timestamps)[self.indices_full]
             good_indices = np.vectorize(range_fn)(timestamps_selected)
 
@@ -213,18 +241,18 @@ class GeneralConcatES(object):
                     self.inp_buff,
                     np.s_[
                         (sample_idx - self.dt * self.n_history) : (sample_idx + 1) : self.dt,
-                        slice_in, 
-                        start_x:end_x:self.subsampling_factor, 
-                        start_y:end_y:self.subsampling_factor
+                        slice_in,
+                        start_x : end_x : self.subsampling_factor,
+                        start_y : end_y : self.subsampling_factor,
                     ],
-                    np.s_[:, start:end, ...]
+                    np.s_[:, start:end, ...],
                 )
             else:
                 self.inp_buff[:, start:end, ...] = dset[
                     (sample_idx - self.dt * self.n_history) : (sample_idx + 1) : self.dt,
-                    slice_in, 
-                    start_x:end_x:self.subsampling_factor, 
-                    start_y:end_y:self.subsampling_factor
+                    slice_in,
+                    start_x : end_x : self.subsampling_factor,
+                    start_y : end_y : self.subsampling_factor,
                 ]
 
             # update offset
@@ -241,18 +269,18 @@ class GeneralConcatES(object):
                     self.tar_buff,
                     np.s_[
                         (sample_idx + self.dt) : (sample_idx + self.dt * (self.n_future + 1) + 1) : self.dt,
-                        slice_out, 
-                        start_x:end_x:self.subsampling_factor, 
-                        start_y:end_y:self.subsampling_factor
+                        slice_out,
+                        start_x : end_x : self.subsampling_factor,
+                        start_y : end_y : self.subsampling_factor,
                     ],
                     np.s_[:, start:end, ...],
                 )
             else:
                 self.tar_buff[:, start:end, ...] = dset[
-                    (sample_idx + self.dt) : (sample_idx + self.dt * (self.n_future + 1) + 1) : self.dt, 
-                    slice_out, 
-                    start_x:end_x:self.subsampling_factor, 
-                    start_y:end_y:self.subsampling_factor
+                    (sample_idx + self.dt) : (sample_idx + self.dt * (self.n_future + 1) + 1) : self.dt,
+                    slice_out,
+                    start_x : end_x : self.subsampling_factor,
+                    start_y : end_y : self.subsampling_factor,
                 ]
 
             # update offset
@@ -275,10 +303,10 @@ class GeneralConcatES(object):
         # open file:
         self.vfile = None
         with h5py.File(self.file_path, "r") as f:
-            dset = f[self.dataset_path]
+            dset = f[self.dataset_name]
 
             # extract timestamps and convert them to datetime objects
-            self.timestamps = self.timezone_fn(f[self.dataset_path].dims[0]["timestamp"][...])
+            self.timestamps = self.timezone_fn(f[self.dataset_name].dims[0][self.timestamp_name][...])
 
             # extract number of years
             self.years = sorted(list(set([d.year for d in self.timestamps.tolist()])))
@@ -298,8 +326,14 @@ class GeneralConcatES(object):
             self.crop_size[0] = self.img_shape[0]
         if self.crop_size[1] is None:
             self.crop_size[1] = self.img_shape[1]
-        assert self.crop_anchor[0] + self.crop_size[0] <= self.img_shape[0]
-        assert self.crop_anchor[1] + self.crop_size[1] <= self.img_shape[1]
+        if self.crop_anchor[0] + self.crop_size[0] > self.img_shape[0]:
+            raise ValueError(
+                f"crop in dimension 0 (anchor {self.crop_anchor[0]} + size {self.crop_size[0]}) exceeds image shape {self.img_shape[0]}"
+            )
+        if self.crop_anchor[1] + self.crop_size[1] > self.img_shape[1]:
+            raise ValueError(
+                f"crop in dimension 1 (anchor {self.crop_anchor[1]} + size {self.crop_size[1]}) exceeds image shape {self.img_shape[1]}"
+            )
         # for x
         split_shapes_x = compute_split_shapes(self.crop_size[0], self.io_grid[0])
         read_shape_x = split_shapes_x[self.io_rank[0]]
@@ -310,8 +344,10 @@ class GeneralConcatES(object):
         read_anchor_y = self.crop_anchor[1] + sum(split_shapes_y[: self.io_rank[1]])
         self.read_anchor = [read_anchor_x, read_anchor_y]
         self.read_shape = [read_shape_x, read_shape_y]
-        self.return_shape = (math.ceil(self.read_shape[0] / self.subsampling_factor), 
-                             math.ceil(self.read_shape[1] / self.subsampling_factor))
+        self.return_shape = (
+            math.ceil(self.read_shape[0] / self.subsampling_factor),
+            math.ceil(self.read_shape[1] / self.subsampling_factor),
+        )
 
         # do some sample indexing gymnastics
         if self.max_samples is not None:
@@ -321,11 +357,18 @@ class GeneralConcatES(object):
 
         # compute global offset
         if self.truncate_old:
-            self.samples_start = max(self.dt * self.n_history, self.n_samples_available - n_samples_total_tmp - self.dt * (self.n_future + 1) - 1)
-            self.samples_end = min(self.samples_start + n_samples_total_tmp, self.n_samples_available) - self.dt * (self.n_future + 1)
+            self.samples_start = max(
+                self.dt * self.n_history,
+                self.n_samples_available - n_samples_total_tmp - self.dt * (self.n_future + 1) - 1,
+            )
+            self.samples_end = min(self.samples_start + n_samples_total_tmp, self.n_samples_available) - self.dt * (
+                self.n_future + 1
+            )
         else:
             self.samples_start = self.dt * self.n_history
-            self.samples_end = min(self.samples_start + n_samples_total_tmp, self.n_samples_available) - self.dt * (self.n_future + 1)
+            self.samples_end = min(self.samples_start + n_samples_total_tmp, self.n_samples_available) - self.dt * (
+                self.n_future + 1
+            )
 
         # create an unshuffled list of valid indices:
         self._generate_indexlist(timestamp_boundary_list)
@@ -333,8 +376,12 @@ class GeneralConcatES(object):
         # some sanity checks
         min_sample_idx = self.indices_select.min()
         max_sample_idx = self.indices_select.max()
-        if ( (min_sample_idx < self.dt * self.n_history) or (max_sample_idx >= (self.n_samples_available - self.dt * (self.n_future + 1))) ):
-            raise IndexError(f"Sample index {min_sample_idx} or {max_sample_idx} is out of bounds [{self.dt * self.n_history}, {self.n_samples_available - self.dt * (self.n_future + 1)}). Please check your index list.")
+        if (min_sample_idx < self.dt * self.n_history) or (
+            max_sample_idx >= (self.n_samples_available - self.dt * (self.n_future + 1))
+        ):
+            raise IndexError(
+                f"Sample index {min_sample_idx} or {max_sample_idx} is out of bounds [{self.dt * self.n_history}, {self.n_samples_available - self.dt * (self.n_future + 1)}). Please check your index list."
+            )
 
         # update the actual total count with the actual number of included
         self.n_samples_total = self.indices_select.shape[0]
@@ -354,23 +401,46 @@ class GeneralConcatES(object):
 
         # prepare file lists
         if enable_logging:
-            logging.info("Average number of included samples per year: {:.1f}".format(float(self.n_samples_total) / float(self.n_years)))
+            logging.info(
+                "Average number of included samples per year: {:.1f}".format(
+                    float(self.n_samples_total) / float(self.n_years)
+                )
+            )
             logging.info(
                 "Found data at path {}. Number of examples: {}. Full image Shape: {} x {} x {}. Read Shape: {} x {} x {}".format(
-                    self.location, self.n_samples_available, self.img_shape[0], self.img_shape[1], self.total_channels, self.read_shape[0], self.read_shape[1], self.n_in_channels
+                    self.location,
+                    self.n_samples_available,
+                    self.img_shape[0],
+                    self.img_shape[1],
+                    self.total_channels,
+                    self.read_shape[0],
+                    self.read_shape[1],
+                    self.n_in_channels,
                 )
             )
             logging.info(
                 "Using {} from the total number of available samples with {} samples per epoch (corresponds to {} steps for {} shards with local batch size {})".format(
-                    self.n_samples_total, self.n_samples_per_epoch, self.num_steps_per_epoch, self.num_shards, self.batch_size
+                    self.n_samples_total,
+                    self.n_samples_per_epoch,
+                    self.num_steps_per_epoch,
+                    self.num_shards,
+                    self.batch_size,
                 )
             )
             start_date = self.timestamps[self.samples_start]
-            end_date = self.timestamps[self.n_samples_available-1]
+            end_date = self.timestamps[self.n_samples_available - 1]
             logging.info(f"Date range for data set: {start_date} to {end_date}.")
             logging.info("Delta t: {} hours".format(self.dhours * self.dt))
-            logging.info("Including {} hours of past history in training at a frequency of {} hours".format(self.dhours * self.dt * (self.n_history + 1), self.dhours * self.dt))
-            logging.info("Including {} hours of future targets in training at a frequency of {} hours".format(self.dhours * self.dt * (self.n_future + 1), self.dhours * self.dt))
+            logging.info(
+                "Including {} hours of past history in training at a frequency of {} hours".format(
+                    self.dhours * self.dt * (self.n_history + 1), self.dhours * self.dt
+                )
+            )
+            logging.info(
+                "Including {} hours of future targets in training at a frequency of {} hours".format(
+                    self.dhours * self.dt * (self.n_future + 1), self.dhours * self.dt
+                )
+            )
 
         # some state variables
         self.last_cycle_epoch = None
@@ -381,8 +451,12 @@ class GeneralConcatES(object):
             self._init_buffers()
 
     def _init_buffers(self):
-        self.inp_buff = np.zeros((self.n_history + 1, self.n_in_channels, self.return_shape[0], self.return_shape[1]), dtype=np.float32)
-        self.tar_buff = np.zeros((self.n_future + 1, self.n_out_channels, self.return_shape[0], self.return_shape[1]), dtype=np.float32)
+        self.inp_buff = np.zeros(
+            (self.n_history + 1, self.n_in_channels, self.return_shape[0], self.return_shape[1]), dtype=np.float32
+        )
+        self.tar_buff = np.zeros(
+            (self.n_future + 1, self.n_out_channels, self.return_shape[0], self.return_shape[1]), dtype=np.float32
+        )
 
     def _compute_timestamps_and_zenith_angle(self, sample_idx, compute_zenith_angle):
         # nvtx range
@@ -391,14 +465,18 @@ class GeneralConcatES(object):
         # zenith angle for input
         inp_time = self.timestamps[sample_idx - self.dt * self.n_history : sample_idx + 1 : self.dt]
         if compute_zenith_angle:
-            cos_zenith_inp = np.expand_dims(cos_zenith_angle(inp_time, self.lon_grid_local, self.lat_grid_local).astype(np.float32), axis=1)
+            cos_zenith_inp = np.expand_dims(
+                cos_zenith_angle(inp_time, self.lon_grid_local, self.lat_grid_local).astype(np.float32), axis=1
+            )
         else:
             cos_zenith_inp = None
 
         # zenith angle for target:
         tar_time = self.timestamps[sample_idx + self.dt : sample_idx + self.dt * (self.n_future + 1) + 1 : self.dt]
         if compute_zenith_angle:
-            cos_zenith_tar = np.expand_dims(cos_zenith_angle(tar_time, self.lon_grid_local, self.lat_grid_local).astype(np.float32), axis=1)
+            cos_zenith_tar = np.expand_dims(
+                cos_zenith_angle(tar_time, self.lon_grid_local, self.lat_grid_local).astype(np.float32), axis=1
+            )
         else:
             cos_zenith_tar = None
 
@@ -408,7 +486,11 @@ class GeneralConcatES(object):
         return cos_zenith_inp, cos_zenith_tar, inp_time, tar_time
 
     def __getstate__(self):
-        return self.__dict__.copy()
+        state = self.__dict__.copy()
+        # drop file handles — they can't cross process boundaries
+        state["vfile"] = None
+        state["dset"] = None
+        return state
 
     def __setstate__(self, state):
         self.__dict__.update(state)
@@ -418,16 +500,16 @@ class GeneralConcatES(object):
         # open file:
         for _ in range(self.num_retries):
             try:
-                self.vfile = h5py.File(self.file_path, "r", driver=self.file_driver)
+                self.vfile = h5py.File(self.file_path, "r", driver=self.file_driver, **self.file_driver_kwargs)
                 break
             except Exception as err:
                 print(f"Cannot open file {self.file_path}. Reason {err}, retrying.", flush=True)
                 time.sleep(5)
-            else:
-                raise OSError(f"Unable to retrieve year handle {year_idx}, aborting.")
+        else:
+            raise OSError(f"Unable to open file {self.file_path}, aborting.")
 
         # get dataset handle
-        self.dset = self.vfile[self.dataset_path]
+        self.dset = self.vfile[self.dataset_name]
 
         if self.is_parallel:
             self._init_buffers()
@@ -486,7 +568,9 @@ class GeneralConcatES(object):
 
         # get time grid
         if self.zenith_angle or self.return_timestamp:
-            zen_inp, zen_tar, inp_time, tar_time = self._compute_timestamps_and_zenith_angle(sample_idx, self.zenith_angle)
+            zen_inp, zen_tar, inp_time, tar_time = self._compute_timestamps_and_zenith_angle(
+                sample_idx, self.zenith_angle
+            )
 
             if self.zenith_angle:
                 result = result + (zen_inp, zen_tar)

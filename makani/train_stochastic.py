@@ -20,6 +20,7 @@ from functools import partial
 
 # utilities
 from makani.utils.profiling import Timer
+from makani.utils import profiling
 from makani.utils import logging_utils
 from makani.utils.YParams import YParams
 
@@ -27,9 +28,9 @@ from makani.utils.YParams import YParams
 from makani.utils import comm
 from makani.utils.parse_dataset_metada import parse_dataset_metadata
 from makani.utils import argument_parser
+from makani.utils.argument_parser import parse_odirect_config
 
 # import trainer
-from makani.utils.parse_dataset_metada import parse_dataset_metadata
 from makani import StochasticTrainer
 
 if __name__ == "__main__":
@@ -44,15 +45,14 @@ if __name__ == "__main__":
 
     # distributed
     params["ensemble_parallel_size"] = args.ensemble_parallel_size
-    params["fin_parallel_size"] = args.fin_parallel_size
-    params["fout_parallel_size"] = args.fout_parallel_size
+    params["matmul_parallel_size"] = args.matmul_parallel_size
     params["h_parallel_size"] = args.h_parallel_size
     params["w_parallel_size"] = args.w_parallel_size
 
     params["data_parallel_sizes"] = [args.ensemble_parallel_size, -1]
     params["data_parallel_names"] = ["ensemble", "batch"]
-    params["model_parallel_sizes"] = [args.h_parallel_size, args.w_parallel_size, args.fin_parallel_size, args.fout_parallel_size]
-    params["model_parallel_names"] = ["h", "w", "fin", "fout"]
+    params["model_parallel_sizes"] = [args.h_parallel_size, args.w_parallel_size, args.matmul_parallel_size]
+    params["model_parallel_names"] = ["h", "w", "matmul"]
     params["parameters_reduction_buffer_count"] = args.parameters_reduction_buffer_count
 
     # checkpoint format
@@ -78,14 +78,18 @@ if __name__ == "__main__":
         params.batch_size = args.batch_size
     params["global_batch_size"] = params.batch_size
     if params["global_batch_size"] % comm.get_size("batch") != 0:
-        raise ValueError(f"Error, cannot evenly distribute {params['global_batch_size']} across {comm.get_size('batch')} GPU.")
+        raise ValueError(
+            f"Error, cannot evenly distribute {params['global_batch_size']} across {comm.get_size('batch')} GPU."
+        )
     params["batch_size"] = int(params["global_batch_size"] // comm.get_size("batch"))
 
     # ensemble size
     if not hasattr(params, "ensemble_size"):
         raise ValueError("Error, please specify ensemble_size for ensemble training.")
     if params["ensemble_size"] % comm.get_size("ensemble") != 0:
-        raise ValueError(f"Error, cannot evenly distribute {params['ensemble_size']} across {comm.get_size('ensemble')} GPU.")
+        raise ValueError(
+            f"Error, cannot evenly distribute {params['ensemble_size']} across {comm.get_size('ensemble')} GPU."
+        )
     params["local_ensemble_size"] = params["ensemble_size"] // comm.get_size("ensemble")
 
     # optimizer params
@@ -127,7 +131,7 @@ if __name__ == "__main__":
     params["jit_mode"] = args.jit_mode
     params["skip_validation"] = args.skip_validation
     params["skip_training"] = args.skip_training
-    params["enable_odirect"] = args.enable_odirect
+    params["enable_odirect"], params["odirect_alignment"] = parse_odirect_config(args.odirect_config)
     params["enable_s3"] = args.enable_s3
     params["checkpointing_level"] = args.checkpointing_level
     params["enable_synthetic_data"] = args.enable_synthetic_data
@@ -158,7 +162,7 @@ if __name__ == "__main__":
     if "metadata_json_path" in params:
         params, _ = parse_dataset_metadata(params["metadata_json_path"], params=params)
     else:
-        raise RuntimeError(f"Error, please specify a dataset descriptor file in json format")
+        raise RuntimeError("Error, please specify a dataset descriptor file in json format")
 
     # instantiate trainer / inference / ensemble object
     trainer = StochasticTrainer(params, world_rank)
@@ -172,15 +176,24 @@ if __name__ == "__main__":
                     torch.profiler.ProfilerActivity.CPU,
                     torch.profiler.ProfilerActivity.CUDA,
                 ],
-                schedule=torch.profiler.schedule(wait=args.capture_range_start - 1, warmup=1, active=args.capture_range_stop - args.capture_range_start, repeat=1),
+                schedule=torch.profiler.schedule(
+                    wait=args.capture_range_start - 1,
+                    warmup=1,
+                    active=args.capture_range_stop - args.capture_range_start,
+                    repeat=1,
+                ),
                 on_trace_ready=trace_handler,
+                record_shapes=True,
+                profile_memory=True,
             ) as profiler:
                 if args.capture_mode == "training":
                     trainer.train(training_profiler=profiler)
                 elif args.capture_mode == "validation":
                     trainer.train(validation_profiler=profiler)
         elif args.capture_type == "cupti":
-            with profiling.CUDAProfiler(capture_range_start=args.capture_range_start, capture_range_stop=args.capture_range_stop, enabled=True) as profiler:
+            with profiling.CUDAProfiler(
+                capture_range_start=args.capture_range_start, capture_range_stop=args.capture_range_stop, enabled=True
+            ) as profiler:
                 with torch.autograd.profiler.emit_nvtx(enabled=True, record_shapes=False):
                     if args.capture_mode == "training":
                         trainer.train(training_profiler=profiler)

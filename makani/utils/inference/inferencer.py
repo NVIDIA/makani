@@ -21,7 +21,6 @@ from tqdm import tqdm
 
 import torch
 import torch.distributed as dist
-import torch.amp as amp
 import torch.utils.data as tud
 
 from makani.utils.driver import Driver
@@ -36,15 +35,27 @@ from makani.models import model_registry
 
 # distributed computing stuff
 from makani.utils import comm
+from makani.utils.precision import AutocastManager
 from makani.utils.dataloaders.data_helpers import get_date_from_string
 
 # inference specific stuff
-from makani.utils.inference.helpers import split_list, SortedIndexSampler, translate_date_sampler_to_timedelta_sampler, compute_inference_range
-from makani.utils.inference.rollout_buffer import RolloutBuffer, TemporalAverageBuffer, SpectrumAverageBuffer, ZonalSpectrumAverageBuffer
+from makani.utils.inference.helpers import (
+    split_list,
+    SortedIndexSampler,
+    translate_date_sampler_to_timedelta_sampler,
+    compute_inference_range,
+)
+from makani.utils.inference.rollout_buffer import (
+    RolloutBuffer,
+    TemporalAverageBuffer,
+    SpectrumAverageBuffer,
+    ZonalSpectrumAverageBuffer,
+)
 
 # checkpoint helpers
 from makani.utils.checkpoint_helpers import get_latest_checkpoint_version
 from makani.utils.training.training_helpers import get_memory_usage
+
 
 class Inferencer(Driver):
     """
@@ -68,21 +79,14 @@ class Inferencer(Driver):
         if self.log_to_wandb:
             self._init_wandb(self.params, job_type="inference")
 
-        # set amp_parameters
-        if hasattr(self.params, "amp_mode") and (self.params.amp_mode != "none"):
-            self.amp_enabled = True
-            if self.params.amp_mode == "fp16":
-                self.amp_dtype = torch.float16
-            elif self.params.amp_mode == "bf16":
-                self.amp_dtype = torch.bfloat16
-            else:
-                raise ValueError(f"Unknown amp mode {self.params.amp_mode}")
-
-            if self.log_to_screen:
-                self.logger.info(f"Enabling automatic mixed precision in {self.params.amp_mode}.")
-        else:
-            self.amp_enabled = False
-            self.amp_dtype = torch.float32
+        # set up mixed precision (amp dtype + optional transformer-engine fp8 recipe).
+        # the manager parses the mode once and hands out a single nested autocast cm.
+        amp_mode = self.params.amp_mode if hasattr(self.params, "amp_mode") else "none"
+        self.autocast = AutocastManager(amp_mode, device_type="cuda", fp8_group=comm.get_group("data"))
+        self.amp_dtype = self.autocast.amp_dtype
+        self.amp_enabled = self.autocast.amp_enabled
+        if self.amp_enabled and self.log_to_screen:
+            self.logger.info(f"Enabling automatic mixed precision in '{amp_mode}'.")
 
         # resuming needs is set to False so loading checkpoints does not attempt to set the optimizer state
         self.params["resuming"] = False
@@ -99,7 +103,9 @@ class Inferencer(Driver):
             self.params["enable_synthetic_data"] = False
 
         # the file path is taken from inf_data_path to perform inference on the out of sample dataset
-        self.valid_dataloader, self.valid_dataset, _ = get_dataloader(self.params, self.params.inf_data_path, mode="inference", device=self.device)
+        self.valid_dataloader, self.valid_dataset, _ = get_dataloader(
+            self.params, self.params.inf_data_path, mode="inference", device=self.device
+        )
         self._set_data_shapes(self.params, self.valid_dataset)
 
         if self.log_to_screen:
@@ -123,7 +129,7 @@ class Inferencer(Driver):
                 relative_timestamp=True,
                 return_target=False,
                 file_suffix=params.get("dataset_file_suffix", "h5"),
-                dataset_path="fields",
+                dataset_name="fields",
                 enable_s3=params.get("enable_s3", False),
                 io_grid=params.get("io_grid", [1, 1, 1]),
                 io_rank=params.get("io_rank", [0, 0, 0]),
@@ -156,15 +162,15 @@ class Inferencer(Driver):
                 add_zenith=0,
                 data_grid_type=params.get("data_grid_type", "equiangular"),
                 model_grid_type=params.get("model_grid_type", "equiangular"),
-                bias=bias, # we subtract the bias to avoid subtracting too big numbers
-                scale=scale, # we need to set that to make sure the climatology is properly scaled
+                bias=bias,  # we subtract the bias to avoid subtracting too big numbers
+                scale=scale,  # we need to set that to make sure the climatology is properly scaled
                 crop_size=(params.get("crop_size_x", None), params.get("crop_size_y", None)),
                 crop_anchor=(params.get("crop_anchor_x", 0), params.get("crop_anchor_y", 0)),
                 return_timestamp=False,
                 relative_timestamp=True,
                 return_target=False,
                 file_suffix=params.get("dataset_file_suffix", "h5"),
-                dataset_path="fields",
+                dataset_name="fields",
                 enable_s3=params.get("enable_s3", False),
                 io_grid=params.get("io_grid", [1, 1, 1]),
                 io_rank=params.get("io_rank", [0, 0, 0]),
@@ -181,12 +187,16 @@ class Inferencer(Driver):
             print(self.model)
 
         if self.log_to_screen:
-            self.logger.info(f"Loading pretrained checkpoint {self.params.checkpoint_path} in {self.params.load_checkpoint} mode")
+            self.logger.info(
+                f"Loading pretrained checkpoint {self.params.checkpoint_path} in {self.params.load_checkpoint} mode"
+            )
 
         # restore from checkpoint
         checkpoint_path = self.params.checkpoint_path
         self.checkpoint_version_current = get_latest_checkpoint_version(checkpoint_path)
-        checkpoint_path = checkpoint_path.format(checkpoint_version=self.checkpoint_version_current, mp_rank="{mp_rank}")
+        checkpoint_path = checkpoint_path.format(
+            checkpoint_version=self.checkpoint_version_current, mp_rank="{mp_rank}"
+        )
 
         self.restore_from_checkpoint(
             checkpoint_path,
@@ -206,7 +216,21 @@ class Inferencer(Driver):
 
     # shorthand for inference range running over the full dataset
     def inference_epoch(
-            self, rollout_steps: int, dhours: int, compute_metrics: bool = False, output_channels: List[str] = [], output_file: Optional[str] = None, output_memory_buffer_size: Optional[int] = None, bias_file: Optional[str] = None, spectrum_file: Optional[str] = None, zonal_spectrum_file: Optional[str] = None, wb2_compatible: Optional[bool] = False, enable_odirect: bool = False, enable_gds: bool = False, profiler=None
+        self,
+        rollout_steps: int,
+        dhours: int,
+        compute_metrics: bool = False,
+        output_channels: List[str] = [],
+        output_file: Optional[str] = None,
+        output_memory_buffer_size: Optional[int] = None,
+        bias_file: Optional[str] = None,
+        spectrum_file: Optional[str] = None,
+        zonal_spectrum_file: Optional[str] = None,
+        wb2_compatible: Optional[bool] = False,
+        enable_odirect: bool = False,
+        odirect_alignment: int = 0,
+        enable_gds: bool = False,
+        profiler=None,
     ):
         """
         Runs the model in autoregressive inference mode on the entire validation dataset. Computes metrics and scores the model.
@@ -238,6 +262,7 @@ class Inferencer(Driver):
             zonal_spectrum_file=zonal_spectrum_file,
             wb2_compatible=wb2_compatible,
             enable_odirect=enable_odirect,
+            odirect_alignment=odirect_alignment,
             enable_gds=enable_gds,
             profiler=profiler,
         )
@@ -263,6 +288,7 @@ class Inferencer(Driver):
         zonal_spectrum_file: Optional[str] = None,
         wb2_compatible: Optional[bool] = False,
         enable_odirect: bool = False,
+        odirect_alignment: int = 0,
         enable_gds: bool = False,
         profiler=None,
     ):
@@ -286,6 +312,7 @@ class Inferencer(Driver):
             zonal_spectrum_file=zonal_spectrum_file,
             wb2_compatible=wb2_compatible,
             enable_odirect=enable_odirect,
+            odirect_alignment=odirect_alignment,
             enable_gds=enable_gds,
             profiler=profiler,
         )
@@ -308,6 +335,7 @@ class Inferencer(Driver):
         zonal_spectrum_file: Optional[str] = None,
         wb2_compatible: Optional[bool] = False,
         enable_odirect: bool = False,
+        odirect_alignment: int = 0,
         enable_gds: bool = False,
         profiler=None,
     ):
@@ -346,9 +374,11 @@ class Inferencer(Driver):
 
         # get shapes
         img_shape = [self.params.img_shape_x, self.params.img_shape_y]
-        local_shape = [self.params.get("img_local_shape_x", img_shape[0]), self.params.get("img_local_shape_y", img_shape[1])]
+        local_shape = [
+            self.params.get("img_local_shape_x", img_shape[0]),
+            self.params.get("img_local_shape_y", img_shape[1]),
+        ]
         local_offset = [self.params.get("img_local_offset_x", 0), self.params.get("img_local_offset_y", 0)]
-
 
         if output_file is not None:
             # intiialize the rollout buffer
@@ -370,6 +400,7 @@ class Inferencer(Driver):
                 output_channels=output_channels,
                 output_memory_buffer_size=output_memory_buffer_size,
                 enable_odirect=enable_odirect,
+                odirect_alignment=odirect_alignment,
                 enable_gds=enable_gds,
             )
         else:
@@ -422,7 +453,7 @@ class Inferencer(Driver):
             zonal_spectrum_channels = output_channels if output_channels else self.params.channel_names
             zonal_spectrum_buffer = ZonalSpectrumAverageBuffer(
                 num_rollout_steps=rollout_steps,
-	            rollout_dt=self.params.dt,
+                rollout_dt=self.params.dt,
                 img_shape=img_shape,
                 ensemble_size=self.params.local_ensemble_size,
                 channel_names=self.params.channel_names,
@@ -437,17 +468,30 @@ class Inferencer(Driver):
         else:
             zonal_spectrum_buffer = None
 
-
         # if wb2 compatibility enabled check if a mask was specified
         if wb2_compatible and self.log_to_screen:
             if self.mask_dataset is None:
-                self.logger.warning("WeatherBench compatibility enabled but no mask specified. Results may differ, please specify a mask.")
+                self.logger.warning(
+                    "WeatherBench compatibility enabled but no mask specified. Results may differ, please specify a mask."
+                )
             if self.climatology_dataset is None:
-                self.logger.warning("WeatherBench compatibility enabled but no climatology specified. Results may differ, please specify a wb2-compatible climatology.")
+                self.logger.warning(
+                    "WeatherBench compatibility enabled but no climatology specified. Results may differ, please specify a wb2-compatible climatology."
+                )
 
-        logs = self._inference_indexlist(indices, rollout_steps, batch_size, metrics=metrics, rollout_buffer=rollout_buffer, bias_buffer=bias_buffer, spectrum_buffer=spectrum_buffer, zonal_spectrum_buffer=zonal_spectrum_buffer, profiler=profiler)
+        logs = self._inference_indexlist(
+            indices,
+            rollout_steps,
+            batch_size,
+            metrics=metrics,
+            rollout_buffer=rollout_buffer,
+            bias_buffer=bias_buffer,
+            spectrum_buffer=spectrum_buffer,
+            zonal_spectrum_buffer=zonal_spectrum_buffer,
+            profiler=profiler,
+        )
 
-        if compute_metrics and not (metrics_file is None):
+        if compute_metrics and metrics_file is not None:
             if comm.get_rank("world") == 0:
                 metrics.save(metrics_file)
 
@@ -501,24 +545,44 @@ class Inferencer(Driver):
         # etc: generate batched list first:
         # use sorted index sampler, which does the trick
         sampler = SortedIndexSampler(indices, num_samples, batch_size, rollout_steps, self.params.dt)
-        subset_dataloader = tud.DataLoader(self.valid_dataset, batch_sampler=sampler, prefetch_factor=6, pin_memory=True, num_workers=self.params.num_data_workers)
+        subset_dataloader = tud.DataLoader(
+            self.valid_dataset,
+            batch_sampler=sampler,
+            prefetch_factor=6,
+            pin_memory=True,
+            num_workers=self.params.num_data_workers,
+        )
 
         # get timedelta with respect to beginning of year
         if self.mask_dataset is not None:
             mask_sampler = translate_date_sampler_to_timedelta_sampler(sampler, self.valid_dataset, self.mask_dataset)
-            self.mask_dataloader = tud.DataLoader(self.mask_dataset, batch_sampler=mask_sampler, prefetch_factor=6, pin_memory=True, num_workers=self.params.num_data_workers)
+            self.mask_dataloader = tud.DataLoader(
+                self.mask_dataset,
+                batch_sampler=mask_sampler,
+                prefetch_factor=6,
+                pin_memory=True,
+                num_workers=self.params.num_data_workers,
+            )
             mask_iterator = iter(self.mask_dataloader)
 
         if self.climatology_dataset is not None:
-            climatology_sampler = translate_date_sampler_to_timedelta_sampler(sampler, self.valid_dataset, self.climatology_dataset)
-            self.climatology_dataloader = tud.DataLoader(self.climatology_dataset, batch_sampler=climatology_sampler, prefetch_factor=6, pin_memory=True, num_workers=self.params.num_data_workers)
+            climatology_sampler = translate_date_sampler_to_timedelta_sampler(
+                sampler, self.valid_dataset, self.climatology_dataset
+            )
+            self.climatology_dataloader = tud.DataLoader(
+                self.climatology_dataset,
+                batch_sampler=climatology_sampler,
+                prefetch_factor=6,
+                pin_memory=True,
+                num_workers=self.params.num_data_workers,
+            )
             climatology_iterator = iter(self.climatology_dataloader)
 
         # create loader for the full epoch
-        inp = None        # folded-batch input carried across rollout steps, shape (B*E, C', H, W)
-        inpz = None       # input zenith expanded to (B*E, ...) if add_zenith
-        tinp = None       # input timestamp (unexpanded, shape (B, ...)) kept for date logging / rollout buffer
-        B = None          # unexpanded batch size captured at episode start
+        inp = None  # folded-batch input carried across rollout steps, shape (B*E, C', H, W)
+        inpz = None  # input zenith expanded to (B*E, ...) if add_zenith
+        tinp = None  # input timestamp (unexpanded, shape (B, ...)) kept for date logging / rollout buffer
+        B = None  # unexpanded batch size captured at episode start
         idt = 0
         E = self.params.local_ensemble_size
         with torch.inference_mode():
@@ -601,7 +665,7 @@ class Inferencer(Driver):
                         # set unpredicted features at (B*E, ...) shape to match the folded-batch inp
                         self.preprocessor.cache_unpredicted_features(None, None, inpz, tarz)
 
-                        with amp.autocast(device_type="cuda", enabled=self.amp_enabled, dtype=self.amp_dtype):
+                        with self.autocast():
                             # single forward on the folded batch; noise does an AR update
                             # (replace_state=False) before being consumed this step
                             pred_flat = self.model(inp, update_state=True, replace_state=False)
@@ -624,7 +688,7 @@ class Inferencer(Driver):
                         tinp = ttar
 
                         # update the metrics starting from the first actual prediction
-                        if (metrics is not None):
+                        if metrics is not None:
 
                             # subtract clim
                             if clims is not None:
@@ -638,13 +702,13 @@ class Inferencer(Driver):
                             metrics.update(predc, targc, loss, idte - 1, masks)
 
                         # update the bias computation
-                        if (bias_buffer is not None):
+                        if bias_buffer is not None:
                             diff = pred - targ.unsqueeze(dim=1)
                             B, E, C, H, W = diff.shape
-                            diff = diff.reshape(B*E, C, H, W).contiguous()
+                            diff = diff.reshape(B * E, C, H, W).contiguous()
                             bias_buffer.update(diff, idte - 1)
 
-                        if (spectrum_buffer is not None):
+                        if spectrum_buffer is not None:
                             if pred.dim() == 4:
                                 prede = pred.unsqueeze(1)
                             else:
@@ -652,7 +716,7 @@ class Inferencer(Driver):
 
                             spectrum_buffer.update(prede, targ.unsqueeze(1), idte - 1)
 
-                        if (zonal_spectrum_buffer is not None):
+                        if zonal_spectrum_buffer is not None:
                             if pred.dim() == 4:
                                 prede = pred.unsqueeze(1)
                             else:
@@ -712,7 +776,7 @@ class Inferencer(Driver):
         if self.log_to_screen:
             # header:
             self.logger.info(separator)
-            self.logger.info(f"Scoring summary:")
+            self.logger.info("Scoring summary:")
             self.logger.info("Total scoring time is {:.2f} sec".format(scoring_time))
 
             # compute padding:
@@ -729,7 +793,22 @@ class Inferencer(Driver):
         return
 
     def score_model(
-            self, metrics_file: Optional[str] = None, output_channels: List[str] = [], output_file: Optional[str] = None, output_memory_buffer_size: Optional[int]=None, bias_file: Optional[str]=None, spectrum_file: Optional[str]=None, zonal_spectrum_file: Optional[str]=None, start_date=None, end_date=None, date_step=1, wb2_compatible=False, enable_odirect: bool = False, enable_gds: bool = False, profiler=None
+        self,
+        metrics_file: Optional[str] = None,
+        output_channels: List[str] = [],
+        output_file: Optional[str] = None,
+        output_memory_buffer_size: Optional[int] = None,
+        bias_file: Optional[str] = None,
+        spectrum_file: Optional[str] = None,
+        zonal_spectrum_file: Optional[str] = None,
+        start_date=None,
+        end_date=None,
+        date_step=1,
+        wb2_compatible=False,
+        enable_odirect: bool = False,
+        odirect_alignment: int = 0,
+        enable_gds: bool = False,
+        profiler=None,
     ):
         """
         main routine for scoring models. Runs the inference over the entire dataset and computes the score. Then writes them to disk
@@ -739,7 +818,9 @@ class Inferencer(Driver):
         if self.log_to_screen:
             # log memory usage so far
             all_mem_gb, max_mem_gb = get_memory_usage(self.device)
-            self.logger.info(f"Scaffolding memory high watermark: {all_mem_gb:.2f} GB ({max_mem_gb:.2f} GB for pytorch)")
+            self.logger.info(
+                f"Scaffolding memory high watermark: {all_mem_gb:.2f} GB ({max_mem_gb:.2f} GB for pytorch)"
+            )
             # announce training start
             self.logger.info("Starting Scoring...")
 
@@ -768,7 +849,9 @@ class Inferencer(Driver):
                 self.logger.info(f"Logging following channels: {output_channels}")
 
         # split the samples across ranks
-        samples_local = split_list(list(range(start_index, end_index, step)), comm.get_size("batch"))[comm.get_rank("batch")]
+        samples_local = split_list(list(range(start_index, end_index, step)), comm.get_size("batch"))[
+            comm.get_rank("batch")
+        ]
 
         # distribute samples across all ranks
         start = min(samples_local)
@@ -795,6 +878,7 @@ class Inferencer(Driver):
             zonal_spectrum_file=zonal_spectrum_file,
             wb2_compatible=wb2_compatible,
             enable_odirect=enable_odirect,
+            odirect_alignment=odirect_alignment,
             enable_gds=enable_gds,
             profiler=profiler,
         )

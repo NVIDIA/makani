@@ -34,15 +34,18 @@ _H, _W = 64, 128
 # grid_to_quadrature_rule
 # ---------------------------------------------------------------------------
 
+
 class TestGridToQuadratureRule(unittest.TestCase):
 
-    @parameterized.expand([
-        ("euclidean",        "uniform"),
-        ("equiangular",      "naive"),
-        ("legendre-gauss",   "legendre-gauss"),
-        ("clenshaw-curtiss", "clenshaw-curtiss"),
-        ("weatherbench2",    "weatherbench2"),
-    ])
+    @parameterized.expand(
+        [
+            ("euclidean", "uniform"),
+            ("equiangular", "naive"),
+            ("legendre-gauss", "legendre-gauss"),
+            ("clenshaw-curtiss", "clenshaw-curtiss"),
+            ("weatherbench2", "weatherbench2"),
+        ]
+    )
     def test_known_grid_types(self, grid_type, expected_rule):
         self.assertEqual(grid_to_quadrature_rule(grid_type), expected_rule)
 
@@ -54,6 +57,7 @@ class TestGridToQuadratureRule(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # GridConverter
 # ---------------------------------------------------------------------------
+
 
 class TestGridConverter(unittest.TestCase):
 
@@ -91,10 +95,8 @@ class TestGridConverter(unittest.TestCase):
         """Legendre-Gauss destination nodes must lie strictly inside the source lat range."""
         converter = GridConverter("equiangular", "legendre-gauss", self.lat_rad, self.lon_rad)
         dst_lat, _ = converter.get_dst_coords()
-        self.assertTrue((dst_lat > self.lat_rad[-1]).all(),
-                        "dst_lat has values at or below the south pole")
-        self.assertTrue((dst_lat < self.lat_rad[0]).all(),
-                        "dst_lat has values at or above the north pole")
+        self.assertTrue((dst_lat > self.lat_rad[-1]).all(), "dst_lat has values at or below the south pole")
+        self.assertTrue((dst_lat < self.lat_rad[0]).all(), "dst_lat has values at or above the north pole")
 
     def test_equiangular_to_legendre_gauss_linear_function_exact(self, verbose=False):
         """Linear interpolation recovers a latitude-linear field exactly."""
@@ -102,16 +104,15 @@ class TestGridConverter(unittest.TestCase):
 
         # Field whose value at row i is lat_rad[i], constant across lon
         data = self.lat_rad.unsqueeze(-1).expand(self.H, self.W)
-        data = data.unsqueeze(0).unsqueeze(0)   # (1, 1, H, W)
+        data = data.unsqueeze(0).unsqueeze(0)  # (1, 1, H, W)
 
-        out = converter(data)                   # (1, 1, H_dst, W)
+        out = converter(data)  # (1, 1, H_dst, W)
 
         dst_lat, _ = converter.get_dst_coords()
         expected = dst_lat.unsqueeze(-1).expand(-1, self.W).unsqueeze(0).unsqueeze(0).to(out.dtype)
 
         self.assertTrue(
-            compare_tensors("linear function interpolation", out, expected,
-                            atol=1e-5, rtol=1e-5, verbose=verbose)
+            compare_tensors("linear function interpolation", out, expected, atol=1e-5, rtol=1e-5, verbose=verbose)
         )
 
     def test_unsupported_dst_raises(self):
@@ -124,6 +125,7 @@ class TestGridConverter(unittest.TestCase):
 # GridQuadrature
 # ---------------------------------------------------------------------------
 
+
 class TestGridQuadrature(unittest.TestCase):
 
     def setUp(self):
@@ -131,45 +133,55 @@ class TestGridQuadrature(unittest.TestCase):
 
     # --- weight correctness --------------------------------------------------
 
-    @parameterized.expand([
-        ("naive",),
-        ("clenshaw-curtiss",),
-        ("legendre-gauss",),
-        ("weatherbench2",),
-        ("uniform",),
-    ])
+    @parameterized.expand(
+        [
+            ("naive",),
+            ("clenshaw-curtiss",),
+            ("legendre-gauss",),
+            ("weatherbench2",),
+            ("uniform",),
+        ]
+    )
     def test_weights_sum_to_4pi(self, quadrature_rule):
         """Quadrature weights must integrate the constant function 1 to 4π (unit-sphere area)."""
         gq = GridQuadrature(quadrature_rule, img_shape=(_H, _W))
         total = gq.quad_weight.sum().item()
         self.assertAlmostEqual(
-            total, 4.0 * math.pi, delta=1e-4,
+            total,
+            4.0 * math.pi,
+            delta=1e-4,
             msg=f"{quadrature_rule}: weights sum to {total:.6f}, expected 4π≈{4*math.pi:.6f}",
         )
 
-    @parameterized.expand([
-        ("naive",),
-        ("clenshaw-curtiss",),
-        ("legendre-gauss",),
-        ("weatherbench2",),
-        ("uniform",),
-    ])
+    @parameterized.expand(
+        [
+            ("naive",),
+            ("clenshaw-curtiss",),
+            ("legendre-gauss",),
+            ("weatherbench2",),
+            ("uniform",),
+        ]
+    )
     def test_weights_sum_to_one_when_normalized(self, quadrature_rule):
         """With normalize=True the weights must sum to 1."""
         gq = GridQuadrature(quadrature_rule, img_shape=(_H, _W), normalize=True)
         total = gq.quad_weight.sum().item()
         self.assertAlmostEqual(
-            total, 1.0, delta=1e-5,
+            total,
+            1.0,
+            delta=1e-5,
             msg=f"{quadrature_rule} normalized: weights sum to {total:.8f}, expected 1.0",
         )
 
-    @parameterized.expand([
-        ("naive",),
-        ("clenshaw-curtiss",),
-        ("legendre-gauss",),
-        ("weatherbench2",),
-        ("uniform",),
-    ])
+    @parameterized.expand(
+        [
+            ("naive",),
+            ("clenshaw-curtiss",),
+            ("legendre-gauss",),
+            ("weatherbench2",),
+            ("uniform",),
+        ]
+    )
     def test_weights_all_non_negative(self, quadrature_rule):
         """All quadrature weights must be non-negative."""
         gq = GridQuadrature(quadrature_rule, img_shape=(_H, _W))
@@ -180,13 +192,15 @@ class TestGridQuadrature(unittest.TestCase):
 
     # --- forward pass --------------------------------------------------------
 
-    @parameterized.expand([
-        ("naive",),
-        ("clenshaw-curtiss",),
-        ("legendre-gauss",),
-        ("weatherbench2",),
-        ("uniform",),
-    ])
+    @parameterized.expand(
+        [
+            ("naive",),
+            ("clenshaw-curtiss",),
+            ("legendre-gauss",),
+            ("weatherbench2",),
+            ("uniform",),
+        ]
+    )
     def test_forward_constant_one_integrates_to_4pi(self, quadrature_rule, verbose=False):
         """Integrating f≡1 over the sphere yields 4π for every quadrature rule."""
         gq = GridQuadrature(quadrature_rule, img_shape=(_H, _W))
@@ -197,7 +211,11 @@ class TestGridQuadrature(unittest.TestCase):
         self.assertTrue(
             compare_tensors(
                 f"constant integral ({quadrature_rule})",
-                out, expected, atol=1e-3, rtol=1e-4, verbose=verbose,
+                out,
+                expected,
+                atol=1e-3,
+                rtol=1e-4,
+                verbose=verbose,
             )
         )
 
@@ -217,9 +235,7 @@ class TestGridQuadrature(unittest.TestCase):
         a, b = 2.5, -1.3
         lhs = gq(a * x + b * y)
         rhs = a * gq(x) + b * gq(y)
-        self.assertTrue(
-            compare_tensors("linearity", lhs, rhs, atol=1e-4, rtol=1e-5, verbose=verbose)
-        )
+        self.assertTrue(compare_tensors("linearity", lhs, rhs, atol=1e-4, rtol=1e-5, verbose=verbose))
 
     # --- construction edge cases ---------------------------------------------
 
@@ -232,8 +248,10 @@ class TestGridQuadrature(unittest.TestCase):
         """A spatially cropped quadrature has strictly less total weight than the full sphere."""
         gq_full = GridQuadrature("legendre-gauss", img_shape=(_H, _W))
         gq_crop = GridQuadrature(
-            "legendre-gauss", img_shape=(_H, _W),
-            crop_shape=(_H // 2, _W), crop_offset=(0, 0),
+            "legendre-gauss",
+            img_shape=(_H, _W),
+            crop_shape=(_H // 2, _W),
+            crop_offset=(0, 0),
         )
         total_full = gq_full.quad_weight.sum().item()
         total_crop = gq_crop.quad_weight.sum().item()
@@ -244,12 +262,15 @@ class TestGridQuadrature(unittest.TestCase):
         """crop_shape == img_shape (with zero offset) is equivalent to no crop."""
         gq_full = GridQuadrature("clenshaw-curtiss", img_shape=(_H, _W))
         gq_crop = GridQuadrature(
-            "clenshaw-curtiss", img_shape=(_H, _W),
-            crop_shape=(_H, _W), crop_offset=(0, 0),
+            "clenshaw-curtiss",
+            img_shape=(_H, _W),
+            crop_shape=(_H, _W),
+            crop_offset=(0, 0),
         )
         self.assertTrue(
-            compare_tensors("full crop vs no crop", gq_full.quad_weight, gq_crop.quad_weight,
-                            atol=0.0, rtol=0.0, verbose=verbose)
+            compare_tensors(
+                "full crop vs no crop", gq_full.quad_weight, gq_crop.quad_weight, atol=0.0, rtol=0.0, verbose=verbose
+            )
         )
 
 
