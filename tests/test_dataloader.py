@@ -715,6 +715,43 @@ class DataLoaderBase:
         with self.subTest(desc="auto_reset advances shuffle state"):
             self.assertNotEqual(fps_ep0, fps_ep1)
 
+    def _test_dali_checkpoint_restore_survives_rebuild(self):
+        """
+        DALI path, train mode: a restore can be performed at all on this backend.
+
+        Restoring rebuilds the pipeline inside a live process, so the python worker
+        pool is spawned a second time and every worker re-opens its file handles
+        through this backend's reader (``_get_year_h5`` / ``_zarr_open`` / the WB2
+        variant). That is the only part of the restore which is backend-specific;
+        the resume logic itself works off DALI's counters and is backend-independent,
+        so it is covered once, in ``_test_dali_checkpoint_mid_epoch_resume``. This
+        test therefore only asserts that the rebuild survives and keeps delivering
+        data, not which samples come out.
+        """
+        params = copy.deepcopy(self.params)
+        params.multifiles = False
+        params.batch_size = 1
+        params.n_train_samples = 8  # keep the test fast
+        params.n_future = 0
+
+        loader, _, _ = get_dataloader(
+            params,
+            params.train_data_path,
+            mode="train",
+            device=self.device,
+            dali_device=self.dali_device,
+        )
+
+        before = next(iter(loader))[0]
+
+        # round-trip the state through the loader, which tears the pipeline down and
+        # builds a new one with a fresh worker pool
+        self.assertTrue(loader.load_state_dict(loader.state_dict()))
+
+        after = next(iter(loader))[0]
+
+        self.assertEqual(tuple(after.shape), tuple(before.shape))
+
     def _test_dali_checkpoint_mid_epoch_resume(self):
         """
         DALI path, train mode: state_dict/load_state_dict resume the sample sequence.
@@ -948,6 +985,11 @@ class TestZarrDataLoader(DataLoaderBase, unittest.TestCase):
     def test_distributed_subsampling(self, multifiles):
         self._test_distributed_subsampling(multifiles)
 
+    # the full mid-epoch resume is exercised on the HDF5 backend; here we only check
+    # that the pipeline rebuild a restore performs works with the zarr reader
+    def test_dali_checkpoint_restore_survives_rebuild(self):
+        self._test_dali_checkpoint_restore_survives_rebuild()
+
     def test_date_retrieval(self):
         self.params.multifiles = True
         train_loader, _, _ = get_dataloader(self.params, self.params.train_data_path, mode="train", device=self.device)
@@ -1020,6 +1062,11 @@ class TestZarrWB2DataLoader(DataLoaderBase, unittest.TestCase):
 
     def test_future(self):
         self._test_future(False)
+
+    # the full mid-epoch resume is exercised on the HDF5 backend; here we only check
+    # that the pipeline rebuild a restore performs works with the WB2 zarr reader
+    def test_dali_checkpoint_restore_survives_rebuild(self):
+        self._test_dali_checkpoint_restore_survives_rebuild()
 
     def test_autoreg(self):
         self._test_autoreg(False)
