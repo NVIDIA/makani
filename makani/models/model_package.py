@@ -350,8 +350,15 @@ class ModelWrapper(torch.nn.Module):
         replace_state : bool or None, optional
             Forwarded to the step wrapper's stochastic-state update.
 
-        Batching contract
-        -----------------
+        Returns
+        -------
+        torch.Tensor
+            Prediction for the next timestep, shape ``(B, C_out, H, W)``,
+            denormalized unless ``normalized_data`` is ``True``.
+
+        Notes
+        -----
+        **Batching contract.**
         Any batch size ``B`` is supported. Two pieces of internal state are
         sized from ``B`` on every call:
 

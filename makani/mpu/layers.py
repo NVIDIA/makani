@@ -606,14 +606,12 @@ class StochasticMLP(nn.Module):
         Width of the hidden layer, defaults to ``in_features``.
     out_features : int, optional
         Number of output features, defaults to ``in_features``.
+    act_layer : callable, optional
+        Activation constructor, by default :class:`torch.nn.GELU`.
     output_bias : bool, optional
         Whether the output projection carries a bias, by default ``True``.
     input_format : str, optional
         Only ``"nchw"`` is supported; anything else raises.
-    comm_name : str, optional
-        Communicator group name, by default ``"matmul"``.
-    act_layer : callable, optional
-        Activation constructor, by default :class:`torch.nn.GELU`.
     drop_rate : float, optional
         Dropout probability, by default ``0.0``.
     drop_type : str, optional
@@ -625,6 +623,8 @@ class StochasticMLP(nn.Module):
     seed : int, optional
         Seed for the private weight-sampling generators. Give distinct values
         to distinct ensemble members.
+    **kwargs
+        Ignored; present so block configs can pass extra keys.
 
     Raises
     ------
