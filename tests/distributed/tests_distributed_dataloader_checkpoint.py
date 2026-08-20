@@ -19,6 +19,7 @@ import shutil
 import tempfile
 import unittest
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.distributed as dist
@@ -27,9 +28,9 @@ from makani.utils import comm
 from makani.utils.driver import Driver
 from makani.utils.dataloader import get_dataloader
 
-from ..testutils import init_hdf5_dataset
-from ..test_dataloader import init_dataset_params
-from .distributed_helpers import _init_grid, reduce_success, sync_and_barrier
+from ..testutils import init_hdf5_dataset, compare_arrays
+from ..test_dataloader import init_dataset_params, get_sample
+from .distributed_helpers import _init_grid, _gather_helper, reduce_success, sync_and_barrier
 
 
 _have_dali = importlib.util.find_spec("nvidia.dali") is not None
@@ -278,7 +279,15 @@ class TestDistributedDataloaderCheckpoint(unittest.TestCase):
 
         Where the IO decomposition is also identical within a comm -- matmul and
         ensemble do not enter ``io_rank``, only h and w do -- the delivered samples
-        themselves are compared too, not just the state that produces them.
+        themselves are compared too, not just the state that produces them: ensemble
+        ranks are meant to draw the very same sample and only differ in how they
+        perturb it downstream.
+
+        Along h and w the local pieces cannot be compared to each other, since each
+        rank holds a different sub-domain by construction. They are instead
+        reassembled into the global image and matched against the samples on disk:
+        if the ranks had resumed at different positions, the pieces would compose an
+        image that exists nowhere in the dataset.
         """
         num_consumed = 2
         num_compared = 2
@@ -293,7 +302,14 @@ class TestDistributedDataloaderCheckpoint(unittest.TestCase):
         Driver._restore_dataloader_state({"dataloader_state": state_dicts}, restored_loader, strict=True)
 
         restored_state = self._comparable_state(restored_loader)
-        fingerprints = self._collect(iter(restored_loader), num_compared)
+
+        # keep the local tensors around, the h/w check below needs to reassemble them.
+        # the samples are compared numerically rather than by bytes: they run through
+        # the normalization in the pipeline, so demanding bitwise equality would tie
+        # the test to that being reproducible down to the last ulp.
+        iterator = iter(restored_loader)
+        samples = [next(iterator)[0] for _ in range(num_compared)]
+        arrays = [np.squeeze(sample.cpu().numpy()) for sample in samples]
 
         # the shard is what the ranks are supposed to disagree on; without this the
         # equality checks below could pass simply because every rank is identical
@@ -316,15 +332,41 @@ class TestDistributedDataloaderCheckpoint(unittest.TestCase):
                 )
 
         # h and w shard the image itself, so only matmul / ensemble ranks read the
-        # very same bytes and can be compared on the delivered samples
+        # very same bytes and can be compared on the delivered samples directly
         for group_name in ("matmul", "ensemble"):
-            gathered = self._all_gather_in_group(fingerprints, group_name)
+            gathered = self._all_gather_in_group(arrays, group_name)
             if gathered is None:
                 continue
+            identical = all(
+                compare_arrays(f"sample {step} across {group_name}", theirs, mine)
+                for other in gathered
+                for step, (theirs, mine) in enumerate(zip(other, gathered[0]))
+            )
             with self.subTest(desc=f"identical samples across {group_name} ranks"):
                 self.assertTrue(
-                    reduce_success(all(fps == gathered[0] for fps in gathered), self.device),
+                    reduce_success(identical, self.device),
                     msg=f"restored loaders deliver different samples across the {group_name} comm",
+                )
+
+        # along h and w the pieces must reassemble into one of the samples on disk.
+        # the test stats fixture is zero-mean / unit-std, so the zscore normalization
+        # leaves the values alone and the loader output can be matched against the raw
+        # file contents (same baseline as _test_dali_parallel_workers_full_epoch_coverage,
+        # but numerically, so the check survives a stats fixture that is not exactly
+        # neutral or a normalization that is not exactly a pass-through).
+        on_disk = [get_sample(self.train_path, int(idx)) for idx in restored_loader.extsource.indices_select]
+        for step, sample in enumerate(samples):
+            assembled = _gather_helper(sample, dim=-2, group=self.h_group)
+            assembled = _gather_helper(assembled, dim=-1, group=self.w_group)
+            assembled = np.squeeze(assembled.cpu().numpy())
+            found = any(
+                compare_arrays(f"assembled sample {step}", assembled, candidate, atol=1e-5, rtol=1e-4)
+                for candidate in on_disk
+            )
+            with self.subTest(desc=f"h/w pieces belong to the same image at step {step}"):
+                self.assertTrue(
+                    reduce_success(found, self.device),
+                    msg=f"the h/w sub-domains at step {step} do not compose a sample of the dataset",
                 )
 
     def test_state_from_a_different_shard_is_rejected(self, verbose=False):
