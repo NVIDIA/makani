@@ -169,6 +169,11 @@ class Driver(metaclass=abc.ABCMeta):
         if not hasattr(params, "load_counters"):
             params["load_counters"] = True
 
+        # allows resuming a run but restarting the data pipeline at the beginning of the epoch,
+        # in the same way load_optimizer / load_scheduler / load_counters can be turned off
+        if not hasattr(params, "load_dataloader_state"):
+            params["load_dataloader_state"] = True
+
         if not hasattr(params, "checkpoint_num_versions"):
             params["checkpoint_num_versions"] = 3
 
@@ -411,8 +416,17 @@ class Driver(metaclass=abc.ABCMeta):
     def get_train_dataloader_for_restore(self) -> Optional[Any]:
         """
         The training dataloader if its state should be restored from the checkpoint, else None.
+
+        Returns None when either the feature is turned off entirely
+        (``checkpoint_dataloader_state``) or only the restore side is
+        (``load_dataloader_state``), which resumes a run with a data pipeline starting at the
+        beginning of the epoch. Note that finetuning does not go through here at all: the
+        trainers only hand the dataloader to the restore when resuming.
         """
         if not self.params.get("checkpoint_dataloader_state", True):
+            return None
+
+        if not self.params.get("load_dataloader_state", True):
             return None
 
         dataloader = getattr(self, "train_dataloader", None)
