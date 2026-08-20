@@ -17,7 +17,7 @@ import os
 import abc
 import gc
 
-from typing import Optional, Dict, Tuple
+from typing import Any, List, Optional, Dict, Tuple
 from collections import OrderedDict
 
 import numpy as np
@@ -44,6 +44,9 @@ from makani.utils.checkpoint_helpers import (
     scatter_optimizer_state_dict,
     prepend_prefix_to_state_dict,
     get_model_state_dict_prefix,
+    supports_dataloader_state,
+    gather_dataloader_state_dict,
+    scatter_dataloader_state_dict,
 )
 
 
@@ -166,8 +169,17 @@ class Driver(metaclass=abc.ABCMeta):
         if not hasattr(params, "load_counters"):
             params["load_counters"] = True
 
+        # allows resuming a run but restarting the data pipeline at the beginning of the epoch,
+        # in the same way load_optimizer / load_scheduler / load_counters can be turned off
+        if not hasattr(params, "load_dataloader_state"):
+            params["load_dataloader_state"] = True
+
         if not hasattr(params, "checkpoint_num_versions"):
             params["checkpoint_num_versions"] = 3
+
+        # whether the state of the training data pipeline is stored in and restored from the checkpoint
+        if not hasattr(params, "checkpoint_dataloader_state"):
+            params["checkpoint_dataloader_state"] = True
 
         return params
 
@@ -388,6 +400,53 @@ class Driver(metaclass=abc.ABCMeta):
                         wandb.log_artifact(self.wandb_normalization)
                         print(f"Creating artifact {norm_string}")
 
+    def get_train_dataloader_state(self) -> Optional[List[Dict[str, Any]]]:
+        """
+        Collect the state of the training data pipeline for checkpointing, on all ranks.
+
+        Only the training pipeline is checkpointed: the validation pipeline is restarted from
+        the beginning of the validation set in every epoch anyway. Returns None if dataloader
+        checkpointing is disabled or unsupported by the loader in use.
+        """
+        if not self.params.get("checkpoint_dataloader_state", True):
+            return None
+
+        return self.gather_dataloader_state(getattr(self, "train_dataloader", None))
+
+    def get_train_dataloader_for_restore(self) -> Optional[Any]:
+        """
+        The training dataloader if its state should be restored from the checkpoint, else None.
+
+        Returns None when either the feature is turned off entirely
+        (``checkpoint_dataloader_state``) or only the restore side is
+        (``load_dataloader_state``), which resumes a run with a data pipeline starting at the
+        beginning of the epoch. Note that finetuning does not go through here at all: the
+        trainers only hand the dataloader to the restore when resuming.
+        """
+        if not self.params.get("checkpoint_dataloader_state", True):
+            return None
+
+        if not self.params.get("load_dataloader_state", True):
+            return None
+
+        dataloader = getattr(self, "train_dataloader", None)
+        if not supports_dataloader_state(dataloader):
+            return None
+
+        return dataloader
+
+    @staticmethod
+    def gather_dataloader_state(dataloader: Any) -> Optional[List[Dict[str, Any]]]:
+        """
+        Routine for collecting the dataloader state of all data-parallel ranks.
+
+        This has to be called by every rank, in contrast to :meth:`save_checkpoint`, which is
+        only called by rank 0 of the data-parallel comm. The returned list is what is handed to
+        :meth:`save_checkpoint` as ``dataloader_state``. Returns None for dataloaders which do
+        not support checkpointing.
+        """
+        return gather_dataloader_state_dict(dataloader)
+
     @staticmethod
     def restore_from_checkpoint(
         checkpoint_path: str,
@@ -396,8 +455,10 @@ class Driver(metaclass=abc.ABCMeta):
         optimizer: Optional[optim.Optimizer] = None,
         scheduler: Optional[lr_scheduler.LRScheduler] = None,
         counters: Optional[Dict[str, int]] = None,
+        dataloader: Optional[Any] = None,
         checkpoint_mode: str = "legacy",
         strict: bool = True,
+        log_to_screen: bool = False,
     ):
         """
         Routine for restoring a checkpoint from a path.
@@ -406,18 +467,74 @@ class Driver(metaclass=abc.ABCMeta):
             if checkpoint_mode == "legacy":
                 # legacy mode
                 Driver._restore_checkpoint_legacy(
-                    checkpoint_path, model, loss, optimizer, scheduler, counters, strict=strict
+                    checkpoint_path,
+                    model,
+                    loss,
+                    optimizer,
+                    scheduler,
+                    counters,
+                    dataloader,
+                    strict=strict,
+                    log_to_screen=log_to_screen,
                 )
             elif checkpoint_mode == "flexible":
                 # new flexible mode allows to load models in arbitrary model-parallel configurations
                 Driver._restore_checkpoint_flexible(
-                    checkpoint_path, model, loss, optimizer, scheduler, counters, strict=strict
+                    checkpoint_path,
+                    model,
+                    loss,
+                    optimizer,
+                    scheduler,
+                    counters,
+                    dataloader,
+                    strict=strict,
+                    log_to_screen=log_to_screen,
                 )
             else:
                 raise ValueError(f"Unknown checkoint mode {checkpoint_mode}.")
 
         # clean up
         gc.collect()
+
+        return
+
+    @staticmethod
+    def _restore_dataloader_state(
+        checkpoint: Dict[str, Any], dataloader: Any, strict: bool = True, log_to_screen: bool = False
+    ):
+        """
+        Restore the state of the data pipeline from an already loaded checkpoint.
+        """
+
+        if not supports_dataloader_state(dataloader):
+            raise ValueError(
+                "Error, the dataloader state was requested to be restored, but the dataloader does not "
+                "support checkpointing. Only the DALI dataloaders with checkpoint_dataloader_state "
+                "set to True do."
+            )
+
+        if "dataloader_state" not in checkpoint:
+            # checkpoints written before dataloader checkpointing was introduced, and checkpoints
+            # written with a dataloader which does not support it, do not carry this entry. this
+            # is not treated as an error even in strict mode, so that older checkpoints stay
+            # resumable; the data pipeline then simply starts at the beginning of the epoch
+            if log_to_screen:
+                logging.getLogger().warning(
+                    "The checkpoint does not contain a dataloader state, so the data pipeline starts at the "
+                    "beginning of the epoch instead of resuming where the checkpoint was taken."
+                )
+            return
+
+        try:
+            state_dict = scatter_dataloader_state_dict(checkpoint["dataloader_state"])
+        except ValueError as err:
+            if strict:
+                raise
+            if log_to_screen:
+                logging.getLogger().warning(f"Skipping restore of the dataloader state: {err}")
+            return
+
+        dataloader.load_state_dict(state_dict, strict=strict)
 
         return
 
@@ -429,7 +546,9 @@ class Driver(metaclass=abc.ABCMeta):
         optimizer: Optional[optim.Optimizer] = None,
         scheduler: Optional[lr_scheduler.LRScheduler] = None,
         counters: Optional[Dict[str, int]] = None,
+        dataloader: Optional[Any] = None,
         strict: bool = True,
+        log_to_screen: bool = False,
         validate_comms: bool = True,
     ):
         checkpoint_fname = checkpoint_path.format(mp_rank=comm.get_rank("model"))
@@ -490,6 +609,9 @@ class Driver(metaclass=abc.ABCMeta):
             counters["iters"] = checkpoint["iters"]
             counters["start_epoch"] = checkpoint["epoch"]
 
+        if dataloader is not None:
+            Driver._restore_dataloader_state(checkpoint, dataloader, strict=strict, log_to_screen=log_to_screen)
+
         return
 
     @staticmethod
@@ -500,7 +622,9 @@ class Driver(metaclass=abc.ABCMeta):
         optimizer: Optional[optim.Optimizer] = None,
         scheduler: Optional[lr_scheduler.LRScheduler] = None,
         counters: Optional[Dict[str, int]] = None,
+        dataloader: Optional[Any] = None,
         strict: bool = True,
+        log_to_screen: bool = False,
     ):
         # when loading the weights in flexble mode we exclusively use mp_rank=0 and load them onto the cpu
         checkpoint_fname = checkpoint_path.format(mp_rank=0)
@@ -538,6 +662,9 @@ class Driver(metaclass=abc.ABCMeta):
             counters["iters"] = checkpoint["iters"]
             counters["start_epoch"] = checkpoint["epoch"]
 
+        if dataloader is not None:
+            Driver._restore_dataloader_state(checkpoint, dataloader, strict=strict, log_to_screen=log_to_screen)
+
         return
 
     @staticmethod
@@ -548,17 +675,26 @@ class Driver(metaclass=abc.ABCMeta):
         optimizer: Optional[optim.Optimizer] = None,
         scheduler: Optional[lr_scheduler.LRScheduler] = None,
         counters: Optional[Dict[str, int]] = None,
+        dataloader_state: Optional[List[Dict[str, Any]]] = None,
         checkpoint_mode: str = "legacy",
     ):
         """
         Save out checkpoint
+
+        ``dataloader_state`` is the list of per-data-parallel-rank states returned by
+        :meth:`gather_dataloader_state`, which has to be collected by all ranks before this
+        routine is entered by the checkpoint-writing rank.
         """
         with torch.no_grad():
             # legacy mode
             if checkpoint_mode == "legacy":
-                Driver._save_checkpoint_legacy(checkpoint_path, model, loss, optimizer, scheduler, counters)
+                Driver._save_checkpoint_legacy(
+                    checkpoint_path, model, loss, optimizer, scheduler, counters, dataloader_state
+                )
             elif checkpoint_mode == "flexible":
-                Driver._save_checkpoint_flexible(checkpoint_path, model, loss, optimizer, scheduler, counters)
+                Driver._save_checkpoint_flexible(
+                    checkpoint_path, model, loss, optimizer, scheduler, counters, dataloader_state
+                )
             else:
                 raise ValueError(f"Unknown checkoint mode {checkpoint_mode}.")
 
@@ -575,6 +711,7 @@ class Driver(metaclass=abc.ABCMeta):
         optimizer: Optional[optim.Optimizer] = None,
         scheduler: Optional[lr_scheduler.LRScheduler] = None,
         counters: Optional[Dict[str, int]] = None,
+        dataloader_state: Optional[List[Dict[str, Any]]] = None,
     ):
         # maybe the logic regarding the mp rank should be moved to somewhere else?
         checkpoint_fname = checkpoint_path.format(mp_rank=comm.get_rank("model"))
@@ -623,6 +760,10 @@ class Driver(metaclass=abc.ABCMeta):
             store_dict["iters"] = counters["iters"]
             store_dict["epoch"] = counters["epoch"]
 
+        # state of the training data pipeline, one entry per data-parallel rank
+        if dataloader_state is not None:
+            store_dict["dataloader_state"] = dataloader_state
+
         torch.save(store_dict, checkpoint_fname)
 
         return
@@ -635,6 +776,7 @@ class Driver(metaclass=abc.ABCMeta):
         optimizer: Optional[optim.Optimizer] = None,
         scheduler: Optional[lr_scheduler.LRScheduler] = None,
         counters: Optional[Dict[str, int]] = None,
+        dataloader_state: Optional[List[Dict[str, Any]]] = None,
     ):
         # checkpoint name
         checkpoint_fname = checkpoint_path.format(mp_rank=0)
@@ -676,6 +818,10 @@ class Driver(metaclass=abc.ABCMeta):
         if counters is not None:
             store_dict["iters"] = counters["iters"]
             store_dict["epoch"] = counters["epoch"]
+
+        # state of the training data pipeline, one entry per data-parallel rank
+        if dataloader_state is not None:
+            store_dict["dataloader_state"] = dataloader_state
 
         # in flexible mode only rank 0 needs to save the data to disk
         if comm.get_world_rank() == 0:

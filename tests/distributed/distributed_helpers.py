@@ -151,9 +151,14 @@ def _init_grid(cls):
     # initializing sht process groups just to be sure
     thd.init(cls.h_group, cls.w_group)
 
+    # the batch dim is not read from the env but auto-filled by comm.init as the
+    # data-parallel remainder, so it is queried from the comm rather than from GRID_*
+    cls.grid_size_b = comm.get_size("batch")
+
     if cls.world_rank == 0:
         print(
-            f"Running distributed tests on grid H x W x E = {cls.grid_size_h} x {cls.grid_size_w} x {cls.grid_size_e}"
+            "Running distributed tests on grid H x W x M x E x B = "
+            f"{cls.grid_size_h} x {cls.grid_size_w} x {cls.grid_size_m} x {cls.grid_size_e} x {cls.grid_size_b}"
         )
 
     # make sure every rank finishes setup together

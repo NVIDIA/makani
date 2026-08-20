@@ -248,8 +248,10 @@ class AutoencoderTrainer(Driver):
                 optimizer=self.optimizer if self.params.get("load_optimizer", True) else None,
                 scheduler=self.scheduler if self.params.get("load_scheduler", True) else None,
                 counters=counters if self.params.get("load_counters", True) else None,
+                dataloader=self.get_train_dataloader_for_restore(),
                 checkpoint_mode=self.params.load_checkpoint,
                 strict=self.params.get("strict_restore", True),
+                log_to_screen=self.log_to_screen,
             )
 
         # read out counters correctly
@@ -342,6 +344,13 @@ class AutoencoderTrainer(Driver):
                     lr = param_group["lr"]
                 wandb.log({"learning rate": lr}, step=self.epoch)
 
+            # the state of the data pipeline is sharded across the data-parallel comm, so it has
+            # to be gathered by all ranks before entering the rank-0-only block below
+            if (self.params.save_checkpoint != "none") and not self.params.get("skip_training", False):
+                dataloader_state = self.get_train_dataloader_state()
+            else:
+                dataloader_state = None
+
             # save out checkpoints
             if (
                 (self.data_parallel_rank == 0)
@@ -368,6 +377,7 @@ class AutoencoderTrainer(Driver):
                     self.optimizer,
                     self.scheduler,
                     counters,
+                    dataloader_state=dataloader_state,
                     checkpoint_mode=checkpoint_mode,
                 )
 
@@ -384,6 +394,7 @@ class AutoencoderTrainer(Driver):
                         self.optimizer,
                         self.scheduler,
                         counters,
+                        dataloader_state=dataloader_state,
                         checkpoint_mode=checkpoint_mode,
                     )
                     best_valid_loss = valid_logs["base"]["validation loss"]

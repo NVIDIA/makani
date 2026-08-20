@@ -43,6 +43,9 @@ from makani.utils.checkpoint_helpers import (
     get_model_state_dict_prefix,
     prepend_prefix_to_state_dict,
     load_checkpoint,
+    supports_dataloader_state,
+    gather_dataloader_state_dict,
+    scatter_dataloader_state_dict,
     UNSAFE_LOAD_ENV_VAR,
 )
 
@@ -355,6 +358,51 @@ class TestLoadCheckpoint(unittest.TestCase):
                 with mock.patch.dict(os.environ, {UNSAFE_LOAD_ENV_VAR: value}):
                     with self.assertRaises(RuntimeError):
                         load_checkpoint(self.path)
+
+
+class _FakeDataloader:
+    """Minimal stand-in for the DALI dataloader's checkpointing interface."""
+
+    def __init__(self, state, enable_checkpointing=True):
+        self.state = state
+        self.enable_checkpointing = enable_checkpointing
+
+    def state_dict(self):
+        return self.state
+
+    def load_state_dict(self, state_dict, strict=True):
+        self.state = state_dict
+        return True
+
+
+class TestDataloaderStateHelpers(unittest.TestCase):
+    """Gather/scatter of the dataloader state in the single-rank (non-distributed) case."""
+
+    def test_unsupported_dataloaders_are_detected(self):
+        # loaders which cannot checkpoint (multifiles, dummy) have no such interface
+        self.assertFalse(supports_dataloader_state(None))
+        self.assertFalse(supports_dataloader_state(object()))
+        # DALI loaders with checkpointing turned off are treated the same way
+        self.assertFalse(supports_dataloader_state(_FakeDataloader({}, enable_checkpointing=False)))
+        self.assertTrue(supports_dataloader_state(_FakeDataloader({})))
+
+    def test_gather_returns_none_for_unsupported_dataloader(self):
+        self.assertIsNone(gather_dataloader_state_dict(None))
+        self.assertIsNone(gather_dataloader_state_dict(_FakeDataloader({}, enable_checkpointing=False)))
+
+    def test_gather_scatter_roundtrip(self):
+        state = {"format_version": 1, "pipeline_checkpoint": torch.arange(8, dtype=torch.uint8)}
+
+        state_dicts = gather_dataloader_state_dict(_FakeDataloader(state))
+
+        # one entry per data-parallel rank, which is a single one here
+        self.assertEqual(len(state_dicts), 1)
+        self.assertIs(scatter_dataloader_state_dict(state_dicts), state)
+
+    def test_scatter_rejects_mismatched_rank_count(self):
+        # resuming into a different data-parallel decomposition cannot be honored
+        with self.assertRaises(ValueError):
+            scatter_dataloader_state_dict([{}, {}])
 
 
 if __name__ == "__main__":

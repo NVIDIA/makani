@@ -715,6 +715,104 @@ class DataLoaderBase:
         with self.subTest(desc="auto_reset advances shuffle state"):
             self.assertNotEqual(fps_ep0, fps_ep1)
 
+    def _test_dali_checkpoint_restore_survives_rebuild(self):
+        """
+        DALI path, train mode: a restore can be performed at all on this backend.
+
+        Restoring rebuilds the pipeline inside a live process, so the python worker
+        pool is spawned a second time and every worker re-opens its file handles
+        through this backend's reader (``_get_year_h5`` / ``_zarr_open`` / the WB2
+        variant). That is the only part of the restore which is backend-specific;
+        the resume logic itself works off DALI's counters and is backend-independent,
+        so it is covered once, in ``_test_dali_checkpoint_mid_epoch_resume``. This
+        test therefore only asserts that the rebuild survives and keeps delivering
+        data, not which samples come out.
+        """
+        params = copy.deepcopy(self.params)
+        params.multifiles = False
+        params.batch_size = 1
+        params.n_train_samples = 8  # keep the test fast
+        params.n_future = 0
+
+        loader, _, _ = get_dataloader(
+            params,
+            params.train_data_path,
+            mode="train",
+            device=self.device,
+            dali_device=self.dali_device,
+        )
+
+        before = next(iter(loader))[0]
+
+        # round-trip the state through the loader, which tears the pipeline down and
+        # builds a new one with a fresh worker pool
+        self.assertTrue(loader.load_state_dict(loader.state_dict()))
+
+        after = next(iter(loader))[0]
+
+        self.assertEqual(tuple(after.shape), tuple(before.shape))
+
+    def _test_dali_checkpoint_mid_epoch_resume(self):
+        """
+        DALI path, train mode: state_dict/load_state_dict resume the sample sequence.
+
+        Captures the loader state in the middle of a (shuffled) epoch, records
+        the samples that follow, and checks that a freshly built loader which
+        restores that state produces exactly those samples. A third loader
+        without a restore must NOT match, which pins down that the comparison
+        is actually sensitive to the stored position rather than trivially
+        satisfied by both loaders starting from the same seed.
+        """
+        params = copy.deepcopy(self.params)
+        params.multifiles = False
+        params.batch_size = 1
+        params.n_train_samples = 20  # keep the test fast
+        params.n_future = 0
+
+        def _make_loader():
+            loader, _, _ = get_dataloader(
+                params,
+                params.train_data_path,
+                mode="train",
+                device=self.device,
+                dali_device=self.dali_device,
+            )
+            return loader
+
+        def _collect(iterator, num_steps):
+            fps = []
+            for _ in range(num_steps):
+                inp = next(iterator)[0]
+                for b in range(inp.shape[0]):
+                    fps.append(inp[b].cpu().numpy().tobytes())
+            return fps
+
+        num_consumed = 3
+        num_compared = 3
+
+        # consume a part of the epoch, then checkpoint mid-epoch
+        loader = _make_loader()
+        iterator = iter(loader)
+        _collect(iterator, num_consumed)
+        state_dict = loader.state_dict()
+
+        # the continuation of the interrupted epoch is the ground truth
+        reference = _collect(iterator, num_compared)
+
+        # a restored loader has to continue where the state was captured
+        restored_loader = _make_loader()
+        self.assertTrue(restored_loader.load_state_dict(state_dict))
+        resumed = _collect(iter(restored_loader), num_compared)
+
+        with self.subTest(desc="restored loader resumes the sample sequence"):
+            self.assertEqual(resumed, reference)
+
+        # without a restore the loader starts at the beginning of the epoch instead
+        fresh = _collect(iter(_make_loader()), num_compared)
+
+        with self.subTest(desc="loader without restore does not resume"):
+            self.assertNotEqual(fresh, reference)
+
 
 @parameterized_class(("dali_device",), _dali_devices)
 class TestHDF5DataLoader(DataLoaderBase, unittest.TestCase):
@@ -792,6 +890,10 @@ class TestHDF5DataLoader(DataLoaderBase, unittest.TestCase):
     @unittest.skipUnless(_have_dali, "nvidia.dali is not installed")
     def test_dali_multi_epoch_reset_state(self):
         self._test_dali_multi_epoch_reset_state()
+
+    @unittest.skipUnless(_have_dali, "nvidia.dali is not installed")
+    def test_dali_checkpoint_mid_epoch_resume(self):
+        self._test_dali_checkpoint_mid_epoch_resume()
 
     # HDF5-only: MultifilesDataset date/index retrieval API
     def test_date_retrieval(self):
@@ -883,6 +985,11 @@ class TestZarrDataLoader(DataLoaderBase, unittest.TestCase):
     def test_distributed_subsampling(self, multifiles):
         self._test_distributed_subsampling(multifiles)
 
+    # the full mid-epoch resume is exercised on the HDF5 backend; here we only check
+    # that the pipeline rebuild a restore performs works with the zarr reader
+    def test_dali_checkpoint_restore_survives_rebuild(self):
+        self._test_dali_checkpoint_restore_survives_rebuild()
+
     def test_date_retrieval(self):
         self.params.multifiles = True
         train_loader, _, _ = get_dataloader(self.params, self.params.train_data_path, mode="train", device=self.device)
@@ -955,6 +1062,11 @@ class TestZarrWB2DataLoader(DataLoaderBase, unittest.TestCase):
 
     def test_future(self):
         self._test_future(False)
+
+    # the full mid-epoch resume is exercised on the HDF5 backend; here we only check
+    # that the pipeline rebuild a restore performs works with the WB2 zarr reader
+    def test_dali_checkpoint_restore_survives_rebuild(self):
+        self._test_dali_checkpoint_restore_survives_rebuild()
 
     def test_autoreg(self):
         self._test_autoreg(False)
