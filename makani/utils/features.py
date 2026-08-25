@@ -94,6 +94,41 @@ def get_wind_channels(channel_names):
     return wind_chans
 
 
+def split_channel_name(channel_name: str):
+    """Split a makani channel name into its variable prefix and pressure level.
+
+    This is the single definition of how channel names are classified. Every
+    reader that has to decide whether a channel is atmospheric or a surface
+    field goes through here, so that the classification cannot drift apart
+    between data sources.
+
+    Parameters
+    ----------
+    channel_name : str
+        Channel name such as ``"z500"`` or ``"u10m"``.
+
+    Returns
+    -------
+    prefix : str
+        Variable prefix, e.g. ``"z"``. Equals ``channel_name`` for surface
+        channels. Prefixes longer than three characters are supported
+        (``"clwc500"`` -> ``("clwc", 500)``): the pattern only requires that the
+        digits are preceded by letters, the prefix itself is everything before
+        them.
+    level : int or None
+        Pressure level in hPa, or ``None`` for surface channels.
+
+    Notes
+    -----
+    ``"d2"`` (2 metre dewpoint) is the one surface name that would otherwise
+    parse as variable ``"d"`` on 2 hPa, so it is excluded explicitly.
+    """
+    match = re.search(r"[0-9]{1,4}$", channel_name)
+    if (re.search(r"[a-z]{1,3}[0-9]{1,4}$", channel_name) is not None) and (channel_name != "d2"):
+        return channel_name[: match.start()], int(match.group())
+    return channel_name, None
+
+
 def get_channel_groups(channel_names, aux_channel_names=[]):
     """
     Helper routine to extract indices of atmospheric, surface and auxiliary variables and group them into their respective groups.
@@ -109,8 +144,8 @@ def get_channel_groups(channel_names, aux_channel_names=[]):
     # parse channel names and group variables by pressure level/surface variables
     for idx, chn in enumerate(channel_names):
         # check if pattern matches an atmospheric variable
-        if (re.search("[a-z]{1,3}[0-9]{1,4}$", chn) is not None) and (chn != "d2"):
-            pressure_level = int(re.search("[0-9]{1,4}$", chn).group())
+        _, pressure_level = split_channel_name(chn)
+        if pressure_level is not None:
             if pressure_level not in atmo_groups.keys():
                 atmo_groups[pressure_level] = []
             atmo_groups[pressure_level].append(idx)

@@ -13,7 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import re
+# channel name classification lives in one place for all data sources
+from makani.utils.features import get_channel_groups, split_channel_name
 
 
 # ---------------------------------------------------------------------------
@@ -69,15 +70,12 @@ def split_convert_channel_names(makani_channel_names):
     atmospheric_levels : list[int]
         Sorted list of distinct pressure levels found in the channel list.
     """
-    from makani.utils.features import get_channel_groups
-
     atmospheric_channel_indices, surface_channel_indices, _, _, atmospheric_levels = get_channel_groups(
         makani_channel_names
     )
 
-    pat = re.compile(r"^(.*?)\d{1,}$")
     atmospheric_channel_names = sorted(
-        list(set(pat.match(makani_channel_names[k]).group(1) for k in atmospheric_channel_indices))
+        list(set(split_channel_name(makani_channel_names[k])[0] for k in atmospheric_channel_indices))
     )
     atmospheric_channel_names_wb2 = [atmospheric_variables[c] for c in atmospheric_channel_names]
 
@@ -124,10 +122,8 @@ def build_wb2_channel_map(channel_names, level_values=None):
 
     channel_map = []
     for ch_name in channel_names:
-        m = re.search(r"[0-9]{1,4}$", ch_name)
-        if m is not None and ch_name != "d2":
-            pressure = int(m.group())
-            prefix = ch_name[: m.start()]
+        prefix, pressure = split_channel_name(ch_name)
+        if pressure is not None:
             if prefix not in atmospheric_variables:
                 raise ValueError(
                     f"Unknown atmospheric variable prefix '{prefix}' for channel '{ch_name}'. "

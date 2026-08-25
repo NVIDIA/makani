@@ -52,14 +52,17 @@ ENV PATH=/opt/hdf5/bin:${PATH}
 # install cdsapi for downloading the dataset
 RUN pip install cdsapi>=0.7.2
 
-# install zarr and data stuff
-RUN pip install more_itertools zarr xarray gcsfs s3fs boto3
+# install zarr and data stuff. zarr is pinned to >=3 because makani is installed with
+# --no-deps below, so the requirement in pyproject.toml is never enforced: an unpinned
+# zarr is left at whatever the base image ships, and a v2 base silently breaks the zarr
+# reader (v2 has no zarr.core.buffer, so importing dali_es_helper_2d fails outright).
+RUN pip install more_itertools "zarr>=3" "xarray>=2025.1.0" gcsfs s3fs boto3
 
 # moviepy for wandb video logging
-RUN pip install moviepy
+RUN pip install "moviepy>=1.0.3"
 
 # other python stuff
-RUN pip install --upgrade wandb ruamel.yaml tqdm
+RUN pip install --upgrade "wandb>=0.13.7" ruamel.yaml "tqdm>=4.60.0"
 
 # scoring tools
 RUN pip install xskillscore properscoring

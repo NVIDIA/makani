@@ -27,10 +27,12 @@ with one file per variable per *day* for pressure levels, per *month* for
 surface analysis, and per *half month* for the accumulated forecast fields.
 """
 
-import re
 import calendar
 import datetime as dt
 from typing import Dict, List, NamedTuple, Optional
+
+# channel name classification lives in one place for all data sources
+from makani.utils.features import split_channel_name
 
 
 NCAR_ERA5_BUCKET = "nsf-ncar-era5"
@@ -136,33 +138,6 @@ class ChannelGroup(NamedTuple):
     variables: List[NcarVariable]
     channel_indices: List[int]
     levels: Optional[List[int]]
-
-
-def split_channel_name(channel_name: str):
-    """Split a makani channel name into its variable prefix and pressure level.
-
-    Parameters
-    ----------
-    channel_name : str
-        Channel name such as ``"z500"`` or ``"u10m"``.
-
-    Returns
-    -------
-    prefix : str
-        Variable prefix, e.g. ``"z"``. Equals ``channel_name`` for surface
-        channels.
-    level : int or None
-        Pressure level in hPa, or ``None`` for surface channels.
-
-    Notes
-    -----
-    Uses the same classification as :func:`makani.utils.features.get_channel_groups`
-    so that channel grouping stays consistent across the code base.
-    """
-    match = re.search(r"[0-9]{1,4}$", channel_name)
-    if (re.search(r"[a-z]{1,3}[0-9]{1,4}$", channel_name) is not None) and (channel_name != "d2"):
-        return channel_name[: match.start()], int(match.group())
-    return channel_name, None
 
 
 def build_ncar_channel_groups(channel_names: List[str], skip_missing_channels: bool = False) -> List[ChannelGroup]:

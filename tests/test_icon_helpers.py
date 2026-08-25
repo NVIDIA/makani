@@ -137,6 +137,39 @@ class TestBuildIconChannelGroups(unittest.TestCase):
         self.assertEqual(height.variable.units, "m")
         self.assertAlmostEqual(GRAVITY, 9.80665)
 
+    def test_hydrometeors_map_onto_era5_channel_names(self):
+        # ERA5 carries these as specific contents in kg kg-1, the same quantity
+        # and unit ICON writes, so the channels keep the ERA5 vocabulary
+        channels = ["clwc500", "ciwc500", "crwc500", "cswc500"]
+        groups = build_icon_channel_groups(channels, available=["qc", "qi", "qr", "qs"])
+
+        self.assertEqual([group.name for group in groups], ["clwc", "ciwc", "crwc", "cswc"])
+        self.assertEqual([group.variable.name for group in groups], ["qc", "qi", "qr", "qs"])
+        for group in groups:
+            with self.subTest(channel=group.name):
+                self.assertEqual(group.variable.units, "kg kg-1")
+                self.assertEqual(group.levels, [500])
+
+    def test_hydrometeor_channel_names_parse_despite_four_letters(self):
+        # the channel name splitter is built around 1-3 letter prefixes; these
+        # names are longer, so pin down that the level still separates correctly
+        group = build_icon_channel_groups(["clwc850", "clwc1000"], available=["qc"])[0]
+
+        self.assertEqual(group.name, "clwc")
+        self.assertEqual(group.levels, [850, 1000])
+
+    def test_graupel_keeps_the_icon_name(self):
+        # ERA5 has no graupel parameter, the IFS folds it into snow, so there is
+        # no ERA5 channel to map onto
+        group = build_icon_channel_groups(["qg500"], available=["qg"])[0]
+
+        self.assertEqual(group.name, "qg")
+        self.assertEqual(group.variable.name, "qg")
+
+    def test_cmip_style_cloud_names_resolve(self):
+        groups = build_icon_channel_groups(["clwc500", "ciwc500"], available=["clw", "cli"])
+        self.assertEqual([group.variable.name for group in groups], ["clw", "cli"])
+
     def test_unresolvable_channels_raise(self):
         with self.subTest(desc="unknown atmospheric prefix"):
             with self.assertRaises(ValueError):

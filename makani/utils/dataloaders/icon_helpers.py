@@ -53,9 +53,8 @@ from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 import numpy as np
 
-# channel name parsing is shared with the NCAR reader so that "z500" is split the
-# same way everywhere; both follow makani.utils.features.get_channel_groups
-from makani.utils.dataloaders.ncar_helpers import split_channel_name
+# channel name classification lives in one place for all data sources
+from makani.utils.features import split_channel_name
 
 
 # ICON's own time encoding: the integer part is a YYYYMMDD date, the fraction is
@@ -135,7 +134,12 @@ atmospheric_variables: Dict[str, Tuple[IconVariable, ...]] = {
         IconVariable("v", "pl", units="m s-1"),
         IconVariable("va", "pl", units="m s-1"),
     ),
+    # ICON writes "w" as the vertical *velocity* in m/s (upward_air_velocity),
+    # which is a different quantity from ERA5's omega in Pa/s: they differ by
+    # -rho*g and cannot be substituted for one another. Both are listed so that
+    # the units carried through resolution say which one a file provides.
     "w": (
+        IconVariable("w", "pl", units="m s-1"),
         IconVariable("omega", "pl", units="Pa s-1"),
         IconVariable("wap", "pl", units="Pa s-1"),
     ),
@@ -147,6 +151,27 @@ atmospheric_variables: Dict[str, Tuple[IconVariable, ...]] = {
         IconVariable("rh", "pl", units="%"),
         IconVariable("hur", "pl", units="%"),
     ),
+    # Hydrometeors. ERA5 carries the first four as pressure level parameters
+    # (clwc 246, ciwc 247, crwc 75, cswc 76) and, like ICON, as specific
+    # contents in kg kg-1, so these map one to one and no conversion is needed.
+    # The channels are therefore named after ERA5 rather than after ICON, which
+    # keeps the channel vocabulary the same as for the ERA5 datasets.
+    "clwc": (
+        IconVariable("qc", "pl", units="kg kg-1"),
+        IconVariable("clw", "pl", units="kg kg-1"),
+    ),
+    "ciwc": (
+        IconVariable("qi", "pl", units="kg kg-1"),
+        IconVariable("cli", "pl", units="kg kg-1"),
+    ),
+    "crwc": (IconVariable("qr", "pl", units="kg kg-1"),),
+    "cswc": (IconVariable("qs", "pl", units="kg kg-1"),),
+    # Graupel is the one hydrometeor with no ERA5 counterpart: the IFS
+    # microphysics does not carry it as a separate species, it is folded into
+    # snow. The channel therefore keeps ICON's own name. If a run wants the
+    # ERA5-comparable quantity instead, "cswc" has to be built as qs + qg,
+    # which is a modelling decision rather than a naming one.
+    "qg": (IconVariable("qg", "pl", units="kg kg-1"),),
 }
 
 surface_variables: Dict[str, Tuple[IconVariable, ...]] = {
