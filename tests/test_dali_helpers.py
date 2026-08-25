@@ -141,7 +141,7 @@ def _make_distinctive_zarr_wb2_dir(root):
     """Per-year WB2-layout zarr directory with distinctive-channel data."""
     import zarr
     import re
-    from makani.utils.dataloaders.wb2_helpers import surface_variables, atmospheric_variables
+    from makani.utils.dataloaders.wb2_helpers import atmospheric_wb2_name, surface_wb2_name
 
     os.makedirs(root, exist_ok=True)
 
@@ -150,10 +150,10 @@ def _make_distinctive_zarr_wb2_dir(root):
     for ch_idx, ch_name in enumerate(CHANNEL_NAMES):
         m = re.search(r"[0-9]{1,4}$", ch_name)
         if m and ch_name != "d2":
-            wb2n = atmospheric_variables[ch_name[: m.start()]]
+            wb2n = atmospheric_wb2_name(ch_name[: m.start()])
             atm_vars.setdefault(wb2n, {})[int(m.group())] = ch_idx
         else:
-            surf_vars[surface_variables[ch_name]] = ch_idx
+            surf_vars[surface_wb2_name(ch_name)] = ch_idx
 
     all_levels = sorted({lv for lvs in atm_vars.values() for lv in lvs})
     levels = np.array(all_levels, dtype=np.int64)

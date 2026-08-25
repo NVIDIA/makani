@@ -18,6 +18,10 @@ Unit tests for ``makani.utils.dataloaders.icon_helpers``: the decoding of ICON
 netCDF conventions and the mapping from ICON variable names onto makani
 channels.
 
+The candidate resolution and channel grouping themselves are shared with the
+other readers and are covered in ``test_channel_helpers.py``; what is pinned
+here is which ICON names each makani channel maps to.
+
 Everything here works on plain arrays and attribute values, so no ICON file, no
 h5py and no grid is needed. The reads and the regridding live in the converter
 and are not covered.
@@ -35,7 +39,6 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from makani.utils.dataloaders.icon_helpers import (
     GRAVITY,
     ICON_TIME_UNITS,
-    IconVariable,
     build_icon_channel_groups,
     check_grid_uuid,
     decode_time,
@@ -43,39 +46,11 @@ from makani.utils.dataloaders.icon_helpers import (
     grid_coordinates_in_degrees,
     pressure_level_index,
     pressure_levels_in_hpa,
-    resolve_variable,
 )
 
 
 def _utc(year, month, day, hour=0, minute=0, second=0):
     return dt.datetime(year, month, day, hour, minute, second, tzinfo=dt.timezone.utc)
-
-
-class TestResolveVariable(unittest.TestCase):
-    """
-    A makani channel maps to several possible ICON names depending on which
-    physics package and output namelist produced the file; the resolver picks
-    the one the file actually has.
-    """
-
-    candidates = (
-        IconVariable("temp", "pl", units="K"),
-        IconVariable("ta", "pl", units="K"),
-    )
-
-    def test_prefers_the_first_candidate_present(self):
-        self.assertEqual(resolve_variable(self.candidates, ["ta", "temp", "qv"]).name, "temp")
-
-    def test_falls_through_to_the_alternative_naming(self):
-        # an AES/CMIP style file has no "temp"
-        self.assertEqual(resolve_variable(self.candidates, ["ta", "hus", "ps"]).name, "ta")
-
-    def test_returns_none_when_the_file_has_neither(self):
-        self.assertIsNone(resolve_variable(self.candidates, ["qv", "ps"]))
-
-    def test_without_a_file_the_preferred_name_is_assumed(self):
-        # used before a file has been opened, e.g. to report what will be read
-        self.assertEqual(resolve_variable(self.candidates, None).name, "temp")
 
 
 class TestBuildIconChannelGroups(unittest.TestCase):
@@ -115,8 +90,8 @@ class TestBuildIconChannelGroups(unittest.TestCase):
         nwp = build_icon_channel_groups(["t850", "t2m", "msl"], available=["temp", "t_2m", "pres_msl"])
         aes = build_icon_channel_groups(["t850", "t2m", "msl"], available=["ta", "tas", "psl"])
 
-        self.assertEqual([group.variable.name for group in nwp], ["temp", "t_2m", "pres_msl"])
-        self.assertEqual([group.variable.name for group in aes], ["ta", "tas", "psl"])
+        self.assertEqual([group.variables[0].name for group in nwp], ["temp", "t_2m", "pres_msl"])
+        self.assertEqual([group.variables[0].name for group in aes], ["ta", "tas", "psl"])
 
     def test_accumulation_semantics_come_from_the_resolved_variable(self):
         # a running total has to be differenced, a flux has to be integrated;
@@ -124,8 +99,8 @@ class TestBuildIconChannelGroups(unittest.TestCase):
         total = build_icon_channel_groups(["tp"], available=["tot_prec"])[0]
         flux = build_icon_channel_groups(["tp"], available=["pr"])[0]
 
-        self.assertEqual(total.variable.accumulation, "since_start")
-        self.assertEqual(flux.variable.accumulation, "rate")
+        self.assertEqual(total.variables[0].accumulation, "since_start")
+        self.assertEqual(flux.variables[0].accumulation, "rate")
 
     def test_geopotential_and_geopotential_height_are_distinguishable(self):
         # z is geopotential; a file offering only zg gives metres and needs a
@@ -133,8 +108,8 @@ class TestBuildIconChannelGroups(unittest.TestCase):
         geopotential = build_icon_channel_groups(["z500"], available=["geopot"])[0]
         height = build_icon_channel_groups(["z500"], available=["zg"])[0]
 
-        self.assertEqual(geopotential.variable.units, "m2 s-2")
-        self.assertEqual(height.variable.units, "m")
+        self.assertEqual(geopotential.variables[0].units, "m2 s-2")
+        self.assertEqual(height.variables[0].units, "m")
         self.assertAlmostEqual(GRAVITY, 9.80665)
 
     def test_hydrometeors_map_onto_era5_channel_names(self):
@@ -144,10 +119,10 @@ class TestBuildIconChannelGroups(unittest.TestCase):
         groups = build_icon_channel_groups(channels, available=["qc", "qi", "qr", "qs"])
 
         self.assertEqual([group.name for group in groups], ["clwc", "ciwc", "crwc", "cswc"])
-        self.assertEqual([group.variable.name for group in groups], ["qc", "qi", "qr", "qs"])
+        self.assertEqual([group.variables[0].name for group in groups], ["qc", "qi", "qr", "qs"])
         for group in groups:
             with self.subTest(channel=group.name):
-                self.assertEqual(group.variable.units, "kg kg-1")
+                self.assertEqual(group.variables[0].units, "kg kg-1")
                 self.assertEqual(group.levels, [500])
 
     def test_hydrometeor_channel_names_parse_despite_four_letters(self):
@@ -164,11 +139,11 @@ class TestBuildIconChannelGroups(unittest.TestCase):
         group = build_icon_channel_groups(["qg500"], available=["qg"])[0]
 
         self.assertEqual(group.name, "qg")
-        self.assertEqual(group.variable.name, "qg")
+        self.assertEqual(group.variables[0].name, "qg")
 
     def test_cmip_style_cloud_names_resolve(self):
         groups = build_icon_channel_groups(["clwc500", "ciwc500"], available=["clw", "cli"])
-        self.assertEqual([group.variable.name for group in groups], ["clw", "cli"])
+        self.assertEqual([group.variables[0].name for group in groups], ["clw", "cli"])
 
     def test_unresolvable_channels_raise(self):
         with self.subTest(desc="unknown atmospheric prefix"):

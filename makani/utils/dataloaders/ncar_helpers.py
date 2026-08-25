@@ -25,14 +25,30 @@ Object keys follow::
 
 with one file per variable per *day* for pressure levels, per *month* for
 surface analysis, and per *half month* for the accumulated forecast fields.
+
+Two things make this source awkward, and they are what most of this module is:
+
+* **Object keys have to be constructed, not discovered.** Listing a bucket this
+  large per read is not viable, so the key of every file is derived from the
+  variable descriptor and the date. The three stream layouts each need their own
+  rule, see :func:`analysis_pl_key`, :func:`analysis_sfc_key` and
+  :func:`accumulation_key`.
+* **Precipitation has to be reassembled.** d633000 ships no total precipitation
+  and no ready-made accumulation window: ``tp`` is ``lsp + cp``, summed over an
+  hour range that may straddle two forecast runs, since a run reaches forecast
+  hour 12 while runs start 12 hours apart. :func:`resolve_accumulation_segments`
+  does that arithmetic.
+
+Channel grouping itself is shared with the other readers and lives in
+:mod:`makani.utils.dataloaders.channel_helpers`.
 """
 
 import calendar
 import datetime as dt
-from typing import Dict, List, NamedTuple, Optional
+from typing import Dict, List, NamedTuple
 
-# channel name classification lives in one place for all data sources
-from makani.utils.features import split_channel_name
+# channel grouping and name classification are shared across the data source readers
+from makani.utils.dataloaders.channel_helpers import ChannelGroup, build_channel_groups
 
 
 NCAR_ERA5_BUCKET = "nsf-ncar-era5"
@@ -103,41 +119,16 @@ atmospheric_variables: Dict[str, NcarVariable] = {
 # Accumulated fields live in the forecast stream and are summed to form the
 # makani channel. d633000 does not ship total precipitation directly, so tp is
 # reconstructed from its two ERA5 components, tp = lsp + cp (both in metres).
-accumulated_variables: Dict[str, List[NcarVariable]] = {
-    "tp": [
-        NcarVariable("e5.oper.fc.sfc.accumu", "128_142", "lsp", "sc", "LSP"),
-        NcarVariable("e5.oper.fc.sfc.accumu", "128_143", "cp", "sc", "CP"),
-    ],
+# the nesting matters: this is ONE candidate made of two components that are
+# summed, not two alternative sources. See makani.utils.dataloaders.channel_helpers.
+accumulated_variables: Dict[str, tuple] = {
+    "tp": (
+        (
+            NcarVariable("e5.oper.fc.sfc.accumu", "128_142", "lsp", "sc", "LSP"),
+            NcarVariable("e5.oper.fc.sfc.accumu", "128_143", "cp", "sc", "CP"),
+        ),
+    ),
 }
-
-
-class ChannelGroup(NamedTuple):
-    """A set of makani channels that are served by the same source files.
-
-    Attributes
-    ----------
-    kind : str
-        One of ``"pl"``, ``"sfc"`` or ``"accum"``. Determines which reader and
-        which key layout applies.
-    name : str
-        The ERA5 short name the group is built around: the variable prefix for
-        pressure level groups (``"z"``), the channel name otherwise (``"t2m"``).
-    variables : list of NcarVariable
-        Source variables. More than one entry only for accumulated channels,
-        whose values are summed.
-    channel_indices : list of int
-        Index of each member channel along axis 1 of the makani ``fields``
-        array.
-    levels : list of int or None
-        Pressure level in hPa for each member channel, ``None`` for surface and
-        accumulated groups.
-    """
-
-    kind: str
-    name: str
-    variables: List[NcarVariable]
-    channel_indices: List[int]
-    levels: Optional[List[int]]
 
 
 def build_ncar_channel_groups(channel_names: List[str], skip_missing_channels: bool = False) -> List[ChannelGroup]:
@@ -146,6 +137,9 @@ def build_ncar_channel_groups(channel_names: List[str], skip_missing_channels: b
     Grouping matters for throughput: the pressure level files are chunked as
     ``(1, n_levels, nlat, nlon)``, so every level of a variable arrives in the
     same chunk and all levels of a variable should be filled from a single read.
+
+    NCAR names every variable canonically, so there is nothing to resolve
+    against the file, and ``available`` is left unset.
 
     Parameters
     ----------
@@ -159,7 +153,9 @@ def build_ncar_channel_groups(channel_names: List[str], skip_missing_channels: b
     Returns
     -------
     list of ChannelGroup
-        One entry per source variable, pressure level groups first.
+        One entry per source variable, pressure level groups first. ``tp`` is
+        the only group with more than one variable, since it is summed from
+        ``lsp`` and ``cp``.
 
     Raises
     ------
@@ -167,39 +163,14 @@ def build_ncar_channel_groups(channel_names: List[str], skip_missing_channels: b
         If a channel has no known NCAR counterpart and ``skip_missing_channels``
         is False.
     """
-    pl_groups: Dict[str, ChannelGroup] = {}
-    other_groups: List[ChannelGroup] = []
-
-    for cidx, channel_name in enumerate(channel_names):
-        prefix, level = split_channel_name(channel_name)
-
-        if level is not None:
-            if prefix not in atmospheric_variables:
-                if skip_missing_channels:
-                    continue
-                raise ValueError(
-                    f"Unknown atmospheric variable prefix '{prefix}' for channel '{channel_name}'. "
-                    f"Known prefixes: {list(atmospheric_variables)}"
-                )
-            group = pl_groups.get(prefix)
-            if group is None:
-                group = ChannelGroup("pl", prefix, [atmospheric_variables[prefix]], [], [])
-                pl_groups[prefix] = group
-            group.channel_indices.append(cidx)
-            group.levels.append(level)
-        elif channel_name in surface_variables:
-            other_groups.append(ChannelGroup("sfc", channel_name, [surface_variables[channel_name]], [cidx], None))
-        elif channel_name in accumulated_variables:
-            other_groups.append(
-                ChannelGroup("accum", channel_name, list(accumulated_variables[channel_name]), [cidx], None)
-            )
-        elif not skip_missing_channels:
-            raise ValueError(
-                f"Unknown surface variable '{channel_name}'. "
-                f"Known names: {list(surface_variables) + list(accumulated_variables)}"
-            )
-
-    return list(pl_groups.values()) + other_groups
+    return build_channel_groups(
+        channel_names,
+        atmospheric=atmospheric_variables,
+        surface=surface_variables,
+        accumulated=accumulated_variables,
+        skip_missing_channels=skip_missing_channels,
+        source="NCAR",
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -36,15 +36,33 @@ Three things here are worth knowing before touching the converter:
 * **Variable names are not standardized.** ICON is run with different physics
   packages and output namelists: NWP setups write ``temp``, ``pres_sfc``,
   ``t_2m``, while AES/CMIP style setups write ``ta``, ``ps``, ``tas`` for the
-  same fields. Each makani channel therefore maps to a *list* of candidate
-  names, resolved against the variables a given file actually contains. See
-  :func:`resolve_variable`.
+  same fields. Each makani channel therefore maps to a list of candidate names,
+  resolved against the variables a given file actually contains by
+  :func:`makani.utils.dataloaders.channel_helpers.resolve_variable`.
 
-..note::
-    The name tables below are assembled from the common ICON output namelists
-    and have not yet been checked against a real file from the producer. Expect
-    to extend them; the resolution machinery is what matters and is what the
-    tests pin down.
+What a real dataset looks like
+------------------------------
+The tables were checked against the EXCLAIM coupled DYAMOND run (R02B10,
+83,886,080 cells, grid 56), which is representative of the km-scale output
+makani is likely to be handed:
+
+* one file per variable per day, ``(time, plev, ncells)`` float32, **not
+  compressed** -- no filters at all, so a (time, level) slab is a contiguous
+  read and the netCDF unpacking below is a no-op for that dataset;
+* the vertical axis is ``plev`` in **Pa**, carrying the 37 standard ERA5
+  pressure levels, so makani's ``z500``-style channels map onto it by index and
+  no vertical interpolation is needed;
+* the horizontal grid is ``CDI_grid_type = "unstructured"`` at **cell centres**
+  (``number_of_grid_in_reference = 1``), which means ``u``/``v`` are already
+  earth-relative components and need no reconstruction from edge normals;
+* ``clon``/``clat`` are present in *some* files only. Variables that lack them
+  refer to the grid solely through ``uuidOfHGrid``, so the coordinates have to
+  be taken from a file that has them (or from the external grid file) and
+  checked with :func:`check_grid_uuid`.
+
+The tables remain provisional in the sense that a different ICON setup will use
+names not listed here; extending them is expected, and the resolution machinery
+rather than any individual entry is what the tests pin down.
 """
 
 import re
@@ -53,8 +71,8 @@ from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 import numpy as np
 
-# channel name classification lives in one place for all data sources
-from makani.utils.features import split_channel_name
+# channel grouping and name classification are shared across the data source readers
+from makani.utils.dataloaders.channel_helpers import ChannelGroup, build_channel_groups
 
 
 # ICON's own time encoding: the integer part is a YYYYMMDD date, the fraction is
@@ -197,79 +215,6 @@ accumulated_variables: Dict[str, Tuple[IconVariable, ...]] = {
 }
 
 
-class ChannelGroup(NamedTuple):
-    """A set of makani channels served by one ICON variable.
-
-    Attributes
-    ----------
-    kind : str
-        ``"pl"``, ``"sfc"`` or ``"accum"``, taken from the resolved variable.
-    name : str
-        The makani side name: the channel prefix for pressure level groups
-        (``"z"``), the channel name otherwise (``"t2m"``).
-    variable : IconVariable
-        The ICON variable the group reads from.
-    channel_indices : list of int
-        Index of each member channel along the channel axis of the makani
-        ``fields`` array.
-    levels : list of int or None
-        Pressure level in hPa for each member channel, ``None`` for single
-        level and accumulated groups.
-    """
-
-    kind: str
-    name: str
-    variable: IconVariable
-    channel_indices: List[int]
-    levels: Optional[List[int]]
-
-
-def _as_text(value) -> str:
-    """Normalize an HDF5 attribute to ``str``.
-
-    ``h5py`` hands back ``bytes`` for the fixed length strings netCDF writes,
-    and 0-d/1-element arrays for scalar attributes, so attributes have to be
-    unwrapped before they can be compared against anything.
-    """
-    if isinstance(value, np.ndarray):
-        if value.size != 1:
-            raise ValueError(f"Expected a scalar attribute, got an array of size {value.size}.")
-        value = value.reshape(-1)[0]
-    if isinstance(value, (bytes, np.bytes_)):
-        return value.decode("utf-8")
-    return str(value)
-
-
-def resolve_variable(candidates: Sequence[IconVariable], available: Optional[Sequence[str]] = None):
-    """Pick the ICON variable a file actually provides for a makani channel.
-
-    Parameters
-    ----------
-    candidates : sequence of IconVariable
-        Candidates in preference order, as listed in the tables above.
-    available : sequence of str, optional
-        Variable names present in the file. When omitted the first candidate is
-        returned, which is what to do when the file has not been opened yet.
-
-    Returns
-    -------
-    IconVariable or None
-        The first candidate the file provides, or None if it provides none.
-    """
-    if not candidates:
-        return None
-
-    if available is None:
-        return candidates[0]
-
-    names = set(available)
-    for candidate in candidates:
-        if candidate.name in names:
-            return candidate
-
-    return None
-
-
 def build_icon_channel_groups(
     channel_names: List[str],
     available: Optional[Sequence[str]] = None,
@@ -303,51 +248,43 @@ def build_icon_channel_groups(
     ValueError
         If a channel cannot be resolved and ``skip_missing_channels`` is False.
     """
-    pl_groups: Dict[str, ChannelGroup] = {}
-    other_groups: List[ChannelGroup] = []
-
-    for cidx, channel_name in enumerate(channel_names):
-        prefix, level = split_channel_name(channel_name)
-
-        if level is not None:
-            variable = resolve_variable(atmospheric_variables.get(prefix, ()), available)
-            if variable is None:
-                if skip_missing_channels:
-                    continue
-                raise ValueError(
-                    f"No ICON variable found for atmospheric channel '{channel_name}'. "
-                    f"Known prefixes: {list(atmospheric_variables)}."
-                )
-            group = pl_groups.get(prefix)
-            if group is None:
-                group = ChannelGroup("pl", prefix, variable, [], [])
-                pl_groups[prefix] = group
-            group.channel_indices.append(cidx)
-            group.levels.append(level)
-            continue
-
-        variable = resolve_variable(surface_variables.get(channel_name, ()), available)
-        if variable is not None:
-            other_groups.append(ChannelGroup("sfc", channel_name, variable, [cidx], None))
-            continue
-
-        variable = resolve_variable(accumulated_variables.get(channel_name, ()), available)
-        if variable is not None:
-            other_groups.append(ChannelGroup("accum", channel_name, variable, [cidx], None))
-            continue
-
-        if not skip_missing_channels:
-            raise ValueError(
-                f"No ICON variable found for surface channel '{channel_name}'. "
-                f"Known names: {list(surface_variables) + list(accumulated_variables)}."
-            )
-
-    return list(pl_groups.values()) + other_groups
+    return build_channel_groups(
+        channel_names,
+        atmospheric=atmospheric_variables,
+        surface=surface_variables,
+        accumulated=accumulated_variables,
+        available=available,
+        skip_missing_channels=skip_missing_channels,
+        source="ICON",
+    )
 
 
 # ---------------------------------------------------------------------------
 # Decoding
 # ---------------------------------------------------------------------------
+
+
+def _as_text(value) -> str:
+    """Normalize an HDF5 attribute to ``str``.
+
+    ``h5py`` hands back ``bytes`` for the fixed length strings netCDF writes, and
+    0-d or 1-element arrays for scalar attributes, so an attribute has to be
+    unwrapped before it can be compared against anything. Anything else is
+    stringified, which keeps callers free of isinstance checks.
+
+    Raises
+    ------
+    ValueError
+        If the value is an array holding more than one element, which means the
+        caller asked for a scalar attribute and got something else.
+    """
+    if isinstance(value, np.ndarray):
+        if value.size != 1:
+            raise ValueError(f"Expected a scalar attribute, got an array of size {value.size}.")
+        value = value.reshape(-1)[0]
+    if isinstance(value, (bytes, np.bytes_)):
+        return value.decode("utf-8")
+    return str(value)
 
 
 def decode_time(values, units) -> List[dt.datetime]:

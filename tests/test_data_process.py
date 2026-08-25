@@ -1231,5 +1231,36 @@ class TestGetStats(unittest.TestCase):
             )
 
 
+class TestConverterImports(unittest.TestCase):
+    """
+    Import every conversion script in ``data_process``.
+
+    The converters are driven by MPI against multi terabyte archives, so they
+    are not otherwise exercised by any test: a renamed helper or a changed
+    table layout would surface on a production run rather than here. Importing
+    them executes the module body, which is where the imports and the
+    module level lookups live, and is the cheapest guard against that.
+
+    Each is skipped when its dependencies are missing, since ``mpi4py``,
+    ``xarray`` and ``dask`` are in the ``data_process`` extra rather than the
+    base install.
+    """
+
+    CONVERTERS = [
+        ("data_process.convert_ncar_era5_to_makani_input", ["mpi4py", "h5py"]),
+        ("data_process.convert_makani_output_to_wb2", ["mpi4py", "xarray", "dask", "h5py"]),
+        ("data_process.convert_wb2_to_makani_input", ["mpi4py", "xarray", "h5py"]),
+        ("data_process.generate_wb2_climatology", ["mpi4py", "xarray", "h5py"]),
+    ]
+
+    def test_converters_import(self):
+        for module_name, requirements in self.CONVERTERS:
+            missing = [r for r in requirements if importlib.util.find_spec(r) is None]
+            with self.subTest(module=module_name):
+                if missing:
+                    self.skipTest(f"missing dependencies: {', '.join(missing)}")
+                importlib.import_module(module_name)
+
+
 if __name__ == "__main__":
     unittest.main()
