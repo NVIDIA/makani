@@ -38,6 +38,8 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 from makani.utils.dataloaders.icon_helpers import (
     GRAVITY,
+    IconVariable,
+    accumulated_variables,
     ICON_TIME_UNITS,
     build_icon_channel_groups,
     check_grid_uuid,
@@ -144,6 +146,24 @@ class TestBuildIconChannelGroups(unittest.TestCase):
     def test_cmip_style_cloud_names_resolve(self):
         groups = build_icon_channel_groups(["clwc500", "ciwc500"], available=["clw", "cli"])
         self.assertEqual([group.variables[0].name for group in groups], ["clw", "cli"])
+
+    def test_precipitation_offers_alternatives_not_components(self):
+        """
+        The mirror image of the NCAR tp entry, and the reason the nesting is
+        explicit.
+
+        tot_prec and pr are two ways a run may report precipitation, not two
+        quantities to add up: a file carries one or the other. Nested one level
+        deeper they would read as components, resolution would demand both, and
+        every file would fail to provide tp at all.
+        """
+        candidates = accumulated_variables["tp"]
+
+        self.assertGreater(len(candidates), 1, "tp must offer more than one possible source")
+        for candidate in candidates:
+            with self.subTest(variable=candidate.name):
+                # a bare descriptor is a candidate of a single component
+                self.assertIsInstance(candidate, IconVariable)
 
     def test_unresolvable_channels_raise(self):
         with self.subTest(desc="unknown atmospheric prefix"):

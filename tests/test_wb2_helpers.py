@@ -16,6 +16,7 @@
 import unittest
 
 from makani.utils.dataloaders.wb2_helpers import (
+    Wb2Variable,
     surface_variables,
     atmospheric_variables,
     surface_variables_inv,
@@ -25,6 +26,44 @@ from makani.utils.dataloaders.wb2_helpers import (
     split_convert_channel_names,
     build_wb2_channel_map,
 )
+
+
+class TestVariableSemantics(unittest.TestCase):
+    """
+    The tables carry more than the WB2 name: the kind, the units and how the
+    variable relates to the channel in time. Those fields are what a converter
+    reasons about, and unlike the name they are never exercised by simply
+    reading a store, so they are pinned here.
+    """
+
+    def test_every_entry_is_a_descriptor(self):
+        for table in (surface_variables, atmospheric_variables):
+            for channel, variable in table.items():
+                with self.subTest(channel=channel):
+                    self.assertIsInstance(variable, Wb2Variable)
+                    self.assertTrue(variable.name)
+                    self.assertIn(variable.kind, ("pl", "sfc", "accum"))
+                    self.assertTrue(variable.units)
+
+    def test_atmospheric_entries_are_pressure_level(self):
+        for prefix, variable in atmospheric_variables.items():
+            with self.subTest(prefix=prefix):
+                self.assertEqual(variable.kind, "pl")
+
+    def test_instantaneous_surface_fields_do_not_accumulate(self):
+        for channel, variable in surface_variables.items():
+            if variable.kind == "sfc":
+                with self.subTest(channel=channel):
+                    self.assertEqual(variable.accumulation, "none")
+
+    def test_precipitation_carries_a_fixed_window(self):
+        # the window is baked into the WB2 name ("..._6hr"), so a store fixes it
+        # and the reader neither differences nor integrates anything
+        tp = surface_variables["tp"]
+
+        self.assertEqual(tp.name, "total_precipitation_6hr")
+        self.assertEqual(tp.kind, "accum")
+        self.assertEqual(tp.accumulation, "window")
 
 
 class TestNameLookups(unittest.TestCase):

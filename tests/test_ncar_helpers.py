@@ -33,6 +33,7 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 from makani.utils.dataloaders.ncar_helpers import (
     ACCUM_INIT_HOURS,
+    accumulated_variables,
     ACCUM_MAX_FORECAST_HOUR,
     NCAR_EPOCH,
     NcarVariable,
@@ -94,6 +95,20 @@ class TestBuildNcarChannelGroups(unittest.TestCase):
         # tp is not shipped directly, it is reconstructed as lsp + cp
         self.assertEqual(groups["tp"].kind, "accum")
         self.assertEqual([var.short_name for var in groups["tp"].variables], ["lsp", "cp"])
+
+    def test_precipitation_is_summed_not_alternatives(self):
+        """
+        The nesting of the tp entry carries meaning that is easy to lose.
+
+        d633000 has no total precipitation, so tp is lsp PLUS cp: one candidate
+        made of two components. Written one level flatter it would read as two
+        *alternatives*, the reader would take whichever it saw first, and the
+        dataset would silently carry roughly half its precipitation.
+        """
+        candidates = accumulated_variables["tp"]
+
+        self.assertEqual(len(candidates), 1, "tp must offer exactly one way to be built")
+        self.assertEqual([variable.short_name for variable in candidates[0]], ["lsp", "cp"])
 
     def test_unknown_channels_raise(self):
         with self.subTest(desc="unknown atmospheric prefix"):
