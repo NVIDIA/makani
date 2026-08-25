@@ -117,6 +117,8 @@ class TestBuildIconChannelGroups(unittest.TestCase):
     def test_hydrometeors_map_onto_era5_channel_names(self):
         # ERA5 carries these as specific contents in kg kg-1, the same quantity
         # and unit ICON writes, so the channels keep the ERA5 vocabulary
+        # no qg in this file, so cswc falls back to qs alone; the sum is covered
+        # in test_snow_is_summed_with_graupel_to_match_era5
         channels = ["clwc500", "ciwc500", "crwc500", "cswc500"]
         groups = build_icon_channel_groups(channels, available=["qc", "qi", "qr", "qs"])
 
@@ -126,6 +128,31 @@ class TestBuildIconChannelGroups(unittest.TestCase):
             with self.subTest(channel=group.name):
                 self.assertEqual(group.variables[0].units, "kg kg-1")
                 self.assertEqual(group.levels, [500])
+
+    def test_snow_is_summed_with_graupel_to_match_era5(self):
+        """
+        ERA5's snow content includes graupel, ICON's qs does not, so the
+        ERA5-named channel is the sum. At convection-resolving resolution
+        graupel dominates in deep convective cores, so reading qs alone would
+        bias the field exactly where the run is most informative.
+        """
+        group = build_icon_channel_groups(["cswc500"], available=["qs", "qg"])[0]
+
+        self.assertEqual(group.name, "cswc")
+        self.assertEqual([variable.name for variable in group.variables], ["qs", "qg"])
+
+    def test_snow_falls_back_to_qs_without_graupel(self):
+        # a microphysics scheme with no graupel category still provides cswc
+        group = build_icon_channel_groups(["cswc500"], available=["qs"])[0]
+
+        self.assertEqual([variable.name for variable in group.variables], ["qs"])
+
+    def test_graupel_is_still_available_on_its_own(self):
+        # for runs that prefer ICON's species split over the ERA5 vocabulary
+        group = build_icon_channel_groups(["qg500"], available=["qs", "qg"])[0]
+
+        self.assertEqual(group.name, "qg")
+        self.assertEqual([variable.name for variable in group.variables], ["qg"])
 
     def test_hydrometeor_channel_names_parse_despite_four_letters(self):
         # the channel name splitter is built around 1-3 letter prefixes; these

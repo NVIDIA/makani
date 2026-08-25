@@ -183,12 +183,23 @@ atmospheric_variables: Dict[str, Tuple[IconVariable, ...]] = {
         IconVariable("cli", "pl", units="kg kg-1"),
     ),
     "crwc": (IconVariable("qr", "pl", units="kg kg-1"),),
-    "cswc": (IconVariable("qs", "pl", units="kg kg-1"),),
-    # Graupel is the one hydrometeor with no ERA5 counterpart: the IFS
-    # microphysics does not carry it as a separate species, it is folded into
-    # snow. The channel therefore keeps ICON's own name. If a run wants the
-    # ERA5-comparable quantity instead, "cswc" has to be built as qs + qg,
-    # which is a modelling decision rather than a naming one.
+    # ERA5 has no graupel category: its snow content is documented as including
+    # graupel, so the ERA5-equivalent of "cswc" is ICON's qs PLUS qg, and the
+    # first candidate is that sum. This matters at the resolutions ICON output
+    # comes at: with convection resolved, graupel is a leading species in deep
+    # convective cores, so taking qs alone would bias the field exactly where
+    # the run has the most to say. Setups whose microphysics carries no graupel
+    # fall through to the second candidate, qs on its own.
+    "cswc": (
+        (
+            IconVariable("qs", "pl", units="kg kg-1"),
+            IconVariable("qg", "pl", units="kg kg-1"),
+        ),
+        IconVariable("qs", "pl", units="kg kg-1"),
+    ),
+    # graupel is also available on its own, for runs that want the ICON species
+    # split rather than the ERA5 vocabulary. Requesting both "cswc" and "qg"
+    # means qg is read twice, which is redundant but not wrong.
     "qg": (IconVariable("qg", "pl", units="kg kg-1"),),
 }
 
