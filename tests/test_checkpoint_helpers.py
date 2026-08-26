@@ -90,18 +90,18 @@ class TestGetLatestCheckpointVersion(unittest.TestCase):
 
     def test_returns_zero_when_no_files_match(self):
         # No files exist → bare-except branch returns 0.
-        self.assertEqual(get_latest_checkpoint_version(self.path_template), 0)
+        self.assertEqual(get_latest_checkpoint_version(self.path_template, verbose=False), 0)
 
     def test_extracts_version_from_single_file(self):
         self._touch("ckpt_mp0_v3.tar")
-        self.assertEqual(get_latest_checkpoint_version(self.path_template), 3)
+        self.assertEqual(get_latest_checkpoint_version(self.path_template, verbose=False), 3)
 
     def test_picks_latest_by_mtime_not_version_number(self):
         # The implementation uses os.path.getmtime to pick the "latest" — NOT the
         # numeric max. Pin this behavior: write v5 at t=100, v2 at t=200, expect 2.
         self._touch("ckpt_mp0_v5.tar", mtime=100)
         self._touch("ckpt_mp0_v2.tar", mtime=200)
-        self.assertEqual(get_latest_checkpoint_version(self.path_template), 2)
+        self.assertEqual(get_latest_checkpoint_version(self.path_template, verbose=False), 2)
 
     def test_picks_highest_version_when_mtimes_strictly_increase(self):
         # Common case: each successive checkpoint has a later mtime AND a larger
@@ -109,13 +109,13 @@ class TestGetLatestCheckpointVersion(unittest.TestCase):
         self._touch("ckpt_mp0_v0.tar", mtime=100)
         self._touch("ckpt_mp0_v1.tar", mtime=200)
         self._touch("ckpt_mp0_v7.tar", mtime=300)
-        self.assertEqual(get_latest_checkpoint_version(self.path_template), 7)
+        self.assertEqual(get_latest_checkpoint_version(self.path_template, verbose=False), 7)
 
     def test_only_inspects_mp_rank_0_files(self):
         # The template is formatted with mp_rank=0, so files at other ranks
         # are not seen. With only an mp_rank=1 file present, function returns 0.
         self._touch("ckpt_mp1_v9.tar")
-        self.assertEqual(get_latest_checkpoint_version(self.path_template), 0)
+        self.assertEqual(get_latest_checkpoint_version(self.path_template, verbose=False), 0)
 
     def test_returns_zero_on_unparseable_filename(self):
         # File matches the glob (mp_rank=0) but lacks ``_v<digits>``: the regex
@@ -124,7 +124,7 @@ class TestGetLatestCheckpointVersion(unittest.TestCase):
         weird_path = os.path.join(self.tmpdir, "ckpt_mp0_vNOTANUMBER.tar")
         with open(weird_path, "w"):
             pass
-        self.assertEqual(get_latest_checkpoint_version(self.path_template), 0)
+        self.assertEqual(get_latest_checkpoint_version(self.path_template, verbose=False), 0)
 
 
 class _OrigModWrapper:

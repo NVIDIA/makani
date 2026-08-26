@@ -547,7 +547,7 @@ class DataLoaderBase:
              loader claims to visit (loader.extsource.indices_select).
 
         (1) catches the original failure mode: a per-year clamp in
-        GeneralES.__call__ that silently maps indices near a year boundary
+        SampleSource.__call__ that silently maps indices near a year boundary
         to the same frame, producing duplicates.  (2) additionally catches
         a regression where the clamp returned a fixed-but-different frame
         (no duplicates but every sample wrong) and other indexing slips
@@ -596,14 +596,14 @@ class DataLoaderBase:
         DALI path, eval mode, parameterized on num_data_workers.
 
         num_data_workers is plumbed through to both py_num_workers and the
-        external_source's prefetch_queue_depth (data_loader_dali_2d.py:41,70).
+        external_source's prefetch_queue_depth (dali_dataloader.py:41,70).
         Under parallel execution DALI runs a SharedBatchDispatcher in a
         thread per worker that serialises the callback's returned numpy
-        arrays into shared memory.  If GeneralES.__call__ ever returned a
+        arrays into shared memory.  If SampleSource.__call__ ever returned a
         reference to a reused per-worker buffer instead of a fresh copy,
         the main worker thread would invoke the next sample-fetch before
         the dispatcher had finished reading the previous buffer, producing
-        either duplicate or torn samples.  GeneralES._reorder_channels
+        either duplicate or torn samples.  SampleSource._reorder_channels
         sidesteps this by always returning a copy; this test locks that
         invariant in.
 

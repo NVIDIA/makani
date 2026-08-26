@@ -213,12 +213,12 @@ def get_dataloader(params, files_pattern, device, mode="train", dali_device=None
         sampler = None
 
     else:
-        from makani.utils.dataloaders.data_loader_dali_2d import ERA5DaliESDataloader as ERA5DaliESDataloader2D
+        from makani.utils.dataloaders.dali_dataloader import DaliDataloader
 
         # dali loader
         if dali_device is None:
             dali_device = "gpu" if torch.cuda.is_available() else "cpu"
-        dataloader = ERA5DaliESDataloader2D(params, files_pattern, (mode == "train"), dali_device=dali_device)
+        dataloader = DaliDataloader(params, files_pattern, (mode == "train"), dali_device=dali_device)
 
         dataset = types.SimpleNamespace(
             in_channels=dataloader.in_channels,
