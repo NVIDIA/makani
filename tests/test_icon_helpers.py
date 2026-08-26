@@ -250,6 +250,29 @@ class TestDecodeTime(unittest.TestCase):
             with self.subTest(units=units):
                 self.assertEqual(decode_time([1.5], units), [_utc(2017, 1, 2, 12)])
 
+    def test_cf_reference_without_padding(self):
+        # udunits does not require zero padding and ICON writes exactly this
+        times = decode_time([0, 180], "minutes since 2020-1-1 00:00:00")
+        self.assertEqual(times, [_utc(2020, 1, 1, 0), _utc(2020, 1, 1, 3)])
+
+    def test_cf_reference_with_offset_is_converted(self):
+        # a reference naming a local instant is moved to UTC, matching
+        # makani.utils.dataloaders.data_helpers.get_date_from_string
+        self.assertEqual(decode_time([0], "hours since 2020-01-01 00:00:00 +2:00"), [_utc(2019, 12, 31, 22)])
+        self.assertEqual(decode_time([0], "hours since 2020-01-01 00:00:00 -05:00"), [_utc(2020, 1, 1, 5)])
+        self.assertEqual(decode_time([0], "hours since 2020-01-01 00:00:00 +0200"), [_utc(2019, 12, 31, 22)])
+        self.assertEqual(decode_time([0], "hours since 2020-01-01T00:00:00+02:00"), [_utc(2019, 12, 31, 22)])
+
+    def test_cf_reference_designators_mean_utc(self):
+        for reference in ("2020-01-01 00:00:00 UTC", "2020-01-01 00:00:00 GMT", "2020-01-01T00:00:00Z"):
+            with self.subTest(reference=reference):
+                self.assertEqual(decode_time([0], f"hours since {reference}"), [_utc(2020, 1, 1)])
+
+    def test_bare_date_is_not_read_as_an_offset(self):
+        # "2020-01-01" ends in something shaped like "-01"; taking it for an
+        # offset would silently move the epoch by an hour
+        self.assertEqual(decode_time([0], "days since 2020-01-01"), [_utc(2020, 1, 1)])
+
     def test_cf_seconds_and_minutes(self):
         self.assertEqual(decode_time([90], "seconds since 2017-01-01"), [_utc(2017, 1, 1, 0, 1, 30)])
         self.assertEqual(decode_time([90], "minutes since 2017-01-01"), [_utc(2017, 1, 1, 1, 30)])

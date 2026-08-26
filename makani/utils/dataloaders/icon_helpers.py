@@ -87,6 +87,12 @@ _CF_UNITS_PATTERN = re.compile(r"^\s*(day|hour|minute|second)s?\s+since\s+(.+?)\
 
 _CF_UNIT_SECONDS = {"day": 86400, "hour": 3600, "minute": 60, "second": 1}
 
+# designators meaning "this reference is already UTC"
+_UTC_DESIGNATORS = ("Z", "UTC", "GMT")
+
+# a udunits style trailing offset: +2:00, -05:00, +0200
+_CF_OFFSET_PATTERN = re.compile(r"^(?P<sign>[+-])(?P<hours>\d{1,2})(?::?(?P<minutes>\d{2}))?$")
+
 _CF_REFERENCE_FORMATS = (
     "%Y-%m-%d %H:%M:%S",
     "%Y-%m-%dT%H:%M:%S",
@@ -360,21 +366,62 @@ def _decode_icon_time_value(value: float) -> dt.datetime:
 
 
 def _parse_cf_reference(reference: str) -> dt.datetime:
-    """Parse the reference date of a CF ``<unit> since <reference>`` string."""
+    """Parse the reference date of a CF ``<unit> since <reference>`` string.
+
+    Follows the same policy as
+    :func:`makani.utils.dataloaders.data_helpers.get_date_from_string`: a
+    reference carrying a designator or an offset is converted to UTC, one
+    without is taken to be UTC already. udunits permits an offset as a separate
+    trailing token (``"hours since 2020-01-01 00:00:00 +2:00"``), and ISO
+    strings carry it attached; both are handled.
+
+    ..note::
+        A trailing offset is only recognised as a separate whitespace token,
+        because a bare date ends in something that looks exactly like one:
+        reading ``2020-01-01`` greedily would take the ``-01`` for "minus one
+        hour" and silently move the epoch.
+    """
     text = reference.strip()
+    offset = None
 
-    # trailing timezone designators, which strptime does not take in this position
-    for suffix in ("Z", "UTC", "+00:00", "+0000"):
-        if text.endswith(suffix):
-            text = text[: -len(suffix)].strip()
+    tokens = text.split()
+    if len(tokens) > 1 and tokens[-1].upper() in _UTC_DESIGNATORS:
+        text, offset = " ".join(tokens[:-1]), dt.timedelta(0)
+    elif len(tokens) > 1 and _CF_OFFSET_PATTERN.match(tokens[-1]):
+        match = _CF_OFFSET_PATTERN.match(tokens[-1])
+        sign = -1 if match.group("sign") == "-" else 1
+        minutes = int(match.group("minutes") or 0)
+        offset = sign * dt.timedelta(hours=int(match.group("hours")), minutes=minutes)
+        text = " ".join(tokens[:-1])
+    elif text.upper().endswith("Z"):
+        # attached designator on a single token, for python versions whose
+        # fromisoformat does not accept it
+        text, offset = text[:-1].strip(), dt.timedelta(0)
 
-    for fmt in _CF_REFERENCE_FORMATS:
-        try:
-            return dt.datetime.strptime(text, fmt).replace(tzinfo=dt.timezone.utc)
-        except ValueError:
-            continue
+    parsed = None
+    try:
+        parsed = dt.datetime.fromisoformat(text)
+    except ValueError:
+        # udunits does not require zero padding, and ICON writes
+        # "minutes since 2020-1-1 00:00:00", which is not valid ISO 8601
+        for fmt in _CF_REFERENCE_FORMATS:
+            try:
+                parsed = dt.datetime.strptime(text, fmt)
+                break
+            except ValueError:
+                continue
 
-    raise ValueError(f"Cannot parse CF reference date '{reference}'.")
+    if parsed is None:
+        raise ValueError(f"Cannot parse CF reference date '{reference}'.")
+
+    if parsed.tzinfo is not None:
+        return parsed.astimezone(dt.timezone.utc)
+
+    if offset is not None:
+        # the reference names a local instant: subtract the offset to reach UTC
+        return (parsed - offset).replace(tzinfo=dt.timezone.utc)
+
+    return parsed.replace(tzinfo=dt.timezone.utc)
 
 
 def decode_values(

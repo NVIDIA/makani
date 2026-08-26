@@ -152,15 +152,28 @@ def get_timestamp(year, hour):
     return jan_01_epoch + dt.timedelta(hours=hour)
 
 
-# this is a small helper to convert datetime to correct time zone
 def get_date_from_string(isostring):
-    date = dt.datetime.fromisoformat(isostring)
-    try:
-        date = date.astimezone(dt.timezone.utc)
-    except:
-        date = date.replace(tzinfo=dt.timezone.utc)
+    """Parse an ISO 8601 date string into a timezone aware UTC datetime.
 
-    return date
+    A string carrying a designator (``2017-01-01T00:00:00Z``, or an explicit
+    offset) is converted to UTC. One without (``2017-01-01T00:00:00``) is taken
+    to be UTC already and merely labelled as such.
+
+    ..note::
+        The naive case has to be handled explicitly. Since Python 3.6,
+        ``astimezone`` on a naive datetime does not raise: it assumes the value
+        is in the *local* zone and converts from there, so a date string without
+        a designator would silently shift by the offset of whichever machine
+        parsed it -- an hour on a CET laptop, nothing on a UTC cluster. That is
+        the failure this helper exists to prevent, so the check is on
+        ``tzinfo`` rather than on an exception that no longer fires.
+    """
+    date = dt.datetime.fromisoformat(isostring)
+
+    if date.tzinfo is None:
+        return date.replace(tzinfo=dt.timezone.utc)
+
+    return date.astimezone(dt.timezone.utc)
 
 
 def get_date_from_timestamp(timestamp):
