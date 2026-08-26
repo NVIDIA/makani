@@ -1176,22 +1176,24 @@ class TestMultifilesDataset(unittest.TestCase):
 
         # channel c holds the constant value c + 1, so which channels came back
         # can be read off the values
+        # one file: the dataset requires a constant cadence, and a second file
+        # starting at its own new year would leave a 347 day gap after twenty
+        # daily samples
         cls.distinct_path = os.path.join(cls.tmpdir.name, "distinct")
         os.makedirs(cls.distinct_path, exist_ok=True)
-        for year in (2017, 2018):
-            base = dt.datetime(year, 1, 1, tzinfo=dt.timezone.utc)
-            n_samples = 20
-            timestamps = np.array(
-                [(base + dt.timedelta(hours=24 * idx)).timestamp() for idx in range(n_samples)], dtype=np.float64
-            )
-            data = np.zeros((n_samples, NUM_CHANNELS, 8, 16), dtype=np.float32)
-            for channel in range(NUM_CHANNELS):
-                data[:, channel] = float(channel + 1)
-            with h5.File(os.path.join(cls.distinct_path, f"{year}.h5"), "w") as handle:
-                dset = handle.create_dataset(H5_PATH, data=data)
-                scale = handle.create_dataset("timestamp", data=timestamps)
-                scale.make_scale("timestamp")
-                dset.dims[0].attach_scale(scale)
+        base = dt.datetime(2017, 1, 1, tzinfo=dt.timezone.utc)
+        n_samples = 20
+        timestamps = np.array(
+            [(base + dt.timedelta(hours=24 * idx)).timestamp() for idx in range(n_samples)], dtype=np.float64
+        )
+        data = np.zeros((n_samples, NUM_CHANNELS, 8, 16), dtype=np.float32)
+        for channel in range(NUM_CHANNELS):
+            data[:, channel] = float(channel + 1)
+        with h5.File(os.path.join(cls.distinct_path, "2017.h5"), "w") as handle:
+            dset = handle.create_dataset(H5_PATH, data=data)
+            scale = handle.create_dataset("timestamp", data=timestamps)
+            scale.make_scale("timestamp")
+            dset.dims[0].attach_scale(scale)
 
     @classmethod
     def tearDownClass(cls):
