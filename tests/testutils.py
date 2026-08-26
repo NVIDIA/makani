@@ -487,7 +487,7 @@ def init_wb2_zarr_dataset(
     Returns the same tuple as ``init_hdf5_dataset``/``init_zarr_dataset``
     (with ``concat_path=None``).
     """
-    from makani.utils.dataloaders.wb2_helpers import surface_variables, atmospheric_variables
+    from makani.utils.dataloaders.wb2_helpers import atmospheric_wb2_name, surface_wb2_name
 
     if channel_names is None:
         channel_names = list(CHANNEL_NAMES)
@@ -517,10 +517,10 @@ def init_wb2_zarr_dataset(
         if m is not None and ch_name != "d2":
             pressure = int(m.group())
             prefix = ch_name[: m.start()]
-            wb2_name = atmospheric_variables[prefix]
+            wb2_name = atmospheric_wb2_name(prefix)
             atm_vars.setdefault(wb2_name, set()).add(pressure)
         else:
-            surf_vars.add(surface_variables[ch_name])
+            surf_vars.add(surface_wb2_name(ch_name))
 
     # unified sorted level array covering all atmospheric variables in the fixture
     all_levels = sorted(set().union(*atm_vars.values())) if atm_vars else []

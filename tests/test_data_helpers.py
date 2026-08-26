@@ -13,7 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import contextlib
 import datetime as dt
+import time
 import unittest
 
 import numpy as np
@@ -216,6 +218,22 @@ class TestGetTimestamp(unittest.TestCase):
 # ===========================================================================
 # 5. get_date_from_string
 # ===========================================================================
+@contextlib.contextmanager
+def _local_timezone(name):
+    """Run the enclosed block as if the machine were in another timezone."""
+    previous = os.environ.get("TZ")
+    os.environ["TZ"] = name
+    time.tzset()
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous
+        time.tzset()
+
+
 class TestGetDateFromString(unittest.TestCase):
 
     def test_utc_aware_string_preserved(self):
@@ -230,10 +248,39 @@ class TestGetDateFromString(unittest.TestCase):
         self.assertEqual(ts.hour, 12)
         self.assertEqual(ts.date(), dt.date(2020, 6, 15))
 
-    def test_naive_string_returns_timezone_aware(self):
-        """A naive ISO string must produce a timezone-aware result."""
+    def test_naive_string_is_taken_to_be_utc(self):
+        """A naive ISO string is labelled UTC, not converted from local time.
+
+        Asserting only that the result is timezone aware is not enough: the
+        moment itself has to be unchanged, which is what distinguishes
+        labelling from converting.
+        """
         ts = get_date_from_string("2020-06-15T12:00:00")
-        self.assertIsNotNone(ts.tzinfo)
+
+        self.assertEqual(ts, dt.datetime(2020, 6, 15, 12, 0, 0, tzinfo=UTC))
+
+    @unittest.skipUnless(hasattr(time, "tzset"), "TZ manipulation is POSIX only")
+    def test_parsing_does_not_depend_on_the_machine_timezone(self):
+        """The same string must give the same moment on any machine.
+
+        This is the reason the helper exists. ``astimezone`` on a naive datetime
+        does not raise, it assumes the *local* zone, so a date written without a
+        designator would land an hour out on a CET laptop and be correct on a
+        UTC cluster -- a discrepancy that only shows up when comparing runs
+        across systems.
+        """
+        cases = {
+            "2020-06-15T12:00:00+00:00": dt.datetime(2020, 6, 15, 12, tzinfo=UTC),
+            "2020-06-15T17:00:00+05:00": dt.datetime(2020, 6, 15, 12, tzinfo=UTC),
+            "2020-06-15T12:00:00": dt.datetime(2020, 6, 15, 12, tzinfo=UTC),
+            "2020-06-15": dt.datetime(2020, 6, 15, 0, tzinfo=UTC),
+        }
+
+        for zone in ("UTC", "Europe/Berlin", "America/Los_Angeles"):
+            with _local_timezone(zone):
+                for isostring, expected in cases.items():
+                    with self.subTest(timezone=zone, isostring=isostring):
+                        self.assertEqual(get_date_from_string(isostring), expected)
 
     def test_result_is_datetime(self):
         ts = get_date_from_string("2020-01-01")

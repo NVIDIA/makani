@@ -1231,5 +1231,40 @@ class TestGetStats(unittest.TestCase):
             )
 
 
+# conversion scripts, with the extras each needs to be importable at all
+_CONVERTERS = [
+    ("data_process.convert_ncar_era5_to_makani_input", ["mpi4py", "h5py"]),
+    ("data_process.convert_makani_output_to_wb2", ["mpi4py", "xarray", "dask", "h5py"]),
+    ("data_process.convert_wb2_to_makani_input", ["mpi4py", "xarray", "h5py"]),
+    ("data_process.generate_wb2_climatology", ["mpi4py", "xarray", "h5py"]),
+]
+
+
+class TestConverterImports(unittest.TestCase):
+    """
+    Import each conversion script in ``data_process``.
+
+    The converters are driven by MPI against multi terabyte archives and are not
+    otherwise exercised by any test, so this is the only thing standing between a
+    rename here and a failure on a production run.
+
+    What it covers is the *import surface*: module level ``from ... import``
+    statements and any code that runs at import time. It says nothing about what
+    happens inside the functions -- a helper called with the wrong arguments in
+    the middle of a conversion loop is still invisible here.
+
+    Each is skipped when its dependencies are missing, since ``mpi4py``,
+    ``xarray`` and ``dask`` live in the ``data_process`` extra rather than the
+    base install; that means these normally skip in CI and run in the container.
+    """
+
+    @parameterized.expand(_CONVERTERS)
+    def test_converter_imports(self, module_name, requirements):
+        missing = [name for name in requirements if importlib.util.find_spec(name) is None]
+        if missing:
+            self.skipTest(f"{module_name} needs {', '.join(missing)}")
+        importlib.import_module(module_name)
+
+
 if __name__ == "__main__":
     unittest.main()

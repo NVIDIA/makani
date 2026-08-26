@@ -1,0 +1,597 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Helpers for reading ICON model output in netCDF form.
+
+ICON writes netCDF4, which is HDF5 underneath, so the files open with ``h5py``
+and no netCDF library is needed. What ``h5py`` does *not* do is the decoding
+that ``netCDF4``/``xarray`` would normally hide, and ICON adds conventions of
+its own on top. This module isolates that decoding and the mapping from ICON
+variable names onto makani channels, so that the converter in
+``data_process/`` is left with I/O and regridding only, and so that the fiddly
+parts can be tested without any ICON data.
+
+Three things here are worth knowing before touching the converter:
+
+* **Time is not CF.** ICON writes ``time:units = "day as %Y%m%d.%f"``, i.e. the
+  float ``20170821.333333`` means 2017-08-21 08:00. Interpreting that as an
+  offset from an epoch, the way CF ``days since ...`` works, yields dates that
+  are wrong but look plausible. See :func:`decode_time`.
+* **Values may be packed.** netCDF ``scale_factor``/``add_offset`` packing and
+  ``_FillValue`` are applied by the netCDF library, not by HDF5, so reading
+  through ``h5py`` returns the raw (possibly integer) values. See
+  :func:`decode_values`.
+* **Variable names are not standardized.** ICON is run with different physics
+  packages and output namelists: NWP setups write ``temp``, ``pres_sfc``,
+  ``t_2m``, while AES/CMIP style setups write ``ta``, ``ps``, ``tas`` for the
+  same fields. Each makani channel therefore maps to a list of candidate names,
+  resolved against the variables a given file actually contains by
+  :func:`makani.utils.dataloaders.channel_helpers.resolve_variable`.
+
+What a real dataset looks like
+------------------------------
+The tables were checked against the EXCLAIM coupled DYAMOND run (R02B10,
+83,886,080 cells, grid 56), which is representative of the km-scale output
+makani is likely to be handed:
+
+* one file per variable per day, ``(time, plev, ncells)`` float32, **not
+  compressed** -- no filters at all, so a (time, level) slab is a contiguous
+  read and the netCDF unpacking below is a no-op for that dataset;
+* the vertical axis is ``plev`` in **Pa**, carrying the 37 standard ERA5
+  pressure levels, so makani's ``z500``-style channels map onto it by index and
+  no vertical interpolation is needed;
+* the horizontal grid is ``CDI_grid_type = "unstructured"`` at **cell centres**
+  (``number_of_grid_in_reference = 1``), which means ``u``/``v`` are already
+  earth-relative components and need no reconstruction from edge normals;
+* ``clon``/``clat`` are present in *some* files only. Variables that lack them
+  refer to the grid solely through ``uuidOfHGrid``, so the coordinates have to
+  be taken from a file that has them (or from the external grid file) and
+  checked with :func:`check_grid_uuid`.
+
+The tables remain provisional in the sense that a different ICON setup will use
+names not listed here; extending them is expected, and the resolution machinery
+rather than any individual entry is what the tests pin down.
+"""
+
+import re
+import datetime as dt
+from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
+
+import numpy as np
+
+# channel grouping and name classification are shared across the data source readers
+from makani.utils.dataloaders.channel_helpers import ChannelGroup, build_channel_groups
+
+
+# ICON's own time encoding: the integer part is a YYYYMMDD date, the fraction is
+# the elapsed part of that day
+ICON_TIME_UNITS = "day as %Y%m%d.%f"
+
+# standard gravity, for converting between geopotential (m2/s2, ICON "geopot")
+# and geopotential height (m, CMIP "zg")
+GRAVITY = 9.80665
+
+_CF_UNITS_PATTERN = re.compile(r"^\s*(day|hour|minute|second)s?\s+since\s+(.+?)\s*$", re.IGNORECASE)
+
+_CF_UNIT_SECONDS = {"day": 86400, "hour": 3600, "minute": 60, "second": 1}
+
+# designators meaning "this reference is already UTC"
+_UTC_DESIGNATORS = ("Z", "UTC", "GMT")
+
+# a udunits style trailing offset: +2:00, -05:00, +0200
+_CF_OFFSET_PATTERN = re.compile(r"^(?P<sign>[+-])(?P<hours>\d{1,2})(?::?(?P<minutes>\d{2}))?$")
+
+_CF_REFERENCE_FORMATS = (
+    "%Y-%m-%d %H:%M:%S",
+    "%Y-%m-%dT%H:%M:%S",
+    "%Y-%m-%d %H:%M",
+    "%Y-%m-%d",
+)
+
+
+class IconVariable(NamedTuple):
+    """One candidate ICON variable for a makani channel.
+
+    Attributes
+    ----------
+    name : str
+        Variable name as it appears in the netCDF file.
+    kind : str
+        ``"pl"`` for fields on pressure levels, ``"sfc"`` for single level
+        fields, ``"accum"`` for fields that need temporal post-processing.
+    accumulation : str
+        How the variable relates to the makani channel in time. ``"none"`` for
+        instantaneous fields; ``"since_start"`` for totals accumulated from the
+        beginning of the run, which have to be differenced between consecutive
+        outputs; ``"rate"`` for fluxes, which have to be multiplied by the
+        length of the window.
+    units : str, optional
+        Units the variable is expected to carry, for the converter to check
+        against the file. Mismatches usually mean a different variable was
+        resolved than intended, e.g. geopotential against geopotential height.
+    """
+
+    name: str
+    kind: str
+    accumulation: str = "none"
+    units: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# ERA5-style makani channel -> candidate ICON variables
+#
+# Candidates are listed in preference order: NWP style names first, since that
+# is what the operational and most limited area setups write, then AES/CMIP
+# style, then plain ERA5 short names for files that were converted elsewhere.
+# ---------------------------------------------------------------------------
+
+atmospheric_variables: Dict[str, Tuple[IconVariable, ...]] = {
+    # NOTE: makani's "z" is geopotential (m2/s2). "zg" is geopotential *height*
+    # (m) and needs multiplying by GRAVITY; the units field flags which is which.
+    "z": (
+        IconVariable("geopot", "pl", units="m2 s-2"),
+        IconVariable("zg", "pl", units="m"),
+        IconVariable("z", "pl", units="m2 s-2"),
+    ),
+    "t": (
+        IconVariable("temp", "pl", units="K"),
+        IconVariable("ta", "pl", units="K"),
+        IconVariable("t", "pl", units="K"),
+    ),
+    "u": (
+        IconVariable("u", "pl", units="m s-1"),
+        IconVariable("ua", "pl", units="m s-1"),
+    ),
+    "v": (
+        IconVariable("v", "pl", units="m s-1"),
+        IconVariable("va", "pl", units="m s-1"),
+    ),
+    # ICON writes "w" as the vertical *velocity* in m/s (upward_air_velocity),
+    # which is a different quantity from ERA5's omega in Pa/s: they differ by
+    # -rho*g and cannot be substituted for one another. Both are listed so that
+    # the units carried through resolution say which one a file provides.
+    "w": (
+        IconVariable("w", "pl", units="m s-1"),
+        IconVariable("omega", "pl", units="Pa s-1"),
+        IconVariable("wap", "pl", units="Pa s-1"),
+    ),
+    "q": (
+        IconVariable("qv", "pl", units="kg kg-1"),
+        IconVariable("hus", "pl", units="kg kg-1"),
+    ),
+    "r": (
+        IconVariable("rh", "pl", units="%"),
+        IconVariable("hur", "pl", units="%"),
+    ),
+    # Hydrometeors. ERA5 carries the first four as pressure level parameters
+    # (clwc 246, ciwc 247, crwc 75, cswc 76) and, like ICON, as specific
+    # contents in kg kg-1, so these map one to one and no conversion is needed.
+    # The channels are therefore named after ERA5 rather than after ICON, which
+    # keeps the channel vocabulary the same as for the ERA5 datasets.
+    "clwc": (
+        IconVariable("qc", "pl", units="kg kg-1"),
+        IconVariable("clw", "pl", units="kg kg-1"),
+    ),
+    "ciwc": (
+        IconVariable("qi", "pl", units="kg kg-1"),
+        IconVariable("cli", "pl", units="kg kg-1"),
+    ),
+    "crwc": (IconVariable("qr", "pl", units="kg kg-1"),),
+    # ERA5 has no graupel category: its snow content is documented as including
+    # graupel, so the ERA5-equivalent of "cswc" is ICON's qs PLUS qg, and the
+    # first candidate is that sum. This matters at the resolutions ICON output
+    # comes at: with convection resolved, graupel is a leading species in deep
+    # convective cores, so taking qs alone would bias the field exactly where
+    # the run has the most to say. Setups whose microphysics carries no graupel
+    # fall through to the second candidate, qs on its own.
+    "cswc": (
+        (
+            IconVariable("qs", "pl", units="kg kg-1"),
+            IconVariable("qg", "pl", units="kg kg-1"),
+        ),
+        IconVariable("qs", "pl", units="kg kg-1"),
+    ),
+    # graupel is also available on its own, for runs that want the ICON species
+    # split rather than the ERA5 vocabulary. Requesting both "cswc" and "qg"
+    # means qg is read twice, which is redundant but not wrong.
+    "qg": (IconVariable("qg", "pl", units="kg kg-1"),),
+}
+
+surface_variables: Dict[str, Tuple[IconVariable, ...]] = {
+    "u10m": (IconVariable("u_10m", "sfc", units="m s-1"), IconVariable("uas", "sfc", units="m s-1")),
+    "v10m": (IconVariable("v_10m", "sfc", units="m s-1"), IconVariable("vas", "sfc", units="m s-1")),
+    "t2m": (IconVariable("t_2m", "sfc", units="K"), IconVariable("tas", "sfc", units="K")),
+    "d2": (IconVariable("td_2m", "sfc", units="K"), IconVariable("tdps", "sfc", units="K")),
+    "sp": (IconVariable("pres_sfc", "sfc", units="Pa"), IconVariable("ps", "sfc", units="Pa")),
+    "msl": (IconVariable("pres_msl", "sfc", units="Pa"), IconVariable("psl", "sfc", units="Pa")),
+    "tcwv": (IconVariable("tqv", "sfc", units="kg m-2"), IconVariable("prw", "sfc", units="kg m-2")),
+    "sst": (IconVariable("t_seasfc", "sfc", units="K"), IconVariable("tos", "sfc", units="K")),
+}
+
+accumulated_variables: Dict[str, Tuple[IconVariable, ...]] = {
+    # tot_prec is a running total since the start of the run and has to be
+    # differenced; pr is an instantaneous flux and has to be integrated over the
+    # window instead. Which one a file carries changes the arithmetic, hence the
+    # accumulation field rather than a single code path.
+    "tp": (
+        IconVariable("tot_prec", "accum", accumulation="since_start", units="kg m-2"),
+        IconVariable("pr", "accum", accumulation="rate", units="kg m-2 s-1"),
+    ),
+}
+
+
+def build_icon_channel_groups(
+    channel_names: List[str],
+    available: Optional[Sequence[str]] = None,
+    skip_missing_channels: bool = False,
+) -> List[ChannelGroup]:
+    """Group makani channel names by the ICON variable that provides them.
+
+    All levels of a variable come from the same ICON variable, which is stored
+    as ``(time, plev, ncells)``, so they are collected into one group and read
+    together.
+
+    Parameters
+    ----------
+    channel_names : list of str
+        Channel names in channel index order, i.e. ``coords["channel"]`` from
+        the dataset metadata.
+    available : sequence of str, optional
+        Variable names present in the file, used to resolve between the
+        alternative ICON namings. When omitted the preferred name is assumed.
+    skip_missing_channels : bool, optional
+        If True, channels that no candidate variable covers are dropped instead
+        of raising.
+
+    Returns
+    -------
+    list of ChannelGroup
+        One entry per source variable, pressure level groups first.
+
+    Raises
+    ------
+    ValueError
+        If a channel cannot be resolved and ``skip_missing_channels`` is False.
+    """
+    return build_channel_groups(
+        channel_names,
+        atmospheric=atmospheric_variables,
+        surface=surface_variables,
+        accumulated=accumulated_variables,
+        available=available,
+        skip_missing_channels=skip_missing_channels,
+        source="ICON",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Decoding
+# ---------------------------------------------------------------------------
+
+
+def _as_text(value) -> str:
+    """Normalize an HDF5 attribute to ``str``.
+
+    ``h5py`` hands back ``bytes`` for the fixed length strings netCDF writes, and
+    0-d or 1-element arrays for scalar attributes, so an attribute has to be
+    unwrapped before it can be compared against anything. Anything else is
+    stringified, which keeps callers free of isinstance checks.
+
+    Raises
+    ------
+    ValueError
+        If the value is an array holding more than one element, which means the
+        caller asked for a scalar attribute and got something else.
+    """
+    if isinstance(value, np.ndarray):
+        if value.size != 1:
+            raise ValueError(f"Expected a scalar attribute, got an array of size {value.size}.")
+        value = value.reshape(-1)[0]
+    if isinstance(value, (bytes, np.bytes_)):
+        return value.decode("utf-8")
+    return str(value)
+
+
+def decode_time(values, units) -> List[dt.datetime]:
+    """Decode an ICON time coordinate into timezone aware UTC datetimes.
+
+    Two encodings are accepted: ICON's own ``"day as %Y%m%d.%f"``, where the
+    integer part is the calendar date and the fraction is the elapsed part of
+    the day, and the CF ``"<unit> since <reference>"`` form that ICON writes
+    when configured for CF output.
+
+    Times are rounded to the nearest second, because the fractional day is
+    stored as a float and an exact 08:00 comes back as 07:59:59.99 otherwise.
+
+    Parameters
+    ----------
+    values : array_like
+        Raw values of the time variable.
+    units : str or bytes
+        The ``units`` attribute of the time variable.
+
+    Returns
+    -------
+    list of datetime.datetime
+        One timezone aware datetime per input value.
+
+    Raises
+    ------
+    ValueError
+        If the units string is neither of the two supported encodings, or if a
+        value is not a valid date under it.
+    """
+    text = _as_text(units).strip()
+    values = np.atleast_1d(np.asarray(values, dtype=np.float64))
+
+    if text == ICON_TIME_UNITS:
+        return [_decode_icon_time_value(value) for value in values]
+
+    match = _CF_UNITS_PATTERN.match(text)
+    if match is not None:
+        unit, reference = match.group(1).lower(), match.group(2)
+        seconds_per_unit = _CF_UNIT_SECONDS[unit]
+        origin = _parse_cf_reference(reference)
+        return [origin + dt.timedelta(seconds=round(value * seconds_per_unit)) for value in values]
+
+    raise ValueError(
+        f"Unsupported time encoding '{text}'. Expected ICON's '{ICON_TIME_UNITS}' "
+        "or a CF style '<unit> since <reference>'."
+    )
+
+
+def _decode_icon_time_value(value: float) -> dt.datetime:
+    """Decode a single ``YYYYMMDD.fraction`` value."""
+    stamp = int(np.floor(value))
+    fraction = float(value) - stamp
+
+    try:
+        day = dt.datetime.strptime(str(stamp), "%Y%m%d").replace(tzinfo=dt.timezone.utc)
+    except ValueError as err:
+        raise ValueError(f"Time value {value} does not start with a valid YYYYMMDD date.") from err
+
+    return day + dt.timedelta(seconds=round(fraction * 86400))
+
+
+def _parse_cf_reference(reference: str) -> dt.datetime:
+    """Parse the reference date of a CF ``<unit> since <reference>`` string.
+
+    Follows the same policy as
+    :func:`makani.utils.dataloaders.data_helpers.get_date_from_string`: a
+    reference carrying a designator or an offset is converted to UTC, one
+    without is taken to be UTC already. udunits permits an offset as a separate
+    trailing token (``"hours since 2020-01-01 00:00:00 +2:00"``), and ISO
+    strings carry it attached; both are handled.
+
+    ..note::
+        A trailing offset is only recognised as a separate whitespace token,
+        because a bare date ends in something that looks exactly like one:
+        reading ``2020-01-01`` greedily would take the ``-01`` for "minus one
+        hour" and silently move the epoch.
+    """
+    text = reference.strip()
+    offset = None
+
+    tokens = text.split()
+    if len(tokens) > 1 and tokens[-1].upper() in _UTC_DESIGNATORS:
+        text, offset = " ".join(tokens[:-1]), dt.timedelta(0)
+    elif len(tokens) > 1 and _CF_OFFSET_PATTERN.match(tokens[-1]):
+        match = _CF_OFFSET_PATTERN.match(tokens[-1])
+        sign = -1 if match.group("sign") == "-" else 1
+        minutes = int(match.group("minutes") or 0)
+        offset = sign * dt.timedelta(hours=int(match.group("hours")), minutes=minutes)
+        text = " ".join(tokens[:-1])
+    elif text.upper().endswith("Z"):
+        # attached designator on a single token, for python versions whose
+        # fromisoformat does not accept it
+        text, offset = text[:-1].strip(), dt.timedelta(0)
+
+    parsed = None
+    try:
+        parsed = dt.datetime.fromisoformat(text)
+    except ValueError:
+        # udunits does not require zero padding, and ICON writes
+        # "minutes since 2020-1-1 00:00:00", which is not valid ISO 8601
+        for fmt in _CF_REFERENCE_FORMATS:
+            try:
+                parsed = dt.datetime.strptime(text, fmt)
+                break
+            except ValueError:
+                continue
+
+    if parsed is None:
+        raise ValueError(f"Cannot parse CF reference date '{reference}'.")
+
+    if parsed.tzinfo is not None:
+        return parsed.astimezone(dt.timezone.utc)
+
+    if offset is not None:
+        # the reference names a local instant: subtract the offset to reach UTC
+        return (parsed - offset).replace(tzinfo=dt.timezone.utc)
+
+    return parsed.replace(tzinfo=dt.timezone.utc)
+
+
+def decode_values(
+    raw: np.ndarray,
+    fill_value=None,
+    scale_factor=None,
+    add_offset=None,
+    dtype=np.float32,
+) -> np.ndarray:
+    """Apply netCDF packing and missing value conventions to a raw HDF5 read.
+
+    The netCDF library normally does this on the way out, but reading a netCDF4
+    file through ``h5py`` bypasses it: a packed variable comes back as the
+    stored integers, and fill values come back as whatever sentinel was written.
+
+    Fill values are matched against the *raw* data, before unpacking, as CF
+    requires, and become NaN. Unpacking is ``raw * scale_factor + add_offset``,
+    with either factor optional.
+
+    Parameters
+    ----------
+    raw : numpy.ndarray
+        Values as read from the file.
+    fill_value : scalar, optional
+        Value denoting missing data, from ``_FillValue`` or ``missing_value``.
+    scale_factor, add_offset : scalar, optional
+        Packing parameters from the variable attributes.
+    dtype : numpy dtype, optional
+        Floating point type of the result, float32 by default.
+
+    Returns
+    -------
+    numpy.ndarray
+        Decoded values, with missing data as NaN.
+    """
+    if not np.issubdtype(np.dtype(dtype), np.floating):
+        raise ValueError(f"Decoded values need a floating point dtype to hold NaN, got {dtype}.")
+
+    raw = np.asarray(raw)
+    missing = None
+    if fill_value is not None:
+        missing = raw == np.asarray(fill_value).reshape(()).astype(raw.dtype, copy=False)
+
+    values = raw.astype(dtype, copy=True)
+
+    if scale_factor is not None:
+        values *= dtype(scale_factor)
+    if add_offset is not None:
+        values += dtype(add_offset)
+
+    if missing is not None and missing.any():
+        values[missing] = np.nan
+
+    return values
+
+
+# ---------------------------------------------------------------------------
+# Grid and level metadata
+# ---------------------------------------------------------------------------
+
+
+def grid_coordinates_in_degrees(clon, clat) -> Tuple[np.ndarray, np.ndarray]:
+    """Convert ICON cell center coordinates from radians to degrees.
+
+    ICON stores ``clon``/``clat`` in radians with longitude in [-pi, pi]. The
+    result uses degrees with longitude in [0, 360), matching makani's own
+    convention and the ERA5 datasets it is trained on.
+
+    Parameters
+    ----------
+    clon, clat : array_like
+        Cell center longitude and latitude in radians.
+
+    Returns
+    -------
+    lon, lat : numpy.ndarray
+        Coordinates in degrees, longitude wrapped into [0, 360).
+
+    Raises
+    ------
+    ValueError
+        If the inputs do not look like radians, which almost always means the
+        file stores degrees already and the caller would otherwise silently
+        collapse the whole globe into a few degrees around the prime meridian.
+    """
+    clon = np.asarray(clon, dtype=np.float64)
+    clat = np.asarray(clat, dtype=np.float64)
+
+    if clon.shape != clat.shape:
+        raise ValueError(f"clon and clat must have the same shape, got {clon.shape} and {clat.shape}.")
+
+    if np.nanmax(np.abs(clat)) > np.pi / 2 + 1e-6:
+        raise ValueError(
+            "Cell latitudes exceed pi/2, so they are not radians. ICON writes radians; "
+            "if this file stores degrees, pass them through unchanged instead."
+        )
+
+    lat = np.rad2deg(clat)
+    lon = np.mod(np.rad2deg(clon), 360.0)
+
+    return lon, lat
+
+
+def pressure_levels_in_hpa(levels) -> np.ndarray:
+    """Normalize a pressure level coordinate to hPa.
+
+    ICON writes pressure levels in Pa while makani channel names carry hPa
+    (``z500``), so one of the two has to be converted, and getting it backwards
+    silently selects the wrong level. Pa is detected by magnitude: no
+    meteorologically useful level exceeds 2000 hPa, and none is below 0.01 hPa.
+    """
+    levels = np.asarray(levels, dtype=np.float64)
+
+    if levels.size == 0:
+        raise ValueError("Empty pressure level coordinate.")
+
+    if np.nanmax(levels) > 2000.0:
+        return levels / 100.0
+
+    return levels
+
+
+def pressure_level_index(levels, wanted_hpa: int, tolerance: float = 0.5) -> int:
+    """Return the index of ``wanted_hpa`` in a pressure level coordinate.
+
+    The coordinate may be in Pa or hPa, see :func:`pressure_levels_in_hpa`.
+
+    Raises
+    ------
+    ValueError
+        If no level matches within ``tolerance`` hPa.
+    """
+    levels_hpa = pressure_levels_in_hpa(levels)
+    distance = np.abs(levels_hpa - wanted_hpa)
+    closest = int(np.argmin(distance))
+
+    if distance[closest] > tolerance:
+        raise ValueError(
+            f"No pressure level within {tolerance} hPa of {wanted_hpa} hPa. "
+            f"Available levels (hPa): {np.array2string(levels_hpa, threshold=20)}."
+        )
+
+    return closest
+
+
+def check_grid_uuid(data_uuid, grid_uuid) -> None:
+    """Check that a data file and a grid file describe the same horizontal grid.
+
+    ICON stamps output files with the ``uuidOfHGrid`` of the grid they were run
+    on. Regridding against the wrong grid file produces a plausible looking but
+    scrambled field, so the UUIDs are compared rather than assumed to match.
+    Comparison ignores case and surrounding whitespace; either side being absent
+    is accepted, since not every setup writes the attribute.
+
+    Raises
+    ------
+    ValueError
+        If both UUIDs are present and differ.
+    """
+    if data_uuid is None or grid_uuid is None:
+        return
+
+    data_text = _as_text(data_uuid).strip().lower()
+    grid_text = _as_text(grid_uuid).strip().lower()
+
+    if not data_text or not grid_text:
+        return
+
+    if data_text != grid_text:
+        raise ValueError(
+            f"The data file was written on grid {data_text} but the grid file describes {grid_text}. "
+            "Regridding with a mismatched grid file silently scrambles the field."
+        )

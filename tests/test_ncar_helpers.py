@@ -16,7 +16,8 @@
 """
 Unit tests for ``makani.utils.dataloaders.ncar_helpers``, the channel mapping,
 object key and accumulation window arithmetic behind the NSF NCAR ERA5 (RDA
-d633000) converter.
+d633000) converter. The channel name splitter it builds on is shared with the
+other readers and is covered in ``test_features.py``.
 
 Everything here is pure computation on names and datetimes, so no S3 access, no
 MPI and no data fixtures are involved. The reads themselves live in
@@ -32,6 +33,7 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 from makani.utils.dataloaders.ncar_helpers import (
     ACCUM_INIT_HOURS,
+    accumulated_variables,
     ACCUM_MAX_FORECAST_HOUR,
     NCAR_EPOCH,
     NcarVariable,
@@ -41,36 +43,12 @@ from makani.utils.dataloaders.ncar_helpers import (
     build_ncar_channel_groups,
     latest_forecast_init,
     resolve_accumulation_segments,
-    split_channel_name,
     to_ncar_hours,
 )
 
 
 def _utc(year, month, day, hour=0):
     return dt.datetime(year, month, day, hour, tzinfo=dt.timezone.utc)
-
-
-class TestSplitChannelName(unittest.TestCase):
-    """
-    Channel names are classified by a trailing number: ``z500`` is the variable
-    ``z`` on 500 hPa, while ``u10m`` and ``t2m`` end in a letter and are surface
-    fields. ``d2`` is the one name that looks like a level but is not.
-    """
-
-    def test_pressure_level_channels(self):
-        self.assertEqual(split_channel_name("z500"), ("z", 500))
-        self.assertEqual(split_channel_name("t850"), ("t", 850))
-        self.assertEqual(split_channel_name("u1000"), ("u", 1000))
-        self.assertEqual(split_channel_name("q50"), ("q", 50))
-
-    def test_surface_channels_have_no_level(self):
-        for name in ["t2m", "u10m", "v10m", "u100m", "sp", "msl", "tcwv", "sst", "tp"]:
-            with self.subTest(channel=name):
-                self.assertEqual(split_channel_name(name), (name, None))
-
-    def test_d2_is_not_read_as_a_level(self):
-        # "d2" would otherwise parse as variable "d" on 2 hPa
-        self.assertEqual(split_channel_name("d2"), ("d2", None))
 
 
 class TestBuildNcarChannelGroups(unittest.TestCase):
@@ -117,6 +95,20 @@ class TestBuildNcarChannelGroups(unittest.TestCase):
         # tp is not shipped directly, it is reconstructed as lsp + cp
         self.assertEqual(groups["tp"].kind, "accum")
         self.assertEqual([var.short_name for var in groups["tp"].variables], ["lsp", "cp"])
+
+    def test_precipitation_is_summed_not_alternatives(self):
+        """
+        The nesting of the tp entry carries meaning that is easy to lose.
+
+        d633000 has no total precipitation, so tp is lsp PLUS cp: one candidate
+        made of two components. Written one level flatter it would read as two
+        *alternatives*, the reader would take whichever it saw first, and the
+        dataset would silently carry roughly half its precipitation.
+        """
+        candidates = accumulated_variables["tp"]
+
+        self.assertEqual(len(candidates), 1, "tp must offer exactly one way to be built")
+        self.assertEqual([variable.short_name for variable in candidates[0]], ["lsp", "cp"])
 
     def test_unknown_channels_raise(self):
         with self.subTest(desc="unknown atmospheric prefix"):

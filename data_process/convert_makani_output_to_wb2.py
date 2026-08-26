@@ -32,7 +32,11 @@ from mpi4py import MPI
 from makani.utils.dataloaders.data_helpers import get_date_from_timestamp
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from makani.utils.dataloaders.wb2_helpers import surface_variables, atmospheric_variables, split_convert_channel_names
+from makani.utils.dataloaders.wb2_helpers import (
+    atmospheric_wb2_name,
+    split_convert_channel_names,
+    surface_wb2_name,
+)
 
 
 def convert(
@@ -212,7 +216,7 @@ def convert(
                     data = np.transpose(data, axes=(0, 2, 1, 3, 4))
 
                     # create xarray
-                    scwb2 = surface_variables[sc]
+                    scwb2 = surface_wb2_name(sc)
                     chunk_data_arrays[scwb2] = (
                         ["time", "number", "prediction_timedelta", "latitude", "longitude"],
                         data,
@@ -228,7 +232,7 @@ def convert(
                         data[..., idl, :, :] = tmpdata[...]
 
                     # create array
-                    acwb2 = atmospheric_variables[ac]
+                    acwb2 = atmospheric_wb2_name(ac)
                     chunk_data_arrays[acwb2] = (
                         ["time", "number", "prediction_timedelta", "level", "latitude", "longitude"],
                         data,
