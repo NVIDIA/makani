@@ -1159,5 +1159,204 @@ class TestDummyLoader(unittest.TestCase):
         self.assertTrue((out_scale == 1).all())
 
 
+class TestMultifilesDataset(unittest.TestCase):
+    """MultifilesDataset built directly, without DALI or a GPU.
+
+    The parameterized suites above compare it against the DALI path on the same
+    fixture, which is the broad check. What is pinned here is what only this
+    dataset does: reading a target window, striding by ``dt``, surviving the
+    pickling a torch worker pool performs, and reporting the grid the files
+    actually carry.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmpdir = tempfile.TemporaryDirectory()
+        cls.train_path, *_ = init_hdf5_dataset(cls.tmpdir.name)
+
+        # channel c holds the constant value c + 1, so which channels came back
+        # can be read off the values
+        cls.distinct_path = os.path.join(cls.tmpdir.name, "distinct")
+        os.makedirs(cls.distinct_path, exist_ok=True)
+        for year in (2017, 2018):
+            base = dt.datetime(year, 1, 1, tzinfo=dt.timezone.utc)
+            n_samples = 20
+            timestamps = np.array(
+                [(base + dt.timedelta(hours=24 * idx)).timestamp() for idx in range(n_samples)], dtype=np.float64
+            )
+            data = np.zeros((n_samples, NUM_CHANNELS, 8, 16), dtype=np.float32)
+            for channel in range(NUM_CHANNELS):
+                data[:, channel] = float(channel + 1)
+            with h5.File(os.path.join(cls.distinct_path, f"{year}.h5"), "w") as handle:
+                dset = handle.create_dataset(H5_PATH, data=data)
+                scale = handle.create_dataset("timestamp", data=timestamps)
+                scale.make_scale("timestamp")
+                dset.dims[0].attach_scale(scale)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmpdir.cleanup()
+
+    def _make(self, location=None, **overrides):
+        from makani.utils.dataloaders.data_loader_multifiles import MultifilesDataset
+
+        kwargs = dict(
+            location=location or self.train_path,
+            dt=1,
+            in_channels=list(range(NUM_CHANNELS)),
+            out_channels=list(range(NUM_CHANNELS)),
+            n_history=0,
+            n_future=0,
+            enable_logging=False,
+        )
+        kwargs.update(overrides)
+        return MultifilesDataset(**kwargs)
+
+    def test_target_uses_the_output_channels(self):
+        """The target window is the output channels, not the input ones.
+
+        These were read with the input selection and then normalized with the
+        output statistics, so a run whose outputs differ from its inputs
+        trained against the wrong fields. Nothing catches that downstream: the
+        shapes agree whenever the two selections are the same length.
+        """
+        dataset = self._make(location=self.distinct_path, in_channels=[0, 1], out_channels=[3, 4], n_future=0)
+
+        inp, tar = dataset[0]
+
+        # channel c holds c + 1
+        np.testing.assert_allclose(inp[:, 0].numpy(), 1.0)
+        np.testing.assert_allclose(inp[:, 1].numpy(), 2.0)
+        np.testing.assert_allclose(tar[:, 0].numpy(), 4.0)
+        np.testing.assert_allclose(tar[:, 1].numpy(), 5.0)
+
+    def test_target_channels_are_reordered_like_the_inputs(self):
+        # an unsorted request has to come back in the order it was asked for,
+        # on the target side as well
+        dataset = self._make(location=self.distinct_path, in_channels=[1, 0], out_channels=[4, 2])
+
+        inp, tar = dataset[0]
+
+        np.testing.assert_allclose(inp[:, 0].numpy(), 2.0)
+        np.testing.assert_allclose(inp[:, 1].numpy(), 1.0)
+        np.testing.assert_allclose(tar[:, 0].numpy(), 5.0)
+        np.testing.assert_allclose(tar[:, 1].numpy(), 3.0)
+
+    def test_timestamps_stride_by_dt(self):
+        """The times returned belong to the samples returned.
+
+        The window steps ``dt`` samples at a time, so its timestamps do too.
+        Slicing adjacent ones instead gives times that drift from the data as
+        soon as dt > 1, which reaches the model through the zenith angle.
+        """
+        dataset = self._make(dt=2, n_history=1, return_timestamp=True, add_zenith=False)
+
+        _, _, inp_time, _ = dataset[0]
+
+        dhours = dataset.dhours
+        self.assertEqual(float(inp_time[1] - inp_time[0]), 2 * dhours * 3600.0)
+
+    def test_timestamps_match_the_samples_they_came_from(self):
+        # the stronger statement: the returned times are the dataset's own
+        # times at the indices the data was read from
+        dataset = self._make(dt=3, n_history=1, return_timestamp=True, add_zenith=False)
+
+        _, _, inp_time, _ = dataset[5]
+
+        expected = [dataset.timestamps[5], dataset.timestamps[5 + 3]]
+        np.testing.assert_allclose(inp_time.numpy(), expected)
+
+    def test_target_times_stride_by_dt(self):
+        dataset = self._make(dt=2, n_future=1, return_timestamp=True, add_zenith=False)
+
+        _, _, _, tar_time = dataset[0]
+
+        self.assertEqual(float(tar_time[1] - tar_time[0]), 2 * dataset.dhours * 3600.0)
+
+    def test_survives_pickling(self):
+        # a torch DataLoader with workers pickles the dataset; the backend has
+        # to drop its handles and reopen them on the other side
+        import pickle
+
+        dataset = self._make()
+        before = dataset[3]
+
+        revived = pickle.loads(pickle.dumps(dataset))
+        after = revived[3]
+
+        for position, (original, restored) in enumerate(zip(before, after)):
+            with self.subTest(output=position):
+                self.assertTrue(compare_tensors(f"unpickled output {position}", restored, original))
+
+    def test_reports_the_grid_the_files_carry(self):
+        # the fixture writes its coordinates, so they should be what comes back
+        dataset = self._make()
+
+        with h5.File(sorted(glob.glob(os.path.join(self.train_path, "*.h5")))[0], "r") as handle:
+            latitude = handle["lat"][...]
+
+        np.testing.assert_allclose(dataset.lat_lon[0], latitude, rtol=1e-6)
+
+    def test_lookup_by_time_round_trips(self):
+        # inference addresses samples by timestamp, so the two directions have
+        # to agree
+        dataset = self._make()
+
+        for index in (0, 17, 400):
+            with self.subTest(index=index):
+                self.assertEqual(dataset.get_index_at_time(dataset.get_time_at_index(index)), index)
+
+
+@unittest.skipUnless(_have_dali, "the WB2 fixture is shared with the DALI suites")
+class TestMultifilesWb2(unittest.TestCase):
+    """The WeatherBench2 layout, read through the torch dataset.
+
+    Reachable only since the dataset moved onto the backends and started
+    passing ``channel_names`` -- which the layout needs, since it addresses
+    variables by name rather than by index. Inference uses this dataset, so
+    this is what makes a WB2 store usable there.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmpdir = tempfile.TemporaryDirectory()
+        cls.train_path, *_ = init_wb2_zarr_dataset(cls.tmpdir.name)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmpdir.cleanup()
+
+    def _make(self, **overrides):
+        from makani.utils.dataloaders.data_loader_multifiles import MultifilesDataset
+
+        kwargs = dict(
+            location=self.train_path,
+            dt=1,
+            in_channels=list(range(NUM_CHANNELS)),
+            out_channels=list(range(NUM_CHANNELS)),
+            n_history=0,
+            n_future=0,
+            channel_names=list(CHANNEL_NAMES),
+            enable_logging=False,
+        )
+        kwargs.update(overrides)
+        return MultifilesDataset(**kwargs)
+
+    def test_reads_the_same_values_as_the_store(self):
+        dataset = self._make()
+
+        inp, _ = dataset[2]
+        expected = get_wb2_zarr_sample(self.train_path, 2)
+
+        self.assertTrue(compare_arrays("wb2 through multifiles", inp[0].numpy(), expected, rtol=1e-5, atol=1e-6))
+
+    def test_without_channel_names_it_says_so(self):
+        # the layout cannot be read by index, and the message should name what
+        # is missing rather than what was not found
+        with self.assertRaises(ValueError) as ctx:
+            self._make(channel_names=None)
+        self.assertIn("channel_names", str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()
