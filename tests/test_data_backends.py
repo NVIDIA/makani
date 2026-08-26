@@ -670,6 +670,169 @@ class TestUnconsolidatedZarr(unittest.TestCase):
         np.testing.assert_allclose(backend.read(0, slice(0, 3), channels), reference.read(0, slice(0, 3), channels))
 
 
+def _write_h5(path, data, timestamps, latitude=None, longitude=None):
+    """A minimal makani-layout file, annotated as much as asked for."""
+    with h5.File(path, "w") as handle:
+        dset = handle.create_dataset(H5_PATH, data=data)
+        if timestamps is not None:
+            scale = handle.create_dataset("timestamp", data=np.asarray(timestamps, dtype=np.float64))
+            scale.make_scale("timestamp")
+            dset.dims[0].attach_scale(scale)
+        if latitude is not None:
+            handle.create_dataset("lat", data=np.asarray(latitude, dtype=np.float32))
+            handle["lat"].make_scale("lat")
+            dset.dims[2].attach_scale(handle["lat"])
+            handle.create_dataset("lon", data=np.asarray(longitude, dtype=np.float32))
+            handle["lon"].make_scale("lon")
+            dset.dims[3].attach_scale(handle["lon"])
+    return path
+
+
+class TestTimeOrderedDiscovery(unittest.TestCase):
+    """Files are ordered by the data, not by the name.
+
+    The makani layouts name a file after its year, so sorting by name orders
+    them by time as well. That is a property of those layouts, not of datasets
+    in general -- an inference dataset can be a directory of arbitrarily named
+    files -- so the order comes from the first sample of each file. Getting it
+    wrong silently misdates every sample after the first file.
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def _write_part(self, name, start_day, n_samples=4):
+        base = dt.datetime(2017, 1, 1, tzinfo=dt.timezone.utc) + dt.timedelta(days=start_day)
+        timestamps = [(base + dt.timedelta(days=idx)).timestamp() for idx in range(n_samples)]
+        data = np.full((n_samples, NUM_CHANNELS, 4, 8), float(start_day), dtype=np.float32)
+        return _write_h5(os.path.join(self.tmpdir.name, name), data, timestamps)
+
+    def test_files_are_ordered_by_time_not_by_name(self):
+        # names deliberately sort the other way round from the timestamps
+        self._write_part("charlie.h5", start_day=0)
+        self._write_part("bravo.h5", start_day=4)
+        self._write_part("alpha.h5", start_day=8)
+
+        metadata = get_backend(self.tmpdir.name, file_pattern="*").discover()
+
+        self.assertEqual([os.path.basename(path) for path in metadata.files], ["charlie.h5", "bravo.h5", "alpha.h5"])
+        self.assertTrue(
+            all(metadata.timestamps[i] < metadata.timestamps[i + 1] for i in range(len(metadata.timestamps) - 1))
+        )
+
+    def test_samples_per_file_follows_the_same_order(self):
+        # the sample index walks files in this order, so the counts have to be
+        # permuted alongside them or every index past the first file is wrong
+        self._write_part("charlie.h5", start_day=0, n_samples=2)
+        self._write_part("alpha.h5", start_day=8, n_samples=5)
+
+        metadata = get_backend(self.tmpdir.name, file_pattern="*").discover()
+
+        self.assertEqual(metadata.samples_per_file, [2, 5])
+
+    def test_overlapping_files_are_refused(self):
+        # one file's range inside another's makes a global sample index
+        # ambiguous, so it is refused rather than silently resolved
+        self._write_part("first.h5", start_day=0, n_samples=10)
+        self._write_part("inside.h5", start_day=2, n_samples=2)
+
+        with self.assertRaises(RuntimeError) as ctx:
+            get_backend(self.tmpdir.name, file_pattern="*").discover()
+        self.assertIn("overlapping", str(ctx.exception))
+
+    def test_a_file_that_is_not_a_year_needs_timestamps(self):
+        # synthesis derives the times from the year in the name; without one
+        # there is nothing to derive them from
+        data = np.zeros((4, NUM_CHANNELS, 4, 8), dtype=np.float32)
+        _write_h5(os.path.join(self.tmpdir.name, "part_one.h5"), data, timestamps=None)
+
+        with self.assertRaises(ValueError) as ctx:
+            get_backend(self.tmpdir.name, file_pattern="*").discover()
+        self.assertIn("not a year", str(ctx.exception))
+
+    def test_the_year_layout_is_unaffected(self):
+        # name order and time order agree here, which is why the training path
+        # sees no change from ordering by time
+        for year in (2018, 2017):
+            base = dt.datetime(year, 1, 1, tzinfo=dt.timezone.utc)
+            timestamps = [(base + dt.timedelta(days=idx)).timestamp() for idx in range(3)]
+            data = np.zeros((3, NUM_CHANNELS, 4, 8), dtype=np.float32)
+            _write_h5(os.path.join(self.tmpdir.name, f"{year}.h5"), data, timestamps)
+
+        metadata = get_backend(self.tmpdir.name).discover()
+
+        self.assertEqual([os.path.basename(path) for path in metadata.files], ["2017.h5", "2018.h5"])
+        self.assertEqual(metadata.labels, [2017, 2018])
+
+
+class TestFileCoordinates(unittest.TestCase):
+    """Where the grid comes from.
+
+    A dataset that is not equiangular still has to describe itself correctly:
+    the coordinates go to the resampler and to the solar zenith angle, and both
+    give quietly wrong answers on a grid they were not told about. So the file
+    is asked first, and the equiangular assumption is only the fallback for a
+    file that carries no coordinates at all.
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.shape = (8, 16)
+        # not linspace(90, -90): a grid the fallback could not have guessed
+        self.latitude = np.linspace(-89.0, 89.0, self.shape[0])
+        self.longitude = np.linspace(0.0, 350.0, self.shape[1])
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def _write(self, name="2017.h5", with_coordinates=True):
+        base = dt.datetime(2017, 1, 1, tzinfo=dt.timezone.utc)
+        timestamps = [(base + dt.timedelta(days=idx)).timestamp() for idx in range(3)]
+        data = np.zeros((3, NUM_CHANNELS, *self.shape), dtype=np.float32)
+        return _write_h5(
+            os.path.join(self.tmpdir.name, name),
+            data,
+            timestamps,
+            latitude=self.latitude if with_coordinates else None,
+            longitude=self.longitude if with_coordinates else None,
+        )
+
+    def test_coordinates_come_from_the_file(self):
+        self._write()
+        metadata = get_backend(self.tmpdir.name).discover()
+
+        np.testing.assert_allclose(metadata.grid.lat, self.latitude, rtol=1e-6)
+        np.testing.assert_allclose(metadata.grid.lon, self.longitude, rtol=1e-6)
+
+    def test_a_file_without_coordinates_falls_back(self):
+        self._write(with_coordinates=False)
+        metadata = get_backend(self.tmpdir.name).discover()
+
+        np.testing.assert_allclose(metadata.grid.lat, np.linspace(90, -90, self.shape[0], endpoint=True))
+        np.testing.assert_allclose(metadata.grid.lon, np.linspace(0, 360, self.shape[1], endpoint=False))
+
+    def test_an_explicit_grid_wins_over_the_file(self):
+        # the caller knows something the file does not, e.g. a dataset written
+        # with the wrong coordinates
+        self._write()
+        override = (np.linspace(1, 8, self.shape[0]), np.linspace(1, 16, self.shape[1]))
+        metadata = get_backend(self.tmpdir.name, lat_lon=override).discover()
+
+        np.testing.assert_allclose(metadata.grid.lat, override[0])
+
+    def test_the_chunk_carries_the_file_coordinates(self):
+        # the chunk is what a consumer actually reads coordinates from, so the
+        # decomposition has to slice the file's grid, not a fabricated one
+        self._write()
+        backend = get_backend(self.tmpdir.name, io_grid=[2, 1], io_rank=[1, 0])
+        backend.discover()
+
+        np.testing.assert_allclose(backend.chunk.lat, self.latitude[self.shape[0] // 2 :], rtol=1e-6)
+
+
 class TestWb2Backend(unittest.TestCase):
 
     def test_channel_names_are_required(self):

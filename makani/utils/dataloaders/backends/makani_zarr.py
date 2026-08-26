@@ -35,8 +35,8 @@ import zarr
 # decoded data still lands directly in the preallocated buffer (zero-copy read).
 from zarr.core.buffer.cpu import NDBuffer as _ZarrNDBuffer
 
-from ..data_helpers import get_date_from_timestamp, get_lat_lon_grid, get_timestamp
-from .base import BackendMetadata, DatasetBackend, GridSpec
+from ..data_helpers import get_lat_lon_grid, get_timestamp
+from .base import BackendMetadata, DatasetBackend, GridSpec, order_files_by_time, timestamp_converter
 from .makani_hdf5 import StructuredChunkMixin, contiguous_slices
 
 
@@ -77,15 +77,32 @@ class MakaniZarrBackend(StructuredChunkMixin, DatasetBackend):
     def _find_files(self) -> List[str]:
         paths = []
         for location in self.location:
-            paths += glob.glob(os.path.join(location, "????.zarr"))
+            paths += glob.glob(os.path.join(location, f"{self.file_pattern}.zarr"))
         return sorted(paths)
+
+    @staticmethod
+    def _label_from_name(path) -> Optional[int]:
+        """The year in a store name, where the name is one. None otherwise."""
+        stem = os.path.splitext(os.path.basename(path))[0]
+        return int(stem) if stem.isdigit() else None
+
+    def _read_coordinates(self, group):
+        """Grid coordinates carried by the store, or None if it carries none."""
+        for latitude_name, longitude_name in (
+            (self.latitude_name, self.longitude_name),
+            # the xarray convention, which is what a store written by xarray uses
+            ("latitude", "longitude"),
+        ):
+            if latitude_name in group and longitude_name in group:
+                return np.asarray(group[latitude_name]), np.asarray(group[longitude_name])
+        return None
 
     def _probe(self, group):
         """Return the array whose shape and time axis describe this store."""
         return group[self.dataset_name]
 
     def _read_timestamps(self, group, dset, label, timezone_fn) -> np.ndarray:
-        """Read the time coordinate, or synthesize it from the file's label."""
+        """Read the time coordinate, or synthesize it from the store's label."""
         # the makani name first, then the xarray convention
         candidates = [self.timestamp_name]
         if "time" != self.timestamp_name:
@@ -98,6 +115,12 @@ class MakaniZarrBackend(StructuredChunkMixin, DatasetBackend):
                 if np.issubdtype(raw.dtype, np.datetime64):
                     raw = raw.astype("datetime64[s]").astype(np.float64)
                 return timezone_fn(raw)
+
+        if label is None:
+            raise ValueError(
+                f"The store carries no '{self.timestamp_name}' coordinate, and its name is not a year to derive "
+                "the sample times from."
+            )
 
         synthesized = np.asarray(
             # one timestamp per sample, dhours apart -- the step belongs in the
@@ -116,13 +139,14 @@ class MakaniZarrBackend(StructuredChunkMixin, DatasetBackend):
             locations = ", ".join(self.location)
             raise IOError(f"Error, the specified file path(s) {locations} do not contain zarr stores.")
 
-        labels = [int(os.path.splitext(os.path.basename(path))[0]) for path in files]
-        timezone_fn = np.vectorize(get_date_from_timestamp)
+        labels = [self._label_from_name(path) for path in files]
+        timezone_fn = timestamp_converter(self.relative_timestamp)
 
         samples_per_file = []
         timestamps = []
         img_shape = None
         total_channels = None
+        coordinates = None
 
         for file_idx, path in enumerate(files):
             group = zarr_open(path)
@@ -132,16 +156,22 @@ class MakaniZarrBackend(StructuredChunkMixin, DatasetBackend):
             probe = self._probe(group)
             if img_shape is None:
                 img_shape, total_channels = self._describe(group, probe)
+                coordinates = self._read_coordinates(group)
             samples_per_file.append(probe.shape[0])
             timestamps.append(self._read_timestamps(group, probe, labels[file_idx], timezone_fn))
+
+        files, labels, samples_per_file, timestamps = order_files_by_time(files, labels, samples_per_file, timestamps)
 
         self.files = [None] * len(files)
         self.dsets = [None] * len(files)
 
-        if self.lat_lon is None:
-            latitude, longitude = get_lat_lon_grid(img_shape)
-        else:
+        # what the caller asked for, else what the store says, else the assumption
+        if self.lat_lon is not None:
             latitude, longitude = np.asarray(self.lat_lon[0]), np.asarray(self.lat_lon[1])
+        elif coordinates is not None:
+            latitude, longitude = coordinates
+        else:
+            latitude, longitude = get_lat_lon_grid(img_shape)
 
         grid = GridSpec("equiangular", tuple(img_shape), np.asarray(latitude), np.asarray(longitude))
         self.chunk = self._resolve_chunk(grid)
@@ -149,7 +179,7 @@ class MakaniZarrBackend(StructuredChunkMixin, DatasetBackend):
             files=files,
             labels=labels,
             samples_per_file=samples_per_file,
-            timestamps=np.concatenate(timestamps, axis=0),
+            timestamps=timestamps,
             grid=grid,
             total_channels=total_channels,
         )

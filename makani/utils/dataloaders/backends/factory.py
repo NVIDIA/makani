@@ -21,6 +21,10 @@ per-year HDF5 layout, one holding ``????.zarr`` is zarr -- and a zarr store that
 has no ``fields`` array is a WeatherBench2 store, whose variables are named
 individually.
 
+``file_pattern`` is the name to glob for, without the extension. It defaults to
+the makani convention of a file per year; a dataset of arbitrarily named files
+passes ``"*"``.
+
 A run that knows what it has can name it outright and skip the guessing.
 """
 
@@ -42,7 +46,7 @@ BACKENDS = {
 }
 
 
-def detect_backend(location, dataset_name: str = "fields", enable_s3: bool = False) -> str:
+def detect_backend(location, dataset_name: str = "fields", enable_s3: bool = False, file_pattern: str = "????") -> str:
     """Name the backend that fits what is at ``location``."""
     locations = location if isinstance(location, list) else [location]
 
@@ -57,11 +61,11 @@ def detect_backend(location, dataset_name: str = "fields", enable_s3: bool = Fal
         return "makani_hdf5"
 
     for path in locations:
-        if glob.glob(os.path.join(path, "????.h5")):
+        if glob.glob(os.path.join(path, f"{file_pattern}.h5")):
             return "makani_hdf5"
 
     for path in locations:
-        stores = sorted(glob.glob(os.path.join(path, "????.zarr")))
+        stores = sorted(glob.glob(os.path.join(path, f"{file_pattern}.zarr")))
         if stores:
             # the layouts share a container, so the store itself has to be asked
             return "makani_zarr" if dataset_name in zarr_open(stores[0]) else "arco_wb2"
@@ -87,6 +91,7 @@ def get_backend(location, backend: Optional[str] = None, **kwargs) -> DatasetBac
             location,
             dataset_name=kwargs.get("dataset_name", "fields"),
             enable_s3=kwargs.get("enable_s3", False),
+            file_pattern=kwargs.get("file_pattern", "????"),
         )
 
     if backend not in BACKENDS:
