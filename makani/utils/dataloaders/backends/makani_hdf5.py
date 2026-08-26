@@ -29,15 +29,15 @@ import logging
 import os
 from functools import partial
 from itertools import groupby
-from typing import List, Sequence
+from typing import List, Optional, Sequence
 
 import h5py
 import numpy as np
 from torch_harmonics.distributed import compute_split_shapes
 
 from ..aws_connector import get_default_aws_connector
-from ..data_helpers import get_date_from_timestamp, get_lat_lon_grid, get_timestamp
-from .base import BackendMetadata, DatasetBackend, GridSpec
+from ..data_helpers import get_lat_lon_grid, get_timestamp
+from .base import BackendMetadata, DatasetBackend, GridSpec, order_files_by_time, timestamp_converter
 
 
 def contiguous_slices(indices: Sequence[int]):
@@ -167,7 +167,7 @@ class MakaniHDF5Backend(StructuredChunkMixin, DatasetBackend):
         if not self.enable_s3:
             paths = []
             for location in self.location:
-                paths += glob.glob(os.path.join(location, "????.h5"))
+                paths += glob.glob(os.path.join(location, f"{self.file_pattern}.h5"))
             return sorted(paths)
 
         paths = [
@@ -176,6 +176,21 @@ class MakaniHDF5Backend(StructuredChunkMixin, DatasetBackend):
             if path.endswith(".h5")
         ]
         return sorted(paths)
+
+    @staticmethod
+    def _label_from_name(path) -> Optional[int]:
+        """The year in a filename, where the name is one. None otherwise."""
+        stem = os.path.splitext(os.path.basename(path))[0]
+        return int(stem) if stem.isdigit() else None
+
+    def _read_coordinates(self, dset):
+        """Grid coordinates carried by the file, or None if it carries none."""
+        try:
+            latitude = dset.dims[2][self.latitude_name][...]
+            longitude = dset.dims[3][self.longitude_name][...]
+        except (KeyError, IndexError, RuntimeError):
+            return None
+        return np.asarray(latitude), np.asarray(longitude)
 
     def _open_for_stats(self):
         if not self.enable_s3:
@@ -188,15 +203,16 @@ class MakaniHDF5Backend(StructuredChunkMixin, DatasetBackend):
             locations = ", ".join(self.location)
             raise IOError(f"Error, the specified file path(s) {locations} do not contain h5 files.")
 
-        labels = [int(os.path.splitext(os.path.basename(path))[0]) for path in files]
+        labels = [self._label_from_name(path) for path in files]
 
-        timezone_fn = np.vectorize(get_date_from_timestamp)
+        timezone_fn = timestamp_converter(self.relative_timestamp)
         fopen = self._open_for_stats()
 
         samples_per_file = []
         timestamps = []
         img_shape = None
         total_channels = None
+        coordinates = None
 
         for file_idx, path in enumerate(files):
             with fopen(path) as handle:
@@ -206,10 +222,16 @@ class MakaniHDF5Backend(StructuredChunkMixin, DatasetBackend):
                 if img_shape is None:
                     img_shape = dset.shape[2:4]
                     total_channels = dset.shape[1]
+                    coordinates = self._read_coordinates(dset)
                 samples_per_file.append(dset.shape[0])
 
                 if self.timestamp_name in dset.dims[0]:
                     timestamps.append(timezone_fn(dset.dims[0][self.timestamp_name][...]))
+                elif labels[file_idx] is None:
+                    raise ValueError(
+                        f"{path} carries no '{self.timestamp_name}' dimension scale, and its name is not a year "
+                        "to derive the sample times from. Annotate it; see data_process/annotate_dataset.py."
+                    )
                 else:
                     # unannotated file: derive the times from the year in its name.
                     # one timestamp per sample, dhours apart -- the step belongs
@@ -222,13 +244,18 @@ class MakaniHDF5Backend(StructuredChunkMixin, DatasetBackend):
                     )
                     timestamps.append(timezone_fn(synthesized))
 
+        files, labels, samples_per_file, timestamps = order_files_by_time(files, labels, samples_per_file, timestamps)
+
         self.files = [None] * len(files)
         self.dsets = [None] * len(files)
 
-        if self.lat_lon is None:
-            latitude, longitude = get_lat_lon_grid(img_shape)
-        else:
+        # what the caller asked for, else what the file says, else the assumption
+        if self.lat_lon is not None:
             latitude, longitude = np.asarray(self.lat_lon[0]), np.asarray(self.lat_lon[1])
+        elif coordinates is not None:
+            latitude, longitude = coordinates
+        else:
+            latitude, longitude = get_lat_lon_grid(img_shape)
 
         grid = GridSpec("equiangular", tuple(img_shape), np.asarray(latitude), np.asarray(longitude))
         self.chunk = self._resolve_chunk(grid)
@@ -236,7 +263,7 @@ class MakaniHDF5Backend(StructuredChunkMixin, DatasetBackend):
             files=files,
             labels=labels,
             samples_per_file=samples_per_file,
-            timestamps=np.concatenate(timestamps, axis=0),
+            timestamps=timestamps,
             grid=grid,
             total_channels=total_channels,
         )

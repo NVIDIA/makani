@@ -110,6 +110,8 @@ def get_dataloader(params, files_pattern, device, mode="train", dali_device=None
             file_suffix=params.get("dataset_file_suffix", "h5"),
             dataset_name=params.get("h5_path", "fields"),
             timestamp_name=params.get("timestamp_name", "timestamp"),
+            # required by layouts that address variables by name, such as WB2
+            channel_names=params.get("channel_names", None),
             latitude_name=params.get("latitude_name", "lat"),
             longitude_name=params.get("longitude_name", "lon"),
             enable_s3=params.get("enable_s3", False),

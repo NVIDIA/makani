@@ -33,8 +33,8 @@ from typing import List
 import h5py
 import numpy as np
 
-from ..data_helpers import get_date_from_timestamp, get_lat_lon_grid
-from .base import BackendMetadata, GridSpec
+from ..data_helpers import get_lat_lon_grid
+from .base import BackendMetadata, GridSpec, timestamp_converter
 from .makani_hdf5 import MakaniHDF5Backend
 
 
@@ -63,7 +63,7 @@ class MakaniConcatBackend(MakaniHDF5Backend):
 
     def discover(self, enable_logging: bool = False) -> BackendMetadata:
         files = self._find_files()
-        timezone_fn = np.vectorize(get_date_from_timestamp)
+        timezone_fn = timestamp_converter(self.relative_timestamp)
 
         with h5py.File(files[0], "r") as handle:
             dset = handle[self.dataset_name]
@@ -78,6 +78,7 @@ class MakaniConcatBackend(MakaniHDF5Backend):
                 )
 
             timestamps = timezone_fn(dset.dims[0][self.timestamp_name][...])
+            coordinates = self._read_coordinates(dset)
             img_shape = dset.shape[2:4]
             total_channels = dset.shape[1]
             n_samples = dset.shape[0]
@@ -85,10 +86,13 @@ class MakaniConcatBackend(MakaniHDF5Backend):
         self.files = [None]
         self.dsets = [None]
 
-        if self.lat_lon is None:
-            latitude, longitude = get_lat_lon_grid(img_shape)
-        else:
+        # what the caller asked for, else what the file says, else the assumption
+        if self.lat_lon is not None:
             latitude, longitude = np.asarray(self.lat_lon[0]), np.asarray(self.lat_lon[1])
+        elif coordinates is not None:
+            latitude, longitude = coordinates
+        else:
+            latitude, longitude = get_lat_lon_grid(img_shape)
 
         grid = GridSpec("equiangular", tuple(img_shape), np.asarray(latitude), np.asarray(longitude))
         self.chunk = self._resolve_chunk(grid)
@@ -96,7 +100,7 @@ class MakaniConcatBackend(MakaniHDF5Backend):
             files=files,
             # the label is only used for reporting and for deriving timestamps,
             # and this layout needs neither; the first year is the useful answer
-            labels=[timestamps[0].year],
+            labels=[getattr(timestamps[0], "year", None)],
             samples_per_file=[n_samples],
             timestamps=timestamps,
             grid=grid,

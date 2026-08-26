@@ -65,9 +65,59 @@ handles, through :attr:`_handle_attributes`.
 """
 
 import abc
+import os
 from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 import numpy as np
+
+from ..data_helpers import get_date_from_timestamp, get_timedelta_from_timestamp
+
+
+def timestamp_converter(relative_timestamp: bool = False):
+    """The function turning stored times into python objects.
+
+    Absolute times become timezone aware datetimes. A dataset whose times are
+    offsets rather than dates -- a climatology indexed by time of year, say --
+    asks for ``relative_timestamp`` and gets timedeltas instead.
+    """
+    return np.vectorize(get_timedelta_from_timestamp if relative_timestamp else get_date_from_timestamp)
+
+
+def order_files_by_time(files, labels, samples_per_file, timestamps):
+    """Put files in the order the sample index runs through them.
+
+    Filenames are not a reliable order: they are the year for the makani
+    layouts, but a dataset can just as well be a directory of arbitrarily named
+    files. What always orders them is the data itself, so the files are sorted
+    by the time of their first sample.
+
+    Sorting by first sample only says where each file starts. Sorting by last
+    sample as well and requiring the same permutation is what rules out files
+    that overlap -- if one file's range straddles another's, the two orders
+    disagree. Overlapping files would make a global sample index ambiguous, so
+    this is refused rather than resolved.
+
+    Returns the four inputs reordered, with the timestamps concatenated.
+    """
+    starts = [times[0] for times in timestamps]
+    ends = [times[-1] for times in timestamps]
+
+    by_start = np.argsort(starts, kind="stable")
+    by_end = np.argsort(ends, kind="stable")
+    if not np.array_equal(by_start, by_end):
+        overlapping = ", ".join(os.path.basename(files[idx]) for idx in by_start[:4])
+        raise RuntimeError(
+            "The files have overlapping time ranges, which makes a sample index ambiguous. "
+            f"Please provide files with disjoint ranges (files in start order: {overlapping}...)."
+        )
+
+    order = by_start.tolist()
+    return (
+        [files[idx] for idx in order],
+        [labels[idx] for idx in order],
+        [samples_per_file[idx] for idx in order],
+        np.concatenate([timestamps[idx] for idx in order], axis=0),
+    )
 
 
 class GridSpec(NamedTuple):
@@ -143,6 +193,18 @@ class DatasetBackend(abc.ABC):
         Name of the array holding the fields, where the layout has one.
     timestamp_name : str
         Name of the coordinate holding sample times, where the layout has one.
+    latitude_name, longitude_name : str
+        Names of the coordinates holding the grid. Read from the file when it
+        carries them, so that a dataset on a grid other than the assumed
+        equiangular one is described by its own coordinates rather than by
+        fabricated ones.
+    file_pattern : str
+        Glob for the file names, without the extension. The default ``"????"``
+        is the makani convention of a file per year; a dataset of arbitrarily
+        named files passes ``"*"`` and is ordered by time instead of by name.
+    relative_timestamp : bool
+        Whether the stored times are offsets rather than dates, as in a
+        climatology indexed by time of year.
     dhours : int
         Hours between consecutive samples, used to synthesize timestamps for
         datasets that were never annotated with them.
@@ -196,6 +258,10 @@ class DatasetBackend(abc.ABC):
         location,
         dataset_name: str = "fields",
         timestamp_name: str = "timestamp",
+        latitude_name: str = "lat",
+        longitude_name: str = "lon",
+        file_pattern: str = "????",
+        relative_timestamp: bool = False,
         dhours: int = 6,
         channel_names: Optional[Sequence[str]] = None,
         crop_anchor: Optional[Sequence[int]] = None,
@@ -209,6 +275,10 @@ class DatasetBackend(abc.ABC):
         self.location = location if isinstance(location, list) else [location]
         self.dataset_name = dataset_name
         self.timestamp_name = timestamp_name
+        self.latitude_name = latitude_name
+        self.longitude_name = longitude_name
+        self.file_pattern = file_pattern
+        self.relative_timestamp = relative_timestamp
         self.dhours = dhours
         self.channel_names = channel_names
 
