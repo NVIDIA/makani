@@ -68,13 +68,14 @@ class MultifilesDataset(Dataset):
         return_timestamp: Optional[bool] = False,
         relative_timestamp: Optional[bool] = False,
         return_target: Optional[bool] = True,
-        file_suffix: Optional[str] = "h5",
         dataset_name: Optional[str] = "fields",
         timestamp_name: Optional[str] = "timestamp",
         channel_names: Optional[List[str]] = None,
         latitude_name: Optional[str] = "lat",
         longitude_name: Optional[str] = "lon",
         enable_s3: Optional[bool] = False,
+        enable_odirect: Optional[bool] = False,
+        odirect_alignment: Optional[int] = 0,
         crop_size: Optional[Tuple[int, int]] = (None, None),
         crop_anchor: Optional[Tuple[int, int]] = (0, 0),
         subsampling_factor: Optional[int] = 1,
@@ -96,13 +97,14 @@ class MultifilesDataset(Dataset):
         self.return_timestamp = return_timestamp
         self.relative_timestamp = relative_timestamp
         self.return_target = return_target
-        self.file_suffix = file_suffix
         self.dataset_name = dataset_name
         self.timestamp_name = timestamp_name
         self.channel_names = channel_names
         self.latitude_name = latitude_name
         self.longitude_name = longitude_name
         self.enable_s3 = enable_s3
+        self.enable_odirect = enable_odirect
+        self.odirect_alignment = odirect_alignment
 
         # channels are read in ascending order because that is the only order
         # storage can serve efficiently, then permuted back into the requested one
@@ -182,6 +184,8 @@ class MultifilesDataset(Dataset):
             io_rank=self.io_rank,
             subsampling_factor=self.subsampling_factor,
             enable_s3=self.enable_s3,
+            enable_odirect=self.enable_odirect,
+            odirect_alignment=self.odirect_alignment,
         )
         metadata = self.backend.discover(enable_logging=enable_logging)
 

@@ -107,7 +107,6 @@ def get_dataloader(params, files_pattern, device, mode="train", dali_device=None
             subsampling_factor=params.get("subsampling_factor", 1),
             return_timestamp=(True if (mode == "inference") else False),
             return_target=(False if (mode == "inference") else True),
-            file_suffix=params.get("dataset_file_suffix", "h5"),
             dataset_name=params.get("h5_path", "fields"),
             timestamp_name=params.get("timestamp_name", "timestamp"),
             # required by layouts that address variables by name, such as WB2
@@ -115,6 +114,8 @@ def get_dataloader(params, files_pattern, device, mode="train", dali_device=None
             latitude_name=params.get("latitude_name", "lat"),
             longitude_name=params.get("longitude_name", "lon"),
             enable_s3=params.get("enable_s3", False),
+            enable_odirect=params.get("enable_odirect", False),
+            odirect_alignment=params.get("odirect_alignment", 0),
             io_grid=params.get("io_grid", [1, 1, 1]),
             io_rank=params.get("io_rank", [0, 0, 0]),
         )
