@@ -1307,7 +1307,6 @@ class TestMultifilesDataset(unittest.TestCase):
                 self.assertEqual(dataset.get_index_at_time(dataset.get_time_at_index(index)), index)
 
 
-@unittest.skipUnless(_have_dali, "the WB2 fixture is shared with the DALI suites")
 class TestMultifilesWb2(unittest.TestCase):
     """The WeatherBench2 layout, read through the torch dataset.
 
