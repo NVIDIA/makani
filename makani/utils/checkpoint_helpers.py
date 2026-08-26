@@ -105,15 +105,24 @@ def load_checkpoint(checkpoint_fname: str, map_location: str = "cpu", mmap: bool
         ) from err
 
 
-def get_latest_checkpoint_version(checkpoint_path):
+def get_latest_checkpoint_version(checkpoint_path, verbose: bool = True):
+    """Highest version among the checkpoints matching a path template, 0 if there are none.
+
+    A fresh run has nothing to match, so failing to detect a version is normal
+    rather than an error; ``verbose=False`` silences the notice for callers that
+    expect it.
+    """
+    pattern = checkpoint_path.format(mp_rank=0, checkpoint_version="*")
     try:
-        checkpoint_path = max(
-            glob.glob(checkpoint_path.format(mp_rank=0, checkpoint_version="*")), key=os.path.getmtime
-        )
-        pathname, _ = os.path.splitext(checkpoint_path)
+        # the newest match is the one whose version is current
+        newest = max(glob.glob(pattern), key=os.path.getmtime)
+        pathname, _ = os.path.splitext(newest)
         latest_version = int(re.match(r"^.*?_v(\d{1,})$", pathname).groups()[0])
     except:
-        print(f"Could not identify version for checkpoint {checkpoint_path}. Skipping detection.")
+        # the pattern rather than the template: what was searched for, not what
+        # the caller happened to phrase it as
+        if verbose:
+            print(f"Could not identify version for checkpoint {pattern}. Skipping detection.")
         latest_version = 0
 
     return latest_version

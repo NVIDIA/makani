@@ -23,7 +23,13 @@ import argparse as ap
 from glob import glob
 
 
-def annotate(metadata: dict, file_names_to_annotate: List[str], years: List[int], entry_key: Optional[str] = "fields"):
+def annotate(
+    metadata: dict,
+    file_names_to_annotate: List[str],
+    years: List[int],
+    entry_key: Optional[str] = "fields",
+    verbose: Optional[bool] = True,
+):
     """Function to annotate the dimensions of an existing makani compatible HDF5 dataset.
 
     Modifies the files in-place. If a file is already annotated, the annotation is skipped.
@@ -47,6 +53,8 @@ def annotate(metadata: dict, file_names_to_annotate: List[str], years: List[int]
         dictionary.
     entry_key: str
         This is the HDF5 dataset name of the data in the files. Defaults to "fields".
+    verbose: bool
+        Whether to print progress to stdout. Defaults to True; set to False when calling this as a library function.
     """
 
     # get dhours
@@ -60,7 +68,8 @@ def annotate(metadata: dict, file_names_to_annotate: List[str], years: List[int]
     channel_names = metadata["coords"]["channel"]
     chanlen = max([len(v) for v in channel_names])
 
-    print(f"Annotating files: {file_names_to_annotate}")
+    if verbose:
+        print(f"Annotating files: {file_names_to_annotate}")
 
     for filename, year in zip(file_names_to_annotate, years):
 
@@ -105,7 +114,8 @@ def annotate(metadata: dict, file_names_to_annotate: List[str], years: List[int]
                 print(f"Could not annotate {filename}. Reason: {err}")
                 continue
 
-    print("All done.")
+    if verbose:
+        print("All done.")
 
     return
 

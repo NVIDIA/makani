@@ -78,7 +78,7 @@ class TestAnnotateDataset(unittest.TestCase):
         years = [2017, 2018, 2019]  # Corresponding years for the files
 
         # Run annotation
-        annotate(metadata, all_files, years)
+        annotate(metadata, all_files, years, verbose=False)
 
         # reference files:
         train_files_ref = sorted(
@@ -192,7 +192,9 @@ class TestConcatenateDataset(unittest.TestCase):
 
         # Run concatenation
         output_file = os.path.join(input_dirs[0], "concatenated.h5v")
-        concatenate(input_dirs, output_file, metadata, [channel_names], train_files, years, dhoursrel=dhoursrel)
+        concatenate(
+            input_dirs, output_file, metadata, [channel_names], train_files, years, dhoursrel=dhoursrel, verbose=False
+        )
 
         # Compare concatenated file with original files
         with h5.File(output_file, "r") as f_conc:
@@ -342,6 +344,7 @@ class TestConcatenateDataset(unittest.TestCase):
                 file_names_to_concatenate=[f"{y}.h5" for y in years_local],
                 years=years_local,
                 dhoursrel=dhoursrel,
+                verbose=False,
             )
 
             # Build expected output: each year is sliced to floor(n/dhoursrel)
@@ -521,6 +524,7 @@ class TestConcatenateDatasetChannelsAndTime(unittest.TestCase):
             file_names_to_concatenate=file_names,
             years=self.years,
             dhoursrel=dhoursrel,
+            verbose=False,
         )
 
         # Build the expected concatenated array and timestamp vector for comparison.
@@ -652,7 +656,7 @@ class TestConcatenateDatasetChannelsAndTime(unittest.TestCase):
 
             # ----------------------------------------------------------------------
             # Loader-realistic access patterns. Mirrors `_get_data_h5` in
-            # makani/utils/dataloaders/dali_es_helper_concat_2d.py.
+            # makani/utils/dataloaders/backends/makani_concat.py.
             # ----------------------------------------------------------------------
 
             # Pattern 1: cropped spatial region with subsampling on both spatial dims.
@@ -817,6 +821,7 @@ class TestConcatenateDatasetChannelsAndTime(unittest.TestCase):
                 years=self.years,
                 dhoursrel=1,
                 entry_key=custom_key,
+                verbose=False,
             )
 
             expected_full = np.concatenate(
@@ -927,6 +932,7 @@ class TestConcatenateDatasetChannelsAndTime(unittest.TestCase):
                 file_names_to_concatenate=[f"{y}.h5" for y in self.years],
                 years=self.years,
                 dhoursrel=1,
+                verbose=False,
             )
 
             expected_full = np.concatenate(
@@ -1057,6 +1063,7 @@ class TestConcatenateDatasetChannelsAndTime(unittest.TestCase):
                 file_names_to_concatenate=[f"{y}.h5" for y in self.years],
                 years=self.years,
                 dhoursrel=dhoursrel,
+                verbose=False,
             )
 
             n_red = n // dhoursrel
