@@ -233,7 +233,7 @@ class DummyLoader(object):
         self.img_shape_y_resampled = self.img_shape_resampled[1]
 
         # auto-create lat/lon if the caller didn't supply them
-        # (matches the pattern used by GeneralES and GeneralConcatES)
+        # (matches the pattern used by SampleSource)
         if self.lat_lon is None:
             latitude, longitude = get_lat_lon_grid(self.img_shape)
             self.lat_lon = (latitude.tolist(), longitude.tolist())

@@ -29,11 +29,12 @@ from torch.utils.data import Dataset
 import h5py
 import zarr
 
+from makani.utils.dataloaders.aws_connector import get_default_aws_connector
+
 # for data normalization
 from makani.utils.dataloaders.data_helpers import (
     get_date_from_timestamp,
     get_timedelta_from_timestamp,
-    get_default_aws_connector,
 )
 
 # for grid conversion

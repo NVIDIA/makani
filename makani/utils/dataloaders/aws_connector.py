@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 from typing import Union, List
 
 
@@ -58,3 +59,18 @@ class AWSConnector(object):
                 obj.append(bname + "/" + key)
 
         return obj
+
+
+def get_default_aws_connector(aws_session_token=None):
+    """Build a connector from the credentials in the environment.
+
+    Reads the standard AWS variables, so a run inherits whatever the session it
+    was launched in was authenticated as.
+    """
+    return AWSConnector(
+        aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+        aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+        aws_region_name=os.getenv("AWS_DEFAULT_REGION"),
+        aws_endpoint_url=os.getenv("AWS_ENDPOINT_URL"),
+        aws_session_token=aws_session_token,
+    )

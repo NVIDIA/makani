@@ -13,6 +13,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""The DALI training dataloader.
+
+Wraps :class:`~makani.utils.dataloaders.sample_source.SampleSource` in a DALI
+pipeline: the source assembles one window at a time in a python worker, and DALI
+batches it, moves it to the GPU and applies normalization there. Which files the
+samples come from is the backends' concern, and how a window is built is the
+source's; this module is the pipeline around them.
+
+Two things are worth knowing about it. The pipeline can be checkpointed mid-epoch
+and rebuilt from that state, which is what lets a training run resume without
+replaying an epoch -- see :meth:`DaliDataloader.state_dict`. And restoring is
+always a rebuild, since DALI only accepts serialized state at construction.
+"""
+
 import os
 import logging
 from typing import Any, Dict, Optional
@@ -31,14 +45,26 @@ from makani.utils import comm
 
 # es helper
 from makani.utils.dataloaders.data_helpers import get_data_normalization
+from makani.utils.dataloaders.sample_source import SampleSource
 from makani.utils.grids import GridConverter
 
 
-# bump whenever the layout of the dict returned by ERA5DaliESDataloader.state_dict changes
+# bump whenever the layout of the dict returned by DaliDataloader.state_dict changes
 _DATALOADER_STATE_VERSION = 1
 
 
-class ERA5DaliESDataloader(object):
+class DaliDataloader(object):
+    """Feeds batches to training, reading through a dataset backend.
+
+    Iterating yields the tensors named when the pipeline was built: the input and
+    target windows, followed by the zenith angles and timestamps when those were
+    asked for. Normalization and any grid conversion happen on the GPU, so what
+    comes out is ready for the model.
+
+    Built from ``params``, which names the dataset and its layout, the channels,
+    the window geometry and the decomposition. Set
+    ``checkpoint_dataloader_state`` to make the pipeline resumable.
+    """
 
     def get_pipeline(self, checkpoint: Optional[bytes] = None):
         pipeline = Pipeline(
@@ -215,18 +241,15 @@ class ERA5DaliESDataloader(object):
         crop_size = [params.get("crop_size_x", None), params.get("crop_size_y", None)]
         crop_anchor = [params.get("crop_anchor_x", 0), params.get("crop_anchor_y", 0)]
 
-        if os.path.isfile(self.location):
-            from makani.utils.dataloaders.dali_es_helper_concat_2d import GeneralConcatES as GeneralES
-        elif os.path.isdir(self.location):
-            from makani.utils.dataloaders.dali_es_helper_2d import GeneralES
-        else:
+        if not (os.path.isfile(self.location) or os.path.isdir(self.location)):
             raise IOError(f"Path {self.location} does not exist.")
 
         # get list of excluded timestamps
         timestamp_boundary_list = params.get("analysis_epoch_start_dates", [])
 
-        # get the image sizes
-        self.extsource = GeneralES(
+        # the storage layout is detected by the backend; a run that knows what it
+        # has can name it instead through the "dataset_backend" parameter
+        self.extsource = SampleSource(
             self.location,
             max_samples=self.n_samples,
             samples_per_epoch=self.n_samples_per_epoch,
@@ -260,6 +283,7 @@ class ERA5DaliESDataloader(object):
             seed=self.global_seed,
             is_parallel=True,
             timestamp_boundary_list=timestamp_boundary_list,
+            backend=params.get("dataset_backend", None),
         )
 
         # grid types
@@ -387,7 +411,7 @@ class ERA5DaliESDataloader(object):
 
         The heavy lifting is done by DALI: ``pipeline_checkpoint`` is the serialized state of
         the pipeline and of the iterator wrapping it, which encodes how many batches have been
-        consumed and in which epoch. The external source callback (``GeneralES``) derives its
+        consumed and in which epoch. The external source callback (``SampleSource``) derives its
         shuffling permutation and sample index purely from the epoch/iteration counters DALI
         passes in, so restoring those counters restores the full sample order.
 

@@ -14,21 +14,26 @@
 # limitations under the License.
 
 """
-Unit tests for the DALI external-source helper classes.
+Unit tests for ``SampleSource``, the sample assembly above the storage backends.
 
-GeneralES       – directory-based loader (one HDF5 file per year)
-GeneralConcatES – single-file loader (all years concatenated)
+One suite, ``_BaseESTests``, is run against every layout a dataset can be stored
+in: per-year HDF5, a single concatenated HDF5 file, per-year zarr, and a
+WeatherBench2 store. What is under test is the assembly -- windows, cropping,
+subsampling, channel ordering, shuffling, epoch cycling, zenith angles -- and
+running it against all four is what keeps the backends honest, since every one
+of them has to produce the same answers.
 
-These classes implement the DALI external-source protocol but are plain Python
-objects that can be exercised without DALI.  We mock the DALI SampleInfo
-namedtuple and call __call__ directly.
+``SampleSource`` implements the DALI external-source protocol but has no DALI
+dependency: it is a plain callable taking a ``SampleInfo``. The tests mock that
+namedtuple and call ``__call__`` directly, so they need neither DALI nor a GPU.
+The backends themselves are unit tested separately, in ``test_data_backends.py``.
 
 Dataset fixture
 ---------------
-TestGeneralES reuses init_hdf5_dataset() from testutils, which creates two training
+TestMakaniHDF5 reuses init_hdf5_dataset() from testutils, which creates two training
 years (2017, 2018) of 365 samples each (dhours=24) under a temp directory.
 
-TestGeneralConcatES uses the same dimensions but builds a single concatenated
+TestMakaniConcat uses the same dimensions but builds a single concatenated
 HDF5 file.
 
 Boundary exclusion test
@@ -42,9 +47,12 @@ With dhours=24 and the default n_history=0/n_future=0/dt=1 config:
 import math
 import os
 import sys
+import contextlib
 import datetime as dt
+import io
 import tempfile
 import unittest
+from unittest import mock
 
 import h5py
 import numpy as np
@@ -110,7 +118,7 @@ def _distinctive_year_arrays(year):
 
 
 def _make_distinctive_dir(root):
-    """Per-year directory with distinctive-channel data (for GeneralES)."""
+    """Per-year directory with distinctive-channel data (for SampleSource)."""
     os.makedirs(root, exist_ok=True)
     for year in _YEARS:
         data, timestamps = _distinctive_year_arrays(year)
@@ -184,7 +192,7 @@ def _make_distinctive_zarr_wb2_dir(root):
 
 
 def _make_distinctive_concat(root):
-    """Single concatenated file with distinctive-channel data (for GeneralConcatES)."""
+    """Single concatenated file with distinctive-channel data (for SampleSource)."""
     os.makedirs(root, exist_ok=True)
     all_data, all_ts = [], []
     for year in _YEARS:
@@ -235,45 +243,25 @@ def _default_kwargs(location):
     )
 
 
-def _make_general_es(location, **overrides):
-    """Build a GeneralES and simulate __setstate__ (set file-handle methods)."""
-    from makani.utils.dataloaders.dali_es_helper_2d import GeneralES
+def _make_source(location, **overrides):
+    """Build a SampleSource for a location, whatever layout is stored there.
+
+    Nothing layout-specific is needed here any more: the backend is detected
+    from the location and opens its own handles on first read, so a single
+    factory serves every suite.
+    """
+    from makani.utils.dataloaders.sample_source import SampleSource
 
     kw = _default_kwargs(location)
     kw.update(overrides)
-    es = GeneralES(**kw)
-    # replicate what __setstate__ does: install the per-format file handles
-    if es.file_format == "h5":
-        es.get_year_handle = es._get_year_h5
-        es.get_data_handle = es._get_data_h5
-    elif getattr(es, "zarr_format", "makani") == "wb2":
-        es.get_year_handle = es._get_year_zarr_wb2
-        es.get_data_handle = es._get_data_zarr_wb2
-    else:
-        es.get_year_handle = es._get_year_zarr
-        es.get_data_handle = es._get_data_zarr
-    return es
-
-
-def _make_concat_es(file_path, **overrides):
-    """Build a GeneralConcatES and simulate __setstate__ (open file handles)."""
-    from makani.utils.dataloaders.dali_es_helper_concat_2d import GeneralConcatES
-
-    kw = _default_kwargs(file_path)
-    kw.update(overrides)
-    es = GeneralConcatES(**kw)
-    # replicate what __setstate__ does: open the file and install data handle
-    es.vfile = h5py.File(es.file_path, "r", driver=es.file_driver)
-    es.dset = es.vfile[es.dataset_name]
-    es.get_data_handle = es._get_data_h5
-    return es
+    return SampleSource(**kw)
 
 
 def _ts_to_posix(t):
     """Normalise a timestamp to a POSIX float.
 
-    GeneralES._compute_timestamps() returns numpy float64 (seconds since epoch).
-    GeneralConcatES._compute_timestamps_and_zenith_angle() returns datetime objects
+    SampleSource._compute_timestamps() returns numpy float64 (seconds since epoch).
+    SampleSource._compute_timestamps_and_zenith_angle() returns datetime objects
     (slices of self.timestamps).  This helper handles both.
     """
     try:
@@ -289,7 +277,7 @@ def _ts_to_posix(t):
 
 class _BaseESTests:
     """
-    Tests shared between TestGeneralES and TestGeneralConcatES.
+    Tests shared between TestMakaniHDF5 and TestMakaniConcat.
 
     Subclasses must implement:
         _make(**overrides)             → ES backed by standard random dataset
@@ -297,9 +285,9 @@ class _BaseESTests:
         _expected_n_valid(dt, n_history, n_future)
                                        → number of usable samples for the
                                          given window config.  Differs between
-                                         backends because GeneralES drops
+                                         backends because SampleSource drops
                                          windows that cross year boundaries
-                                         while GeneralConcatES does not.
+                                         while SampleSource does not.
     """
 
     def _expected_n_valid(self, dt, n_history, n_future):
@@ -849,8 +837,8 @@ class _BaseESTests:
 # ===========================================================================
 
 
-class TestGeneralES(_BaseESTests, unittest.TestCase):
-    """Tests for GeneralES (directory of per-year HDF5 files).
+class TestMakaniHDF5(_BaseESTests, unittest.TestCase):
+    """Tests for SampleSource (directory of per-year HDF5 files).
 
     The main dataset is created by init_hdf5_dataset() from testutils, which
     produces the same two-year training layout used by the other dataloader tests.
@@ -871,27 +859,27 @@ class TestGeneralES(_BaseESTests, unittest.TestCase):
         self._tmpdir.cleanup()
 
     def _make(self, **overrides):
-        return _make_general_es(self._train_path, **overrides)
+        return _make_source(self._train_path, **overrides)
 
     def _make_distinctive(self, **overrides):
-        return _make_general_es(self._dc_path, **overrides)
+        return _make_source(self._dc_path, **overrides)
 
     def _make_for_pickle(self, **overrides):
         """Main-process state: __init__ done, no file handles, no buffers."""
-        from makani.utils.dataloaders.dali_es_helper_2d import GeneralES
+        from makani.utils.dataloaders.sample_source import SampleSource
 
         kw = _default_kwargs(self._train_path)
         kw["is_parallel"] = True  # buffers not yet allocated; __setstate__ will do it
         kw.update(overrides)
-        return GeneralES(**kw)
+        return SampleSource(**kw)
 
     def test_missing_directory_raises(self):
         with self.assertRaises(IOError):
-            _make_general_es(os.path.join(self._tmpdir.name, "does_not_exist"))
+            _make_source(os.path.join(self._tmpdir.name, "does_not_exist"))
 
 
-class TestGeneralConcatES(_BaseESTests, unittest.TestCase):
-    """Tests for GeneralConcatES (single concatenated HDF5 file)."""
+class TestMakaniConcat(_BaseESTests, unittest.TestCase):
+    """Tests for SampleSource (single concatenated HDF5 file)."""
 
     def _expected_n_valid(self, dt, n_history, n_future):
         # single contiguous file: samples_start=dt*n_history, samples_end
@@ -912,37 +900,37 @@ class TestGeneralConcatES(_BaseESTests, unittest.TestCase):
         self._tmpdir.cleanup()
 
     def _make(self, **overrides):
-        return _make_concat_es(self._file, **overrides)
+        return _make_source(self._file, **overrides)
 
     def _make_distinctive(self, **overrides):
-        return _make_concat_es(self._file_dc, **overrides)
+        return _make_source(self._file_dc, **overrides)
 
     def _make_for_pickle(self, **overrides):
-        """Main-process state: __init__ done, vfile=None, no buffers."""
-        from makani.utils.dataloaders.dali_es_helper_concat_2d import GeneralConcatES
+        """Main-process state: __init__ done, no file handles, no buffers."""
+        from makani.utils.dataloaders.sample_source import SampleSource
 
         kw = _default_kwargs(self._file)
         kw["is_parallel"] = True  # buffers not yet allocated; __setstate__ will do it
         kw.update(overrides)
-        return GeneralConcatES(**kw)
+        return SampleSource(**kw)
 
     def test_missing_file_raises(self):
         with self.assertRaises(IOError):
-            _make_concat_es(os.path.join(self._tmpdir.name, "no_such.h5"))
+            _make_source(os.path.join(self._tmpdir.name, "no_such.h5"))
 
     def test_s3_raises_not_implemented(self):
-        from makani.utils.dataloaders.dali_es_helper_concat_2d import GeneralConcatES
+        from makani.utils.dataloaders.sample_source import SampleSource
 
         kw = _default_kwargs(self._file)
         kw["enable_s3"] = True
         with self.assertRaises(NotImplementedError):
-            GeneralConcatES(**kw)
+            SampleSource(**kw)
 
 
-class TestGeneralZarrES(_BaseESTests, unittest.TestCase):
-    """Tests for GeneralES backed by zarr files in makani flat format.
+class TestMakaniZarr(_BaseESTests, unittest.TestCase):
+    """Tests for SampleSource backed by zarr files in makani flat format.
 
-    Uses the same ``_BaseESTests`` suite as ``TestGeneralES``.  The zarr stores
+    Uses the same ``_BaseESTests`` suite as ``TestMakaniHDF5``.  The zarr stores
     mirror the HDF5 layout: a single ``fields`` array of shape
     ``(time, channels, lat, lon)`` per year file.
     """
@@ -960,22 +948,22 @@ class TestGeneralZarrES(_BaseESTests, unittest.TestCase):
         self._tmpdir.cleanup()
 
     def _make(self, **overrides):
-        return _make_general_es(self._train_path, **overrides)
+        return _make_source(self._train_path, **overrides)
 
     def _make_distinctive(self, **overrides):
-        return _make_general_es(self._dc_path, **overrides)
+        return _make_source(self._dc_path, **overrides)
 
     def _make_for_pickle(self, **overrides):
-        from makani.utils.dataloaders.dali_es_helper_2d import GeneralES
+        from makani.utils.dataloaders.sample_source import SampleSource
 
         kw = _default_kwargs(self._train_path)
         kw["is_parallel"] = True
         kw.update(overrides)
-        return GeneralES(**kw)
+        return SampleSource(**kw)
 
 
-class TestGeneralZarrWB2ES(_BaseESTests, unittest.TestCase):
-    """Tests for GeneralES backed by zarr files in WB2 per-variable format.
+class TestArcoWB2(_BaseESTests, unittest.TestCase):
+    """Tests for SampleSource backed by zarr files in WB2 per-variable format.
 
     Each variable is stored as a separate zarr array (surface: ``(time, lat, lon)``,
     atmospheric: ``(time, level, lat, lon)``).  The ES auto-detects the WB2 format
@@ -998,21 +986,92 @@ class TestGeneralZarrWB2ES(_BaseESTests, unittest.TestCase):
     def _make(self, **overrides):
         kw = dict(channel_names=list(CHANNEL_NAMES))
         kw.update(overrides)
-        return _make_general_es(self._train_path, **kw)
+        return _make_source(self._train_path, **kw)
 
     def _make_distinctive(self, **overrides):
         kw = dict(channel_names=list(CHANNEL_NAMES))
         kw.update(overrides)
-        return _make_general_es(self._dc_path, **kw)
+        return _make_source(self._dc_path, **kw)
 
     def _make_for_pickle(self, **overrides):
-        from makani.utils.dataloaders.dali_es_helper_2d import GeneralES
+        from makani.utils.dataloaders.sample_source import SampleSource
 
         kw = _default_kwargs(self._train_path)
         kw["is_parallel"] = True
         kw["channel_names"] = list(CHANNEL_NAMES)
         kw.update(overrides)
-        return GeneralES(**kw)
+        return SampleSource(**kw)
+
+
+class TestOpenRetries(unittest.TestCase):
+    """Opening a file is retried before the run is given up on.
+
+    A shared filesystem under a few thousand ranks fails transiently: a handle
+    that cannot be had now can usually be had a moment later, and killing a
+    multi-day run over one of those is expensive. Equally, retrying forever
+    turns a genuinely missing file into a hang, so the attempts are bounded and
+    the last failure is raised.
+
+    Neither half is reachable from a normal run, so these substitute a backend
+    open that fails on demand, and patch out the sleep so the bounded case does
+    not take the wall-clock time the real one would.
+    """
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self._train_path, *_ = init_hdf5_dataset(self._tmpdir.name)
+        self.source = _make_source(self._train_path)
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    @contextlib.contextmanager
+    def _failing_open(self, failures):
+        """Replace the backend open with one that fails its first N calls."""
+        attempts = []
+        real_open = self.source.backend.open
+
+        def flaky(file_idx):
+            attempts.append(file_idx)
+            if len(attempts) <= failures:
+                raise OSError("Resource temporarily unavailable")
+            return real_open(file_idx)
+
+        # the retry notice goes to stdout, which is noise in a passing test
+        with mock.patch.object(self.source.backend, "open", flaky):
+            with mock.patch("makani.utils.dataloaders.sample_source.time.sleep"):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    yield attempts
+
+    def test_a_transient_failure_is_survived(self):
+        with self._failing_open(failures=2) as attempts:
+            self.source._open_with_retries(0)
+
+        self.assertEqual(len(attempts), 3)
+
+    def test_the_last_attempt_still_counts(self):
+        # the boundary: failing every time but the final attempt has to succeed,
+        # otherwise the retry budget is off by one
+        with self._failing_open(failures=self.source.num_retries - 1) as attempts:
+            self.source._open_with_retries(0)
+
+        self.assertEqual(len(attempts), self.source.num_retries)
+
+    def test_a_persistent_failure_is_given_up_on(self):
+        with self._failing_open(failures=self.source.num_retries) as attempts:
+            with self.assertRaises(OSError) as ctx:
+                self.source._open_with_retries(0)
+
+        self.assertEqual(len(attempts), self.source.num_retries)
+        self.assertIn("after {} attempts".format(self.source.num_retries), str(ctx.exception))
+
+    def test_the_happy_path_does_not_sleep(self):
+        # every sample of every epoch goes through here, so a success must not
+        # pay for the retry machinery
+        with mock.patch("makani.utils.dataloaders.sample_source.time.sleep") as sleep:
+            self.source._open_with_retries(0)
+
+        sleep.assert_not_called()
 
 
 if __name__ == "__main__":

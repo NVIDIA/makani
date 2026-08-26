@@ -13,11 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 import datetime as dt
 import numpy as np
-
-from .aws_connector import AWSConnector
 
 
 # this is a small helper to get the latitude and longitude grid consistently across
@@ -182,16 +179,6 @@ def get_date_from_timestamp(timestamp):
 
 def get_timedelta_from_timestamp(timestamp):
     return dt.timedelta(seconds=timestamp)
-
-
-def get_default_aws_connector(aws_session_token):
-    return AWSConnector(
-        aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
-        aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
-        aws_region_name=os.getenv("AWS_DEFAULT_REGION"),
-        aws_endpoint_url=os.getenv("AWS_ENDPOINT_URL"),
-        aws_session_token=aws_session_token,
-    )
 
 
 def get_date_ranges(dates, lookback_hours: int, lookahead_hours: int):
