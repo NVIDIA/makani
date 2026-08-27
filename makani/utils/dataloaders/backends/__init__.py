@@ -15,10 +15,17 @@
 
 """Storage backends for the sample sources.
 
-Each backend knows how to find, open and read one dataset layout. They are
-consumed by :class:`makani.utils.dataloaders.sample_source.SampleSource`, which
-owns everything the layouts have in common: index arithmetic, shuffling, epoch
-cycling, window assembly and spatial sharding.
+Each backend knows how to find, open and read one dataset layout, and emits data
+on the grid that layout stores -- a lat/lon raster for the makani and
+WeatherBench2 formats, an icosahedral mesh for ICON. None of them resample.
+
+They are consumed by
+:class:`makani.utils.dataloaders.sample_source.SampleSource`, which feeds the
+DALI pipeline, and by
+:class:`makani.utils.dataloaders.data_loader_multifiles.MultifilesDataset`,
+which is the map style dataset inference uses. Both own what the layouts have in
+common: index arithmetic, window assembly, normalization and, for the training
+source, shuffling and epoch cycling.
 """
 
 from .base import DatasetBackend, BackendMetadata
@@ -26,6 +33,7 @@ from .makani_hdf5 import MakaniHDF5Backend
 from .makani_zarr import MakaniZarrBackend
 from .arco_wb2 import ArcoWB2Backend
 from .makani_concat import MakaniConcatBackend
+from .icon import IconBackend
 from .factory import get_backend
 
 __all__ = [
@@ -35,5 +43,6 @@ __all__ = [
     "MakaniZarrBackend",
     "ArcoWB2Backend",
     "MakaniConcatBackend",
+    "IconBackend",
     "get_backend",
 ]

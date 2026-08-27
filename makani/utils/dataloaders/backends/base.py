@@ -158,12 +158,16 @@ class BackendMetadata(NamedTuple):
     Attributes
     ----------
     files : list of str
-        Paths, in the order the sample index runs through them.
+        One entry per unit the sample index runs through, in order. For most
+        layouts a unit is a file. It need not be: a dataset that splits its
+        variables across files has a sample spanning several of them, and the
+        entry is then one representative path, with the backend holding the rest
+        internally. Nothing outside the backend opens these.
     labels : list of int
         A label per file, used for reporting and for deriving timestamps when a
         file carries none. For the makani layouts this is the year.
     samples_per_file : list of int
-        Number of samples in each file. The caller turns this into global
+        Number of samples in each unit. The caller turns this into global
         offsets; a backend never sees a global sample index.
     timestamps : numpy.ndarray
         One timezone aware datetime per sample, concatenated across files.
@@ -198,10 +202,13 @@ class DatasetBackend(abc.ABC):
         carries them, so that a dataset on a grid other than the assumed
         equiangular one is described by its own coordinates rather than by
         fabricated ones.
-    file_pattern : str
-        Glob for the file names, without the extension. The default ``"????"``
-        is the makani convention of a file per year; a dataset of arbitrarily
-        named files passes ``"*"`` and is ordered by time instead of by name.
+    file_pattern : str, optional
+        Glob for the file names, without the extension. Defaults to
+        :attr:`default_file_pattern`, which is whatever the layout names its
+        files: the makani layouts use ``"????"``, a file per year, while ICON
+        names its files after the variable and the date. A dataset of
+        arbitrarily named files in a makani layout passes ``"*"`` and is ordered
+        by time instead of by name.
     relative_timestamp : bool
         Whether the stored times are offsets rather than dates, as in a
         climatology indexed by time of year.
@@ -245,6 +252,11 @@ class DatasetBackend(abc.ABC):
         do about it: resampling still happens downstream.
     """
 
+    #: how this layout names its files, without the extension. Permissive here
+    #: because a layout that has no convention should not impose one; the makani
+    #: layouts override it with the year they are named after.
+    default_file_pattern: str = "*"
+
     #: attributes holding open file handles, dropped when pickled
     _handle_attributes: Tuple[str, ...] = ()
 
@@ -260,7 +272,7 @@ class DatasetBackend(abc.ABC):
         timestamp_name: str = "timestamp",
         latitude_name: str = "lat",
         longitude_name: str = "lon",
-        file_pattern: str = "????",
+        file_pattern: Optional[str] = None,
         relative_timestamp: bool = False,
         dhours: int = 6,
         channel_names: Optional[Sequence[str]] = None,
@@ -277,7 +289,7 @@ class DatasetBackend(abc.ABC):
         self.timestamp_name = timestamp_name
         self.latitude_name = latitude_name
         self.longitude_name = longitude_name
-        self.file_pattern = file_pattern
+        self.file_pattern = file_pattern if file_pattern is not None else self.default_file_pattern
         self.relative_timestamp = relative_timestamp
         self.dhours = dhours
         self.channel_names = channel_names

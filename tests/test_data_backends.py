@@ -16,10 +16,11 @@
 """
 Unit tests for the storage backends.
 
-``test_sample_source.py`` drives all four backends end to end through
+``test_sample_source.py`` drives the raster backends end to end through
 ``SampleSource``, which covers the read path thoroughly. What it cannot see are
 the properties that hold *between* the pieces, and those are what this file
-pins:
+pins -- along with the whole of the ICON backend, which no end to end suite
+reaches yet because nothing downstream consumes an unstructured grid:
 
 * **coordinates match the data.** A backend promises that ``chunk.lat`` and
   ``chunk.lon`` give the position of every value it emits. Nothing downstream
@@ -34,6 +35,13 @@ pins:
 * **pickling.** ``test_pickle_roundtrip`` covers handles, but only for local
   files; the connection a remote backend holds is dropped by different
   machinery.
+* **times are absolute.** Ordering and a non-null timezone are cheap to satisfy
+  while still being wrong by an epoch, an offset or a unit, so the first sample
+  of every layout is checked against the time it was written at.
+* **which cells a rank reads,** for the mesh: that the runs cover the selection,
+  that a target point's neighbours are on the same rank, and that the values and
+  the coordinates emitted describe the same cells. All three are silent when
+  wrong -- the arrays stay self consistent and the field is scrambled.
 
 These need neither DALI nor a GPU, so unlike the end to end suite they run in
 CI.
@@ -53,6 +61,7 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 from makani.utils.dataloaders.backends import (
     ArcoWB2Backend,
+    IconBackend,
     BackendMetadata,
     MakaniConcatBackend,
     MakaniHDF5Backend,
@@ -62,9 +71,17 @@ from makani.utils.dataloaders.backends import (
 from makani.utils.dataloaders.backends.base import GridSpec
 from makani.utils.dataloaders.backends.factory import detect_backend
 from makani.utils.dataloaders.backends.makani_hdf5 import contiguous_slices
+from makani.utils.dataloaders.backends.mesh import block_of_rank, coalesce_runs
 
 from .testutils import (
     CHANNEL_NAMES,
+    ICON_FILL,
+    ICON_FILL_CELLS,
+    ICON_N_CELLS,
+    ICON_PLEV_HPA,
+    compare_arrays,
+    icon_expected_field,
+    init_icon_dataset,
     DHOURS,
     NUM_SAMPLES_PER_YEAR,
     TRAIN_YEARS,
@@ -104,6 +121,67 @@ class TestContiguousSlices(unittest.TestCase):
         indices = [1, 2, 3, 9, 10, 40]
         covered = [i for s in contiguous_slices(indices) for i in range(s.start, s.stop)]
         self.assertEqual(covered, indices)
+
+
+class TestCoalesceRuns(unittest.TestCase):
+    """Turning selected cells into the reads that fetch them.
+
+    Like ``contiguous_slices``, a broken version still returns the right data:
+    the cells are all there, just fetched in more reads, or in one read far
+    larger than it needed to be. Only the slices themselves show it, so they are
+    asserted directly.
+    """
+
+    def test_adjacent_cells_are_one_run(self):
+        self.assertEqual(coalesce_runs(np.array([4, 5, 6])), [slice(4, 7)])
+
+    def test_a_gap_splits_the_run(self):
+        self.assertEqual(coalesce_runs(np.array([0, 1, 2, 7, 8])), [slice(0, 3), slice(7, 9)])
+
+    def test_a_short_gap_is_read_through(self):
+        # one read of nine cells beats two reads of three and two, once the
+        # fixed cost of a read exceeds the four cells bridged
+        self.assertEqual(coalesce_runs(np.array([0, 1, 2, 7, 8]), merge_gap=4), [slice(0, 9)])
+
+    def test_the_gap_is_a_limit_not_a_hint(self):
+        # the gap here is five cells, one more than allowed, so it still splits
+        self.assertEqual(coalesce_runs(np.array([0, 1, 2, 8, 9]), merge_gap=4), [slice(0, 3), slice(8, 10)])
+
+    def test_empty(self):
+        self.assertEqual(coalesce_runs(np.array([], dtype=int)), [])
+
+    def test_single_cell(self):
+        self.assertEqual(coalesce_runs(np.array([5])), [slice(5, 6)])
+
+    def test_runs_cover_every_selected_cell(self):
+        """The property that makes bridging safe: nothing is dropped.
+
+        A cell that falls outside every run is read as whatever the buffer held,
+        which is silent and looks like data.
+        """
+        selection = np.sort(np.random.default_rng(0).choice(10_000, 500, replace=False))
+        for merge_gap in (0, 8, 64, 1024):
+            with self.subTest(merge_gap=merge_gap):
+                covered = np.concatenate(
+                    [np.arange(run.start, run.stop) for run in coalesce_runs(selection, merge_gap)]
+                )
+                self.assertTrue(np.all(np.isin(selection, covered)))
+
+    def test_bridging_trades_reads_for_bytes(self):
+        """Fewer reads with a larger gap, and every surviving gap is a real one."""
+        selection = np.sort(np.random.default_rng(0).choice(10_000, 500, replace=False))
+
+        tight = coalesce_runs(selection, 0)
+        loose = coalesce_runs(selection, 1024)
+
+        self.assertLess(len(loose), len(tight))
+
+        # whatever the setting, a gap that was left unbridged has to be wider
+        # than the one we were willing to read through
+        for merge_gap, runs in ((0, tight), (1024, loose)):
+            with self.subTest(merge_gap=merge_gap):
+                gaps = [later.start - earlier.stop for earlier, later in zip(runs, runs[1:])]
+                self.assertTrue(all(gap > merge_gap for gap in gaps))
 
 
 class TestGridSpec(unittest.TestCase):
@@ -252,6 +330,19 @@ class TestDiscovery(_BackendFixture):
         self.assertIsNotNone(metadata.timestamps[0].tzinfo)
         self.assertTrue(all(a < b for a, b in zip(metadata.timestamps, metadata.timestamps[1:])))
 
+    def test_annotated_timestamps_are_the_times_the_file_carries(self):
+        """The times a file was annotated with, read back as they were written.
+
+        Ordering and a non-null timezone are cheap to satisfy while still being
+        wrong by an epoch, an offset or a unit. The fixture writes the first
+        sample at midnight UTC on new year, so that is what has to come back.
+        """
+        metadata = get_backend(self.train_path).discover()
+
+        self.assertEqual(metadata.timestamps[0], dt.datetime(TRAIN_YEARS[0], 1, 1, tzinfo=dt.timezone.utc))
+        self.assertEqual(metadata.timestamps[1] - metadata.timestamps[0], dt.timedelta(hours=DHOURS))
+        self.assertEqual(metadata.timestamps[0].utcoffset(), dt.timedelta(0))
+
     def test_labels_are_the_years(self):
         metadata = get_backend(self.train_path).discover()
 
@@ -290,8 +381,8 @@ class TestChunkCoordinates(_BackendFixture):
         backend = self._backend()
 
         self.assertEqual(backend.chunk.shape, (IMG_SIZE_H, IMG_SIZE_W))
-        np.testing.assert_allclose(backend.chunk.lat, backend.metadata.grid.lat)
-        np.testing.assert_allclose(backend.chunk.lon, backend.metadata.grid.lon)
+        self.assertTrue(compare_arrays("backend.chunk.lat", backend.chunk.lat, backend.metadata.grid.lat))
+        self.assertTrue(compare_arrays("backend.chunk.lon", backend.chunk.lon, backend.metadata.grid.lon))
 
     def test_coordinate_lengths_match_the_chunk_shape(self):
         for io_grid, io_rank in [([1, 1], [0, 0]), ([2, 1], [1, 0]), ([2, 2], [1, 1]), ([3, 1], [2, 0])]:
@@ -309,8 +400,16 @@ class TestChunkCoordinates(_BackendFixture):
 
         lat_start = backend.read_anchor[0]
         lon_start = backend.read_anchor[1]
-        np.testing.assert_allclose(backend.chunk.lat, grid.lat[lat_start : lat_start + backend.read_shape[0]])
-        np.testing.assert_allclose(backend.chunk.lon, grid.lon[lon_start : lon_start + backend.read_shape[1]])
+        self.assertTrue(
+            compare_arrays(
+                "backend.chunk.lat", backend.chunk.lat, grid.lat[lat_start : lat_start + backend.read_shape[0]]
+            )
+        )
+        self.assertTrue(
+            compare_arrays(
+                "backend.chunk.lon", backend.chunk.lon, grid.lon[lon_start : lon_start + backend.read_shape[1]]
+            )
+        )
 
     def test_chunks_tile_the_grid_without_gaps_or_overlap(self):
         # every latitude of the global grid is claimed by exactly one rank
@@ -319,7 +418,7 @@ class TestChunkCoordinates(_BackendFixture):
             backend = self._backend(io_grid=[3, 1], io_rank=[rank, 0])
             claimed.append(backend.chunk.lat)
 
-        np.testing.assert_allclose(np.concatenate(claimed), backend.metadata.grid.lat)
+        self.assertTrue(compare_arrays("np.concatenate(claimed)", np.concatenate(claimed), backend.metadata.grid.lat))
 
     def test_data_at_a_coordinate_is_the_data_at_that_coordinate(self):
         """Read a decomposed chunk and check it against the same region read whole.
@@ -345,13 +444,13 @@ class TestChunkCoordinates(_BackendFixture):
             lon_offset : lon_offset + part.chunk.shape[1],
         ]
 
-        np.testing.assert_allclose(chunk, expected)
+        self.assertTrue(compare_arrays("chunk", chunk, expected))
 
     def test_subsampling_takes_every_nth_coordinate(self):
         backend = self._backend(subsampling_factor=2)
 
-        np.testing.assert_allclose(backend.chunk.lat, backend.metadata.grid.lat[::2])
-        np.testing.assert_allclose(backend.chunk.lon, backend.metadata.grid.lon[::2])
+        self.assertTrue(compare_arrays("backend.chunk.lat", backend.chunk.lat, backend.metadata.grid.lat[::2]))
+        self.assertTrue(compare_arrays("backend.chunk.lon", backend.chunk.lon, backend.metadata.grid.lon[::2]))
 
     def test_crop_decomposition_and_subsampling_compose(self):
         """All three narrow the chunk, and they are applied in one place.
@@ -376,8 +475,8 @@ class TestChunkCoordinates(_BackendFixture):
         expected_lat = grid.lat[expected_start : crop_anchor[0] + crop_size[0] : 2]
         expected_lon = grid.lon[crop_anchor[1] : crop_anchor[1] + crop_size[1] : 2]
 
-        np.testing.assert_allclose(backend.chunk.lat, expected_lat)
-        np.testing.assert_allclose(backend.chunk.lon, expected_lon)
+        self.assertTrue(compare_arrays("backend.chunk.lat", backend.chunk.lat, expected_lat))
+        self.assertTrue(compare_arrays("backend.chunk.lon", backend.chunk.lon, expected_lon))
         self.assertEqual(backend.chunk.shape, (len(expected_lat), len(expected_lon)))
 
     def test_crop_beyond_the_grid_raises(self):
@@ -428,7 +527,7 @@ class TestLifecycle(_BackendFixture):
         backend.close()
         after = backend.read(0, slice(0, 1), channels)
 
-        np.testing.assert_allclose(before, after)
+        self.assertTrue(compare_arrays("before", before, after))
 
 
 class TestConcatBackend(_BackendFixture):
@@ -486,7 +585,7 @@ class TestPickling(_BackendFixture):
         restored = pickle.loads(pickle.dumps(backend))
         after = restored.read(0, slice(0, 2), channels)
 
-        np.testing.assert_allclose(before, after)
+        self.assertTrue(compare_arrays("before", before, after))
 
     def test_roundtrip_preserves_the_chunk(self):
         backend = get_backend(self.train_path, io_grid=[2, 2], io_rank=[0, 1])
@@ -495,8 +594,8 @@ class TestPickling(_BackendFixture):
         restored = pickle.loads(pickle.dumps(backend))
 
         self.assertEqual(restored.chunk.shape, backend.chunk.shape)
-        np.testing.assert_allclose(restored.chunk.lat, backend.chunk.lat)
-        np.testing.assert_allclose(restored.chunk.lon, backend.chunk.lon)
+        self.assertTrue(compare_arrays("restored.chunk.lat", restored.chunk.lat, backend.chunk.lat))
+        self.assertTrue(compare_arrays("restored.chunk.lon", restored.chunk.lon, backend.chunk.lon))
 
 
 class TestReading(_BackendFixture):
@@ -521,7 +620,7 @@ class TestReading(_BackendFixture):
         out = np.zeros_like(allocated)
         backend.read(0, slice(0, 2), channels, out=out)
 
-        np.testing.assert_allclose(allocated, out)
+        self.assertTrue(compare_arrays("allocated", allocated, out))
 
     def test_channel_subset_is_read_in_order(self):
         backend = get_backend(self.train_path)
@@ -530,8 +629,8 @@ class TestReading(_BackendFixture):
         every = backend.read(0, slice(0, 1), np.arange(NUM_CHANNELS))
         subset = backend.read(0, slice(0, 1), np.array([0, 2]))
 
-        np.testing.assert_allclose(subset[:, 0], every[:, 0])
-        np.testing.assert_allclose(subset[:, 1], every[:, 2])
+        self.assertTrue(compare_arrays("subset[:, 0]", subset[:, 0], every[:, 0]))
+        self.assertTrue(compare_arrays("subset[:, 1]", subset[:, 1], every[:, 2]))
 
     def test_strided_time_slice(self):
         backend = get_backend(self.train_path)
@@ -543,8 +642,8 @@ class TestReading(_BackendFixture):
         third = backend.read(0, slice(2, 3), channels)
 
         self.assertEqual(strided.shape[0], 2)
-        np.testing.assert_allclose(strided[0], first[0])
-        np.testing.assert_allclose(strided[1], third[0])
+        self.assertTrue(compare_arrays("strided[0]", strided[0], first[0]))
+        self.assertTrue(compare_arrays("strided[1]", strided[1], third[0]))
 
 
 class TestTimestampSynthesis(unittest.TestCase):
@@ -667,7 +766,13 @@ class TestUnconsolidatedZarr(unittest.TestCase):
         backend = get_backend(self.plain)
         backend.discover()
 
-        np.testing.assert_allclose(backend.read(0, slice(0, 3), channels), reference.read(0, slice(0, 3), channels))
+        self.assertTrue(
+            compare_arrays(
+                "backend.read(0, slice(0, 3), channels)",
+                backend.read(0, slice(0, 3), channels),
+                reference.read(0, slice(0, 3), channels),
+            )
+        )
 
 
 def _write_h5(path, data, timestamps, latitude=None, longitude=None):
@@ -804,15 +909,19 @@ class TestFileCoordinates(unittest.TestCase):
         self._write()
         metadata = get_backend(self.tmpdir.name).discover()
 
-        np.testing.assert_allclose(metadata.grid.lat, self.latitude, rtol=1e-6)
-        np.testing.assert_allclose(metadata.grid.lon, self.longitude, rtol=1e-6)
+        self.assertTrue(compare_arrays("metadata.grid.lat", metadata.grid.lat, self.latitude, rtol=1e-6))
+        self.assertTrue(compare_arrays("metadata.grid.lon", metadata.grid.lon, self.longitude, rtol=1e-6))
 
     def test_a_file_without_coordinates_falls_back(self):
         self._write(with_coordinates=False)
         metadata = get_backend(self.tmpdir.name).discover()
 
-        np.testing.assert_allclose(metadata.grid.lat, np.linspace(90, -90, self.shape[0], endpoint=True))
-        np.testing.assert_allclose(metadata.grid.lon, np.linspace(0, 360, self.shape[1], endpoint=False))
+        self.assertTrue(
+            compare_arrays("metadata.grid.lat", metadata.grid.lat, np.linspace(90, -90, self.shape[0], endpoint=True))
+        )
+        self.assertTrue(
+            compare_arrays("metadata.grid.lon", metadata.grid.lon, np.linspace(0, 360, self.shape[1], endpoint=False))
+        )
 
     def test_an_explicit_grid_wins_over_the_file(self):
         # the caller knows something the file does not, e.g. a dataset written
@@ -821,7 +930,7 @@ class TestFileCoordinates(unittest.TestCase):
         override = (np.linspace(1, 8, self.shape[0]), np.linspace(1, 16, self.shape[1]))
         metadata = get_backend(self.tmpdir.name, lat_lon=override).discover()
 
-        np.testing.assert_allclose(metadata.grid.lat, override[0])
+        self.assertTrue(compare_arrays("metadata.grid.lat", metadata.grid.lat, override[0]))
 
     def test_the_chunk_carries_the_file_coordinates(self):
         # the chunk is what a consumer actually reads coordinates from, so the
@@ -830,10 +939,471 @@ class TestFileCoordinates(unittest.TestCase):
         backend = get_backend(self.tmpdir.name, io_grid=[2, 1], io_rank=[1, 0])
         backend.discover()
 
-        np.testing.assert_allclose(backend.chunk.lat, self.latitude[self.shape[0] // 2 :], rtol=1e-6)
+        self.assertTrue(
+            compare_arrays("backend.chunk.lat", backend.chunk.lat, self.latitude[self.shape[0] // 2 :], rtol=1e-6)
+        )
+
+
+class _IconFixture(unittest.TestCase):
+    """A scaled down ICON dataset, shared by the tests below."""
+
+    def assertFieldEqual(self, got, want, msg="field"):
+        """Compare fields that carry NaN where the fixture wrote a fill.
+
+        Where the NaNs sit is asserted separately, and deliberately: NaN never
+        compares equal, so folding it into the value check would either hide a
+        misplaced fill or fail for the wrong reason.
+        """
+        got, want = np.asarray(got), np.asarray(want)
+        self.assertTrue(np.array_equal(np.isnan(got), np.isnan(want)), f"{msg}: fills are in different places")
+
+        finite = ~np.isnan(want)
+        self.assertTrue(compare_arrays(msg, got[finite], want[finite], atol=1e-5, rtol=1e-5, verbose=True))
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmpdir = tempfile.TemporaryDirectory()
+        cls.data_path, cls.grid_path, cls.n_samples, cls.channel_names = init_icon_dataset(cls.tmpdir.name)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmpdir.cleanup()
+
+    def _backend(self, **overrides):
+        kwargs = dict(grid_file=self.grid_path, channel_names=list(self.channel_names))
+        kwargs.update(overrides)
+        return get_backend(self.data_path, **kwargs)
+
+
+class TestIconDiscovery(_IconFixture):
+    """What the backend makes of a directory of ICON output.
+
+    The layout differs from every other one here in three ways at once -- a
+    sample spans files, the variables disagree about what times exist, and a
+    variable name does not identify a variable -- so what discovery settles is
+    worth stating rather than inferring from a read.
+    """
+
+    def test_the_mesh_is_reported_as_unstructured(self):
+        metadata = self._backend().discover()
+
+        self.assertEqual(metadata.grid.kind, "unstructured")
+        self.assertEqual(metadata.grid.shape, (ICON_N_CELLS,))
+        self.assertFalse(metadata.grid.is_structured)
+
+    def test_coordinates_are_degrees_with_longitude_in_zero_to_360(self):
+        # the files store radians with longitude in [-pi, pi]; makani works in
+        # degrees with longitude in [0, 360)
+        grid = self._backend().discover().grid
+
+        self.assertGreaterEqual(grid.lon.min(), 0.0)
+        self.assertLess(grid.lon.max(), 360.0)
+        self.assertGreaterEqual(grid.lat.min(), -90.0)
+        self.assertLessEqual(grid.lat.max(), 90.0)
+        self.assertEqual(len(grid.lat), ICON_N_CELLS)
+
+    def test_samples_are_the_times_every_variable_has(self):
+        """The sample axis is an intersection, not a union.
+
+        Pressure level variables are three hourly and the surface one is
+        hourly, so an hourly sample would have no temperature to go with it.
+        Taking the union instead would produce samples that cannot be read.
+        """
+        metadata = self._backend().discover()
+
+        self.assertEqual(len(metadata.timestamps), self.n_samples)
+        steps = {
+            (metadata.timestamps[idx + 1] - metadata.timestamps[idx]).total_seconds() / 3600
+            for idx in range(len(metadata.timestamps) - 1)
+        }
+        self.assertEqual(steps, {3.0})
+
+    def test_units_break_where_a_file_changes(self):
+        # the level variables are daily and the surface variable spans both
+        # days, so the units are the days: within one, no variable changes file
+        metadata = self._backend().discover()
+
+        self.assertEqual(metadata.samples_per_file, [8, 8])
+        self.assertEqual(sum(metadata.samples_per_file), len(metadata.timestamps))
+
+    def test_timestamps_are_absolute_utc_times(self):
+        """The sample times, not merely their spacing.
+
+        The files say ``minutes since 2020-1-1 00:00:00`` and start on the
+        first of June 2021. A misparsed epoch, a wrong unit or a naive local
+        time would all still produce an evenly spaced, ordered axis.
+        """
+        metadata = self._backend().discover()
+
+        self.assertEqual(metadata.timestamps[0], dt.datetime(2021, 6, 1, tzinfo=dt.timezone.utc))
+        self.assertEqual(metadata.timestamps[1], dt.datetime(2021, 6, 1, 3, tzinfo=dt.timezone.utc))
+        self.assertEqual(metadata.timestamps[0].utcoffset(), dt.timedelta(0))
+
+    def test_coordinates_keep_the_order_the_grid_file_has(self):
+        """Cell n of the grid describes cell n of the data.
+
+        The only thing tying a value to a place on the sphere is that both are
+        indexed by the same cell number. Sorting or otherwise reordering the
+        coordinates on the way in would leave every array self consistent, every
+        test of shapes and ranges passing, and every field scrambled -- so the
+        coordinates are checked against the grid file itself rather than against
+        anything else the backend produced.
+        """
+        metadata = self._backend().discover()
+
+        with h5.File(self.grid_path, "r") as handle:
+            clon, clat = handle["clon"][...], handle["clat"][...]
+
+        self.assertTrue(compare_arrays("latitudes", metadata.grid.lat, np.degrees(clat), atol=1e-6))
+        self.assertTrue(compare_arrays("longitudes", metadata.grid.lon, np.mod(np.degrees(clon), 360.0), atol=1e-6))
+
+    def test_total_channels_is_what_was_asked_for(self):
+        # ICON has no channel axis to count, so the number is the request
+        metadata = self._backend().discover()
+        self.assertEqual(metadata.total_channels, len(self.channel_names))
+
+    def test_detected_from_the_extension(self):
+        self.assertEqual(detect_backend(self.data_path), "icon")
+        self.assertIsInstance(self._backend(), IconBackend)
+
+
+class TestIconReading(_IconFixture):
+
+    def _read(self, backend, sample, channel):
+        """One channel at one sample, through the unit it falls in."""
+        offset = 0
+        for unit_idx, count in enumerate(backend.metadata.samples_per_file):
+            if sample < offset + count:
+                return backend.read(unit_idx, slice(sample - offset, sample - offset + 1), np.array([channel]))
+            offset += count
+        raise AssertionError("sample out of range")
+
+    def setUp(self):
+        self.backend = self._backend()
+        self.backend.discover()
+
+    def test_a_pressure_level_channel_reads_the_pressure_level_variable(self):
+        """Two variables are called ``u``; only one can serve ``u500``.
+
+        The files carry ``u`` on pressure levels and ``u`` on altitude levels.
+        Resolving by name alone picks whichever was seen first, which is wrong
+        half the time and silently so -- both are plausible wind fields.
+        """
+        values = self._read(self.backend, sample=0, channel=0)  # u500
+
+        expected = icon_expected_field("u", 0, ICON_PLEV_HPA.index(500))
+        self.assertFieldEqual(values[0, 0], expected, "u500")
+
+    def test_levels_are_addressed_by_pressure_not_by_position(self):
+        u500 = self._read(self.backend, sample=0, channel=0)
+        u850 = self._read(self.backend, sample=0, channel=1)
+
+        for name, values, hpa in (("u500", u500, 500), ("u850", u850, 850)):
+            with self.subTest(channel=name):
+                self.assertFieldEqual(values[0, 0], icon_expected_field("u", 0, ICON_PLEV_HPA.index(hpa)), name)
+
+    def test_a_surface_channel_follows_its_own_cadence(self):
+        """The hourly variable has to be indexed by time, not by sample number.
+
+        Sample 1 is three hours after sample 0, which is index 1 in a three
+        hourly file and index 3 in an hourly one. Reusing the sample index for
+        both is the obvious mistake and it misdates the surface field.
+        """
+        values = self._read(self.backend, sample=1, channel=4)  # t2m
+
+        self.assertFieldEqual(values[0, 0], icon_expected_field("t_2m", 3, 0), "t2m at sample 1")
+
+    def test_reading_crosses_a_unit_boundary_correctly(self):
+        # sample 8 is the first of the second day, so a different file for the
+        # level variables and a later index in the same file for the surface one
+        values = self._read(self.backend, sample=8, channel=2)  # t500
+
+        expected = icon_expected_field("temp", 0, ICON_PLEV_HPA.index(500))
+        self.assertFieldEqual(values[0, 0], expected, "t500 on the second day")
+
+    def test_fill_values_become_nan(self):
+        # cell 7 is written as _FillValue throughout
+        values = self._read(self.backend, sample=0, channel=0)
+
+        self.assertTrue(np.isnan(values[0, 0, list(ICON_FILL_CELLS)]).all())
+        self.assertFalse(np.isnan(np.delete(values[0, 0], list(ICON_FILL_CELLS))).any())
+
+    def test_the_raw_fill_sentinel_does_not_survive(self):
+        values = self._read(self.backend, sample=0, channel=0)
+        self.assertFalse(np.any(values == ICON_FILL))
+
+    def test_several_channels_at_once_match_one_at_a_time(self):
+        together = self.backend.read(0, slice(0, 2), np.array([0, 2, 4]))
+
+        for position, channel in enumerate([0, 2, 4]):
+            with self.subTest(channel=self.channel_names[channel]):
+                alone = self.backend.read(0, slice(0, 2), np.array([channel]))
+                self.assertFieldEqual(together[:, position], alone[:, 0], "batched vs single channel")
+
+    def test_reads_are_repeatable(self):
+        # the run buffer is reused between reads, so a second read has to
+        # overwrite it rather than return what the first one left behind
+        first = self.backend.read(0, slice(0, 1), np.array([0])).copy()
+        self.backend.read(0, slice(1, 2), np.array([2]))
+        again = self.backend.read(0, slice(0, 1), np.array([0]))
+
+        self.assertFieldEqual(again, first, "repeated read")
+
+
+class TestIconDecomposition(_IconFixture):
+    """Which cells a rank reads, and the guarantee that makes it safe."""
+
+    def _target_grid(self, nlat=32, nlon=64):
+        return GridSpec(
+            "equiangular",
+            (nlat, nlon),
+            np.linspace(90, -90, nlat),
+            np.linspace(0, 360, nlon, endpoint=False),
+        )
+
+    def test_one_rank_gets_the_whole_mesh(self):
+        backend = self._backend()
+        backend.discover()
+        self.assertEqual(backend.chunk.shape, (ICON_N_CELLS,))
+
+    def test_ranks_cover_the_mesh_between_them(self):
+        """Every cell reaches some rank, and the overlap is only the halo.
+
+        A cell that no rank reads is a hole in the field that nothing else
+        would notice, since each rank's own chunk looks self consistent.
+        """
+        target = self._target_grid()
+        seen = []
+        for rank in range(2):
+            backend = self._backend(target_grid=target, io_grid=[2, 1], io_rank=[rank, 0])
+            backend.discover()
+            seen.append(set(backend.cell_index.tolist()))
+
+        self.assertEqual(set().union(*seen), set(range(ICON_N_CELLS)))
+        self.assertTrue(seen[0] & seen[1], "the halo should make the blocks overlap")
+
+    def test_a_rank_reads_its_own_latitudes(self):
+        target = self._target_grid()
+        backend = self._backend(target_grid=target, io_grid=[2, 1], io_rank=[0, 0])
+        backend.discover()
+
+        # the northern half, give or take the halo
+        self.assertGreater(backend.chunk.lat.min(), -backend.halo_degrees - 1e-6)
+
+    def test_the_chunk_coordinates_are_the_cells_selected(self):
+        target = self._target_grid()
+        backend = self._backend(target_grid=target, io_grid=[2, 1], io_rank=[1, 0])
+        backend.discover()
+
+        self.assertTrue(compare_arrays("chunk lat", backend.chunk.lat, backend.metadata.grid.lat[backend.cell_index]))
+        self.assertTrue(compare_arrays("chunk lon", backend.chunk.lon, backend.metadata.grid.lon[backend.cell_index]))
+
+    def test_a_decomposed_read_matches_the_whole_mesh(self):
+        """A rank's values are the global field restricted to its cells.
+
+        This is what ties the selection to the read: the runs are read whole and
+        the bridged cells dropped, so an off by one in the compaction shows up
+        here as a shifted field and nowhere else.
+        """
+        target = self._target_grid()
+        whole = self._backend()
+        whole.discover()
+        reference = whole.read(0, slice(0, 1), np.array([0]))
+
+        backend = self._backend(target_grid=target, io_grid=[2, 1], io_rank=[1, 0])
+        backend.discover()
+        local = backend.read(0, slice(0, 1), np.array([0]))
+
+        self.assertFieldEqual(local[0, 0], reference[0, 0][backend.cell_index], "decomposed read")
+
+    def test_values_and_coordinates_describe_the_same_cells(self):
+        """What a rank emits, and where it says those values are, agree.
+
+        Checked against the fixture's formula rather than against another read,
+        so it does not rely on the selection being right on both sides: the
+        value at position k identifies the cell it came from, and the coordinate
+        at position k has to be that cell's.
+        """
+        target = self._target_grid()
+        backend = self._backend(target_grid=target, io_grid=[2, 1], io_rank=[1, 0])
+        backend.discover()
+
+        values = backend.read(0, slice(0, 1), np.array([0]))[0, 0]
+        expected = icon_expected_field("u", 0, ICON_PLEV_HPA.index(500))[backend.cell_index]
+
+        finite = ~np.isnan(expected)
+        self.assertTrue(compare_arrays("decomposed u500", values[finite], expected[finite], atol=1e-5, rtol=1e-5))
+
+        grid = backend.metadata.grid
+        self.assertTrue(compare_arrays("chunk latitudes", backend.chunk.lat, grid.lat[backend.cell_index]))
+        self.assertTrue(compare_arrays("chunk longitudes", backend.chunk.lon, grid.lon[backend.cell_index]))
+
+    def test_every_target_point_has_its_neighbours_locally(self):
+        """The guarantee the halo exists for.
+
+        Resampling onto a target point reads the cells around it, so those cells
+        have to be on the same rank -- otherwise the regrid needs a neighbour
+        exchange, which is exactly what selecting a margin avoids. Asserted as
+        the property rather than as a cell count, so it stays meaningful if the
+        default margin changes.
+        """
+        target = self._target_grid()
+        backend = self._backend(target_grid=target, io_grid=[2, 1], io_rank=[0, 0])
+        backend.discover()
+
+        grid = backend.metadata.grid
+        lat_low, lat_high = block_of_rank(target.lat, [2, 1], [0, 0], 0)
+        lat_low, lat_high = min(lat_low, lat_high), max(lat_low, lat_high)
+        rows = target.lat[(target.lat >= lat_low) & (target.lat <= lat_high)]
+
+        local = set(backend.cell_index.tolist())
+        points = [(lat, lon) for lat in rows[::4] for lon in target.lon[::8]]
+
+        for lat, lon in points:
+            # great circle distance from this target point to every cell
+            cosine = np.sin(np.radians(lat)) * np.sin(np.radians(grid.lat)) + np.cos(np.radians(lat)) * np.cos(
+                np.radians(grid.lat)
+            ) * np.cos(np.radians(lon - grid.lon))
+            nearest = np.argsort(-cosine)[:3]
+            with self.subTest(lat=round(float(lat), 1), lon=round(float(lon), 1)):
+                self.assertTrue(set(nearest.tolist()) <= local, "a neighbour of this point is on another rank")
+
+    def test_the_halo_widens_the_selection(self):
+        # without it a rank holds only its own block, and the points at the edge
+        # have nothing beyond them to interpolate from
+        target = self._target_grid()
+
+        bare = self._backend(target_grid=target, io_grid=[2, 1], io_rank=[0, 0], halo_degrees=0.0)
+        bare.discover()
+        padded = self._backend(target_grid=target, io_grid=[2, 1], io_rank=[0, 0])
+        padded.discover()
+
+        self.assertLess(len(bare.cell_index), len(padded.cell_index))
+        self.assertTrue(set(bare.cell_index.tolist()) <= set(padded.cell_index.tolist()))
+
+    def test_a_fragmented_selection_still_reads_correctly(self):
+        """Several runs rather than one, which the default gap hides.
+
+        With the default ``merge_gap`` a selection this small collapses into a
+        single run, so the compaction is never asked to interleave pieces. A gap
+        of zero forces one run per stretch, which is what a rank of a real mesh
+        would see.
+        """
+        target = self._target_grid()
+        backend = self._backend(target_grid=target, io_grid=[2, 1], io_rank=[1, 0])
+        backend.merge_gap = 0
+        backend.discover()
+
+        self.assertGreater(len(backend.cell_runs), 1, "the selection should not be one contiguous stretch")
+
+        values = backend.read(0, slice(0, 1), np.array([0]))[0, 0]
+        expected = icon_expected_field("u", 0, ICON_PLEV_HPA.index(500))[backend.cell_index]
+
+        finite = ~np.isnan(expected)
+        self.assertTrue(compare_arrays("fragmented read", values[finite], expected[finite], atol=1e-5, rtol=1e-5))
+
+    def test_decomposition_without_a_target_grid_is_refused(self):
+        # a mesh has no rows and columns to split, so there is nothing to
+        # decompose against unless the run says what grid it is heading for
+        with self.assertRaises(ValueError) as ctx:
+            self._backend(io_grid=[2, 1], io_rank=[0, 0]).discover()
+        self.assertIn("target_grid", str(ctx.exception))
+
+
+class TestIconRejections(_IconFixture):
+    """Options and datasets the backend refuses, and how it says so."""
+
+    def test_subsampling_is_refused(self):
+        with self.assertRaises(ValueError) as ctx:
+            self._backend(subsampling_factor=2).discover()
+        self.assertIn("target_grid", str(ctx.exception))
+
+    def test_cropping_is_refused(self):
+        with self.assertRaises(ValueError) as ctx:
+            self._backend(crop_size=[10, 10]).discover()
+        self.assertIn("target_grid", str(ctx.exception))
+
+    def test_channel_names_are_required(self):
+        with self.assertRaises(ValueError) as ctx:
+            get_backend(self.data_path, grid_file=self.grid_path)
+        self.assertIn("channel_names", str(ctx.exception))
+
+    def test_the_grid_file_is_required(self):
+        # the output references a grid rather than carrying one, so there is
+        # nothing to fall back on
+        with self.assertRaises(ValueError) as ctx:
+            get_backend(self.data_path, channel_names=list(self.channel_names))
+        self.assertIn("grid_file", str(ctx.exception))
+
+    def test_a_grid_from_another_run_is_refused(self):
+        """A mismatched grid produces a plausible but scrambled field.
+
+        Nothing downstream can detect it: the values are real and the
+        coordinates are real, they simply do not belong together. So the UUIDs
+        ICON stamps on both sides are compared.
+        """
+        wrong = os.path.join(self.tmpdir.name, "wrong_grid.nc")
+        with h5.File(self.grid_path, "r") as source, h5.File(wrong, "w") as handle:
+            for name in ("clon", "clat"):
+                handle.create_dataset(name, data=source[name][...])
+            handle.attrs["uuidOfHGrid"] = np.bytes_("00000000-0000-0000-0000-000000000000")
+
+        with self.assertRaises(ValueError) as ctx:
+            self._backend(grid_file=wrong).discover()
+        # the message has to name the grid that was found, since the usual cause
+        # is pointing at a grid from a different run
+        self.assertIn("00000000-0000-0000-0000-000000000000", str(ctx.exception))
+
+    def test_a_file_that_is_not_a_grid_is_refused(self):
+        not_a_grid = os.path.join(self.tmpdir.name, "not_a_grid.nc")
+        with h5.File(not_a_grid, "w") as handle:
+            handle.create_dataset("something", data=np.zeros(4))
+
+        with self.assertRaises(ValueError) as ctx:
+            self._backend(grid_file=not_a_grid).discover()
+        self.assertIn("clon", str(ctx.exception))
+
+
+class TestIconPickling(_IconFixture):
+
+    def test_handles_and_buffers_do_not_travel(self):
+        # a worker process gets the plan, not the open files or the scratch
+        # space, both of which it rebuilds for itself
+        backend = self._backend()
+        backend.discover()
+        backend.read(0, slice(0, 1), np.array([0]))
+
+        state = pickle.loads(pickle.dumps(backend)).__getstate__()
+
+        self.assertTrue(all(handle is None for handle in state["files"]))
+        self.assertIsNone(state["_buffer"])
+
+    def test_reads_survive_a_round_trip(self):
+        backend = self._backend()
+        backend.discover()
+        before = backend.read(0, slice(0, 2), np.array([0, 4]))
+
+        revived = pickle.loads(pickle.dumps(backend))
+        after = revived.read(0, slice(0, 2), np.array([0, 4]))
+
+        self.assertFieldEqual(after, before, "read after unpickling")
 
 
 class TestWb2Backend(unittest.TestCase):
+
+    def test_datetime64_times_survive_the_conversion(self):
+        """WB2 stores times as datetime64[ns], not as seconds.
+
+        They go through a nanosecond to second conversion that no other layout
+        needs, and getting that wrong by a factor of 1e9 lands the dataset in
+        1970 -- ordered, timezone aware and completely wrong.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            train_path = init_wb2_zarr_dataset(tmpdir)[0]
+            metadata = get_backend(train_path, channel_names=list(CHANNEL_NAMES)).discover()
+
+            self.assertEqual(metadata.timestamps[0], dt.datetime(TRAIN_YEARS[0], 1, 1, tzinfo=dt.timezone.utc))
+            self.assertEqual(metadata.timestamps[1] - metadata.timestamps[0], dt.timedelta(hours=DHOURS))
 
     def test_channel_names_are_required(self):
         # the layout addresses variables by name, so there is nothing to read

@@ -36,7 +36,13 @@ import zarr
 from zarr.core.buffer.cpu import NDBuffer as _ZarrNDBuffer
 
 from ..data_helpers import get_lat_lon_grid, get_timestamp
-from .base import BackendMetadata, DatasetBackend, GridSpec, order_files_by_time, timestamp_converter
+from .base import (
+    BackendMetadata,
+    DatasetBackend,
+    GridSpec,
+    order_files_by_time,
+    timestamp_converter,
+)
 from .makani_hdf5 import StructuredChunkMixin, contiguous_slices
 
 
@@ -64,6 +70,9 @@ def zarr_open(path, mode="r"):
 
 class MakaniZarrBackend(StructuredChunkMixin, DatasetBackend):
     """Reads the makani layout from zarr, one store per year."""
+
+    #: one store per year, named after it
+    default_file_pattern = "????"
 
     _handle_attributes = ("files", "dsets")
 
