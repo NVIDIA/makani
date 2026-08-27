@@ -1227,10 +1227,15 @@ class TestMultifilesDataset(unittest.TestCase):
         inp, tar = dataset[0]
 
         # channel c holds c + 1
-        np.testing.assert_allclose(inp[:, 0].numpy(), 1.0)
-        np.testing.assert_allclose(inp[:, 1].numpy(), 2.0)
-        np.testing.assert_allclose(tar[:, 0].numpy(), 4.0)
-        np.testing.assert_allclose(tar[:, 1].numpy(), 5.0)
+        for name, values, constant in (
+            ("inp c0", inp[:, 0], 1.0),
+            ("inp c1", inp[:, 1], 2.0),
+            ("tar c0", tar[:, 0], 4.0),
+            ("tar c1", tar[:, 1], 5.0),
+        ):
+            with self.subTest(field=name):
+                got = values.numpy()
+                self.assertTrue(compare_arrays(name, got, np.full_like(got, constant)))
 
     def test_target_channels_are_reordered_like_the_inputs(self):
         # an unsorted request has to come back in the order it was asked for,
@@ -1239,10 +1244,15 @@ class TestMultifilesDataset(unittest.TestCase):
 
         inp, tar = dataset[0]
 
-        np.testing.assert_allclose(inp[:, 0].numpy(), 2.0)
-        np.testing.assert_allclose(inp[:, 1].numpy(), 1.0)
-        np.testing.assert_allclose(tar[:, 0].numpy(), 5.0)
-        np.testing.assert_allclose(tar[:, 1].numpy(), 3.0)
+        for name, values, constant in (
+            ("inp c0", inp[:, 0], 2.0),
+            ("inp c1", inp[:, 1], 1.0),
+            ("tar c0", tar[:, 0], 5.0),
+            ("tar c1", tar[:, 1], 3.0),
+        ):
+            with self.subTest(field=name):
+                got = values.numpy()
+                self.assertTrue(compare_arrays(name, got, np.full_like(got, constant)))
 
     def test_timestamps_stride_by_dt(self):
         """The times returned belong to the samples returned.
@@ -1265,8 +1275,8 @@ class TestMultifilesDataset(unittest.TestCase):
 
         _, _, inp_time, _ = dataset[5]
 
-        expected = [dataset.timestamps[5], dataset.timestamps[5 + 3]]
-        np.testing.assert_allclose(inp_time.numpy(), expected)
+        expected = np.asarray([dataset.timestamps[5], dataset.timestamps[5 + 3]])
+        self.assertTrue(compare_arrays("input timestamps", inp_time.numpy(), expected))
 
     def test_target_times_stride_by_dt(self):
         dataset = self._make(dt=2, n_future=1, return_timestamp=True, add_zenith=False)
@@ -1297,7 +1307,7 @@ class TestMultifilesDataset(unittest.TestCase):
         with h5.File(sorted(glob.glob(os.path.join(self.train_path, "*.h5")))[0], "r") as handle:
             latitude = handle["lat"][...]
 
-        np.testing.assert_allclose(dataset.lat_lon[0], latitude, rtol=1e-6)
+        self.assertTrue(compare_arrays("latitudes", np.asarray(dataset.lat_lon[0]), latitude, rtol=1e-6))
 
     def test_lookup_by_time_round_trips(self):
         # inference addresses samples by timestamp, so the two directions have
