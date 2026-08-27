@@ -143,6 +143,16 @@ class IconBackend(MeshChunkMixin, DatasetBackend):
     max_open_files : int, optional
         Handles to keep. A long run touches one file per variable per day, which
         would otherwise accumulate.
+    enable_odirect : bool
+        Read through the O_DIRECT driver, bypassing the page cache. Worth more
+        here than for the makani layouts: a training run reads tens of gigabytes
+        per sample and never reads any of it twice, so everything it pulls
+        through the cache is eviction pressure on something else. The cost is
+        that a read shorter than the alignment is rounded up, which is why the
+        selection is coalesced into long runs first.
+    odirect_alignment : int
+        Alignment and block size for O_DIRECT, when the default does not suit
+        the filesystem.
     """
 
     #: named after the variable and the date, never after the year
@@ -157,6 +167,8 @@ class IconBackend(MeshChunkMixin, DatasetBackend):
         grid_file: Optional[str] = None,
         halo_degrees: Optional[float] = None,
         max_open_files: int = 64,
+        enable_odirect: bool = False,
+        odirect_alignment: int = 0,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -172,6 +184,11 @@ class IconBackend(MeshChunkMixin, DatasetBackend):
         self.grid_file = grid_file
         self.halo_degrees = halo_degrees
         self.max_open_files = max_open_files
+
+        self.file_driver = "direct" if enable_odirect else None
+        self.file_driver_kwargs = {}
+        if enable_odirect and odirect_alignment > 0:
+            self.file_driver_kwargs = dict(alignment=odirect_alignment, block_size=odirect_alignment)
 
         self.files: List = []
         self.source_paths: List[str] = []
@@ -403,7 +420,7 @@ class IconBackend(MeshChunkMixin, DatasetBackend):
     def _handle(self, path: str):
         index = self.path_index[path]
         if self.files[index] is None:
-            self.files[index] = h5py.File(path, "r")
+            self.files[index] = h5py.File(path, "r", driver=self.file_driver, **self.file_driver_kwargs)
         self._open_order[path] = index
         self._open_order.move_to_end(path)
 

@@ -52,7 +52,7 @@ BACKENDS = {
 LAYOUT_OPTIONS = {
     MakaniHDF5Backend: ("enable_odirect", "odirect_alignment", "enable_s3"),
     MakaniConcatBackend: ("enable_odirect", "odirect_alignment", "enable_s3"),
-    IconBackend: ("grid_file", "halo_degrees", "max_open_files"),
+    IconBackend: ("grid_file", "halo_degrees", "max_open_files", "enable_odirect", "odirect_alignment"),
 }
 
 

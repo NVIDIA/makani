@@ -82,6 +82,7 @@ class MultifilesDataset(Dataset):
         io_grid: Optional[List[int]] = [1, 1, 1],
         io_rank: Optional[List[int]] = [0, 0, 0],
         enable_logging: Optional[bool] = True,
+        backend: Optional[str] = None,
         **kwargs,
     ):
 
@@ -105,6 +106,7 @@ class MultifilesDataset(Dataset):
         self.enable_s3 = enable_s3
         self.enable_odirect = enable_odirect
         self.odirect_alignment = odirect_alignment
+        self.backend_name = backend
 
         # channels are read in ascending order because that is the only order
         # storage can serve efficiently, then permuted back into the requested one
@@ -171,6 +173,7 @@ class MultifilesDataset(Dataset):
         # dataset is not necessarily a file per year
         self.backend = get_backend(
             self.location,
+            backend=self.backend_name,
             dataset_name=self.dataset_name,
             timestamp_name=self.timestamp_name,
             channel_names=self.channel_names,

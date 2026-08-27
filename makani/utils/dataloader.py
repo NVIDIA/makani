@@ -118,6 +118,7 @@ def get_dataloader(params, files_pattern, device, mode="train", dali_device=None
             odirect_alignment=params.get("odirect_alignment", 0),
             io_grid=params.get("io_grid", [1, 1, 1]),
             io_rank=params.get("io_rank", [0, 0, 0]),
+            backend=params.get("dataset_backend", None),
         )
 
         if mode in ["train", "eval"]:
