@@ -37,7 +37,13 @@ from torch_harmonics.distributed import compute_split_shapes
 
 from ..aws_connector import get_default_aws_connector
 from ..data_helpers import get_lat_lon_grid, get_timestamp
-from .base import BackendMetadata, DatasetBackend, GridSpec, order_files_by_time, timestamp_converter
+from .base import (
+    BackendMetadata,
+    DatasetBackend,
+    GridSpec,
+    order_files_by_time,
+    timestamp_converter,
+)
 
 
 def contiguous_slices(indices: Sequence[int]):
@@ -114,6 +120,9 @@ class MakaniHDF5Backend(StructuredChunkMixin, DatasetBackend):
         exclusive with O_DIRECT, and disables ``read_direct``, which the ROS3
         driver does not support.
     """
+
+    #: one file per year, named after it
+    default_file_pattern = "????"
 
     _handle_attributes = ("files", "dsets")
     # the S3 connector holds a session that does not survive pickling
