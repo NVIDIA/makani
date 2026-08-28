@@ -139,14 +139,19 @@ def get_dataloader(params, files_pattern, device, mode="train", dali_device=None
                 pin_memory=torch.cuda.is_available(),
             )
         else:
-            # this will all be handled by the inferencer
+            # this will all be handled by the inferencer, which drives the dataset
+            # directly -- by index and by time -- so it has to stay reachable
             sampler = None
-            dataloader = types.SimpleNamespace()
+            dataloader = types.SimpleNamespace(dataset=dataset)
 
         # for compatibility with the DALI dataloader
         dataloader.lat_lon = dataset.lat_lon
         dataloader.get_output_normalization = dataset.get_output_normalization
         dataloader.get_input_normalization = dataset.get_input_normalization
+
+        # a torch DataLoader already carries its dataset, and refuses to have it
+        # reassigned; the stub above is given one explicitly
+        data_shapes = dataset.data_shapes
 
     elif params.enable_synthetic_data:
         from makani.utils.dataloaders.data_loader_dummy import DummyLoader
@@ -191,27 +196,7 @@ def get_dataloader(params, files_pattern, device, mode="train", dali_device=None
             io_rank=params.get("io_rank", [0, 0, 0]),
         )
 
-        dataset = types.SimpleNamespace(
-            in_channels=dataloader.in_channels,
-            out_channels=dataloader.out_channels,
-            grid_converter=dataloader.grid_converter,
-            img_shape_x=dataloader.img_shape[0],
-            img_shape_y=dataloader.img_shape[1],
-            img_crop_shape_x=dataloader.crop_shape[0],
-            img_crop_shape_y=dataloader.crop_shape[1],
-            img_crop_offset_x=dataloader.crop_anchor[0],
-            img_crop_offset_y=dataloader.crop_anchor[1],
-            img_local_shape_x=dataloader.read_shape[0],
-            img_local_shape_y=dataloader.read_shape[1],
-            img_local_offset_x=dataloader.read_anchor[0],
-            img_local_offset_y=dataloader.read_anchor[1],
-            img_local_shape_x_resampled=dataloader.return_shape[0],
-            img_local_shape_y_resampled=dataloader.return_shape[1],
-            img_shape_x_resampled=dataloader.img_shape_resampled[0],
-            img_shape_y_resampled=dataloader.img_shape_resampled[1],
-            subsampling_factor=dataloader.subsampling_factor,
-            lat_lon_local=dataloader.lat_lon_local,
-        )
+        data_shapes = dataloader.data_shapes
 
         # not needed for the no multifiles case
         sampler = None
@@ -224,29 +209,9 @@ def get_dataloader(params, files_pattern, device, mode="train", dali_device=None
             dali_device = "gpu" if torch.cuda.is_available() else "cpu"
         dataloader = DaliDataloader(params, files_pattern, (mode == "train"), dali_device=dali_device)
 
-        dataset = types.SimpleNamespace(
-            in_channels=dataloader.in_channels,
-            out_channels=dataloader.out_channels,
-            grid_converter=dataloader.grid_converter,
-            img_shape_x=dataloader.img_shape_x,
-            img_shape_y=dataloader.img_shape_y,
-            img_crop_shape_x=dataloader.img_crop_shape_x,
-            img_crop_shape_y=dataloader.img_crop_shape_y,
-            img_crop_offset_x=dataloader.img_crop_offset_x,
-            img_crop_offset_y=dataloader.img_crop_offset_y,
-            img_local_shape_x=dataloader.img_local_shape_x,
-            img_local_shape_y=dataloader.img_local_shape_y,
-            img_local_offset_x=dataloader.img_local_offset_x,
-            img_local_offset_y=dataloader.img_local_offset_y,
-            img_local_shape_x_resampled=dataloader.img_local_shape_x_resampled,
-            img_local_shape_y_resampled=dataloader.img_local_shape_y_resampled,
-            img_shape_x_resampled=dataloader.img_shape_x_resampled,
-            img_shape_y_resampled=dataloader.img_shape_y_resampled,
-            subsampling_factor=dataloader.subsampling_factor,
-            lat_lon_local=dataloader.lat_lon_local,
-        )
+        data_shapes = dataloader.data_shapes
 
         # not needed for the no multifiles case
         sampler = None
 
-    return dataloader, dataset, sampler
+    return dataloader, data_shapes, sampler

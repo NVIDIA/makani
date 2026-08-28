@@ -46,6 +46,7 @@ from makani.utils.dataloaders.data_helpers import (
 
 # storage backends
 from makani.utils.dataloaders.backends import get_backend
+from makani.utils.dataloaders.data_shapes import DataShapes
 
 # for grid conversion
 from makani.utils.grids import GridConverter
@@ -165,6 +166,9 @@ class MultifilesDataset(Dataset):
             torch.deg2rad(torch.tensor(self.lat_lon_local[0])).to(torch.float32),
             torch.deg2rad(torch.tensor(self.lat_lon_local[1])).to(torch.float32),
         )
+
+        # the geometry the run needs, in the one shape every loader reports it
+        self.data_shapes = DataShapes.from_loader(self)
 
     def _get_files_stats(self, enable_logging):
         """Ask the backend what is there, and settle what this rank reads."""

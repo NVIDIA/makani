@@ -103,10 +103,14 @@ class Inferencer(Driver):
             self.params["enable_synthetic_data"] = False
 
         # the file path is taken from inf_data_path to perform inference on the out of sample dataset
-        self.valid_dataloader, self.valid_dataset, _ = get_dataloader(
+        self.valid_dataloader, self.valid_data_shapes, _ = get_dataloader(
             self.params, self.params.inf_data_path, mode="inference", device=self.device
         )
-        self._set_data_shapes(self.params, self.valid_dataset)
+        self._set_data_shapes(self.params, self.valid_data_shapes)
+
+        # inference addresses samples by index and by time, which is the dataset's
+        # own business rather than anything the shapes describe
+        self.valid_dataset = self.valid_dataloader.dataset
 
         if self.log_to_screen:
             self.logger.info("data loader initialized")

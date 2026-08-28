@@ -28,6 +28,7 @@ from makani.utils import comm
 from torch_harmonics.distributed import compute_split_shapes
 
 # for grid conversion
+from makani.utils.dataloaders.data_shapes import DataShapes
 from makani.utils.grids import GridConverter
 
 # data helpers
@@ -104,15 +105,15 @@ class DummyLoader(object):
             self.lat_lon = None
 
         # get cropping:
-        self.crop_shape = crop_size
+        self.crop_size = crop_size
         self.crop_anchor = crop_anchor
 
         self._get_files_stats()
 
         # get local lat lon (overrides the read_anchor-based slice from _get_files_stats)
         self.lat_lon_local = (
-            self.lat_lon[0][self.crop_anchor[0] : self.crop_anchor[0] + self.crop_shape[0]],
-            self.lat_lon[1][self.crop_anchor[1] : self.crop_anchor[1] + self.crop_shape[1]],
+            self.lat_lon[0][self.crop_anchor[0] : self.crop_anchor[0] + self.crop_size[0]],
+            self.lat_lon[1][self.crop_anchor[1] : self.crop_anchor[1] + self.crop_size[1]],
         )
 
         # zenith angle yes or no?
@@ -131,6 +132,9 @@ class DummyLoader(object):
             torch.deg2rad(torch.as_tensor(self.lat_lon_local[0])).to(torch.float32),
             torch.deg2rad(torch.as_tensor(self.lat_lon_local[1])).to(torch.float32),
         )
+
+        # the geometry the run needs, in the one shape every loader reports it
+        self.data_shapes = DataShapes.from_loader(self)
 
     def _get_files_stats(self):
 
@@ -171,32 +175,32 @@ class DummyLoader(object):
 
         # determine local read size:
         # sanitize the crops first
-        if self.crop_shape[0] is None:
-            self.crop_shape_x = self.img_shape[0]
+        if self.crop_size[0] is None:
+            self.crop_size_x = self.img_shape[0]
         else:
-            self.crop_shape_x = self.crop_shape[0]
-        if self.crop_shape[1] is None:
-            self.crop_shape_y = self.img_shape[1]
+            self.crop_size_x = self.crop_size[0]
+        if self.crop_size[1] is None:
+            self.crop_size_y = self.img_shape[1]
         else:
-            self.crop_shape_y = self.crop_shape[1]
-        self.crop_shape = (self.crop_shape_x, self.crop_shape_y)
+            self.crop_size_y = self.crop_size[1]
+        self.crop_size = (self.crop_size_x, self.crop_size_y)
 
-        if self.crop_anchor[0] + self.crop_shape[0] > self.img_shape[0]:
+        if self.crop_anchor[0] + self.crop_size[0] > self.img_shape[0]:
             raise ValueError(
-                f"crop in dimension 0 (anchor {self.crop_anchor[0]} + shape {self.crop_shape[0]}) exceeds image shape {self.img_shape[0]}"
+                f"crop in dimension 0 (anchor {self.crop_anchor[0]} + shape {self.crop_size[0]}) exceeds image shape {self.img_shape[0]}"
             )
-        if self.crop_anchor[1] + self.crop_shape[1] > self.img_shape[1]:
+        if self.crop_anchor[1] + self.crop_size[1] > self.img_shape[1]:
             raise ValueError(
-                f"crop in dimension 1 (anchor {self.crop_anchor[1]} + shape {self.crop_shape[1]}) exceeds image shape {self.img_shape[1]}"
+                f"crop in dimension 1 (anchor {self.crop_anchor[1]} + shape {self.crop_size[1]}) exceeds image shape {self.img_shape[1]}"
             )
 
         # for x
-        split_shapes_x = compute_split_shapes(self.crop_shape[0], self.io_grid[0])
+        split_shapes_x = compute_split_shapes(self.crop_size[0], self.io_grid[0])
         read_shape_x = split_shapes_x[self.io_rank[0]]
         read_anchor_x = sum(split_shapes_x[: self.io_rank[0]])
 
         # for y
-        split_shapes_y = compute_split_shapes(self.crop_shape[1], self.io_grid[1])
+        split_shapes_y = compute_split_shapes(self.crop_size[1], self.io_grid[1])
         read_shape_y = split_shapes_y[self.io_rank[1]]
         read_anchor_y = sum(split_shapes_y[: self.io_rank[1]])
 
@@ -208,29 +212,10 @@ class DummyLoader(object):
             math.ceil(self.read_shape[1] / self.subsampling_factor),
         )
 
-        # set properties for compatibility
-        self.img_shape_x = self.img_shape[0]
-        self.img_shape_y = self.img_shape[1]
-
-        self.img_crop_shape_x = self.crop_shape[0]
-        self.img_crop_shape_y = self.crop_shape[1]
-        self.img_crop_offset_x = self.crop_anchor[0]
-        self.img_crop_offset_y = self.crop_anchor[1]
-
-        self.img_local_shape_x = self.read_shape[0]
-        self.img_local_shape_y = self.read_shape[1]
-        self.img_local_offset_x = self.read_anchor[0]
-        self.img_local_offset_y = self.read_anchor[1]
-
-        # resampling stuff
         self.img_shape_resampled = (
             math.ceil(self.img_shape[0] / self.subsampling_factor),
             math.ceil(self.img_shape[1] / self.subsampling_factor),
         )
-        self.img_local_shape_x_resampled = self.return_shape[0]
-        self.img_local_shape_y_resampled = self.return_shape[1]
-        self.img_shape_x_resampled = self.img_shape_resampled[0]
-        self.img_shape_y_resampled = self.img_shape_resampled[1]
 
         # auto-create lat/lon if the caller didn't supply them
         # (matches the pattern used by SampleSource)
