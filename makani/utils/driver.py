@@ -183,32 +183,36 @@ class Driver(metaclass=abc.ABCMeta):
 
         return params
 
-    def _set_data_shapes(self, params, dataset):
+    def _set_data_shapes(self, params, data_shapes):
+        """Copy the loader's geometry into ``params``.
+
+        The rest of the run reads its shapes from ``params`` rather than from the
+        loader, so this is where the two meet. ``data_shapes`` is a
+        :class:`~makani.utils.dataloaders.data_shapes.DataShapes`, which every
+        loader reports in the same form.
         """
-        Routine for setting the shapes correctly
-        """
 
-        params.N_in_channels = len(dataset.in_channels)
-        params.N_out_channels = len(dataset.out_channels)
+        params.N_in_channels = len(data_shapes.in_channels)
+        params.N_out_channels = len(data_shapes.out_channels)
 
-        params.img_shape_x = dataset.img_shape_x
-        params.img_shape_y = dataset.img_shape_y
+        params.img_shape_x = data_shapes.img_shape_x
+        params.img_shape_y = data_shapes.img_shape_y
 
-        params.img_crop_shape_x = dataset.img_crop_shape_x
-        params.img_crop_shape_y = dataset.img_crop_shape_y
-        params.img_crop_offset_x = dataset.img_crop_offset_x
-        params.img_crop_offset_y = dataset.img_crop_offset_y
+        params.img_crop_shape_x = data_shapes.img_crop_shape_x
+        params.img_crop_shape_y = data_shapes.img_crop_shape_y
+        params.img_crop_offset_x = data_shapes.img_crop_offset_x
+        params.img_crop_offset_y = data_shapes.img_crop_offset_y
 
-        params.img_local_shape_x = dataset.img_local_shape_x
-        params.img_local_shape_y = dataset.img_local_shape_y
-        params.img_local_offset_x = dataset.img_local_offset_x
-        params.img_local_offset_y = dataset.img_local_offset_y
+        params.img_local_shape_x = data_shapes.img_local_shape_x
+        params.img_local_shape_y = data_shapes.img_local_shape_y
+        params.img_local_offset_x = data_shapes.img_local_offset_x
+        params.img_local_offset_y = data_shapes.img_local_offset_y
 
-        params.img_local_shape_x_resampled = dataset.img_local_shape_x_resampled
-        params.img_local_shape_y_resampled = dataset.img_local_shape_y_resampled
-        params.img_shape_x_resampled = dataset.img_shape_x_resampled
-        params.img_shape_y_resampled = dataset.img_shape_y_resampled
-        params.subsampling_factor = dataset.subsampling_factor
+        params.img_local_shape_x_resampled = data_shapes.img_local_shape_x_resampled
+        params.img_local_shape_y_resampled = data_shapes.img_local_shape_y_resampled
+        params.img_shape_x_resampled = data_shapes.img_shape_x_resampled
+        params.img_shape_y_resampled = data_shapes.img_shape_y_resampled
+        params.subsampling_factor = data_shapes.subsampling_factor
 
         if (params.subsampling_factor > 1) and (
             (params.img_crop_shape_x != params.img_shape_x) or (params.img_crop_shape_y != params.img_shape_y)

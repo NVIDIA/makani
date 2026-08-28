@@ -45,6 +45,7 @@ from makani.utils import comm
 
 # es helper
 from makani.utils.dataloaders.data_helpers import get_data_normalization
+from makani.utils.dataloaders.data_shapes import DataShapes
 from makani.utils.dataloaders.sample_source import SampleSource
 from makani.utils.grids import GridConverter
 
@@ -79,8 +80,8 @@ class DaliDataloader(object):
             checkpoint=checkpoint,
         )
 
-        img_shape_x = self.img_shape_x
-        img_shape_y = self.img_shape_y
+        img_shape_x = self.data_shapes.img_shape_x
+        img_shape_y = self.data_shapes.img_shape_y
         in_channels = self.in_channels
         out_channels = self.out_channels
 
@@ -295,29 +296,10 @@ class DaliDataloader(object):
         )
 
         # some image properties
-        self.img_shape_x = self.extsource.img_shape[0]
-        self.img_shape_y = self.extsource.img_shape[1]
-
-        self.img_crop_shape_x = self.extsource.crop_size[0]
-        self.img_crop_shape_y = self.extsource.crop_size[1]
-        self.img_crop_offset_x = self.extsource.crop_anchor[0]
-        self.img_crop_offset_y = self.extsource.crop_anchor[1]
-
-        self.img_local_shape_x = self.extsource.read_shape[0]
-        self.img_local_shape_y = self.extsource.read_shape[1]
-        self.img_local_offset_x = self.extsource.read_anchor[0]
-        self.img_local_offset_y = self.extsource.read_anchor[1]
-
-        # resampled shape
-        self.img_shape_x_resampled = self.extsource.img_shape_resampled[0]
-        self.img_shape_y_resampled = self.extsource.img_shape_resampled[1]
-        self.img_local_shape_x_resampled = self.extsource.return_shape[0]
-        self.img_local_shape_y_resampled = self.extsource.return_shape[1]
-
-        # lat lon coords
+        # the geometry the run needs, in the one shape every loader reports it
+        self.data_shapes = DataShapes.from_loader(self.extsource, grid_converter=self.grid_converter)
         self.lat_lon_local = self.extsource.lat_lon_local
 
-        # num steps
         self.num_steps_per_epoch = self.extsource.num_steps_per_epoch
 
         # load stats
