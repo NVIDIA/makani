@@ -71,6 +71,7 @@ from makani.utils.dataloaders.backends import (
 from makani.utils.dataloaders.backends.base import GridSpec
 from makani.utils.dataloaders.backends.factory import detect_backend
 from makani.utils.dataloaders.backends.makani_hdf5 import contiguous_slices
+from makani.utils.dataloaders.backends.icon import survey_files, variable_of_file
 from makani.utils.dataloaders.backends.mesh import block_of_rank, coalesce_runs
 
 from .testutils import (
@@ -1065,6 +1066,112 @@ class TestIconDiscovery(_IconFixture):
     def test_detected_from_the_extension(self):
         self.assertEqual(detect_backend(self.data_path), "icon")
         self.assertIsInstance(self._backend(), IconBackend)
+
+
+class TestVariableOfFile(unittest.TestCase):
+    """Reading a variable name off an ICON filename.
+
+    ICON names a file after the variable and then decorates it, which is enough
+    to tell -- before opening anything -- whether a run has any use for it. What
+    makes it delicate is that the names nest.
+    """
+
+    CANDIDATES = ["u", "v", "temp", "t_2m", "u_10m", "v_10m", "qv", "qg"]
+
+    def test_the_leading_name_is_the_variable(self):
+        self.assertEqual(variable_of_file("temp_EXCLAIM_atm_1_3_20210601T000000Z.nc", self.CANDIDATES), "temp")
+
+    def test_the_longest_match_wins(self):
+        """``u_10m`` is not ``u``.
+
+        Ten metre wind and upper air wind are both plausible fields of the same
+        name, so a prefix match that stops at the first candidate reads one as
+        the other and nothing downstream can tell.
+        """
+        self.assertEqual(variable_of_file("u_10m_dyamond_atm_7_202106.nc", self.CANDIDATES), "u_10m")
+        self.assertEqual(variable_of_file("u_EXCLAIM_atm_1_4_20210601T000000Z.nc", self.CANDIDATES), "u")
+
+    def test_a_name_with_underscores_is_matched_whole(self):
+        # splitting on the separator would give "t", which is a different table entry
+        self.assertEqual(variable_of_file("t_2m_dyamond_atm_3_202106.nc", self.CANDIDATES), "t_2m")
+
+    def test_a_prefix_has_to_end_at_a_separator(self):
+        # "temperature" is not "temp": matching mid-word would claim files that
+        # belong to a variable nobody asked about
+        self.assertIsNone(variable_of_file("temperature_of_something.nc", ["temp"]))
+
+    def test_an_unknown_name_says_nothing(self):
+        self.assertIsNone(variable_of_file("icon_grid_0056_R02B10_G.nc", self.CANDIDATES))
+
+    def test_the_survey_groups_by_variable(self):
+        survey = survey_files(["u_a_20210601.nc", "u_a_20210602.nc", "u_10m_b.nc", "mystery.nc"], self.CANDIDATES)
+
+        self.assertEqual(survey["u"], ["u_a_20210601.nc", "u_a_20210602.nc"])
+        self.assertEqual(survey["u_10m"], ["u_10m_b.nc"])
+        self.assertEqual(survey[None], ["mystery.nc"])
+
+
+class TestIconFileSurvey(_IconFixture):
+    """Which files discovery opens, and which it leaves alone.
+
+    A run reads a dozen variables from a directory that may hold far more, and
+    on a parallel filesystem every open is a round trip before the file says
+    anything. Names are used to skip work; what a file actually holds is still
+    read from inside it.
+    """
+
+    def _corrupt(self, name):
+        """A file that cannot be opened, so that opening it is detectable."""
+        path = os.path.join(self.data_path, name)
+        with open(path, "wb") as handle:
+            handle.write(b"not an hdf5 file at all")
+        self.addCleanup(os.remove, path)
+        return path
+
+    def test_a_file_for_an_unwanted_variable_is_never_opened(self):
+        """The assertion is the corruption: opening it would raise.
+
+        ``qg`` is a real ICON variable and no channel here asks for it, so
+        discovery should recognise the name and pass over the file without
+        looking inside.
+        """
+        self._corrupt("qg_EXCLAIM_coupled_dyamond_atm_1_3_20210601T000000Z.nc")
+
+        metadata = self._backend().discover()
+
+        self.assertEqual(len(metadata.timestamps), self.n_samples)
+
+    def test_a_file_with_an_unrecognised_name_is_still_opened(self):
+        """Skipping is a guess; reading is not.
+
+        A dataset whose naming does not follow the convention has to keep
+        working, so a name that matches nothing known is opened rather than
+        assumed to be irrelevant.
+        """
+        self._corrupt("mystery_file.nc")
+
+        with self.assertRaises(Exception):
+            self._backend().discover()
+
+    def test_the_survey_records_what_it_found(self):
+        backend = self._backend()
+        backend.discover()
+
+        self.assertIn("temp", backend.survey)
+        self.assertIn("u", backend.survey)
+        self.assertIn("t_2m", backend.survey)
+
+    def test_reading_is_unaffected_by_the_skipping(self):
+        # the same values as without the extra file present
+        self._corrupt("qs_EXCLAIM_coupled_dyamond_atm_1_3_20210601T000000Z.nc")
+        backend = self._backend()
+        backend.discover()
+
+        values = backend.read(0, slice(0, 1), np.array([0]))[0, 0]
+        expected = icon_expected_field("u", 0, ICON_PLEV_HPA.index(500))
+
+        finite = ~np.isnan(expected)
+        self.assertTrue(compare_arrays("u500 with a skipped file present", values[finite], expected[finite], atol=1e-5))
 
 
 class TestIconReading(_IconFixture):

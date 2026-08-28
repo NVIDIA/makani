@@ -58,13 +58,17 @@ import glob
 import logging
 import os
 from collections import OrderedDict
-from typing import Dict, List, NamedTuple, Optional, Tuple
+from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 import h5py
 import numpy as np
 
+from ..channel_helpers import split_channel_name
 from ..icon_helpers import (
+    accumulated_variables,
+    atmospheric_variables,
     build_icon_channel_groups,
+    surface_variables,
     check_grid_uuid,
     decode_time,
     decode_values,
@@ -78,6 +82,73 @@ from .mesh import MeshChunkMixin
 #: level coordinates ICON writes, and what they mean for a makani channel
 PRESSURE_LEVEL_NAMES = ("plev", "pressure", "lev")
 SURFACE_LEVEL_NAMES = ("height", "height_2", "heightAboveGround", "alt", "altitude", "depth")
+
+
+def _candidate_names(candidates) -> List[str]:
+    """Every variable name in a table entry, flattening summed components."""
+    names = []
+    for candidate in candidates or ():
+        if hasattr(candidate, "name"):
+            names.append(candidate.name)
+        else:
+            # a tuple of components that are summed to form the channel
+            names.extend(component.name for component in candidate)
+    return names
+
+
+def candidate_variable_names(channel_names: Sequence[str]) -> List[str]:
+    """Every ICON variable that could serve one of these channels.
+
+    The alternatives, not the resolved choice: a run asking for ``u500`` may be
+    served by ``u`` or ``ua``, and which one is present is exactly what has not
+    been established yet.
+    """
+    names = set()
+    for channel in channel_names:
+        prefix, level = split_channel_name(channel)
+        if level is not None:
+            names.update(_candidate_names(atmospheric_variables.get(prefix)))
+        else:
+            names.update(_candidate_names(surface_variables.get(channel)))
+            names.update(_candidate_names(accumulated_variables.get(channel)))
+    return sorted(names)
+
+
+def known_variable_names() -> List[str]:
+    """Every ICON variable the channel tables know about.
+
+    Classification uses this rather than the wanted set, so that a file holding
+    a variable no channel asked for is recognised *and skipped*, while a file
+    whose name matches nothing stays a candidate for opening.
+    """
+    names = set()
+    for table in (atmospheric_variables, surface_variables, accumulated_variables):
+        for candidates in table.values():
+            names.update(_candidate_names(candidates))
+    return sorted(names)
+
+
+def variable_of_file(path: str, candidates: Sequence[str]) -> Optional[str]:
+    """Which variable a file holds, from its name, or None if it says nothing.
+
+    ICON names a file after the variable it carries and then decorates it, so
+    ``temp_EXCLAIM_..._20210601T000000Z.nc`` is ``temp``. The catch is that the
+    names nest: ``u_10m_dyamond_...`` starts with ``u_`` as well as ``u_10m_``,
+    and reading ten metre wind as upper air ``u`` would be silent. The longest
+    match is therefore the answer, and only names we are actually looking for
+    are candidates at all.
+    """
+    stem = os.path.splitext(os.path.basename(path))[0]
+    matches = [name for name in candidates if stem == name or stem.startswith(name + "_")]
+    return max(matches, key=len) if matches else None
+
+
+def survey_files(paths: Sequence[str], candidates: Sequence[str]) -> Dict[Optional[str], List[str]]:
+    """Group files by the variable their name claims, before opening any of them."""
+    survey: Dict[Optional[str], List[str]] = {}
+    for path in paths:
+        survey.setdefault(variable_of_file(path, candidates), []).append(path)
+    return survey
 
 
 class VariableSource(NamedTuple):
@@ -223,6 +294,38 @@ class IconBackend(MeshChunkMixin, DatasetBackend):
                     return name, pressure_levels_in_hpa(handle[name])
                 return name, values
         return None, None
+
+    def _files_worth_opening(self, files: List[str], enable_logging: bool) -> List[str]:
+        """Drop the files whose name says they hold a variable nothing asked for.
+
+        A run reads a dozen variables out of a directory that may hold many
+        more, and every file it opens costs a round trip to the metadata server
+        before it says anything. Names are used only to *skip*: which variable a
+        file really holds, and whether it is on pressure levels, is still
+        decided by looking inside the ones that survive.
+
+        A file whose name matches nothing known is kept rather than dropped,
+        and if no wanted variable is named at all the survey is ignored
+        entirely -- so a dataset that does not follow the convention costs what
+        it always did rather than quietly losing data.
+        """
+        wanted = set(candidate_variable_names(self.channel_names))
+        self.survey = survey_files(files, known_variable_names())
+
+        named = {name for name in self.survey if name is not None}
+        if not named & wanted:
+            # the names say nothing we recognise, so they are no guide at all
+            return files
+
+        keep = [path for name in named & wanted for path in self.survey[name]]
+        # a name that matches nothing known could still hold a wanted variable
+        keep += self.survey.get(None, [])
+
+        skipped = len(files) - len(keep)
+        if skipped and enable_logging:
+            logging.info(f"Skipping {skipped} of {len(files)} ICON files: no channel asks for what they hold")
+
+        return sorted(keep)
 
     def _inspect(self, path: str, grid_uuid: Optional[str]) -> Dict[str, dict]:
         """What one file contributes: its variables, their times and levels."""
@@ -389,6 +492,7 @@ class IconBackend(MeshChunkMixin, DatasetBackend):
         if enable_logging:
             logging.info(f"Getting file stats from {len(files)} ICON files, grid {os.path.basename(self.grid_file)}")
 
+        files = self._files_worth_opening(files, enable_logging)
         sources = self._build_sources(files, getattr(self, "grid_uuid", None))
         self.channel_plan = self._resolve_channels(sources)
 
