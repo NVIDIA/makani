@@ -54,17 +54,23 @@ to come from running several workers, which is what the DALI pipeline already
 does.
 """
 
+import datetime as dt
 import glob
 import logging
 import os
-from collections import OrderedDict
-from typing import Dict, List, NamedTuple, Optional, Tuple
+import re
+from collections import Counter, OrderedDict
+from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 import h5py
 import numpy as np
 
+from ..channel_helpers import split_channel_name
 from ..icon_helpers import (
+    accumulated_variables,
+    atmospheric_variables,
     build_icon_channel_groups,
+    surface_variables,
     check_grid_uuid,
     decode_time,
     decode_values,
@@ -78,6 +84,97 @@ from .mesh import MeshChunkMixin
 #: level coordinates ICON writes, and what they mean for a makani channel
 PRESSURE_LEVEL_NAMES = ("plev", "pressure", "lev")
 SURFACE_LEVEL_NAMES = ("height", "height_2", "heightAboveGround", "alt", "altitude", "depth")
+
+
+def _candidate_names(candidates) -> List[str]:
+    """Every variable name in a table entry, flattening summed components."""
+    names = []
+    for candidate in candidates or ():
+        if hasattr(candidate, "name"):
+            names.append(candidate.name)
+        else:
+            # a tuple of components that are summed to form the channel
+            names.extend(component.name for component in candidate)
+    return names
+
+
+def candidate_variable_names(channel_names: Sequence[str]) -> List[str]:
+    """Every ICON variable that could serve one of these channels.
+
+    The alternatives, not the resolved choice: a run asking for ``u500`` may be
+    served by ``u`` or ``ua``, and which one is present is exactly what has not
+    been established yet.
+    """
+    names = set()
+    for channel in channel_names:
+        prefix, level = split_channel_name(channel)
+        if level is not None:
+            names.update(_candidate_names(atmospheric_variables.get(prefix)))
+        else:
+            names.update(_candidate_names(surface_variables.get(channel)))
+            names.update(_candidate_names(accumulated_variables.get(channel)))
+    return sorted(names)
+
+
+def known_variable_names() -> List[str]:
+    """Every ICON variable the channel tables know about.
+
+    Classification uses this rather than the wanted set, so that a file holding
+    a variable no channel asked for is recognised *and skipped*, while a file
+    whose name matches nothing stays a candidate for opening.
+    """
+    names = set()
+    for table in (atmospheric_variables, surface_variables, accumulated_variables):
+        for candidates in table.values():
+            names.update(_candidate_names(candidates))
+    return sorted(names)
+
+
+def variable_of_file(path: str, candidates: Sequence[str]) -> Optional[str]:
+    """Which variable a file holds, from its name, or None if it says nothing.
+
+    ICON names a file after the variable it carries and then decorates it, so
+    ``temp_EXCLAIM_..._20210601T000000Z.nc`` is ``temp``. The catch is that the
+    names nest: ``u_10m_dyamond_...`` starts with ``u_`` as well as ``u_10m_``,
+    and reading ten metre wind as upper air ``u`` would be silent. The longest
+    match is therefore the answer, and only names we are actually looking for
+    are candidates at all.
+    """
+    stem = os.path.splitext(os.path.basename(path))[0]
+    matches = [name for name in candidates if stem == name or stem.startswith(name + "_")]
+    return max(matches, key=len) if matches else None
+
+
+#: how ICON stamps a file with the period it covers: a full timestamp for the
+#: daily files, a bare year and month for the aggregated ones
+_DATE_PATTERNS = (
+    (re.compile(r"(\d{8})T(\d{6})Z"), "%Y%m%d%H%M%S"),
+    (re.compile(r"_(\d{6})(?=[._]|$)"), "%Y%m"),
+)
+
+
+def date_of_file(path: str) -> Optional[dt.datetime]:
+    """When the period a file covers begins, from its name.
+
+    ``..._20210601T000000Z.nc`` starts at midnight on the first of June;
+    ``..._202106.nc`` is the monthly aggregate and starts at the same place.
+    Returns None when the name carries no date, which is a reason to open the
+    file rather than to guess.
+    """
+    stem = os.path.basename(path)
+    for pattern, fmt in _DATE_PATTERNS:
+        match = pattern.search(stem)
+        if match:
+            return dt.datetime.strptime("".join(match.groups()), fmt).replace(tzinfo=dt.timezone.utc)
+    return None
+
+
+def survey_files(paths: Sequence[str], candidates: Sequence[str]) -> Dict[Optional[str], List[str]]:
+    """Group files by the variable their name claims, before opening any of them."""
+    survey: Dict[Optional[str], List[str]] = {}
+    for path in paths:
+        survey.setdefault(variable_of_file(path, candidates), []).append(path)
+    return survey
 
 
 class VariableSource(NamedTuple):
@@ -224,6 +321,38 @@ class IconBackend(MeshChunkMixin, DatasetBackend):
                 return name, values
         return None, None
 
+    def _files_worth_opening(self, files: List[str], enable_logging: bool) -> List[str]:
+        """Drop the files whose name says they hold a variable nothing asked for.
+
+        A run reads a dozen variables out of a directory that may hold many
+        more, and every file it opens costs a round trip to the metadata server
+        before it says anything. Names are used only to *skip*: which variable a
+        file really holds, and whether it is on pressure levels, is still
+        decided by looking inside the ones that survive.
+
+        A file whose name matches nothing known is kept rather than dropped,
+        and if no wanted variable is named at all the survey is ignored
+        entirely -- so a dataset that does not follow the convention costs what
+        it always did rather than quietly losing data.
+        """
+        wanted = set(candidate_variable_names(self.channel_names))
+        self.survey = survey_files(files, known_variable_names())
+
+        named = {name for name in self.survey if name is not None}
+        if not named & wanted:
+            # the names say nothing we recognise, so they are no guide at all
+            return files
+
+        keep = [path for name in named & wanted for path in self.survey[name]]
+        # a name that matches nothing known could still hold a wanted variable
+        keep += self.survey.get(None, [])
+
+        skipped = len(files) - len(keep)
+        if skipped and enable_logging:
+            logging.info(f"Skipping {skipped} of {len(files)} ICON files: no channel asks for what they hold")
+
+        return sorted(keep)
+
     def _inspect(self, path: str, grid_uuid: Optional[str]) -> Dict[str, dict]:
         """What one file contributes: its variables, their times and levels."""
         found = {}
@@ -246,6 +375,83 @@ class IconBackend(MeshChunkMixin, DatasetBackend):
                 }
         return found
 
+    def _file_groups(self, files: List[str]) -> List[List[str]]:
+        """Files grouped by the variable their name claims.
+
+        A group shares a level coordinate, a cadence and a file length, which is
+        what lets most of it be described from one member. Files whose name says
+        nothing are each their own group, so nothing is assumed about them.
+        """
+        keep = set(files)
+        groups = []
+        for name, paths in self.survey.items():
+            present = sorted(path for path in paths if path in keep)
+            if not present:
+                continue
+            if name is None:
+                groups.extend([path] for path in present)
+            else:
+                groups.append(present)
+        return groups
+
+    def _inspect_group(self, paths: List[str], grid_uuid: Optional[str]) -> Dict[str, Dict[str, dict]]:
+        """Describe every file of one variable, opening as few as possible.
+
+        The level coordinate, the cadence and the length are properties of the
+        variable rather than of the file, so one member describes them all. Only
+        the sample times differ, and a file stamped with the period it covers
+        says those too -- given that it is the same shape as its neighbours.
+
+        Three things keep that from being a guess:
+
+        * the first and last file are always read, because truncation happens at
+          the ends of a run;
+        * a file whose size differs from the rest of the group is read, since a
+          short file is exactly the one whose times cannot be derived;
+        * what is derived for the last file is checked against what was read
+          from it, and a mismatch abandons the shortcut for the whole group.
+
+        Getting this wrong would be silent -- plausible times attached to the
+        wrong samples -- so the fallback is to open everything, which is what
+        this did before.
+        """
+        opened = {path: self._inspect(path, grid_uuid) for path in {paths[0], paths[-1]}}
+        if len(paths) <= 2:
+            return {path: opened[path] for path in paths}
+
+        dates = {path: date_of_file(path) for path in paths}
+        sizes = {path: os.path.getsize(path) for path in paths}
+        usual_size = Counter(sizes.values()).most_common(1)[0][0]
+
+        first, last = paths[0], paths[-1]
+        reference = opened[first]
+
+        def derived(path) -> Optional[Dict[str, dict]]:
+            """The description a file's name implies, or None if it does not."""
+            if dates[path] is None or dates[first] is None or sizes[path] != usual_size:
+                return None
+            shift = dates[path] - dates[first]
+            return {name: dict(info, times=info["times"] + shift) for name, info in reference.items()}
+
+        # the check: the last file was read, so what its name implies can be
+        # compared against what it actually says
+        predicted = derived(last)
+        trustworthy = predicted is not None and all(
+            np.array_equal(predicted[name]["times"], opened[last][name]["times"]) for name in opened[last]
+        )
+        if not trustworthy:
+            logging.debug("ICON file names do not predict their contents for this group; reading every file")
+            return {path: self._inspect(path, grid_uuid) for path in paths}
+
+        described = {}
+        for path in paths:
+            if path in opened:
+                described[path] = opened[path]
+                continue
+            implied = derived(path)
+            described[path] = implied if implied is not None else self._inspect(path, grid_uuid)
+        return described
+
     def _build_sources(self, files: List[str], grid_uuid: Optional[str]) -> Dict[str, VariableSource]:
         """Collect every variable across every file, in time order.
 
@@ -255,8 +461,12 @@ class IconBackend(MeshChunkMixin, DatasetBackend):
         """
         collected: Dict[Tuple[str, Optional[str]], dict] = {}
 
+        described = {}
+        for group in self._file_groups(files):
+            described.update(self._inspect_group(group, grid_uuid))
+
         for path in files:
-            for name, info in self._inspect(path, grid_uuid).items():
+            for name, info in described[path].items():
                 key = (name, info["level_name"])
                 entry = collected.setdefault(
                     key, {"paths": [], "times": [], "levels": info["levels"], "n_cells": info["n_cells"]}
@@ -389,6 +599,7 @@ class IconBackend(MeshChunkMixin, DatasetBackend):
         if enable_logging:
             logging.info(f"Getting file stats from {len(files)} ICON files, grid {os.path.basename(self.grid_file)}")
 
+        files = self._files_worth_opening(files, enable_logging)
         sources = self._build_sources(files, getattr(self, "grid_uuid", None))
         self.channel_plan = self._resolve_channels(sources)
 
