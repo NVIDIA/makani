@@ -71,7 +71,7 @@ from makani.utils.dataloaders.backends import (
 from makani.utils.dataloaders.backends.base import GridSpec
 from makani.utils.dataloaders.backends.factory import detect_backend
 from makani.utils.dataloaders.backends.makani_hdf5 import contiguous_slices
-from makani.utils.dataloaders.backends.icon import survey_files, variable_of_file
+from makani.utils.dataloaders.backends.icon import date_of_file, survey_files, variable_of_file
 from makani.utils.dataloaders.backends.mesh import block_of_rank, coalesce_runs
 
 from .testutils import (
@@ -1109,6 +1109,128 @@ class TestVariableOfFile(unittest.TestCase):
         self.assertEqual(survey["u"], ["u_a_20210601.nc", "u_a_20210602.nc"])
         self.assertEqual(survey["u_10m"], ["u_10m_b.nc"])
         self.assertEqual(survey[None], ["mystery.nc"])
+
+
+class TestDateOfFile(unittest.TestCase):
+    """Reading the period a file covers off its name."""
+
+    def test_a_daily_file_carries_a_full_timestamp(self):
+        self.assertEqual(
+            date_of_file("temp_EXCLAIM_coupled_dyamond_atm_1_3_20210601T000000Z.nc"),
+            dt.datetime(2021, 6, 1, tzinfo=dt.timezone.utc),
+        )
+
+    def test_an_aggregated_file_carries_a_year_and_month(self):
+        self.assertEqual(date_of_file("t_2m_dyamond_atm_3_202106.nc"), dt.datetime(2021, 6, 1, tzinfo=dt.timezone.utc))
+
+    def test_the_date_is_utc(self):
+        # the times inside the files are UTC, so a naive date here would shift
+        # every derived axis by the reader's own timezone
+        self.assertEqual(date_of_file("u_atm_20210602T000000Z.nc").utcoffset(), dt.timedelta(0))
+
+    def test_a_name_without_a_date_says_nothing(self):
+        self.assertIsNone(date_of_file("mystery.nc"))
+        self.assertIsNone(date_of_file("icon_grid_0056_R02B10_G.nc"))
+
+
+class TestIconDerivedTimes(unittest.TestCase):
+    """Describing a variable's files without opening all of them.
+
+    The level coordinate, the cadence and the length belong to the variable
+    rather than to the file, so one member describes them all; only the sample
+    times differ, and the name says those. What makes it safe rather than a
+    guess is that the ends are always read, an odd sized file is always read,
+    and what the names predict for the last file is checked against what that
+    file actually says.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmpdir = tempfile.TemporaryDirectory()
+        # four days, so that two files are neither the first nor the last
+        cls.data_path, cls.grid_path, cls.n_samples, cls.channel_names = init_icon_dataset(cls.tmpdir.name, n_days=4)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmpdir.cleanup()
+
+    def _backend(self, **overrides):
+        kwargs = dict(grid_file=self.grid_path, channel_names=list(self.channel_names))
+        kwargs.update(overrides)
+        return get_backend(self.data_path, **kwargs)
+
+    def _scramble(self, name, keep_size=True):
+        """Make a file unreadable, optionally without changing its size."""
+        path = os.path.join(self.data_path, name)
+        with open(path, "rb") as handle:
+            original = handle.read()
+
+        def restore():
+            with open(path, "wb") as handle:
+                handle.write(original)
+
+        self.addCleanup(restore)
+
+        garbage = b"x" * (len(original) if keep_size else 128)
+        with open(path, "wb") as handle:
+            handle.write(garbage)
+        return path
+
+    def test_the_times_are_the_ones_the_files_hold(self):
+        # the shortcut has to produce exactly what reading every file would
+        metadata = self._backend().discover()
+
+        self.assertEqual(len(metadata.timestamps), self.n_samples)
+        self.assertEqual(metadata.timestamps[0], dt.datetime(2021, 6, 1, tzinfo=dt.timezone.utc))
+        self.assertEqual(metadata.timestamps[-1], dt.datetime(2021, 6, 4, 21, tzinfo=dt.timezone.utc))
+        steps = {
+            (metadata.timestamps[i + 1] - metadata.timestamps[i]).total_seconds() / 3600
+            for i in range(len(metadata.timestamps) - 1)
+        }
+        self.assertEqual(steps, {3.0})
+
+    def test_a_middle_file_is_not_opened(self):
+        """The assertion is that unreadable content goes unnoticed.
+
+        Day three is neither end and is the usual size, so its times come from
+        its name. Scrambling its contents while keeping its size is invisible to
+        a reader that never opens it -- and fatal to one that does.
+        """
+        self._scramble("temp_dyamond_atm_1_3_20210603T000000Z.nc")
+
+        metadata = self._backend().discover()
+
+        self.assertEqual(len(metadata.timestamps), self.n_samples)
+
+    def test_an_odd_sized_file_is_opened(self):
+        """Size is what says a file is the same shape as its neighbours.
+
+        A short file is exactly the one whose times cannot be derived, so it has
+        to be read -- and here reading it fails, which is the evidence.
+        """
+        self._scramble("temp_dyamond_atm_1_3_20210603T000000Z.nc", keep_size=False)
+
+        with self.assertRaises(Exception):
+            self._backend().discover()
+
+    def test_the_ends_are_always_read(self):
+        # truncation happens at the ends of a run, so they are never derived
+        self._scramble("temp_dyamond_atm_1_3_20210604T000000Z.nc")
+
+        with self.assertRaises(Exception):
+            self._backend().discover()
+
+    def test_reading_agrees_with_the_derived_axis(self):
+        # a sample whose times were derived still reads the right data
+        backend = self._backend()
+        backend.discover()
+
+        # sample 16 is the first of the third day, whose file was described by name
+        values = backend.read(2, slice(0, 1), np.array([2]))[0, 0]
+        expected = icon_expected_field("temp", 0, ICON_PLEV_HPA.index(500))
+
+        finite = ~np.isnan(expected)
+        self.assertTrue(compare_arrays("t500 on a derived day", values[finite], expected[finite], atol=1e-5))
 
 
 class TestIconFileSurvey(_IconFixture):

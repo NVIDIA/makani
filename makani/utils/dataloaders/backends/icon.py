@@ -54,10 +54,12 @@ to come from running several workers, which is what the DALI pipeline already
 does.
 """
 
+import datetime as dt
 import glob
 import logging
 import os
-from collections import OrderedDict
+import re
+from collections import Counter, OrderedDict
 from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 import h5py
@@ -141,6 +143,30 @@ def variable_of_file(path: str, candidates: Sequence[str]) -> Optional[str]:
     stem = os.path.splitext(os.path.basename(path))[0]
     matches = [name for name in candidates if stem == name or stem.startswith(name + "_")]
     return max(matches, key=len) if matches else None
+
+
+#: how ICON stamps a file with the period it covers: a full timestamp for the
+#: daily files, a bare year and month for the aggregated ones
+_DATE_PATTERNS = (
+    (re.compile(r"(\d{8})T(\d{6})Z"), "%Y%m%d%H%M%S"),
+    (re.compile(r"_(\d{6})(?=[._]|$)"), "%Y%m"),
+)
+
+
+def date_of_file(path: str) -> Optional[dt.datetime]:
+    """When the period a file covers begins, from its name.
+
+    ``..._20210601T000000Z.nc`` starts at midnight on the first of June;
+    ``..._202106.nc`` is the monthly aggregate and starts at the same place.
+    Returns None when the name carries no date, which is a reason to open the
+    file rather than to guess.
+    """
+    stem = os.path.basename(path)
+    for pattern, fmt in _DATE_PATTERNS:
+        match = pattern.search(stem)
+        if match:
+            return dt.datetime.strptime("".join(match.groups()), fmt).replace(tzinfo=dt.timezone.utc)
+    return None
 
 
 def survey_files(paths: Sequence[str], candidates: Sequence[str]) -> Dict[Optional[str], List[str]]:
@@ -349,6 +375,83 @@ class IconBackend(MeshChunkMixin, DatasetBackend):
                 }
         return found
 
+    def _file_groups(self, files: List[str]) -> List[List[str]]:
+        """Files grouped by the variable their name claims.
+
+        A group shares a level coordinate, a cadence and a file length, which is
+        what lets most of it be described from one member. Files whose name says
+        nothing are each their own group, so nothing is assumed about them.
+        """
+        keep = set(files)
+        groups = []
+        for name, paths in self.survey.items():
+            present = sorted(path for path in paths if path in keep)
+            if not present:
+                continue
+            if name is None:
+                groups.extend([path] for path in present)
+            else:
+                groups.append(present)
+        return groups
+
+    def _inspect_group(self, paths: List[str], grid_uuid: Optional[str]) -> Dict[str, Dict[str, dict]]:
+        """Describe every file of one variable, opening as few as possible.
+
+        The level coordinate, the cadence and the length are properties of the
+        variable rather than of the file, so one member describes them all. Only
+        the sample times differ, and a file stamped with the period it covers
+        says those too -- given that it is the same shape as its neighbours.
+
+        Three things keep that from being a guess:
+
+        * the first and last file are always read, because truncation happens at
+          the ends of a run;
+        * a file whose size differs from the rest of the group is read, since a
+          short file is exactly the one whose times cannot be derived;
+        * what is derived for the last file is checked against what was read
+          from it, and a mismatch abandons the shortcut for the whole group.
+
+        Getting this wrong would be silent -- plausible times attached to the
+        wrong samples -- so the fallback is to open everything, which is what
+        this did before.
+        """
+        opened = {path: self._inspect(path, grid_uuid) for path in {paths[0], paths[-1]}}
+        if len(paths) <= 2:
+            return {path: opened[path] for path in paths}
+
+        dates = {path: date_of_file(path) for path in paths}
+        sizes = {path: os.path.getsize(path) for path in paths}
+        usual_size = Counter(sizes.values()).most_common(1)[0][0]
+
+        first, last = paths[0], paths[-1]
+        reference = opened[first]
+
+        def derived(path) -> Optional[Dict[str, dict]]:
+            """The description a file's name implies, or None if it does not."""
+            if dates[path] is None or dates[first] is None or sizes[path] != usual_size:
+                return None
+            shift = dates[path] - dates[first]
+            return {name: dict(info, times=info["times"] + shift) for name, info in reference.items()}
+
+        # the check: the last file was read, so what its name implies can be
+        # compared against what it actually says
+        predicted = derived(last)
+        trustworthy = predicted is not None and all(
+            np.array_equal(predicted[name]["times"], opened[last][name]["times"]) for name in opened[last]
+        )
+        if not trustworthy:
+            logging.debug("ICON file names do not predict their contents for this group; reading every file")
+            return {path: self._inspect(path, grid_uuid) for path in paths}
+
+        described = {}
+        for path in paths:
+            if path in opened:
+                described[path] = opened[path]
+                continue
+            implied = derived(path)
+            described[path] = implied if implied is not None else self._inspect(path, grid_uuid)
+        return described
+
     def _build_sources(self, files: List[str], grid_uuid: Optional[str]) -> Dict[str, VariableSource]:
         """Collect every variable across every file, in time order.
 
@@ -358,8 +461,12 @@ class IconBackend(MeshChunkMixin, DatasetBackend):
         """
         collected: Dict[Tuple[str, Optional[str]], dict] = {}
 
+        described = {}
+        for group in self._file_groups(files):
+            described.update(self._inspect_group(group, grid_uuid))
+
         for path in files:
-            for name, info in self._inspect(path, grid_uuid).items():
+            for name, info in described[path].items():
                 key = (name, info["level_name"])
                 entry = collected.setdefault(
                     key, {"paths": [], "times": [], "levels": info["levels"], "n_cells": info["n_cells"]}
