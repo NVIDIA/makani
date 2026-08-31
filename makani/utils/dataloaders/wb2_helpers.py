@@ -13,39 +13,94 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import re
+"""Helpers for reading WeatherBench2 style zarr stores.
+
+WeatherBench2 republishes ERA5 (and model output) as cloud hosted zarr, with one
+array per variable and a shared ``level`` coordinate. Two things differ from
+every other source makani reads, and this module exists to absorb both:
+
+* **Names are spelled out in full.** Where makani and ERA5 say ``z``, ``t2m``,
+  ``tp``, WB2 says ``geopotential``, ``2m_temperature``,
+  ``total_precipitation_6hr``. The tables below are the dictionary between the
+  two vocabularies, in both directions -- makani -> WB2 for reading a store or
+  writing one, WB2 -> makani for interpreting one.
+* **Levels are an axis, not part of the name.** A makani channel list names each
+  level separately (``z500``, ``z850``), while a WB2 store has a single
+  ``geopotential`` array indexed by position along ``level``. Translating a
+  channel therefore yields a *(variable, level index)* pair, not just a name,
+  and the index depends on the level coordinate of the particular store. That is
+  what :func:`build_wb2_channel_map` produces.
+
+Note the ``total_precipitation_6hr`` entry: the accumulation window is part of
+the WB2 variable name, so a store fixes it and the reader cannot choose it. That
+is recorded as ``accumulation="window"``, to distinguish it from sources that
+hand out running totals or instantaneous rates.
+
+Reach for :func:`surface_wb2_name` / :func:`atmospheric_wb2_name` rather than
+indexing the tables, so their layout stays an implementation detail here.
+"""
+
+from typing import Dict, NamedTuple, Optional
+
+# channel name classification lives in one place for all data sources
+from makani.utils.features import get_channel_groups, split_channel_name
 
 
 # ---------------------------------------------------------------------------
 # ERA5 short name <-> WeatherBench2 long name mappings
 # ---------------------------------------------------------------------------
 
-surface_variables = {
-    "u10m": "10m_u_component_of_wind",
-    "v10m": "10m_v_component_of_wind",
-    "t2m": "2m_temperature",
-    "d2": "2m_dewpoint_temperature",
-    "u100m": "100m_u_component_of_wind",
-    "v100m": "100m_v_component_of_wind",
-    "tp": "total_precipitation_6hr",
-    "sp": "surface_pressure",
-    "msl": "mean_sea_level_pressure",
-    "tcwv": "total_column_water_vapour",
-    "sst": "sea_surface_temperature",
+
+class Wb2Variable(NamedTuple):
+    """A WeatherBench2 variable backing a makani channel.
+
+    Attributes
+    ----------
+    name : str
+        WB2 long name, i.e. the variable name in the zarr store.
+    kind : str
+        ``"pl"``, ``"sfc"`` or ``"accum"``.
+    units : str, optional
+        Units the store is expected to carry.
+    accumulation : str
+        ``"none"`` for instantaneous fields, ``"window"`` for totals already
+        accumulated over a fixed window that is baked into the variable name.
+    """
+
+    name: str
+    kind: str
+    units: Optional[str] = None
+    accumulation: str = "none"
+
+
+surface_variables: Dict[str, Wb2Variable] = {
+    "u10m": Wb2Variable("10m_u_component_of_wind", "sfc", units="m s-1"),
+    "v10m": Wb2Variable("10m_v_component_of_wind", "sfc", units="m s-1"),
+    "t2m": Wb2Variable("2m_temperature", "sfc", units="K"),
+    "d2": Wb2Variable("2m_dewpoint_temperature", "sfc", units="K"),
+    "u100m": Wb2Variable("100m_u_component_of_wind", "sfc", units="m s-1"),
+    "v100m": Wb2Variable("100m_v_component_of_wind", "sfc", units="m s-1"),
+    # the accumulation window is part of the WB2 name rather than something the
+    # reader chooses, hence "window" rather than "since_start" or "rate"
+    "tp": Wb2Variable("total_precipitation_6hr", "accum", units="m", accumulation="window"),
+    "sp": Wb2Variable("surface_pressure", "sfc", units="Pa"),
+    "msl": Wb2Variable("mean_sea_level_pressure", "sfc", units="Pa"),
+    "tcwv": Wb2Variable("total_column_water_vapour", "sfc", units="kg m-2"),
+    "sst": Wb2Variable("sea_surface_temperature", "sfc", units="K"),
 }
 
-atmospheric_variables = {
-    "z": "geopotential",
-    "u": "u_component_of_wind",
-    "v": "v_component_of_wind",
-    "t": "temperature",
-    "r": "relative_humidity",
-    "q": "specific_humidity",
+atmospheric_variables: Dict[str, Wb2Variable] = {
+    "z": Wb2Variable("geopotential", "pl", units="m2 s-2"),
+    "u": Wb2Variable("u_component_of_wind", "pl", units="m s-1"),
+    "v": Wb2Variable("v_component_of_wind", "pl", units="m s-1"),
+    "t": Wb2Variable("temperature", "pl", units="K"),
+    "r": Wb2Variable("relative_humidity", "pl", units="%"),
+    "q": Wb2Variable("specific_humidity", "pl", units="kg kg-1"),
 }
 
 # reverse lookups
-surface_variables_inv = {v: k for k, v in surface_variables.items()}
-atmospheric_variables_inv = {v: k for k, v in atmospheric_variables.items()}
+surface_variables_inv = {v.name: k for k, v in surface_variables.items()}
+atmospheric_variables_inv = {v.name: k for k, v in atmospheric_variables.items()}
 
 
 # ---------------------------------------------------------------------------
@@ -69,20 +124,17 @@ def split_convert_channel_names(makani_channel_names):
     atmospheric_levels : list[int]
         Sorted list of distinct pressure levels found in the channel list.
     """
-    from makani.utils.features import get_channel_groups
-
     atmospheric_channel_indices, surface_channel_indices, _, _, atmospheric_levels = get_channel_groups(
         makani_channel_names
     )
 
-    pat = re.compile(r"^(.*?)\d{1,}$")
     atmospheric_channel_names = sorted(
-        list(set(pat.match(makani_channel_names[k]).group(1) for k in atmospheric_channel_indices))
+        list(set(split_channel_name(makani_channel_names[k])[0] for k in atmospheric_channel_indices))
     )
-    atmospheric_channel_names_wb2 = [atmospheric_variables[c] for c in atmospheric_channel_names]
+    atmospheric_channel_names_wb2 = [atmospheric_wb2_name(c) for c in atmospheric_channel_names]
 
     surface_channel_names = sorted([makani_channel_names[k] for k in surface_channel_indices])
-    surface_channel_names_wb2 = [surface_variables[c] for c in surface_channel_names]
+    surface_channel_names_wb2 = [surface_wb2_name(c) for c in surface_channel_names]
 
     atmospheric_levels = sorted(list(atmospheric_levels))
 
@@ -93,6 +145,45 @@ def split_convert_channel_names(makani_channel_names):
         surface_channel_names_wb2,
         atmospheric_levels,
     )
+
+
+def surface_wb2_name(channel_name):
+    """Return the WB2 long name of a makani surface channel.
+
+    ``"t2m"`` -> ``"2m_temperature"``. Callers should go through this rather
+    than indexing :data:`surface_variables` directly, so that the table layout stays
+    an implementation detail of this module and an unknown name produces a
+    readable error instead of a bare ``KeyError``.
+
+    Raises
+    ------
+    ValueError
+        If the channel has no WB2 counterpart.
+    """
+    try:
+        return surface_variables[channel_name].name
+    except KeyError:
+        raise ValueError(f"Unknown surface variable '{channel_name}'. Known names: {list(surface_variables)}") from None
+
+
+def atmospheric_wb2_name(prefix):
+    """Return the WB2 long name of a makani atmospheric variable prefix.
+
+    ``"z"`` -> ``"geopotential"``. The prefix is the channel name without its
+    pressure level, as produced by
+    :func:`makani.utils.features.split_channel_name`.
+
+    Raises
+    ------
+    ValueError
+        If the prefix has no WB2 counterpart.
+    """
+    try:
+        return atmospheric_variables[prefix].name
+    except KeyError:
+        raise ValueError(
+            f"Unknown atmospheric variable prefix '{prefix}'. Known prefixes: {list(atmospheric_variables)}"
+        ) from None
 
 
 def build_wb2_channel_map(channel_names, level_values=None):
@@ -124,16 +215,9 @@ def build_wb2_channel_map(channel_names, level_values=None):
 
     channel_map = []
     for ch_name in channel_names:
-        m = re.search(r"[0-9]{1,4}$", ch_name)
-        if m is not None and ch_name != "d2":
-            pressure = int(m.group())
-            prefix = ch_name[: m.start()]
-            if prefix not in atmospheric_variables:
-                raise ValueError(
-                    f"Unknown atmospheric variable prefix '{prefix}' for channel '{ch_name}'. "
-                    f"Known prefixes: {list(atmospheric_variables)}"
-                )
-            zarr_name = atmospheric_variables[prefix]
+        prefix, pressure = split_channel_name(ch_name)
+        if pressure is not None:
+            zarr_name = atmospheric_wb2_name(prefix)
             if pressure not in level_to_idx:
                 raise ValueError(
                     f"Pressure level {pressure} hPa (channel '{ch_name}') not found in zarr store. "
@@ -141,9 +225,7 @@ def build_wb2_channel_map(channel_names, level_values=None):
                 )
             channel_map.append((zarr_name, level_to_idx[pressure]))
         else:
-            if ch_name not in surface_variables:
-                raise ValueError(f"Unknown surface variable '{ch_name}'. " f"Known names: {list(surface_variables)}")
-            channel_map.append((surface_variables[ch_name], None))
+            channel_map.append((surface_wb2_name(ch_name), None))
 
     return channel_map
 

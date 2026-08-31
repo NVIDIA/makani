@@ -33,6 +33,7 @@ def concatenate(
     years: List[int],
     dhoursrel: Optional[int] = 1,
     entry_key: Optional[str] = "fields",
+    verbose: Optional[bool] = True,
 ):
     """Function to concatenate multiple HDF5 files of an existing makani compatible HDF5 dataset.
 
@@ -70,6 +71,8 @@ def concatenate(
         Relative dhours (distance between samples in hours) of existing and newly concatenated dataset. A value of 1 means every timestamps of the original dataset is used, a value of n > 1 means that every nth timestamp is used.
     entry_key: str
         This is the HDF5 dataset name of the data in the files. Defaults to "fields".
+    verbose: bool
+        Whether to print progress to stdout. Defaults to True; set to False when calling this as a library function.
     """
 
     # ensure that files in file_names_to_concatenate are contained in input_output_dir:
@@ -113,7 +116,8 @@ def concatenate(
                 ts = ts[: ne_red * dhoursrel : dhoursrel]
             timestamps.append(ts.astype(np.float64))
         except:
-            print(f"File {fname} is not annotated, deriving timestamps")
+            if verbose:
+                print(f"File {fname} is not annotated, deriving timestamps")
             year = years[idx]
             jan_01_epoch = dt.datetime(year, 1, 1, 0, 0, 0, tzinfo=dt.timezone.utc)
             ts = [jan_01_epoch + dt.timedelta(hours=h * dhours * dhoursrel) for h in range(ne_red)]
@@ -139,9 +143,10 @@ def concatenate(
     # get the offsets for each channel list:
     channel_offsets = [0] + list(accumulate([len(cnlist) for cnlist in channel_names]))
 
-    print(
-        f"Combining dataset of size {total_entries} with dhours = {dhours} into single virtual file of size: {(total_entries_red, num_channels_total) + dataset_shape[2:]} for years {years[0]}-{years[-1]} with dhours = {dhours * dhoursrel}."
-    )
+    if verbose:
+        print(
+            f"Combining dataset of size {total_entries} with dhours = {dhours} into single virtual file of size: {(total_entries_red, num_channels_total) + dataset_shape[2:]} for years {years[0]}-{years[-1]} with dhours = {dhours * dhoursrel}."
+        )
 
     # create virtual layout
     layout = h5.VirtualLayout(shape=(total_entries_red, num_channels_total) + dataset_shape[2:], dtype=dataset_dtype)
@@ -204,7 +209,8 @@ def concatenate(
         f[entry_key].dims[2].attach_scale(f["lat"])
         f[entry_key].dims[3].attach_scale(f["lon"])
 
-    print("All done.")
+    if verbose:
+        print("All done.")
 
     return
 

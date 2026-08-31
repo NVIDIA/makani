@@ -72,12 +72,14 @@ class TestSaveRestore(unittest.TestCase):
             time.sleep(3)
             create_empty(os.path.join(tempdir, "checkpoint_mp0_v1.tar"))
 
-            version = get_latest_checkpoint_version(os.path.join(tempdir, "checkpoint_mp0_v{checkpoint_version}.tar"))
+            version = get_latest_checkpoint_version(
+                os.path.join(tempdir, "checkpoint_mp0_v{checkpoint_version}.tar"), verbose=False
+            )
 
         self.assertTrue(version == 1)
 
     def test_get_latest_checkpoint_version_default(self):
-        version = get_latest_checkpoint_version("checkpoint_mp0.tar")
+        version = get_latest_checkpoint_version("checkpoint_mp0.tar", verbose=False)
         self.assertTrue(version == 0)
 
     @parameterized.expand(["legacy", "flexible"])

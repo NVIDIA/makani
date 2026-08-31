@@ -78,7 +78,7 @@ class TestAnnotateDataset(unittest.TestCase):
         years = [2017, 2018, 2019]  # Corresponding years for the files
 
         # Run annotation
-        annotate(metadata, all_files, years)
+        annotate(metadata, all_files, years, verbose=False)
 
         # reference files:
         train_files_ref = sorted(
@@ -192,7 +192,9 @@ class TestConcatenateDataset(unittest.TestCase):
 
         # Run concatenation
         output_file = os.path.join(input_dirs[0], "concatenated.h5v")
-        concatenate(input_dirs, output_file, metadata, [channel_names], train_files, years, dhoursrel=dhoursrel)
+        concatenate(
+            input_dirs, output_file, metadata, [channel_names], train_files, years, dhoursrel=dhoursrel, verbose=False
+        )
 
         # Compare concatenated file with original files
         with h5.File(output_file, "r") as f_conc:
@@ -342,6 +344,7 @@ class TestConcatenateDataset(unittest.TestCase):
                 file_names_to_concatenate=[f"{y}.h5" for y in years_local],
                 years=years_local,
                 dhoursrel=dhoursrel,
+                verbose=False,
             )
 
             # Build expected output: each year is sliced to floor(n/dhoursrel)
@@ -521,6 +524,7 @@ class TestConcatenateDatasetChannelsAndTime(unittest.TestCase):
             file_names_to_concatenate=file_names,
             years=self.years,
             dhoursrel=dhoursrel,
+            verbose=False,
         )
 
         # Build the expected concatenated array and timestamp vector for comparison.
@@ -652,7 +656,7 @@ class TestConcatenateDatasetChannelsAndTime(unittest.TestCase):
 
             # ----------------------------------------------------------------------
             # Loader-realistic access patterns. Mirrors `_get_data_h5` in
-            # makani/utils/dataloaders/dali_es_helper_concat_2d.py.
+            # makani/utils/dataloaders/backends/makani_concat.py.
             # ----------------------------------------------------------------------
 
             # Pattern 1: cropped spatial region with subsampling on both spatial dims.
@@ -817,6 +821,7 @@ class TestConcatenateDatasetChannelsAndTime(unittest.TestCase):
                 years=self.years,
                 dhoursrel=1,
                 entry_key=custom_key,
+                verbose=False,
             )
 
             expected_full = np.concatenate(
@@ -927,6 +932,7 @@ class TestConcatenateDatasetChannelsAndTime(unittest.TestCase):
                 file_names_to_concatenate=[f"{y}.h5" for y in self.years],
                 years=self.years,
                 dhoursrel=1,
+                verbose=False,
             )
 
             expected_full = np.concatenate(
@@ -1057,6 +1063,7 @@ class TestConcatenateDatasetChannelsAndTime(unittest.TestCase):
                 file_names_to_concatenate=[f"{y}.h5" for y in self.years],
                 years=self.years,
                 dhoursrel=dhoursrel,
+                verbose=False,
             )
 
             n_red = n // dhoursrel
@@ -1229,6 +1236,41 @@ class TestGetStats(unittest.TestCase):
                     verbose=verbose,
                 )
             )
+
+
+# conversion scripts, with the extras each needs to be importable at all
+_CONVERTERS = [
+    ("data_process.convert_ncar_era5_to_makani_input", ["mpi4py", "h5py"]),
+    ("data_process.convert_makani_output_to_wb2", ["mpi4py", "xarray", "dask", "h5py"]),
+    ("data_process.convert_wb2_to_makani_input", ["mpi4py", "xarray", "h5py"]),
+    ("data_process.generate_wb2_climatology", ["mpi4py", "xarray", "h5py"]),
+]
+
+
+class TestConverterImports(unittest.TestCase):
+    """
+    Import each conversion script in ``data_process``.
+
+    The converters are driven by MPI against multi terabyte archives and are not
+    otherwise exercised by any test, so this is the only thing standing between a
+    rename here and a failure on a production run.
+
+    What it covers is the *import surface*: module level ``from ... import``
+    statements and any code that runs at import time. It says nothing about what
+    happens inside the functions -- a helper called with the wrong arguments in
+    the middle of a conversion loop is still invisible here.
+
+    Each is skipped when its dependencies are missing, since ``mpi4py``,
+    ``xarray`` and ``dask`` live in the ``data_process`` extra rather than the
+    base install; that means these normally skip in CI and run in the container.
+    """
+
+    @parameterized.expand(_CONVERTERS)
+    def test_converter_imports(self, module_name, requirements):
+        missing = [name for name in requirements if importlib.util.find_spec(name) is None]
+        if missing:
+            self.skipTest(f"{module_name} needs {', '.join(missing)}")
+        importlib.import_module(module_name)
 
 
 if __name__ == "__main__":

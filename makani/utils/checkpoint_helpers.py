@@ -20,7 +20,7 @@ import zlib
 import pickle
 
 from collections import OrderedDict
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from warnings import warn
 
 import torch
@@ -105,18 +105,85 @@ def load_checkpoint(checkpoint_fname: str, map_location: str = "cpu", mmap: bool
         ) from err
 
 
-def get_latest_checkpoint_version(checkpoint_path):
+def get_latest_checkpoint_version(checkpoint_path, verbose: bool = True):
+    """Highest version among the checkpoints matching a path template, 0 if there are none.
+
+    A fresh run has nothing to match, so failing to detect a version is normal
+    rather than an error; ``verbose=False`` silences the notice for callers that
+    expect it.
+    """
+    pattern = checkpoint_path.format(mp_rank=0, checkpoint_version="*")
     try:
-        checkpoint_path = max(
-            glob.glob(checkpoint_path.format(mp_rank=0, checkpoint_version="*")), key=os.path.getmtime
-        )
-        pathname, _ = os.path.splitext(checkpoint_path)
+        # the newest match is the one whose version is current
+        newest = max(glob.glob(pattern), key=os.path.getmtime)
+        pathname, _ = os.path.splitext(newest)
         latest_version = int(re.match(r"^.*?_v(\d{1,})$", pathname).groups()[0])
     except:
-        print(f"Could not identify version for checkpoint {checkpoint_path}. Skipping detection.")
+        # the pattern rather than the template: what was searched for, not what
+        # the caller happened to phrase it as
+        if verbose:
+            print(f"Could not identify version for checkpoint {pattern}. Skipping detection.")
         latest_version = 0
 
     return latest_version
+
+
+def supports_dataloader_state(dataloader: Any) -> bool:
+    """Whether the dataloader can capture and restore its state (only the DALI loaders can)."""
+    return (
+        (dataloader is not None)
+        and hasattr(dataloader, "state_dict")
+        and hasattr(dataloader, "load_state_dict")
+        and getattr(dataloader, "enable_checkpointing", False)
+    )
+
+
+def gather_dataloader_state_dict(dataloader: Any) -> Optional[List[Dict[str, Any]]]:
+    """Collect the dataloader state of every data-parallel rank.
+
+    The data pipeline is sharded over the ``data`` comm, so every rank in that comm holds a
+    different state, while checkpoint files are only written by rank 0 of that comm. The states
+    are therefore gathered into a list indexed by the rank within the ``data`` comm, which is
+    what ``scatter_dataloader_state_dict`` reverses on restore. In contrast to the model state,
+    the entries are opaque and independent of each other, so gathering is a plain collection of
+    per-rank objects and scattering is a plain index lookup - nothing is split or merged.
+
+    ..note::
+        This is a collective over the ``data`` comm, so it has to be called by all ranks, not
+        just by the rank which writes the checkpoint file. The states are plain (picklable)
+        python objects: ``all_gather_object`` stages them through a byte tensor on the comm's
+        default device itself, which for NCCL is the rank's current CUDA device.
+
+    Returns None if the dataloader does not support checkpointing.
+    """
+
+    if not supports_dataloader_state(dataloader):
+        return None
+
+    state_dict = dataloader.state_dict()
+
+    num_data_ranks = comm.get_size("data")
+    if num_data_ranks == 1:
+        return [state_dict]
+
+    state_dicts = [None for _ in range(num_data_ranks)]
+    dist.all_gather_object(state_dicts, state_dict, group=comm.get_group("data"))
+
+    return state_dicts
+
+
+def scatter_dataloader_state_dict(state_dicts: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Pick this rank's entry out of the list stored by ``gather_dataloader_state_dict``."""
+
+    num_data_ranks = comm.get_size("data")
+    if len(state_dicts) != num_data_ranks:
+        raise ValueError(
+            f"Error, the checkpoint stores dataloader state for {len(state_dicts)} data-parallel ranks "
+            f"but the current run has {num_data_ranks}. The data pipeline can only be restored into the "
+            "same data-parallel decomposition it was stored from."
+        )
+
+    return state_dicts[comm.get_rank("data")]
 
 
 def gather_model_state_dict(model: nn.Module, grads: Optional[bool] = False) -> OrderedDict:

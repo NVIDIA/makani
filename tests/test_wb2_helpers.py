@@ -16,13 +16,97 @@
 import unittest
 
 from makani.utils.dataloaders.wb2_helpers import (
+    Wb2Variable,
     surface_variables,
     atmospheric_variables,
     surface_variables_inv,
     atmospheric_variables_inv,
+    surface_wb2_name,
+    atmospheric_wb2_name,
     split_convert_channel_names,
     build_wb2_channel_map,
 )
+
+
+class TestVariableSemantics(unittest.TestCase):
+    """
+    The tables carry more than the WB2 name: the kind, the units and how the
+    variable relates to the channel in time. Those fields are what a converter
+    reasons about, and unlike the name they are never exercised by simply
+    reading a store, so they are pinned here.
+    """
+
+    def test_every_entry_is_a_descriptor(self):
+        for table in (surface_variables, atmospheric_variables):
+            for channel, variable in table.items():
+                with self.subTest(channel=channel):
+                    self.assertIsInstance(variable, Wb2Variable)
+                    self.assertTrue(variable.name)
+                    self.assertIn(variable.kind, ("pl", "sfc", "accum"))
+                    self.assertTrue(variable.units)
+
+    def test_atmospheric_entries_are_pressure_level(self):
+        for prefix, variable in atmospheric_variables.items():
+            with self.subTest(prefix=prefix):
+                self.assertEqual(variable.kind, "pl")
+
+    def test_instantaneous_surface_fields_do_not_accumulate(self):
+        for channel, variable in surface_variables.items():
+            if variable.kind == "sfc":
+                with self.subTest(channel=channel):
+                    self.assertEqual(variable.accumulation, "none")
+
+    def test_precipitation_carries_a_fixed_window(self):
+        # the window is baked into the WB2 name ("..._6hr"), so a store fixes it
+        # and the reader neither differences nor integrates anything
+        tp = surface_variables["tp"]
+
+        self.assertEqual(tp.name, "total_precipitation_6hr")
+        self.assertEqual(tp.kind, "accum")
+        self.assertEqual(tp.accumulation, "window")
+
+
+class TestNameLookups(unittest.TestCase):
+    """
+    The two accessors are what the converters use, so that the mapping tables
+    stay an implementation detail of wb2_helpers. They also turn an unknown
+    name into a readable ValueError rather than a bare KeyError coming out of
+    the middle of a conversion run.
+    """
+
+    def test_surface_lookup(self):
+        self.assertEqual(surface_wb2_name("t2m"), "2m_temperature")
+        self.assertEqual(surface_wb2_name("msl"), "mean_sea_level_pressure")
+
+    def test_atmospheric_lookup(self):
+        self.assertEqual(atmospheric_wb2_name("z"), "geopotential")
+        self.assertEqual(atmospheric_wb2_name("q"), "specific_humidity")
+
+    def test_lookups_agree_with_the_tables(self):
+        for name in surface_variables:
+            with self.subTest(channel=name):
+                self.assertEqual(surface_wb2_name(name), surface_variables[name].name)
+        for prefix in atmospheric_variables:
+            with self.subTest(prefix=prefix):
+                self.assertEqual(atmospheric_wb2_name(prefix), atmospheric_variables[prefix].name)
+
+    def test_unknown_surface_name_raises_value_error(self):
+        with self.assertRaises(ValueError) as ctx:
+            surface_wb2_name("not_a_variable")
+        self.assertIn("not_a_variable", str(ctx.exception))
+        self.assertIn("Known names", str(ctx.exception))
+
+    def test_unknown_atmospheric_prefix_raises_value_error(self):
+        with self.assertRaises(ValueError) as ctx:
+            atmospheric_wb2_name("xyz")
+        self.assertIn("xyz", str(ctx.exception))
+        self.assertIn("Known prefixes", str(ctx.exception))
+
+    def test_atmospheric_prefix_is_not_a_full_channel_name(self):
+        # the accessor takes the prefix, not "z500"; passing the channel name is
+        # a mistake that has to fail rather than silently miss
+        with self.assertRaises(ValueError):
+            atmospheric_wb2_name("z500")
 
 
 # ===========================================================================
@@ -40,21 +124,21 @@ class TestMappingTables(unittest.TestCase):
 
     def test_inverse_surface_round_trips(self):
         for era5, wb2 in surface_variables.items():
-            self.assertEqual(surface_variables_inv[wb2], era5)
+            self.assertEqual(surface_variables_inv[wb2.name], era5)
 
     def test_inverse_atmospheric_round_trips(self):
         for era5, wb2 in atmospheric_variables.items():
-            self.assertEqual(atmospheric_variables_inv[wb2], era5)
+            self.assertEqual(atmospheric_variables_inv[wb2.name], era5)
 
     def test_known_surface_mappings(self):
-        self.assertEqual(surface_variables["u10m"], "10m_u_component_of_wind")
-        self.assertEqual(surface_variables["t2m"], "2m_temperature")
-        self.assertEqual(surface_variables["msl"], "mean_sea_level_pressure")
+        self.assertEqual(surface_variables["u10m"].name, "10m_u_component_of_wind")
+        self.assertEqual(surface_variables["t2m"].name, "2m_temperature")
+        self.assertEqual(surface_variables["msl"].name, "mean_sea_level_pressure")
 
     def test_known_atmospheric_mappings(self):
-        self.assertEqual(atmospheric_variables["z"], "geopotential")
-        self.assertEqual(atmospheric_variables["u"], "u_component_of_wind")
-        self.assertEqual(atmospheric_variables["t"], "temperature")
+        self.assertEqual(atmospheric_variables["z"].name, "geopotential")
+        self.assertEqual(atmospheric_variables["u"].name, "u_component_of_wind")
+        self.assertEqual(atmospheric_variables["t"].name, "temperature")
 
 
 # ===========================================================================

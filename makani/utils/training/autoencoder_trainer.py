@@ -87,16 +87,16 @@ class AutoencoderTrainer(Driver):
         if self.log_to_screen:
             self.logger.info(f"Using channel names: {self.params.channel_names}")
             self.logger.info("initializing data loader")
-        self.train_dataloader, self.train_dataset, self.train_sampler = get_dataloader(
+        self.train_dataloader, self.train_data_shapes, self.train_sampler = get_dataloader(
             self.params, self.params.train_data_path, mode="train", device=self.device
         )
-        self.valid_dataloader, self.valid_dataset, self.valid_sampler = get_dataloader(
+        self.valid_dataloader, self.valid_data_shapes, self.valid_sampler = get_dataloader(
             self.params, self.params.valid_data_path, mode="eval", device=self.device
         )
-        self._set_data_shapes(self.params, self.valid_dataset)
+        self._set_data_shapes(self.params, self.valid_data_shapes)
         # obtain the true lon lat grid after cropping and resampling
-        self.lat_global = torch.as_tensor(self.valid_dataset.lat_lon_local[0]).to(self.device)
-        self.lon_global = torch.as_tensor(self.valid_dataset.lat_lon_local[1]).to(self.device)
+        self.lat_global = torch.as_tensor(self.valid_data_shapes.lat_lon_local[0]).to(self.device)
+        self.lon_global = torch.as_tensor(self.valid_data_shapes.lat_lon_local[1]).to(self.device)
         if comm.get_size("h") > 1:
             self.lat_global = gather_uneven(self.lat_global, 0, "h")
         if comm.get_size("w") > 1:
@@ -248,8 +248,10 @@ class AutoencoderTrainer(Driver):
                 optimizer=self.optimizer if self.params.get("load_optimizer", True) else None,
                 scheduler=self.scheduler if self.params.get("load_scheduler", True) else None,
                 counters=counters if self.params.get("load_counters", True) else None,
+                dataloader=self.get_train_dataloader_for_restore(),
                 checkpoint_mode=self.params.load_checkpoint,
                 strict=self.params.get("strict_restore", True),
+                log_to_screen=self.log_to_screen,
             )
 
         # read out counters correctly
@@ -342,6 +344,13 @@ class AutoencoderTrainer(Driver):
                     lr = param_group["lr"]
                 wandb.log({"learning rate": lr}, step=self.epoch)
 
+            # the state of the data pipeline is sharded across the data-parallel comm, so it has
+            # to be gathered by all ranks before entering the rank-0-only block below
+            if (self.params.save_checkpoint != "none") and not self.params.get("skip_training", False):
+                dataloader_state = self.get_train_dataloader_state()
+            else:
+                dataloader_state = None
+
             # save out checkpoints
             if (
                 (self.data_parallel_rank == 0)
@@ -368,6 +377,7 @@ class AutoencoderTrainer(Driver):
                     self.optimizer,
                     self.scheduler,
                     counters,
+                    dataloader_state=dataloader_state,
                     checkpoint_mode=checkpoint_mode,
                 )
 
@@ -384,6 +394,7 @@ class AutoencoderTrainer(Driver):
                         self.optimizer,
                         self.scheduler,
                         counters,
+                        dataloader_state=dataloader_state,
                         checkpoint_mode=checkpoint_mode,
                     )
                     best_valid_loss = valid_logs["base"]["validation loss"]

@@ -547,7 +547,7 @@ class DataLoaderBase:
              loader claims to visit (loader.extsource.indices_select).
 
         (1) catches the original failure mode: a per-year clamp in
-        GeneralES.__call__ that silently maps indices near a year boundary
+        SampleSource.__call__ that silently maps indices near a year boundary
         to the same frame, producing duplicates.  (2) additionally catches
         a regression where the clamp returned a fixed-but-different frame
         (no duplicates but every sample wrong) and other indexing slips
@@ -596,14 +596,14 @@ class DataLoaderBase:
         DALI path, eval mode, parameterized on num_data_workers.
 
         num_data_workers is plumbed through to both py_num_workers and the
-        external_source's prefetch_queue_depth (data_loader_dali_2d.py:41,70).
+        external_source's prefetch_queue_depth (dali_dataloader.py:41,70).
         Under parallel execution DALI runs a SharedBatchDispatcher in a
         thread per worker that serialises the callback's returned numpy
-        arrays into shared memory.  If GeneralES.__call__ ever returned a
+        arrays into shared memory.  If SampleSource.__call__ ever returned a
         reference to a reused per-worker buffer instead of a fresh copy,
         the main worker thread would invoke the next sample-fetch before
         the dispatcher had finished reading the previous buffer, producing
-        either duplicate or torn samples.  GeneralES._reorder_channels
+        either duplicate or torn samples.  SampleSource._reorder_channels
         sidesteps this by always returning a copy; this test locks that
         invariant in.
 
@@ -715,6 +715,104 @@ class DataLoaderBase:
         with self.subTest(desc="auto_reset advances shuffle state"):
             self.assertNotEqual(fps_ep0, fps_ep1)
 
+    def _test_dali_checkpoint_restore_survives_rebuild(self):
+        """
+        DALI path, train mode: a restore can be performed at all on this backend.
+
+        Restoring rebuilds the pipeline inside a live process, so the python worker
+        pool is spawned a second time and every worker re-opens its file handles
+        through this backend's reader (``_get_year_h5`` / ``_zarr_open`` / the WB2
+        variant). That is the only part of the restore which is backend-specific;
+        the resume logic itself works off DALI's counters and is backend-independent,
+        so it is covered once, in ``_test_dali_checkpoint_mid_epoch_resume``. This
+        test therefore only asserts that the rebuild survives and keeps delivering
+        data, not which samples come out.
+        """
+        params = copy.deepcopy(self.params)
+        params.multifiles = False
+        params.batch_size = 1
+        params.n_train_samples = 8  # keep the test fast
+        params.n_future = 0
+
+        loader, _, _ = get_dataloader(
+            params,
+            params.train_data_path,
+            mode="train",
+            device=self.device,
+            dali_device=self.dali_device,
+        )
+
+        before = next(iter(loader))[0]
+
+        # round-trip the state through the loader, which tears the pipeline down and
+        # builds a new one with a fresh worker pool
+        self.assertTrue(loader.load_state_dict(loader.state_dict()))
+
+        after = next(iter(loader))[0]
+
+        self.assertEqual(tuple(after.shape), tuple(before.shape))
+
+    def _test_dali_checkpoint_mid_epoch_resume(self):
+        """
+        DALI path, train mode: state_dict/load_state_dict resume the sample sequence.
+
+        Captures the loader state in the middle of a (shuffled) epoch, records
+        the samples that follow, and checks that a freshly built loader which
+        restores that state produces exactly those samples. A third loader
+        without a restore must NOT match, which pins down that the comparison
+        is actually sensitive to the stored position rather than trivially
+        satisfied by both loaders starting from the same seed.
+        """
+        params = copy.deepcopy(self.params)
+        params.multifiles = False
+        params.batch_size = 1
+        params.n_train_samples = 20  # keep the test fast
+        params.n_future = 0
+
+        def _make_loader():
+            loader, _, _ = get_dataloader(
+                params,
+                params.train_data_path,
+                mode="train",
+                device=self.device,
+                dali_device=self.dali_device,
+            )
+            return loader
+
+        def _collect(iterator, num_steps):
+            fps = []
+            for _ in range(num_steps):
+                inp = next(iterator)[0]
+                for b in range(inp.shape[0]):
+                    fps.append(inp[b].cpu().numpy().tobytes())
+            return fps
+
+        num_consumed = 3
+        num_compared = 3
+
+        # consume a part of the epoch, then checkpoint mid-epoch
+        loader = _make_loader()
+        iterator = iter(loader)
+        _collect(iterator, num_consumed)
+        state_dict = loader.state_dict()
+
+        # the continuation of the interrupted epoch is the ground truth
+        reference = _collect(iterator, num_compared)
+
+        # a restored loader has to continue where the state was captured
+        restored_loader = _make_loader()
+        self.assertTrue(restored_loader.load_state_dict(state_dict))
+        resumed = _collect(iter(restored_loader), num_compared)
+
+        with self.subTest(desc="restored loader resumes the sample sequence"):
+            self.assertEqual(resumed, reference)
+
+        # without a restore the loader starts at the beginning of the epoch instead
+        fresh = _collect(iter(_make_loader()), num_compared)
+
+        with self.subTest(desc="loader without restore does not resume"):
+            self.assertNotEqual(fresh, reference)
+
 
 @parameterized_class(("dali_device",), _dali_devices)
 class TestHDF5DataLoader(DataLoaderBase, unittest.TestCase):
@@ -792,6 +890,10 @@ class TestHDF5DataLoader(DataLoaderBase, unittest.TestCase):
     @unittest.skipUnless(_have_dali, "nvidia.dali is not installed")
     def test_dali_multi_epoch_reset_state(self):
         self._test_dali_multi_epoch_reset_state()
+
+    @unittest.skipUnless(_have_dali, "nvidia.dali is not installed")
+    def test_dali_checkpoint_mid_epoch_resume(self):
+        self._test_dali_checkpoint_mid_epoch_resume()
 
     # HDF5-only: MultifilesDataset date/index retrieval API
     def test_date_retrieval(self):
@@ -883,6 +985,11 @@ class TestZarrDataLoader(DataLoaderBase, unittest.TestCase):
     def test_distributed_subsampling(self, multifiles):
         self._test_distributed_subsampling(multifiles)
 
+    # the full mid-epoch resume is exercised on the HDF5 backend; here we only check
+    # that the pipeline rebuild a restore performs works with the zarr reader
+    def test_dali_checkpoint_restore_survives_rebuild(self):
+        self._test_dali_checkpoint_restore_survives_rebuild()
+
     def test_date_retrieval(self):
         self.params.multifiles = True
         train_loader, _, _ = get_dataloader(self.params, self.params.train_data_path, mode="train", device=self.device)
@@ -955,6 +1062,11 @@ class TestZarrWB2DataLoader(DataLoaderBase, unittest.TestCase):
 
     def test_future(self):
         self._test_future(False)
+
+    # the full mid-epoch resume is exercised on the HDF5 backend; here we only check
+    # that the pipeline rebuild a restore performs works with the WB2 zarr reader
+    def test_dali_checkpoint_restore_survives_rebuild(self):
+        self._test_dali_checkpoint_restore_survives_rebuild()
 
     def test_autoreg(self):
         self._test_autoreg(False)
@@ -1045,6 +1157,216 @@ class TestDummyLoader(unittest.TestCase):
         self.assertTrue((in_scale == 1).all())
         self.assertTrue((out_bias == 0).all())
         self.assertTrue((out_scale == 1).all())
+
+
+class TestMultifilesDataset(unittest.TestCase):
+    """MultifilesDataset built directly, without DALI or a GPU.
+
+    The parameterized suites above compare it against the DALI path on the same
+    fixture, which is the broad check. What is pinned here is what only this
+    dataset does: reading a target window, striding by ``dt``, surviving the
+    pickling a torch worker pool performs, and reporting the grid the files
+    actually carry.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmpdir = tempfile.TemporaryDirectory()
+        cls.train_path, *_ = init_hdf5_dataset(cls.tmpdir.name)
+
+        # channel c holds the constant value c + 1, so which channels came back
+        # can be read off the values
+        # one file: the dataset requires a constant cadence, and a second file
+        # starting at its own new year would leave a 347 day gap after twenty
+        # daily samples
+        cls.distinct_path = os.path.join(cls.tmpdir.name, "distinct")
+        os.makedirs(cls.distinct_path, exist_ok=True)
+        base = dt.datetime(2017, 1, 1, tzinfo=dt.timezone.utc)
+        n_samples = 20
+        timestamps = np.array(
+            [(base + dt.timedelta(hours=24 * idx)).timestamp() for idx in range(n_samples)], dtype=np.float64
+        )
+        data = np.zeros((n_samples, NUM_CHANNELS, 8, 16), dtype=np.float32)
+        for channel in range(NUM_CHANNELS):
+            data[:, channel] = float(channel + 1)
+        with h5.File(os.path.join(cls.distinct_path, "2017.h5"), "w") as handle:
+            dset = handle.create_dataset(H5_PATH, data=data)
+            scale = handle.create_dataset("timestamp", data=timestamps)
+            scale.make_scale("timestamp")
+            dset.dims[0].attach_scale(scale)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmpdir.cleanup()
+
+    def _make(self, location=None, **overrides):
+        from makani.utils.dataloaders.data_loader_multifiles import MultifilesDataset
+
+        kwargs = dict(
+            location=location or self.train_path,
+            dt=1,
+            in_channels=list(range(NUM_CHANNELS)),
+            out_channels=list(range(NUM_CHANNELS)),
+            n_history=0,
+            n_future=0,
+            enable_logging=False,
+        )
+        kwargs.update(overrides)
+        return MultifilesDataset(**kwargs)
+
+    def test_target_uses_the_output_channels(self):
+        """The target window is the output channels, not the input ones.
+
+        These were read with the input selection and then normalized with the
+        output statistics, so a run whose outputs differ from its inputs
+        trained against the wrong fields. Nothing catches that downstream: the
+        shapes agree whenever the two selections are the same length.
+        """
+        dataset = self._make(location=self.distinct_path, in_channels=[0, 1], out_channels=[3, 4], n_future=0)
+
+        inp, tar = dataset[0]
+
+        # channel c holds c + 1
+        for name, values, constant in (
+            ("inp c0", inp[:, 0], 1.0),
+            ("inp c1", inp[:, 1], 2.0),
+            ("tar c0", tar[:, 0], 4.0),
+            ("tar c1", tar[:, 1], 5.0),
+        ):
+            with self.subTest(field=name):
+                got = values.numpy()
+                self.assertTrue(compare_arrays(name, got, np.full_like(got, constant)))
+
+    def test_target_channels_are_reordered_like_the_inputs(self):
+        # an unsorted request has to come back in the order it was asked for,
+        # on the target side as well
+        dataset = self._make(location=self.distinct_path, in_channels=[1, 0], out_channels=[4, 2])
+
+        inp, tar = dataset[0]
+
+        for name, values, constant in (
+            ("inp c0", inp[:, 0], 2.0),
+            ("inp c1", inp[:, 1], 1.0),
+            ("tar c0", tar[:, 0], 5.0),
+            ("tar c1", tar[:, 1], 3.0),
+        ):
+            with self.subTest(field=name):
+                got = values.numpy()
+                self.assertTrue(compare_arrays(name, got, np.full_like(got, constant)))
+
+    def test_timestamps_stride_by_dt(self):
+        """The times returned belong to the samples returned.
+
+        The window steps ``dt`` samples at a time, so its timestamps do too.
+        Slicing adjacent ones instead gives times that drift from the data as
+        soon as dt > 1, which reaches the model through the zenith angle.
+        """
+        dataset = self._make(dt=2, n_history=1, return_timestamp=True, add_zenith=False)
+
+        _, _, inp_time, _ = dataset[0]
+
+        dhours = dataset.dhours
+        self.assertEqual(float(inp_time[1] - inp_time[0]), 2 * dhours * 3600.0)
+
+    def test_timestamps_match_the_samples_they_came_from(self):
+        # the stronger statement: the returned times are the dataset's own
+        # times at the indices the data was read from
+        dataset = self._make(dt=3, n_history=1, return_timestamp=True, add_zenith=False)
+
+        _, _, inp_time, _ = dataset[5]
+
+        expected = np.asarray([dataset.timestamps[5], dataset.timestamps[5 + 3]])
+        self.assertTrue(compare_arrays("input timestamps", inp_time.numpy(), expected))
+
+    def test_target_times_stride_by_dt(self):
+        dataset = self._make(dt=2, n_future=1, return_timestamp=True, add_zenith=False)
+
+        _, _, _, tar_time = dataset[0]
+
+        self.assertEqual(float(tar_time[1] - tar_time[0]), 2 * dataset.dhours * 3600.0)
+
+    def test_survives_pickling(self):
+        # a torch DataLoader with workers pickles the dataset; the backend has
+        # to drop its handles and reopen them on the other side
+        import pickle
+
+        dataset = self._make()
+        before = dataset[3]
+
+        revived = pickle.loads(pickle.dumps(dataset))
+        after = revived[3]
+
+        for position, (original, restored) in enumerate(zip(before, after)):
+            with self.subTest(output=position):
+                self.assertTrue(compare_tensors(f"unpickled output {position}", restored, original))
+
+    def test_reports_the_grid_the_files_carry(self):
+        # the fixture writes its coordinates, so they should be what comes back
+        dataset = self._make()
+
+        with h5.File(sorted(glob.glob(os.path.join(self.train_path, "*.h5")))[0], "r") as handle:
+            latitude = handle["lat"][...]
+
+        self.assertTrue(compare_arrays("latitudes", np.asarray(dataset.lat_lon[0]), latitude, rtol=1e-6))
+
+    def test_lookup_by_time_round_trips(self):
+        # inference addresses samples by timestamp, so the two directions have
+        # to agree
+        dataset = self._make()
+
+        for index in (0, 17, 400):
+            with self.subTest(index=index):
+                self.assertEqual(dataset.get_index_at_time(dataset.get_time_at_index(index)), index)
+
+
+class TestMultifilesWb2(unittest.TestCase):
+    """The WeatherBench2 layout, read through the torch dataset.
+
+    Reachable only since the dataset moved onto the backends and started
+    passing ``channel_names`` -- which the layout needs, since it addresses
+    variables by name rather than by index. Inference uses this dataset, so
+    this is what makes a WB2 store usable there.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmpdir = tempfile.TemporaryDirectory()
+        cls.train_path, *_ = init_wb2_zarr_dataset(cls.tmpdir.name)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmpdir.cleanup()
+
+    def _make(self, **overrides):
+        from makani.utils.dataloaders.data_loader_multifiles import MultifilesDataset
+
+        kwargs = dict(
+            location=self.train_path,
+            dt=1,
+            in_channels=list(range(NUM_CHANNELS)),
+            out_channels=list(range(NUM_CHANNELS)),
+            n_history=0,
+            n_future=0,
+            channel_names=list(CHANNEL_NAMES),
+            enable_logging=False,
+        )
+        kwargs.update(overrides)
+        return MultifilesDataset(**kwargs)
+
+    def test_reads_the_same_values_as_the_store(self):
+        dataset = self._make()
+
+        inp, _ = dataset[2]
+        expected = get_wb2_zarr_sample(self.train_path, 2)
+
+        self.assertTrue(compare_arrays("wb2 through multifiles", inp[0].numpy(), expected, rtol=1e-5, atol=1e-6))
+
+    def test_without_channel_names_it_says_so(self):
+        # the layout cannot be read by index, and the message should name what
+        # is missing rather than what was not found
+        with self.assertRaises(ValueError) as ctx:
+            self._make(channel_names=None)
+        self.assertIn("channel_names", str(ctx.exception))
 
 
 if __name__ == "__main__":

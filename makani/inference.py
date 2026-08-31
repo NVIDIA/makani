@@ -53,7 +53,12 @@ if __name__ == "__main__":
         type=int,
         help="Number of (initial-condition x leadtime) steps to buffer in local memory before flushing to disk. With valid_autoreg_steps=R, one initial condition produces R+1 steps; setting this below R+1 enables mid-rollout flushing, which is useful when a single trajectory does not fit in memory. Bigger values use more memory but reduce I/O overhead. Defaults to the entire run (num_samples * (R+1)). Clamped to at least the local batch size. Pass 0 (or any non-positive value) to disable buffering entirely and stream every step directly to disk.",
     )
-    parser.add_argument("--dataset_file_suffix", default="h5", type=str, help="Suffix of the input files.")
+    parser.add_argument(
+        "--dataset_file_suffix",
+        default=None,
+        type=str,
+        help="Deprecated and ignored: the storage layout is detected from what is at the data path.",
+    )
     parser.add_argument(
         "--mask_file",
         default=None,
@@ -224,8 +229,12 @@ if __name__ == "__main__":
     params["mask_file"] = args.mask_file
     params["climatology_file"] = args.climatology_file
 
+    if args.dataset_file_suffix is not None:
+        logging.warning(
+            "--dataset_file_suffix is deprecated and ignored; the storage layout is detected from the data path."
+        )
+
     # by default we use only the multifiles dataloader for inference
-    params["dataset_file_suffix"] = args.dataset_file_suffix
     params["multifiles"] = True
 
     # wandb configuration

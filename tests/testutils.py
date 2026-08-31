@@ -19,7 +19,7 @@ import re
 import json
 import datetime as dt
 import random
-from typing import List, Optional
+from typing import List, Optional, Sequence
 
 import numpy as np
 import h5py as h5
@@ -487,7 +487,7 @@ def init_wb2_zarr_dataset(
     Returns the same tuple as ``init_hdf5_dataset``/``init_zarr_dataset``
     (with ``concat_path=None``).
     """
-    from makani.utils.dataloaders.wb2_helpers import surface_variables, atmospheric_variables
+    from makani.utils.dataloaders.wb2_helpers import atmospheric_wb2_name, surface_wb2_name
 
     if channel_names is None:
         channel_names = list(CHANNEL_NAMES)
@@ -517,10 +517,10 @@ def init_wb2_zarr_dataset(
         if m is not None and ch_name != "d2":
             pressure = int(m.group())
             prefix = ch_name[: m.start()]
-            wb2_name = atmospheric_variables[prefix]
+            wb2_name = atmospheric_wb2_name(prefix)
             atm_vars.setdefault(wb2_name, set()).add(pressure)
         else:
-            surf_vars.add(surface_variables[ch_name])
+            surf_vars.add(surface_wb2_name(ch_name))
 
     # unified sorted level array covering all atmospheric variables in the fixture
     all_levels = sorted(set().union(*atm_vars.values())) if atm_vars else []
@@ -670,3 +670,207 @@ def compare_arrays(msg, array1, array2, atol=1e-8, rtol=1e-5, verbose=False):
             )
 
     return allclose
+
+
+# ---------------------------------------------------------------------------
+# ICON fixture
+#
+# Scaled down from the EXCLAIM R02B10 DYAMOND output, keeping the properties the
+# backend has to cope with and shrinking only the ones it does not care about:
+#
+#   * one variable per file, so a sample spans several of them
+#   * cadences that differ per variable -- three hourly on pressure levels,
+#     hourly at the surface -- so the sample axis is an intersection
+#   * file spans that differ -- daily for the level variables, one file covering
+#     the whole period for the surface one -- so unit boundaries do not line up
+#   * two variables called ``u``, one on pressure levels and one on altitude
+#     levels, which is what forces resolution by level coordinate
+#   * the cell axis chunked into 21 pieces, as the real files are
+#
+# What is smaller: 320 cells rather than 83,886,080 (both are 20 * 4 * 4**b, the
+# icosahedral count, here with b=1 instead of b=10), four pressure levels rather
+# than 37, and two days rather than a simulation.
+# ---------------------------------------------------------------------------
+
+ICON_N_CELLS = 320
+ICON_PLEV_HPA = (1000, 850, 500, 250)
+ICON_UUID = "e6f7602e-2027-11ef-ab56-6d1c8c7a4d8d"
+ICON_EPOCH = "minutes since 2020-1-1 00:00:00"
+ICON_FILL = np.float32(-9.99e-08)
+ICON_CHANNEL_NAMES = ["u500", "u850", "t500", "t850", "t2m"]
+#: cells written as _FillValue, which a reader has to turn into NaN
+ICON_FILL_CELLS = (7,)
+
+
+def _icosahedral_ordering(lon_rad, lat_rad):
+    """Order cells the way ICON does: by which root region they fall in.
+
+    ICON's cell index follows the icosahedron, so cells that are close on the
+    sphere are close in the file -- coarsely, and with boundaries at the vertex
+    latitudes of +-arctan(1/2) = +-26.57 degrees. Reproducing that is what makes
+    the run coalescing in the backend meaningful to test: a lat/lon block should
+    land in a handful of long index ranges rather than scattered singletons.
+    """
+    # the twelve icosahedron vertices, ordered as a sweep from one pole to the
+    # other rather than by construction: regions next to each other in the index
+    # then lie next to each other on the sphere, which is the property being
+    # imitated. Listing the poles first would make cell 0 and cell n/12
+    # antipodal, and destroy exactly the locality this exists to provide.
+    ring = np.arctan(0.5)
+    vertex_lat = [np.pi / 2] + [ring] * 5 + [-ring] * 5 + [-np.pi / 2]
+    vertex_lon = (
+        [0.0]
+        + [index * 2 * np.pi / 5 for index in range(5)]
+        + [(index + 0.5) * 2 * np.pi / 5 for index in range(5)]
+        + [0.0]
+    )
+
+    vertex_lat = np.asarray(vertex_lat)
+    vertex_lon = np.asarray(vertex_lon)
+
+    # nearest vertex by great circle distance
+    cosine = np.sin(lat_rad[:, None]) * np.sin(vertex_lat[None, :]) + np.cos(lat_rad[:, None]) * np.cos(
+        vertex_lat[None, :]
+    ) * np.cos(lon_rad[:, None] - vertex_lon[None, :])
+    region = np.argmax(cosine, axis=1)
+
+    return np.lexsort((lon_rad, lat_rad, region))
+
+
+def icon_grid_coordinates(n_cells: int = ICON_N_CELLS):
+    """Cell centres for the fixture, in radians, ordered like ICON's."""
+    # a Fibonacci sphere: near uniform, and deterministic
+    indices = np.arange(n_cells, dtype=np.float64)
+    lat = np.arcsin(1.0 - 2.0 * (indices + 0.5) / n_cells)
+    lon = np.mod(indices * np.pi * (3.0 - np.sqrt(5.0)), 2.0 * np.pi) - np.pi
+
+    order = _icosahedral_ordering(lon, lat)
+    return lon[order], lat[order]
+
+
+def icon_expected_value(variable: str, time_index: int, level_index: int, cell: np.ndarray):
+    """The value the fixture stores, so a test can assert an exact read."""
+    base = float(sum(ord(character) for character in variable))
+    return np.float32(base + 1000.0 * time_index + 10.0 * level_index) + np.asarray(cell, dtype=np.float32) / 1000.0
+
+
+def icon_expected_field(variable: str, time_index: int, level_index: int, n_cells: int = ICON_N_CELLS):
+    """The whole field a reader should return, fills included as NaN."""
+    field = icon_expected_value(variable, time_index, level_index, np.arange(n_cells))
+    field[list(ICON_FILL_CELLS)] = np.nan
+    return field
+
+
+def _write_icon_file(path, variable, units, times, level_name, level_values, level_units, n_cells, fill_cells=()):
+    """One ICON style netCDF4 file: a single variable of (time, level, ncells)."""
+    n_chunks = 21  # as in the real files, so the cell axis is chunked the same way
+    chunk = int(np.ceil(n_cells / n_chunks))
+
+    with h5.File(path, "w") as handle:
+        handle.attrs["Conventions"] = np.bytes_("CF-1.6")
+        handle.attrs["uuidOfHGrid"] = np.bytes_(ICON_UUID)
+        handle.attrs["grid_file_uri"] = np.bytes_("http://example.invalid/icon_grid_test.nc")
+
+        time_dset = handle.create_dataset("time", data=np.asarray(times, dtype=np.float64))
+        time_dset.attrs["units"] = np.bytes_(ICON_EPOCH)
+
+        level_dset = handle.create_dataset(level_name, data=np.asarray(level_values, dtype=np.float64))
+        level_dset.attrs["units"] = np.bytes_(level_units)
+
+        cells = np.arange(n_cells)
+        data = np.empty((len(times), len(level_values), n_cells), dtype=np.float32)
+        for time_index in range(len(times)):
+            for level_index in range(len(level_values)):
+                data[time_index, level_index] = icon_expected_value(variable, time_index, level_index, cells)
+        for cell in fill_cells:
+            data[:, :, cell] = ICON_FILL
+
+        field = handle.create_dataset(variable, data=data, chunks=(1, 1, chunk))
+        field.attrs["units"] = np.bytes_(units)
+        field.attrs["_FillValue"] = ICON_FILL
+        field.attrs["missing_value"] = ICON_FILL
+        field.attrs["CDI_grid_type"] = np.bytes_("unstructured")
+        field.attrs["number_of_grid_in_reference"] = np.int32(1)
+
+
+def init_icon_dataset(
+    path: str,
+    n_cells: Optional[int] = ICON_N_CELLS,
+    n_days: Optional[int] = 2,
+    fill_cells: Optional[Sequence[int]] = ICON_FILL_CELLS,
+):
+    """Create a scaled down ICON dataset and its grid file.
+
+    Returns ``(data_path, grid_path, n_samples, channel_names)``, where
+    ``n_samples`` counts the times every required variable has -- the three
+    hourly axis, since that is the coarsest.
+    """
+    data_path = os.path.join(path, "icon")
+    grid_path = os.path.join(path, "icon_grid_test.nc")
+    os.makedirs(data_path, exist_ok=True)
+
+    lon_rad, lat_rad = icon_grid_coordinates(n_cells)
+    with h5.File(grid_path, "w") as handle:
+        handle.attrs["uuidOfHGrid"] = np.bytes_(ICON_UUID)
+        handle.attrs["grid_root"] = np.int32(2)
+        handle.attrs["grid_level"] = np.int32(1)
+        for name, values in (("clon", lon_rad), ("clat", lat_rad)):
+            dset = handle.create_dataset(name, data=values)
+            dset.attrs["units"] = np.bytes_("radian")
+
+    day_zero = dt.datetime(2021, 6, 1, tzinfo=dt.timezone.utc)
+    epoch = dt.datetime(2020, 1, 1, tzinfo=dt.timezone.utc)
+    minutes = lambda when: (when - epoch).total_seconds() / 60.0  # noqa: E731
+
+    pressures = np.asarray(ICON_PLEV_HPA, dtype=np.float64) * 100.0  # the files store Pa
+
+    for day in range(n_days):
+        start = day_zero + dt.timedelta(days=day)
+        stamp = start.strftime("%Y%m%dT%H%M%SZ")
+
+        # three hourly on pressure levels, one file per day
+        three_hourly = [minutes(start + dt.timedelta(hours=3 * step)) for step in range(8)]
+        for variable, units in (("temp", "K"), ("u", "m s-1")):
+            _write_icon_file(
+                os.path.join(data_path, f"{variable}_dyamond_atm_1_3_{stamp}.nc"),
+                variable,
+                units,
+                three_hourly,
+                "plev",
+                pressures,
+                "Pa",
+                n_cells,
+                fill_cells,
+            )
+
+        # the same name on altitude levels, hourly: what forces resolution by
+        # level coordinate rather than by name
+        hourly = [minutes(start + dt.timedelta(hours=step)) for step in range(24)]
+        _write_icon_file(
+            os.path.join(data_path, f"u_dyamond_atm_4_{stamp}.nc"),
+            "u",
+            "m s-1",
+            hourly,
+            "alt",
+            np.asarray([10.0, 100.0]),
+            "m",
+            n_cells,
+            fill_cells,
+        )
+
+    # hourly at the surface, and one file for the whole period rather than one
+    # per day, so its unit boundaries do not line up with the others
+    all_hours = [minutes(day_zero + dt.timedelta(hours=step)) for step in range(24 * n_days)]
+    _write_icon_file(
+        os.path.join(data_path, "t_2m_dyamond_atm_3_202106.nc"),
+        "t_2m",
+        "K",
+        all_hours,
+        "height_2",
+        np.asarray([2.0]),
+        "m",
+        n_cells,
+        fill_cells,
+    )
+
+    return data_path, grid_path, 8 * n_days, list(ICON_CHANNEL_NAMES)

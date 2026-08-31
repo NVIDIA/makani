@@ -20,6 +20,7 @@ import unittest
 
 import numpy as np
 
+from makani.utils.grid_types import expected_latitudes
 from makani.utils.parse_dataset_metada import parse_dataset_metadata
 
 import sys
@@ -179,6 +180,93 @@ class TestParseDatasetMetadata(unittest.TestCase):
         path = self._path_without_latlon("no_latlon_i")
         params, _ = parse_dataset_metadata(path, self.params)
         self.assertEqual(params["data_grid_type"], "equiangular")
+
+    # -----------------------------------------------------------------------
+    # 3b. The grid type is required, and checked
+    # -----------------------------------------------------------------------
+
+    def test_missing_grid_type_is_refused(self):
+        """A dataset has to say what grid it is on.
+
+        This used to default to equiangular, which is silently wrong for every
+        dataset that is not: the quadrature weights follow from the grid type,
+        so an area averaged loss computed on the wrong one is wrong everywhere
+        and looks fine.
+        """
+        meta = self._base_metadata()
+        del meta["coords"]["grid_type"]
+        path = self._write_json("no_grid_type", meta)
+
+        with self.assertRaises(ValueError) as ctx:
+            parse_dataset_metadata(path, self.params)
+
+        message = str(ctx.exception)
+        self.assertIn("grid_type", message)
+        self.assertIn(path, message)
+        self.assertIn("equiangular", message)  # the message lists what is accepted
+
+    def test_a_declaration_that_the_latitudes_contradict_is_refused(self):
+        # equiangular nodes declared as legendre-gauss: the coordinates are
+        # right there, so the claim is checkable
+        meta = self._base_metadata()
+        meta["coords"]["grid_type"] = "legendre-gauss"
+        path = self._write_json("lying_grid_type", meta)
+
+        with self.assertRaises(ValueError) as ctx:
+            parse_dataset_metadata(path, self.params)
+
+        message = str(ctx.exception)
+        self.assertIn("legendre-gauss", message)
+        self.assertIn("equiangular", message)  # names what they actually look like
+
+    def test_a_truthful_non_equiangular_declaration_is_accepted(self):
+        meta = self._base_metadata()
+        meta["coords"]["grid_type"] = "legendre-gauss"
+        meta["coords"]["lat"] = np.flip(expected_latitudes("legendre-gauss", _IMG_H)).tolist()
+        path = self._write_json("honest_grid_type", meta)
+
+        params, _ = parse_dataset_metadata(path, self.params)
+
+        self.assertEqual(params["data_grid_type"], "legendre-gauss")
+
+    def test_latitudes_rounded_to_float32_still_verify(self):
+        # what a file stores, and what metadata written from one looks like
+        meta = self._base_metadata()
+        meta["coords"]["lat"] = np.asarray(meta["coords"]["lat"], dtype=np.float32).astype(float).tolist()
+        path = self._write_json("float32_lats", meta)
+
+        params, _ = parse_dataset_metadata(path, self.params)
+
+        self.assertEqual(params["data_grid_type"], "equiangular")
+
+    def test_coordinates_without_latitudes_follow_the_declared_grid(self):
+        """The dummy grid is built from the declared type, not assumed.
+
+        A synthetic run on a legendre-gauss grid should get legendre-gauss
+        latitudes, otherwise it is testing something the real run will not do.
+        """
+        meta = self._base_metadata()
+        meta["coords"]["grid_type"] = "legendre-gauss"
+        del meta["coords"]["lat"]
+        del meta["coords"]["lon"]
+        path = self._write_json("no_latlon_lg", meta)
+
+        params, _ = parse_dataset_metadata(path, self.params)
+
+        expected = np.flip(expected_latitudes("legendre-gauss", _IMG_H))
+        self.assertEqual(len(params["lat"]), _IMG_H)
+        self.assertTrue(np.allclose(params["lat"], expected, atol=1e-9))
+        # still north to south, as everything downstream expects
+        self.assertGreater(params["lat"][0], params["lat"][-1])
+
+    def test_a_grid_with_no_latitudes_and_no_coordinates_is_refused(self):
+        # euclidean is not on the sphere, so nothing can place the data
+        meta = self._base_metadata(coords=dict(grid_type="euclidean", channel=_CH_NAMES))
+        path = self._write_json("euclidean_no_coords", meta)
+
+        with self.assertRaises(ValueError) as ctx:
+            parse_dataset_metadata(path, self.params)
+        self.assertIn("coords.lat", str(ctx.exception))
 
     # -----------------------------------------------------------------------
     # 4. Channel sanitization

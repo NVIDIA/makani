@@ -99,9 +99,12 @@ def get_static_features(params):
     normalize_static_features = params.get("normalize_static_features", False)
     normalizer = None
     if normalize_static_features:
+        from makani.utils.grid_types import DEFAULT_GRID_TYPE
         from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature
 
-        quadrature_rule = grid_to_quadrature_rule(params.get("data_grid_type", "equiangular"))
+        # params restored from a checkpoint written before the grid type became
+        # required may not carry one; a fresh run always does
+        quadrature_rule = grid_to_quadrature_rule(params.get("data_grid_type", DEFAULT_GRID_TYPE))
         crop_shape = [
             params.get("img_crop_shape_x", params.img_shape_x),
             params.get("img_crop_shape_y", params.img_shape_y),

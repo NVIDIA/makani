@@ -98,23 +98,28 @@ def get_dataloader(params, files_pattern, device, mode="train", dali_device=None
             n_history=params.get("n_history", 0),
             n_future=(params.get("valid_autoreg_steps") if (mode == "eval") else params.get("n_future", 0)),
             add_zenith=params.get("add_zenith", False),
-            data_grid_type=params.get("data_grid_type", "equiangular"),
+            data_grid_type=params.data_grid_type,
             model_grid_type=params.get("model_grid_type", "equiangular"),
             bias=bias,
             scale=scale,
             crop_size=(params.get("crop_size_x", None), params.get("crop_size_y", None)),
             crop_anchor=(params.get("crop_anchor_x", 0), params.get("crop_anchor_y", 0)),
             subsampling_factor=params.get("subsampling_factor", 1),
+            grid_type=params.data_grid_type,
             return_timestamp=(True if (mode == "inference") else False),
             return_target=(False if (mode == "inference") else True),
-            file_suffix=params.get("dataset_file_suffix", "h5"),
             dataset_name=params.get("h5_path", "fields"),
             timestamp_name=params.get("timestamp_name", "timestamp"),
+            # required by layouts that address variables by name, such as WB2
+            channel_names=params.get("channel_names", None),
             latitude_name=params.get("latitude_name", "lat"),
             longitude_name=params.get("longitude_name", "lon"),
             enable_s3=params.get("enable_s3", False),
+            enable_odirect=params.get("enable_odirect", False),
+            odirect_alignment=params.get("odirect_alignment", 0),
             io_grid=params.get("io_grid", [1, 1, 1]),
             io_rank=params.get("io_rank", [0, 0, 0]),
+            backend=params.get("dataset_backend", None),
         )
 
         if mode in ["train", "eval"]:
@@ -135,14 +140,19 @@ def get_dataloader(params, files_pattern, device, mode="train", dali_device=None
                 pin_memory=torch.cuda.is_available(),
             )
         else:
-            # this will all be handled by the inferencer
+            # this will all be handled by the inferencer, which drives the dataset
+            # directly -- by index and by time -- so it has to stay reachable
             sampler = None
-            dataloader = types.SimpleNamespace()
+            dataloader = types.SimpleNamespace(dataset=dataset)
 
         # for compatibility with the DALI dataloader
         dataloader.lat_lon = dataset.lat_lon
         dataloader.get_output_normalization = dataset.get_output_normalization
         dataloader.get_input_normalization = dataset.get_input_normalization
+
+        # a torch DataLoader already carries its dataset, and refuses to have it
+        # reassigned; the stub above is given one explicitly
+        data_shapes = dataset.data_shapes
 
     elif params.enable_synthetic_data:
         from makani.utils.dataloaders.data_loader_dummy import DummyLoader
@@ -176,73 +186,34 @@ def get_dataloader(params, files_pattern, device, mode="train", dali_device=None
             add_zenith=params.get("add_zenith", False),
             latitudes=params.get("lat", None),
             longitudes=params.get("lon", None),
-            data_grid_type=params.get("data_grid_type", "equiangular"),
+            data_grid_type=params.data_grid_type,
             model_grid_type=params.get("model_grid_type", "equiangular"),
             crop_size=(params.get("crop_size_x", None), params.get("crop_size_y", None)),
             crop_anchor=(params.get("crop_anchor_x", 0), params.get("crop_anchor_y", 0)),
             subsampling_factor=params.get("subsampling_factor", 1),
+            grid_type=params.data_grid_type,
             return_timestamp=(True if (mode == "inference") else False),
             return_target=(False if (mode == "inference") else True),
             io_grid=params.get("io_grid", [1, 1, 1]),
             io_rank=params.get("io_rank", [0, 0, 0]),
         )
 
-        dataset = types.SimpleNamespace(
-            in_channels=dataloader.in_channels,
-            out_channels=dataloader.out_channels,
-            grid_converter=dataloader.grid_converter,
-            img_shape_x=dataloader.img_shape[0],
-            img_shape_y=dataloader.img_shape[1],
-            img_crop_shape_x=dataloader.crop_shape[0],
-            img_crop_shape_y=dataloader.crop_shape[1],
-            img_crop_offset_x=dataloader.crop_anchor[0],
-            img_crop_offset_y=dataloader.crop_anchor[1],
-            img_local_shape_x=dataloader.read_shape[0],
-            img_local_shape_y=dataloader.read_shape[1],
-            img_local_offset_x=dataloader.read_anchor[0],
-            img_local_offset_y=dataloader.read_anchor[1],
-            img_local_shape_x_resampled=dataloader.return_shape[0],
-            img_local_shape_y_resampled=dataloader.return_shape[1],
-            img_shape_x_resampled=dataloader.img_shape_resampled[0],
-            img_shape_y_resampled=dataloader.img_shape_resampled[1],
-            subsampling_factor=dataloader.subsampling_factor,
-            lat_lon_local=dataloader.lat_lon_local,
-        )
+        data_shapes = dataloader.data_shapes
 
         # not needed for the no multifiles case
         sampler = None
 
     else:
-        from makani.utils.dataloaders.data_loader_dali_2d import ERA5DaliESDataloader as ERA5DaliESDataloader2D
+        from makani.utils.dataloaders.dali_dataloader import DaliDataloader
 
         # dali loader
         if dali_device is None:
             dali_device = "gpu" if torch.cuda.is_available() else "cpu"
-        dataloader = ERA5DaliESDataloader2D(params, files_pattern, (mode == "train"), dali_device=dali_device)
+        dataloader = DaliDataloader(params, files_pattern, (mode == "train"), dali_device=dali_device)
 
-        dataset = types.SimpleNamespace(
-            in_channels=dataloader.in_channels,
-            out_channels=dataloader.out_channels,
-            grid_converter=dataloader.grid_converter,
-            img_shape_x=dataloader.img_shape_x,
-            img_shape_y=dataloader.img_shape_y,
-            img_crop_shape_x=dataloader.img_crop_shape_x,
-            img_crop_shape_y=dataloader.img_crop_shape_y,
-            img_crop_offset_x=dataloader.img_crop_offset_x,
-            img_crop_offset_y=dataloader.img_crop_offset_y,
-            img_local_shape_x=dataloader.img_local_shape_x,
-            img_local_shape_y=dataloader.img_local_shape_y,
-            img_local_offset_x=dataloader.img_local_offset_x,
-            img_local_offset_y=dataloader.img_local_offset_y,
-            img_local_shape_x_resampled=dataloader.img_local_shape_x_resampled,
-            img_local_shape_y_resampled=dataloader.img_local_shape_y_resampled,
-            img_shape_x_resampled=dataloader.img_shape_x_resampled,
-            img_shape_y_resampled=dataloader.img_shape_y_resampled,
-            subsampling_factor=dataloader.subsampling_factor,
-            lat_lon_local=dataloader.lat_lon_local,
-        )
+        data_shapes = dataloader.data_shapes
 
         # not needed for the no multifiles case
         sampler = None
 
-    return dataloader, dataset, sampler
+    return dataloader, data_shapes, sampler

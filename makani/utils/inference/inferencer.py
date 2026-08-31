@@ -103,10 +103,14 @@ class Inferencer(Driver):
             self.params["enable_synthetic_data"] = False
 
         # the file path is taken from inf_data_path to perform inference on the out of sample dataset
-        self.valid_dataloader, self.valid_dataset, _ = get_dataloader(
+        self.valid_dataloader, self.valid_data_shapes, _ = get_dataloader(
             self.params, self.params.inf_data_path, mode="inference", device=self.device
         )
-        self._set_data_shapes(self.params, self.valid_dataset)
+        self._set_data_shapes(self.params, self.valid_data_shapes)
+
+        # inference addresses samples by index and by time, which is the dataset's
+        # own business rather than anything the shapes describe
+        self.valid_dataset = self.valid_dataloader.dataset
 
         if self.log_to_screen:
             self.logger.info("data loader initialized")
@@ -121,14 +125,13 @@ class Inferencer(Driver):
                 n_history=0,  # since we only use it for the output
                 n_future=0,
                 add_zenith=0,
-                data_grid_type=params.get("data_grid_type", "equiangular"),
+                data_grid_type=params.data_grid_type,
                 model_grid_type=params.get("model_grid_type", "equiangular"),
                 crop_size=(params.get("crop_size_x", None), params.get("crop_size_y", None)),
                 crop_anchor=(params.get("crop_anchor_x", 0), params.get("crop_anchor_y", 0)),
                 return_timestamp=False,
                 relative_timestamp=True,
                 return_target=False,
-                file_suffix=params.get("dataset_file_suffix", "h5"),
                 dataset_name="fields",
                 enable_s3=params.get("enable_s3", False),
                 io_grid=params.get("io_grid", [1, 1, 1]),
@@ -160,7 +163,7 @@ class Inferencer(Driver):
                 n_history=0,  # since we only use it for the output
                 n_future=0,
                 add_zenith=0,
-                data_grid_type=params.get("data_grid_type", "equiangular"),
+                data_grid_type=params.data_grid_type,
                 model_grid_type=params.get("model_grid_type", "equiangular"),
                 bias=bias,  # we subtract the bias to avoid subtracting too big numbers
                 scale=scale,  # we need to set that to make sure the climatology is properly scaled
@@ -169,7 +172,6 @@ class Inferencer(Driver):
                 return_timestamp=False,
                 relative_timestamp=True,
                 return_target=False,
-                file_suffix=params.get("dataset_file_suffix", "h5"),
                 dataset_name="fields",
                 enable_s3=params.get("enable_s3", False),
                 io_grid=params.get("io_grid", [1, 1, 1]),

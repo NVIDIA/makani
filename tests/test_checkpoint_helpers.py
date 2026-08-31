@@ -43,6 +43,9 @@ from makani.utils.checkpoint_helpers import (
     get_model_state_dict_prefix,
     prepend_prefix_to_state_dict,
     load_checkpoint,
+    supports_dataloader_state,
+    gather_dataloader_state_dict,
+    scatter_dataloader_state_dict,
     UNSAFE_LOAD_ENV_VAR,
 )
 
@@ -87,18 +90,18 @@ class TestGetLatestCheckpointVersion(unittest.TestCase):
 
     def test_returns_zero_when_no_files_match(self):
         # No files exist → bare-except branch returns 0.
-        self.assertEqual(get_latest_checkpoint_version(self.path_template), 0)
+        self.assertEqual(get_latest_checkpoint_version(self.path_template, verbose=False), 0)
 
     def test_extracts_version_from_single_file(self):
         self._touch("ckpt_mp0_v3.tar")
-        self.assertEqual(get_latest_checkpoint_version(self.path_template), 3)
+        self.assertEqual(get_latest_checkpoint_version(self.path_template, verbose=False), 3)
 
     def test_picks_latest_by_mtime_not_version_number(self):
         # The implementation uses os.path.getmtime to pick the "latest" — NOT the
         # numeric max. Pin this behavior: write v5 at t=100, v2 at t=200, expect 2.
         self._touch("ckpt_mp0_v5.tar", mtime=100)
         self._touch("ckpt_mp0_v2.tar", mtime=200)
-        self.assertEqual(get_latest_checkpoint_version(self.path_template), 2)
+        self.assertEqual(get_latest_checkpoint_version(self.path_template, verbose=False), 2)
 
     def test_picks_highest_version_when_mtimes_strictly_increase(self):
         # Common case: each successive checkpoint has a later mtime AND a larger
@@ -106,13 +109,13 @@ class TestGetLatestCheckpointVersion(unittest.TestCase):
         self._touch("ckpt_mp0_v0.tar", mtime=100)
         self._touch("ckpt_mp0_v1.tar", mtime=200)
         self._touch("ckpt_mp0_v7.tar", mtime=300)
-        self.assertEqual(get_latest_checkpoint_version(self.path_template), 7)
+        self.assertEqual(get_latest_checkpoint_version(self.path_template, verbose=False), 7)
 
     def test_only_inspects_mp_rank_0_files(self):
         # The template is formatted with mp_rank=0, so files at other ranks
         # are not seen. With only an mp_rank=1 file present, function returns 0.
         self._touch("ckpt_mp1_v9.tar")
-        self.assertEqual(get_latest_checkpoint_version(self.path_template), 0)
+        self.assertEqual(get_latest_checkpoint_version(self.path_template, verbose=False), 0)
 
     def test_returns_zero_on_unparseable_filename(self):
         # File matches the glob (mp_rank=0) but lacks ``_v<digits>``: the regex
@@ -121,7 +124,7 @@ class TestGetLatestCheckpointVersion(unittest.TestCase):
         weird_path = os.path.join(self.tmpdir, "ckpt_mp0_vNOTANUMBER.tar")
         with open(weird_path, "w"):
             pass
-        self.assertEqual(get_latest_checkpoint_version(self.path_template), 0)
+        self.assertEqual(get_latest_checkpoint_version(self.path_template, verbose=False), 0)
 
 
 class _OrigModWrapper:
@@ -355,6 +358,51 @@ class TestLoadCheckpoint(unittest.TestCase):
                 with mock.patch.dict(os.environ, {UNSAFE_LOAD_ENV_VAR: value}):
                     with self.assertRaises(RuntimeError):
                         load_checkpoint(self.path)
+
+
+class _FakeDataloader:
+    """Minimal stand-in for the DALI dataloader's checkpointing interface."""
+
+    def __init__(self, state, enable_checkpointing=True):
+        self.state = state
+        self.enable_checkpointing = enable_checkpointing
+
+    def state_dict(self):
+        return self.state
+
+    def load_state_dict(self, state_dict, strict=True):
+        self.state = state_dict
+        return True
+
+
+class TestDataloaderStateHelpers(unittest.TestCase):
+    """Gather/scatter of the dataloader state in the single-rank (non-distributed) case."""
+
+    def test_unsupported_dataloaders_are_detected(self):
+        # loaders which cannot checkpoint (multifiles, dummy) have no such interface
+        self.assertFalse(supports_dataloader_state(None))
+        self.assertFalse(supports_dataloader_state(object()))
+        # DALI loaders with checkpointing turned off are treated the same way
+        self.assertFalse(supports_dataloader_state(_FakeDataloader({}, enable_checkpointing=False)))
+        self.assertTrue(supports_dataloader_state(_FakeDataloader({})))
+
+    def test_gather_returns_none_for_unsupported_dataloader(self):
+        self.assertIsNone(gather_dataloader_state_dict(None))
+        self.assertIsNone(gather_dataloader_state_dict(_FakeDataloader({}, enable_checkpointing=False)))
+
+    def test_gather_scatter_roundtrip(self):
+        state = {"format_version": 1, "pipeline_checkpoint": torch.arange(8, dtype=torch.uint8)}
+
+        state_dicts = gather_dataloader_state_dict(_FakeDataloader(state))
+
+        # one entry per data-parallel rank, which is a single one here
+        self.assertEqual(len(state_dicts), 1)
+        self.assertIs(scatter_dataloader_state_dict(state_dicts), state)
+
+    def test_scatter_rejects_mismatched_rank_count(self):
+        # resuming into a different data-parallel decomposition cannot be honored
+        with self.assertRaises(ValueError):
+            scatter_dataloader_state_dict([{}, {}])
 
 
 if __name__ == "__main__":
