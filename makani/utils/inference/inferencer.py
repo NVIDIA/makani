@@ -125,7 +125,7 @@ class Inferencer(Driver):
                 n_history=0,  # since we only use it for the output
                 n_future=0,
                 add_zenith=0,
-                data_grid_type=params.get("data_grid_type", "equiangular"),
+                data_grid_type=params.data_grid_type,
                 model_grid_type=params.get("model_grid_type", "equiangular"),
                 crop_size=(params.get("crop_size_x", None), params.get("crop_size_y", None)),
                 crop_anchor=(params.get("crop_anchor_x", 0), params.get("crop_anchor_y", 0)),
@@ -163,7 +163,7 @@ class Inferencer(Driver):
                 n_history=0,  # since we only use it for the output
                 n_future=0,
                 add_zenith=0,
-                data_grid_type=params.get("data_grid_type", "equiangular"),
+                data_grid_type=params.data_grid_type,
                 model_grid_type=params.get("model_grid_type", "equiangular"),
                 bias=bias,  # we subtract the bias to avoid subtracting too big numbers
                 scale=scale,  # we need to set that to make sure the climatology is properly scaled

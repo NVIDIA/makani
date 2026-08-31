@@ -49,6 +49,7 @@ from makani.utils.dataloaders.backends import get_backend
 from makani.utils.dataloaders.data_shapes import DataShapes
 
 # for grid conversion
+from makani.utils.grid_types import DEFAULT_GRID_TYPE
 from makani.utils.grids import GridConverter
 
 
@@ -80,6 +81,7 @@ class MultifilesDataset(Dataset):
         crop_size: Optional[Tuple[int, int]] = (None, None),
         crop_anchor: Optional[Tuple[int, int]] = (0, 0),
         subsampling_factor: Optional[int] = 1,
+        grid_type: Optional[str] = DEFAULT_GRID_TYPE,
         io_grid: Optional[List[int]] = [1, 1, 1],
         io_rank: Optional[List[int]] = [0, 0, 0],
         enable_logging: Optional[bool] = True,
@@ -129,6 +131,7 @@ class MultifilesDataset(Dataset):
         self.crop_size = crop_size
         self.crop_anchor = crop_anchor
         self.subsampling_factor = subsampling_factor
+        self.grid_type = grid_type
 
         # datetime logic
         if self.relative_timestamp:
@@ -190,6 +193,7 @@ class MultifilesDataset(Dataset):
             io_grid=self.io_grid,
             io_rank=self.io_rank,
             subsampling_factor=self.subsampling_factor,
+            grid_type=self.grid_type,
             enable_s3=self.enable_s3,
             enable_odirect=self.enable_odirect,
             odirect_alignment=self.odirect_alignment,

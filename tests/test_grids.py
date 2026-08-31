@@ -18,9 +18,11 @@ import os
 import sys
 import unittest
 
+import numpy as np
 import torch
 from parameterized import parameterized
 
+from makani.utils.grid_types import expected_latitudes, matching_grid_types, verify_grid_type
 from makani.utils.grids import grid_to_quadrature_rule, GridConverter, GridQuadrature
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
@@ -272,6 +274,104 @@ class TestGridQuadrature(unittest.TestCase):
                 "full crop vs no crop", gq_full.quad_weight, gq_crop.quad_weight, atol=0.0, rtol=0.0, verbose=verbose
             )
         )
+
+
+class TestGridTypeVerification(unittest.TestCase):
+    """Checking that a declared grid type matches the coordinates it came with.
+
+    The declaration decides the quadrature. Weights that do not belong to the
+    grid mis-weight every area averaged loss and metric, by an amount that looks
+    like a modelling difference rather than a bug -- and since the coordinates
+    are always available, the claim never has to be taken on trust.
+    """
+
+    def test_equiangular_latitudes_span_pole_to_pole(self):
+        latitudes = expected_latitudes("equiangular", 5)
+        self.assertTrue(np.allclose(latitudes, [-90.0, -45.0, 0.0, 45.0, 90.0]))
+
+    def test_the_equally_spaced_grids_share_their_nodes(self):
+        """Three grid types, one set of nodes.
+
+        Clenshaw-Curtiss and WeatherBench2 both sit on the equally spaced
+        latitudes and differ from equiangular only in how they weight them. So
+        no coordinate can separate the three, and anything claiming to identify
+        a grid from its latitudes has to say so rather than pick one.
+        """
+        for grid_type in ("clenshaw-curtiss", "weatherbench2"):
+            with self.subTest(grid_type=grid_type):
+                self.assertTrue(np.allclose(expected_latitudes(grid_type, 9), expected_latitudes("equiangular", 9)))
+
+    def test_gauss_nodes_are_not_the_equiangular_ones(self):
+        # the premise of the whole check: the grids are distinguishable
+        gauss = expected_latitudes("legendre-gauss", 32)
+        equiangular = expected_latitudes("equiangular", 32)
+
+        self.assertGreater(np.max(np.abs(gauss - equiangular)), 1.0)
+
+    def test_gauss_nodes_stay_inside_the_poles(self):
+        gauss = expected_latitudes("legendre-gauss", 16)
+
+        self.assertGreater(gauss[0], -90.0)
+        self.assertLess(gauss[-1], 90.0)
+
+    def test_a_grid_off_the_sphere_has_no_latitudes(self):
+        self.assertIsNone(expected_latitudes("euclidean", 8))
+
+    def test_an_unknown_grid_type_is_refused(self):
+        with self.assertRaises(NotImplementedError):
+            expected_latitudes("cubed-sphere", 8)
+
+    def test_equally_spaced_nodes_match_every_grid_that_uses_them(self):
+        # all three, because the coordinates genuinely do not distinguish them
+        self.assertEqual(
+            matching_grid_types(expected_latitudes("equiangular", 24)),
+            ["equiangular", "clenshaw-curtiss", "weatherbench2"],
+        )
+
+    def test_gauss_nodes_match_only_the_gauss_grid(self):
+        # the one separation coordinates can make, and the one worth making
+        self.assertEqual(matching_grid_types(expected_latitudes("legendre-gauss", 24)), ["legendre-gauss"])
+
+    def test_latitudes_that_are_no_known_grid_match_nothing(self):
+        self.assertEqual(matching_grid_types(np.linspace(-30.0, 30.0, 12)), [])
+
+    def test_a_truthful_declaration_passes(self):
+        for grid_type in ("equiangular", "legendre-gauss", "clenshaw-curtiss", "weatherbench2"):
+            with self.subTest(grid_type=grid_type):
+                verify_grid_type(grid_type, expected_latitudes(grid_type, 24))
+
+    def test_orientation_is_not_part_of_the_claim(self):
+        # makani stores latitudes north to south, the quadrature routines
+        # produce them south to north; what is compared is where the nodes are
+        verify_grid_type("legendre-gauss", np.flip(expected_latitudes("legendre-gauss", 24)))
+
+    def test_a_false_declaration_is_refused_and_says_what_it_looks_like(self):
+        with self.assertRaises(ValueError) as ctx:
+            verify_grid_type("legendre-gauss", expected_latitudes("equiangular", 24), source="data.json")
+
+        message = str(ctx.exception)
+        self.assertIn("data.json", message)
+        self.assertIn("legendre-gauss", message)
+        self.assertIn("equiangular", message)
+
+    def test_a_swap_within_the_equally_spaced_grids_cannot_be_caught(self):
+        """Stated as a test because it is a limit, not an oversight.
+
+        Declaring Clenshaw-Curtiss over equiangular nodes is accepted: the nodes
+        are identical and the coordinates hold no evidence either way. Only the
+        weights differ, and no dataset carries those.
+        """
+        verify_grid_type("clenshaw-curtiss", expected_latitudes("equiangular", 24))
+        verify_grid_type("equiangular", expected_latitudes("clenshaw-curtiss", 24))
+
+    def test_float32_coordinates_still_verify(self):
+        # coordinates come out of files as float32, so the tolerance has to
+        # absorb that while still separating the grids
+        latitudes = expected_latitudes("equiangular", 721).astype(np.float32).astype(np.float64)
+        verify_grid_type("equiangular", latitudes)
+
+    def test_a_grid_off_the_sphere_is_not_checked(self):
+        verify_grid_type("euclidean", np.linspace(0.0, 1.0, 8))
 
 
 if __name__ == "__main__":

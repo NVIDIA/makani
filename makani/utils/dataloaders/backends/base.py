@@ -70,6 +70,7 @@ from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 import numpy as np
 
+from ...grid_types import DEFAULT_GRID_TYPE, verify_grid_type
 from ..data_helpers import get_date_from_timestamp, get_timedelta_from_timestamp
 
 
@@ -234,6 +235,11 @@ class DatasetBackend(abc.ABC):
         grid instead. A proper downsampling layer, where the method is the
         user's choice (average pooling, spectral truncation), is intended to
         replace this.
+    grid_type : str
+        The grid the data is stored on, in makani's vocabulary. It decides the
+        quadrature, so it is declared by the dataset rather than guessed here --
+        and where the files carry coordinates, the declaration is checked
+        against them.
     lat_lon : tuple, optional
         Coordinates to use instead of those found in the files.
     target_grid : GridSpec, optional
@@ -281,6 +287,7 @@ class DatasetBackend(abc.ABC):
         io_grid: Optional[Sequence[int]] = None,
         io_rank: Optional[Sequence[int]] = None,
         subsampling_factor: int = 1,
+        grid_type: str = DEFAULT_GRID_TYPE,
         lat_lon=None,
         target_grid: Optional[GridSpec] = None,
     ):
@@ -299,6 +306,7 @@ class DatasetBackend(abc.ABC):
         self.io_grid = list(io_grid) if io_grid is not None else [1, 1]
         self.io_rank = list(io_rank) if io_rank is not None else [0, 0]
         self.subsampling_factor = subsampling_factor
+        self.grid_type = grid_type
         self.lat_lon = lat_lon
         self.target_grid = target_grid
 
@@ -398,6 +406,20 @@ class DatasetBackend(abc.ABC):
     def _restore(self) -> None:
         """Rebuild whatever could not be pickled. Overridden where needed."""
         return
+
+    def _describe_grid(self, shape, latitude, longitude, from_file: bool) -> GridSpec:
+        """The dataset's grid, with the declared type checked against it.
+
+        Hardcoding a type here would override a correct declaration, which is
+        worse than defaulting: a run that says legendre-gauss would silently be
+        given equiangular quadrature. Where the coordinates came out of the
+        files there is evidence, so the claim is checked; where they were
+        fabricated from the shape there is none, and nothing is asserted.
+        """
+        if from_file:
+            verify_grid_type(self.grid_type, latitude, source=f"the dataset at {self.location[0]}")
+
+        return GridSpec(self.grid_type, tuple(shape), np.asarray(latitude), np.asarray(longitude))
 
     def __del__(self):
         try:

@@ -46,6 +46,7 @@ from typing import Optional
 import numpy as np
 import torch
 
+from ..grid_types import DEFAULT_GRID_TYPE
 from .backends import get_backend
 from .data_helpers import get_date_from_string, get_date_from_timestamp, get_date_ranges, get_timestamp
 
@@ -133,6 +134,7 @@ class SampleSource(object):
         crop_size,
         crop_anchor,
         subsampling_factor=1,
+        grid_type=DEFAULT_GRID_TYPE,
         num_shards=1,
         shard_id=0,
         io_grid=[1, 1, 1],
@@ -203,6 +205,7 @@ class SampleSource(object):
             io_grid=io_grid[1:],
             io_rank=io_rank[1:],
             subsampling_factor=subsampling_factor,
+            grid_type=grid_type,
             lat_lon=lat_lon,
             enable_odirect=enable_odirect,
             odirect_alignment=odirect_alignment,

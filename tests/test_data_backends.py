@@ -73,6 +73,7 @@ from makani.utils.dataloaders.backends.factory import detect_backend
 from makani.utils.dataloaders.backends.makani_hdf5 import contiguous_slices
 from makani.utils.dataloaders.backends.icon import date_of_file, survey_files, variable_of_file
 from makani.utils.dataloaders.backends.mesh import block_of_rank, coalesce_runs
+from makani.utils.grid_types import expected_latitudes
 
 from .testutils import (
     CHANNEL_NAMES,
@@ -887,8 +888,12 @@ class TestFileCoordinates(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.TemporaryDirectory()
         self.shape = (8, 16)
-        # not linspace(90, -90): a grid the fallback could not have guessed
-        self.latitude = np.linspace(-89.0, 89.0, self.shape[0])
+        # a real grid, and not the one the fallback would have invented: Gauss
+        # nodes sit nowhere near the equiangular ones, so a fabricated grid
+        # cannot pass for this file's -- and unlike arbitrary numbers, these are
+        # a grid the dataset can honestly declare itself to be on
+        self.grid_type = "legendre-gauss"
+        self.latitude = np.flip(expected_latitudes(self.grid_type, self.shape[0]))
         self.longitude = np.linspace(0.0, 350.0, self.shape[1])
 
     def tearDown(self):
@@ -908,7 +913,7 @@ class TestFileCoordinates(unittest.TestCase):
 
     def test_coordinates_come_from_the_file(self):
         self._write()
-        metadata = get_backend(self.tmpdir.name).discover()
+        metadata = get_backend(self.tmpdir.name, grid_type=self.grid_type).discover()
 
         self.assertTrue(compare_arrays("metadata.grid.lat", metadata.grid.lat, self.latitude, rtol=1e-6))
         self.assertTrue(compare_arrays("metadata.grid.lon", metadata.grid.lon, self.longitude, rtol=1e-6))
@@ -937,7 +942,7 @@ class TestFileCoordinates(unittest.TestCase):
         # the chunk is what a consumer actually reads coordinates from, so the
         # decomposition has to slice the file's grid, not a fabricated one
         self._write()
-        backend = get_backend(self.tmpdir.name, io_grid=[2, 1], io_rank=[1, 0])
+        backend = get_backend(self.tmpdir.name, grid_type=self.grid_type, io_grid=[2, 1], io_rank=[1, 0])
         backend.discover()
 
         self.assertTrue(
