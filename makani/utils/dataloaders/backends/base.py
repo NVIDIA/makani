@@ -70,7 +70,7 @@ from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 import numpy as np
 
-from ...utils.grid_types import DEFAULT_GRID_TYPE, verify_grid_type
+from ...grid_types import DEFAULT_GRID_TYPE, verify_grid_type
 from ..data_helpers import get_date_from_timestamp, get_timedelta_from_timestamp
 
 
