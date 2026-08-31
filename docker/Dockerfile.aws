@@ -20,7 +20,7 @@ ARG DLFW_VERSION=25.12
 FROM nvcr.io/nvidia/pytorch:${DLFW_VERSION}-py3
 
 # update repo info
-RUN apt update -y && apt install -y libibmad5
+RUN apt update -y && apt install -y libibmad5 libssl-dev
 
 # upgrade cmake
 RUN apt remove cmake -y && \
