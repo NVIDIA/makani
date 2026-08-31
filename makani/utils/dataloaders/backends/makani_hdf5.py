@@ -259,14 +259,16 @@ class MakaniHDF5Backend(StructuredChunkMixin, DatasetBackend):
         self.dsets = [None] * len(files)
 
         # what the caller asked for, else what the file says, else the assumption
+        from_file = False
         if self.lat_lon is not None:
             latitude, longitude = np.asarray(self.lat_lon[0]), np.asarray(self.lat_lon[1])
         elif coordinates is not None:
             latitude, longitude = coordinates
+            from_file = True
         else:
             latitude, longitude = get_lat_lon_grid(img_shape)
 
-        grid = GridSpec("equiangular", tuple(img_shape), np.asarray(latitude), np.asarray(longitude))
+        grid = self._describe_grid(img_shape, latitude, longitude, from_file)
         self.chunk = self._resolve_chunk(grid)
         self.metadata = BackendMetadata(
             files=files,

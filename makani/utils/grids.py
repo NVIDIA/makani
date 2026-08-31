@@ -19,6 +19,7 @@ import torch.amp as amp
 
 from torch_harmonics.quadrature import legendre_gauss_weights, clenshaw_curtiss_weights, precompute_latitudes
 
+
 from makani.utils import comm
 from torch_harmonics.distributed import compute_split_shapes, split_tensor_along_dim
 from makani.mpu.mappings import reduce_from_parallel_region

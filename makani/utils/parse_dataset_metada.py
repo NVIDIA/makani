@@ -16,6 +16,8 @@
 import json
 import numpy as np
 
+from makani.utils.grid_types import expected_latitudes, verify_grid_type
+
 
 def parse_dataset_metadata(metadata_json_path, params):
     """Helper routine for parsing the metadata file data.json in the datasets."""
@@ -30,16 +32,38 @@ def parse_dataset_metadata(metadata_json_path, params):
         # load excluded list of timestamps if available
         params["analysis_epoch_start_dates"] = metadata.get("analysis_epoch_start_dates", [])
 
-        # read grid information: if not present, assume equiangular
+        # the grid type is required: it decides the quadrature, and a dataset
+        # that does not say what grid it is on cannot be integrated over
+        # correctly. Defaulting to equiangular is what this used to do, and it
+        # is wrong silently for every dataset that is not.
+        if "grid_type" not in metadata["coords"]:
+            raise ValueError(
+                f"{metadata_json_path} does not declare coords.grid_type. It is required: the quadrature "
+                "weights follow from it, so a dataset that does not say what grid it is on cannot be area "
+                "averaged correctly. Add one of 'equiangular', 'legendre-gauss', 'clenshaw-curtiss', "
+                "'weatherbench2' or 'euclidean'; see data_process/examples/metadata.json."
+            )
+        params["data_grid_type"] = metadata["coords"]["grid_type"]
+
         if ("lat" in metadata["coords"]) and ("lon" in metadata["coords"]):
             params["lat"] = metadata["coords"]["lat"]
             params["lon"] = metadata["coords"]["lon"]
-            params["data_grid_type"] = metadata["coords"]["grid_type"]
+
+            # the coordinates are right here, so the declaration is checked
+            # rather than taken on trust
+            verify_grid_type(params["data_grid_type"], params["lat"], source=metadata_json_path)
         else:
-            # create a dummy lat grid, useful for dummy data experiments
-            params["lat"] = np.linspace(start=90.0, stop=-90.0, endpoint=True, num=params["img_shape_x"]).tolist()
+            # no coordinates given, which is useful for dummy data experiments:
+            # build them from the grid type the dataset does declare
+            latitudes = expected_latitudes(params["data_grid_type"], params["img_shape_x"])
+            if latitudes is None:
+                raise ValueError(
+                    f"{metadata_json_path} declares grid_type '{params['data_grid_type']}' and no "
+                    "coordinates, so there is nothing to place the data on. Give coords.lat and coords.lon."
+                )
+            # stored north to south, as everything downstream expects
+            params["lat"] = np.flip(latitudes).tolist()
             params["lon"] = np.linspace(start=0.0, stop=360.0, endpoint=False, num=params["img_shape_y"]).tolist()
-            params["data_grid_type"] = "equiangular"
 
         # channel name sanitization step
         channel_names = metadata["coords"]["channel"]

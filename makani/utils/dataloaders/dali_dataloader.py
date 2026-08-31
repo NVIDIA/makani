@@ -265,6 +265,7 @@ class DaliDataloader(object):
             crop_size=crop_size,
             crop_anchor=crop_anchor,
             subsampling_factor=self.subsampling_factor,
+            grid_type=params.data_grid_type,
             num_shards=self.num_shards,
             shard_id=self.shard_id,
             io_grid=params.get("io_grid", [1, 1, 1]),

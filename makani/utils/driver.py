@@ -33,6 +33,7 @@ import wandb
 # makani dependencies
 from makani.utils.YParams import YParams
 from makani.utils.features import get_auxiliary_channels
+from makani.utils.grid_types import DEFAULT_GRID_TYPE
 from makani.utils import comm
 from makani.utils.dataloaders.data_helpers import get_data_normalization
 from makani.utils.training.training_helpers import get_parameter_groups
@@ -180,6 +181,13 @@ class Driver(metaclass=abc.ABCMeta):
         # whether the state of the training data pipeline is stored in and restored from the checkpoint
         if not hasattr(params, "checkpoint_dataloader_state"):
             params["checkpoint_dataloader_state"] = True
+
+        # a real dataset declares its grid in the metadata, which is required and
+        # verified there. Reaching here without one means no metadata was parsed
+        # at all, which is the synthetic case, and the synthetic loader builds an
+        # equiangular grid. Stated once so that no consumer has to assume it.
+        if not hasattr(params, "data_grid_type"):
+            params["data_grid_type"] = DEFAULT_GRID_TYPE
 
         return params
 
