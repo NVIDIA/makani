@@ -167,8 +167,16 @@ class ConservativeRemap(nn.Module):
         latitude = latitude / np.clip(latitude.sum(axis=1, keepdims=True), 1e-30, None)
         longitude = longitude / np.clip(longitude.sum(axis=1, keepdims=True), 1e-30, None)
 
+        # a target row sitting exactly on a pole is one physical point with
+        # n_lon coordinate labels, not n_lon distinct cells -- it is forced
+        # constant across longitude in _from_raster rather than here, because
+        # the constant has to be the zonal mean of the *latitude-averaged*
+        # row, which only exists once the latitude contraction has run
+        pole_mask = np.isclose(np.abs(np.asarray(target_lat, dtype=np.float64)), 90.0)
+
         remap.register_buffer("latitude_weights", torch.as_tensor(latitude, dtype=dtype))
         remap.register_buffer("longitude_weights", torch.as_tensor(longitude, dtype=dtype))
+        remap.register_buffer("pole_mask", torch.as_tensor(pole_mask, dtype=torch.bool))
         return remap
 
     @classmethod
@@ -198,10 +206,27 @@ class ConservativeRemap(nn.Module):
         target = _TargetGrid(target_lat, target_lon)
         flat = target.cell_of(cell_lat, cell_lon)
 
+        # a target row sitting exactly on a pole is one physical point, so a
+        # cell landing anywhere in that row's cap belongs to the pole's value
+        # regardless of the longitude it happened to carry -- collapse the
+        # whole row onto its first column so the polar cap is integrated as a
+        # unit rather than sliced into n_lon independent (and differently
+        # populated) longitude wedges
+        pole_rows = target.pole_rows
+        if pole_rows.size:
+            row = flat // target.n_lon
+            is_pole = np.isin(row, pole_rows)
+            flat = np.where(is_pole, row * target.n_lon, flat)
+
         n_target = target.n_lat * target.n_lon
         caught = np.bincount(flat, weights=cell_area, minlength=n_target)
 
         empty = np.flatnonzero(caught <= 0.0)
+        if pole_rows.size:
+            # the other n_lon - 1 columns of a pole row never catch anything
+            # by construction now; they are filled by broadcast, not fallback
+            replicas = np.concatenate([np.arange(r * target.n_lon + 1, (r + 1) * target.n_lon) for r in pole_rows])
+            empty = np.setdiff1d(empty, replicas, assume_unique=True)
         remap.fallback_fraction = float(len(empty)) / float(n_target)
 
         remap.register_buffer("cell_target", torch.as_tensor(flat, dtype=torch.int64))
@@ -211,6 +236,7 @@ class ConservativeRemap(nn.Module):
         remap.register_buffer(
             "empty_source", torch.as_tensor(target.nearest_cell(empty, cell_lat, cell_lon), dtype=torch.int64)
         )
+        remap.register_buffer("pole_rows", torch.as_tensor(pole_rows, dtype=torch.int64))
         return remap
 
     # ---- application -------------------------------------------------------
@@ -232,6 +258,13 @@ class ConservativeRemap(nn.Module):
 
         # one contraction per axis: (..., s_lat, s_lon) -> (..., t_lat, t_lon)
         out = torch.einsum("...ij,ki->...kj", data, latitude)
+        if self.pole_mask.any():
+            # a row on a pole is one point relabelled n_lon times; averaging
+            # a constant row over longitude leaves it that same constant, so
+            # this alone makes the pole rows come out uniform after the next
+            # contraction
+            zonal_mean = out.mean(dim=-1, keepdim=True)
+            out = torch.where(self.pole_mask.view(-1, 1), zonal_mean, out)
         return torch.einsum("...kj,lj->...kl", out, longitude)
 
     def _from_mesh(self, data: torch.Tensor) -> torch.Tensor:
@@ -245,6 +278,12 @@ class ConservativeRemap(nn.Module):
 
         if self.empty_target.numel():
             totals[:, self.empty_target] = flat[:, self.empty_source]
+
+        if self.pole_rows.numel():
+            n_lon = self.target_shape[1]
+            for row in self.pole_rows.tolist():
+                start = row * n_lon
+                totals[:, start : start + n_lon] = totals[:, start : start + 1]
 
         return totals.reshape(*leading, *self.target_shape)
 
@@ -265,6 +304,10 @@ class _TargetGrid:
         self.sorted_sin_edges = self.sin_edges if self.ascending else self.sin_edges[::-1]
 
         self.lon_edges = cell_bounds_longitude(self.longitudes)
+
+        # a row exactly on a pole is one physical point carrying n_lon
+        # coordinate labels, not n_lon distinct cells
+        self.pole_rows = np.flatnonzero(np.isclose(np.abs(self.latitudes), 90.0))
 
     def cell_of(self, lat: np.ndarray, lon: np.ndarray) -> np.ndarray:
         """Flat index of the target cell each point falls in."""

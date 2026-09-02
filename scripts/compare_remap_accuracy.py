@@ -69,10 +69,13 @@ Usage
 import argparse
 import math
 import time
-from functools import partial
+from functools import lru_cache, partial
 
 import numpy as np
+import torch
 from scipy.spatial import ConvexHull, cKDTree
+
+from makani.utils.remap import ConservativeRemap
 
 
 # ---------------------------------------------------------------------------
@@ -93,14 +96,58 @@ def unit_vectors(lat, lon):
     return np.stack([np.cos(phi) * np.cos(lam), np.cos(phi) * np.sin(lam), np.sin(phi)], axis=-1)
 
 
-def analytic_field(lat, lon, noise=0.0, seed=0):
+@lru_cache(maxsize=None)
+def _s2_reference_field(seed, lmax, alpha, ref_nlat):
+    """A smooth field's values on a fine reference grid.
+
+    Built from makani's ``IsotropicGaussianRandomFieldS2``: real spherical
+    harmonic coefficients, scaled by a per-degree power law with exponent
+    ``alpha`` and transformed to the grid with an inverse SHT. ``alpha`` is
+    what sets the correlation length here: a steep falloff concentrates power
+    in the lowest few degrees regardless of ``lmax`` and reads as
+    large-wavelength structure, while a flatter one spreads it toward
+    ``lmax`` and gives visibly finer texture -- ``lmax`` only bounds the
+    *shortest* wavelength that can appear, ``alpha`` decides how much of the
+    permitted range is actually used.
+
+    A formula written directly in (lat, lon), like the trig expression this
+    replaced, is generally *not* well defined at the poles -- it keeps
+    depending on longitude there even though every (90, lon) is the same
+    point. Spherical harmonics don't have that problem: every m != 0 mode
+    vanishes at phi = +-90 by construction, so this field comes out exactly
+    constant across longitude at both poles, which is what a physically
+    meaningful "truth" for the pole-consistency fix needs to be. Cached on
+    its arguments so every call in a sweep (mesh cells, several target grids)
+    samples the same underlying field rather than drawing a fresh one.
+    """
+    from makani.models.noise import IsotropicGaussianRandomFieldS2
+
+    field = IsotropicGaussianRandomFieldS2(
+        img_shape=(ref_nlat, 2 * ref_nlat),
+        batch_size=1,
+        num_channels=1,
+        sigma=1.0,
+        alpha=alpha,
+        lmax=lmax,
+        seed=seed,
+    )
+    field.update()
+    values = field().detach().numpy().reshape(-1)
+    ref_lat, ref_lon = equiangular_grid(ref_nlat)
+    return ref_lat, ref_lon, values
+
+
+def analytic_field(lat, lon, noise=0.0, seed=0, lmax=10, alpha=1.0, ref_nlat=181):
     """A smooth field, optionally roughened at the grid scale.
 
-    The smooth part is resolvable by any of the grids here; the noise is not,
-    which is what separates a method that averages from one that samples.
+    The smooth part is resolvable by any of the grids here (its spectrum is
+    truncated to ``lmax``, comfortably below the coarsest target used in the
+    sweep); the noise is not, which is what separates a method that averages
+    from one that samples. ``seed`` fixes both parts, so results are
+    reproducible run to run.
     """
-    phi, lam = np.radians(lat), np.radians(lon)
-    smooth = np.sin(3.0 * lam) * np.cos(2.0 * phi) + 0.5 * np.cos(5.0 * phi) + 0.25 * np.sin(2.0 * lam) * np.sin(phi)
+    ref_lat, ref_lon, ref_values = _s2_reference_field(seed, lmax, alpha, ref_nlat)
+    smooth = bilinear_to_points(ref_values, ref_lat, ref_lon, np.asarray(lat, dtype=np.float64), np.asarray(lon, dtype=np.float64))
     if noise <= 0.0:
         return smooth
     rng = np.random.default_rng(seed)
@@ -187,43 +234,28 @@ def remap_barycentric(tree, source_values, target_xyz, triangulation=None, **_):
     return out
 
 
-def remap_conservative(tree, source_values, target_xyz, target=None, source_area=None, **_):
-    """Area weighted mean of the cells whose centre falls in each target cell."""
-    target_lat, target_lon, flat_of_cell = target
-    n_target = len(target_lat) * len(target_lon)
+def build_conservative(source_lat, source_lon, source_area, target_lat, target_lon):
+    """The real ``ConservativeRemap.from_mesh`` operator for one target grid.
 
-    weighted = np.bincount(flat_of_cell, weights=source_area * source_values, minlength=n_target)
-    caught = np.bincount(flat_of_cell, weights=source_area, minlength=n_target)
-
-    out = np.zeros(n_target)
-    filled = caught > 0.0
-    out[filled] = weighted[filled] / caught[filled]
-
-    if not np.all(filled):
-        empty = np.flatnonzero(~filled)
-        _, index = tree.query(target_xyz[empty], k=1)
-        out[empty] = source_values[index]
-
-    return out, 1.0 - filled.mean()
+    This script used to carry its own reimplementation of cell assignment and
+    area-weighted averaging, parallel to ``makani.utils.remap``. The two drifted
+    -- the reimplementation had no pole handling -- so both this method and the
+    cell-mean reference below now go through the actual production operator
+    instead. Built once per target grid and shared by both, rather than each
+    pulling in its own copy of the assignment logic.
+    """
+    return ConservativeRemap.from_mesh(source_lat, source_lon, source_area, target_lat, target_lon)
 
 
-def assign_cells_to_target(source_lat, source_lon, target_lat, target_lon):
-    """Flat target index each source cell falls into."""
-    edges = np.concatenate(([target_lat[0]], (target_lat[:-1] + target_lat[1:]) / 2.0, [target_lat[-1]]))
-    edges[0], edges[-1] = math.copysign(90.0, target_lat[0]), math.copysign(90.0, target_lat[-1])
-    sin_edges = np.sin(np.radians(edges))
+def apply_conservative(operator, values):
+    """Run the operator forward on a numpy field, numpy in and out."""
+    result = operator(torch.as_tensor(values, dtype=torch.float32))
+    return result.numpy().reshape(-1)
 
-    ascending = sin_edges[0] < sin_edges[-1]
-    ordered = sin_edges if ascending else sin_edges[::-1]
-    row = np.clip(np.searchsorted(ordered, np.sin(np.radians(source_lat)), side="right") - 1, 0, len(target_lat) - 1)
-    if not ascending:
-        row = len(target_lat) - 1 - row
 
-    spacing = 360.0 / len(target_lon)
-    column = np.clip(
-        (np.mod(source_lon - (target_lon[0] - spacing / 2.0), 360.0) / spacing).astype(np.int64), 0, len(target_lon) - 1
-    )
-    return row * len(target_lon) + column
+def remap_conservative(tree, source_values, target_xyz, operator=None, **_):
+    """Area weighted mean via the real ``ConservativeRemap.from_mesh`` operator."""
+    return apply_conservative(operator, source_values), operator.fallback_fraction
 
 
 def bilinear_to_points(values, target_lat, target_lon, lat, lon):
@@ -253,7 +285,7 @@ def bilinear_to_points(values, target_lat, target_lon, lat, lon):
 def main(args):
     source_lat, source_lon = fibonacci_mesh(args.cells)
     source_xyz = unit_vectors(source_lat, source_lon)
-    source_values = analytic_field(source_lat, source_lon, noise=args.noise)
+    source_values = analytic_field(source_lat, source_lon, noise=args.noise, seed=args.seed)
     source_area = np.full(args.cells, 4.0 * np.pi / args.cells)
     source_integral = float(source_area @ source_values)
 
@@ -277,17 +309,18 @@ def main(args):
         grid_lat, grid_lon = grid_lat.ravel(), grid_lon.ravel()
 
         target_xyz = unit_vectors(grid_lat, grid_lon)
-        # two references: the field at the point, and its mean over the cell.
-        # The cell mean is estimated from the source cells that fall in it,
-        # which is the best available stand-in for an integral over the cell
-        truth_point = analytic_field(grid_lat, grid_lon, noise=0.0)
-        target_area = cell_areas(target_lat, target_lon)
-        flat_of_cell = assign_cells_to_target(source_lat, source_lon, target_lat, target_lon)
+        operator = build_conservative(source_lat, source_lon, source_area, target_lat, target_lon)
 
-        smooth_source = analytic_field(source_lat, source_lon, noise=0.0)
-        caught = np.bincount(flat_of_cell, weights=source_area, minlength=n_target)
-        summed = np.bincount(flat_of_cell, weights=source_area * smooth_source, minlength=n_target)
-        truth_cell = np.where(caught > 0.0, summed / np.clip(caught, 1e-30, None), truth_point)
+        # two references: the field at the point, and its mean over the cell.
+        # The cell mean comes from feeding the noiseless field through the same
+        # conservative operator being evaluated as a method, so the reference is
+        # pole-consistent by the same construction and never a separate estimate
+        # that could disagree with it
+        truth_point = analytic_field(grid_lat, grid_lon, noise=0.0, seed=args.seed)
+        target_area = cell_areas(target_lat, target_lon)
+
+        smooth_source = analytic_field(source_lat, source_lon, noise=0.0, seed=args.seed)
+        truth_cell = apply_conservative(operator, smooth_source)
 
         ratio = args.cells / n_target
         print(f"target {n_lat} x {2 * n_lat} = {n_target} points   ({ratio:.2f} mesh cells per target cell)")
@@ -303,8 +336,7 @@ def main(args):
                 source_values,
                 target_xyz,
                 triangulation=triangulation,
-                target=(target_lat, target_lon, flat_of_cell),
-                source_area=source_area,
+                operator=operator,
             )
             empty = None
             if isinstance(result, tuple):
@@ -336,6 +368,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--cells", type=int, default=10000, help="Cells in the synthetic mesh.")
     parser.add_argument("--noise", type=float, default=0.3, help="Amplitude of the unresolvable part of the field.")
+    parser.add_argument("--seed", type=int, default=0, help="Seed for the synthetic field, mesh noise included.")
     parser.add_argument(
         "--neighbours", type=int, nargs="+", default=[1, 3, 6, 12], help="Values of k to try; k=1 is nearest."
     )
