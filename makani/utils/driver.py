@@ -980,10 +980,10 @@ class Driver(metaclass=abc.ABCMeta):
         """
         from makani.utils import visualize
 
-        # Functors reference channels symbolically via {name} placeholders. The
-        # visualizer resolves them against channel_names, ships only the
-        # referenced channels to the renderer subprocesses, and rewrites each
-        # functor to index into the stripped tensor.
+        # Plot entries name an op from visualize.PLOT_OPS and reference channels
+        # symbolically. The visualizer resolves the names against channel_names,
+        # ships only the referenced channels to the renderer subprocesses, and
+        # rewrites the channel lists to index into the stripped tensor.
         cnames = params.channel_names
         plot_list = []
 
@@ -991,7 +991,8 @@ class Driver(metaclass=abc.ABCMeta):
             plot_list.append(
                 {
                     "name": "windspeed_uv10",
-                    "functor": "lambda x: np.sqrt(np.square(x[{u10m}, ...]) + np.square(x[{v10m}, ...]))",
+                    "op": "magnitude",
+                    "channels": ["u10m", "v10m"],
                     "diverging": False,
                 }
             )
@@ -1000,7 +1001,8 @@ class Driver(metaclass=abc.ABCMeta):
             plot_list.append(
                 {
                     "name": "geopotential_z500",
-                    "functor": "lambda x: x[{z500}, ...]",
+                    "op": "select",
+                    "channels": ["z500"],
                     "diverging": False,
                 }
             )
@@ -1009,7 +1011,8 @@ class Driver(metaclass=abc.ABCMeta):
             plot_list.append(
                 {
                     "name": "specific_humidity_q100",
-                    "functor": "lambda x: x[{q100}, ...]",
+                    "op": "select",
+                    "channels": ["q100"],
                     "diverging": False,
                 }
             )
