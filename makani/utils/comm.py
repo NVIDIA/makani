@@ -15,6 +15,8 @@
 
 import math
 
+import torch.distributed as dist
+
 # we are using the distributed manager from physicsnemo
 from physicsnemo.distributed.manager import DistributedManager
 from physicsnemo.distributed.config import ProcessGroupNode, ProcessGroupConfig
@@ -103,8 +105,44 @@ def is_distributed(name: str):
 
 
 def cleanup():
+    """Tear down every process group this module registered, then the world group.
+
+    ``DistributedManager.cleanup()`` only calls ``dist.destroy_process_group()``
+    with no argument (the default/world group) -- physicsnemo's own comment on
+    that call claims "destroying group.WORLD is enough for all process groups
+    to get destroyed", but nothing there actually verifies it, and this module
+    (via ``create_groups_from_config``) registers a whole tree of subgroups
+    under ``_DM._groups`` -- ``h``, ``w``, ``spatial``, ``model``, ``matmul``,
+    ``data``, ``ensemble``, ``batch``, plus one ``__orthogonal_to_<name>``
+    group per node (``DistributedManager.create_group_from_node`` creates one
+    for every node, and ``DistributedManager`` tracks it the same way as any
+    other named group, so ``_DM.group_names`` already includes them -- nothing
+    here has to enumerate them separately).
+
+    Other code holds direct references to some of these -- e.g.
+    ``torch_harmonics.distributed``'s own cached polar/azimuth group handles
+    (the exact ``h``/``w`` group objects, if a caller passed them to
+    ``torch_harmonics.distributed.init``) -- and may have *already* destroyed
+    a given group through its own explicit API (``torch_harmonics.distributed.finalize()``,
+    for the polar/azimuth pair) by the time this runs. This module has no
+    general way to know which names that covers, so each destroy call is
+    wrapped: a group that is already gone raises ``ValueError`` from
+    ``dist.destroy_process_group``, treated here as success (someone else
+    already did this one) rather than a real failure -- silently relying on
+    Python reference counting to eventually destroy the rest is not
+    deterministic either way, so every group still gets an explicit destroy
+    attempt, guaranteeing its underlying NCCL communicator is gone before the
+    next ``init()``.
+    """
     global _DM
     if _DM is not None:
+        for name in list(_DM.group_names):
+            group = _DM.group(name)
+            if group is not None:
+                try:
+                    dist.destroy_process_group(group)
+                except ValueError:
+                    pass
         _DM.cleanup()
         _DM = None
     return
