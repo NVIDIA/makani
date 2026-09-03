@@ -147,7 +147,9 @@ def analytic_field(lat, lon, noise=0.0, seed=0, lmax=10, alpha=1.0, ref_nlat=181
     reproducible run to run.
     """
     ref_lat, ref_lon, ref_values = _s2_reference_field(seed, lmax, alpha, ref_nlat)
-    smooth = bilinear_to_points(ref_values, ref_lat, ref_lon, np.asarray(lat, dtype=np.float64), np.asarray(lon, dtype=np.float64))
+    smooth = bilinear_to_points(
+        ref_values, ref_lat, ref_lon, np.asarray(lat, dtype=np.float64), np.asarray(lon, dtype=np.float64)
+    )
     if noise <= 0.0:
         return smooth
     rng = np.random.default_rng(seed)

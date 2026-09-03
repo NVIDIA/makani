@@ -91,7 +91,9 @@ def _p2p_exchange(send_prev, send_next, prev_rank, next_rank, recv_count_prev, r
     if (prev_rank is not None) and (prev_rank == next_rank):
         peer = prev_rank
         send_buf = torch.cat([send_prev, send_next], dim=-1).contiguous()
-        recv_buf = torch.zeros(*send_prev.shape[:-1], recv_count_prev + recv_count_next, dtype=send_prev.dtype, device=send_prev.device)
+        recv_buf = torch.zeros(
+            *send_prev.shape[:-1], recv_count_prev + recv_count_next, dtype=send_prev.dtype, device=send_prev.device
+        )
         reqs = dist.batch_isend_irecv(
             [dist.P2POp(dist.irecv, recv_buf, peer, group), dist.P2POp(dist.isend, send_buf, peer, group)]
         )
@@ -131,9 +133,7 @@ def owner_rank(global_index: torch.Tensor, splits) -> torch.Tensor:
     here avoids a numpy round-trip for no reason); ``splits`` is the plain
     list ``compute_split_shapes`` returns.
     """
-    boundaries = torch.cumsum(
-        torch.as_tensor(splits, dtype=global_index.dtype, device=global_index.device), dim=0
-    )[:-1]
+    boundaries = torch.cumsum(torch.as_tensor(splits, dtype=global_index.dtype, device=global_index.device), dim=0)[:-1]
     return torch.searchsorted(boundaries, global_index, right=True)
 
 
@@ -179,7 +179,9 @@ class _ExchangeIndexedFn(torch.autograd.Function):
 
         send_prev = x.index_select(-1, send_index_prev) if prev_rank is not None else None
         send_next = x.index_select(-1, send_index_next) if next_rank is not None else None
-        recv_prev, recv_next = _p2p_exchange(send_prev, send_next, prev_rank, next_rank, recv_count_prev, recv_count_next, group)
+        recv_prev, recv_next = _p2p_exchange(
+            send_prev, send_next, prev_rank, next_rank, recv_count_prev, recv_count_next, group
+        )
 
         pieces = [piece for piece in (recv_prev, x, recv_next) if piece is not None]
         return torch.cat(pieces, dim=-1).contiguous()
@@ -217,8 +219,13 @@ class _ExchangeIndexedFn(torch.autograd.Function):
             grad_to_next = dout[..., offset : offset + ctx.recv_count_next].contiguous()
 
         recv_from_prev, recv_from_next = _p2p_exchange(
-            grad_to_prev, grad_to_next, prev_rank, next_rank, ctx.send_index_prev.numel() if prev_rank is not None else 0,
-            ctx.send_index_next.numel() if next_rank is not None else 0, group
+            grad_to_prev,
+            grad_to_next,
+            prev_rank,
+            next_rank,
+            ctx.send_index_prev.numel() if prev_rank is not None else 0,
+            ctx.send_index_next.numel() if next_rank is not None else 0,
+            group,
         )
 
         # gradient owed back for the local entries this rank sent away, from
@@ -234,7 +241,9 @@ class _ExchangeIndexedFn(torch.autograd.Function):
 
 
 @torch.compiler.disable()
-def exchange_indexed(x, prev_rank, next_rank, send_index_prev, send_index_next, recv_count_prev, recv_count_next, group):
+def exchange_indexed(
+    x, prev_rank, next_rank, send_index_prev, send_index_next, recv_count_prev, recv_count_next, group
+):
     """Exchange selected entries of ``x`` (last dim) with immediate neighbours.
 
     Parameters
@@ -272,14 +281,18 @@ class _RedistributeFn(torch.autograd.Function):
 
     @staticmethod
     @torch.amp.custom_fwd(device_type="cuda")
-    def forward(x, keep_index, prev_rank, next_rank, send_index_prev, send_index_next, recv_count_prev, recv_count_next, group):
+    def forward(
+        x, keep_index, prev_rank, next_rank, send_index_prev, send_index_next, recv_count_prev, recv_count_next, group
+    ):
         kept = x.index_select(-1, keep_index)
         if (prev_rank is None) and (next_rank is None):
             return kept
 
         send_prev = x.index_select(-1, send_index_prev) if prev_rank is not None else None
         send_next = x.index_select(-1, send_index_next) if next_rank is not None else None
-        recv_prev, recv_next = _p2p_exchange(send_prev, send_next, prev_rank, next_rank, recv_count_prev, recv_count_next, group)
+        recv_prev, recv_next = _p2p_exchange(
+            send_prev, send_next, prev_rank, next_rank, recv_count_prev, recv_count_next, group
+        )
 
         pieces = [kept] + [piece for piece in (recv_prev, recv_next) if piece is not None]
         return torch.cat(pieces, dim=-1).contiguous()
@@ -287,9 +300,17 @@ class _RedistributeFn(torch.autograd.Function):
     @staticmethod
     @_custom_setup_context(device_type="cuda")
     def setup_context(ctx, inputs, output):
-        x, keep_index, prev_rank, next_rank, send_index_prev, send_index_next, recv_count_prev, recv_count_next, group = (
-            inputs
-        )
+        (
+            x,
+            keep_index,
+            prev_rank,
+            next_rank,
+            send_index_prev,
+            send_index_next,
+            recv_count_prev,
+            recv_count_next,
+            group,
+        ) = inputs
         ctx.N = x.shape[-1]
         ctx.leading = x.shape[:-1]
         ctx.dtype = x.dtype
@@ -324,8 +345,13 @@ class _RedistributeFn(torch.autograd.Function):
             grad_to_next = dout[..., offset : offset + ctx.recv_count_next].contiguous()
 
         recv_from_prev, recv_from_next = _p2p_exchange(
-            grad_to_prev, grad_to_next, prev_rank, next_rank, ctx.send_index_prev.numel() if prev_rank is not None else 0,
-            ctx.send_index_next.numel() if next_rank is not None else 0, group
+            grad_to_prev,
+            grad_to_next,
+            prev_rank,
+            next_rank,
+            ctx.send_index_prev.numel() if prev_rank is not None else 0,
+            ctx.send_index_next.numel() if next_rank is not None else 0,
+            group,
         )
 
         if recv_from_prev is not None:
@@ -337,7 +363,9 @@ class _RedistributeFn(torch.autograd.Function):
 
 
 @torch.compiler.disable()
-def redistribute_indexed(x, keep_index, prev_rank, next_rank, send_index_prev, send_index_next, recv_count_prev, recv_count_next, group):
+def redistribute_indexed(
+    x, keep_index, prev_rank, next_rank, send_index_prev, send_index_next, recv_count_prev, recv_count_next, group
+):
     """Keep ``x[..., keep_index]``, hand the rest to their owning neighbour, receive what neighbours hand over.
 
     Unlike :func:`exchange_indexed` (which duplicates boundary data as a halo),

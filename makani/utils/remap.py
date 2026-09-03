@@ -236,7 +236,19 @@ def _ensure_thd_initialized():
 
 
 def _redistribute_mesh_cells(
-    remap, cell_lat, cell_lon, cell_area, row_global, col_global, lat_splits, h_size, h_rank, lon_splits, w_size, w_rank, device
+    remap,
+    cell_lat,
+    cell_lon,
+    cell_area,
+    row_global,
+    col_global,
+    lat_splits,
+    h_size,
+    h_rank,
+    lon_splits,
+    w_size,
+    w_rank,
+    device,
 ):
     """Move each mesh cell to the rank that truly owns its target cell.
 
@@ -413,9 +425,7 @@ def _finalize_mesh(remap, target, flat, cell_area, cell_lat, cell_lon, dtype, sp
     remap.fallback_fraction = float(len(empty)) / float(n_target)
 
     remap.register_buffer("cell_target", torch.as_tensor(flat, dtype=torch.int64, device=device))
-    remap.register_buffer(
-        "cell_weight", torch.as_tensor(cell_area, dtype=dtype, device=device).requires_grad_(False)
-    )
+    remap.register_buffer("cell_weight", torch.as_tensor(cell_area, dtype=dtype, device=device).requires_grad_(False))
     remap.register_buffer(
         "target_weight",
         torch.as_tensor(np.clip(caught, 1e-30, None), dtype=dtype, device=device).requires_grad_(False),
@@ -563,8 +573,12 @@ class ConservativeRemap(nn.Module):
         latitude_local = latitude_full[t_lat_start:t_lat_stop]
         longitude_local = longitude_full[t_lon_start:t_lon_stop]
 
-        halo_lat = _group_halo_radius(latitude_full, n_target_lat, n_source_lat, h_size, periodic=False) if h_size > 1 else 0
-        halo_lon = _group_halo_radius(longitude_full, n_target_lon, n_source_lon, w_size, periodic=True) if w_size > 1 else 0
+        halo_lat = (
+            _group_halo_radius(latitude_full, n_target_lat, n_source_lat, h_size, periodic=False) if h_size > 1 else 0
+        )
+        halo_lon = (
+            _group_halo_radius(longitude_full, n_target_lon, n_source_lon, w_size, periodic=True) if w_size > 1 else 0
+        )
 
         # the source axis of the weight matrix must always match this rank's
         # local *source* block (plus halo) -- leaving it spanning the full
@@ -658,11 +672,20 @@ class ConservativeRemap(nn.Module):
             remap.spatial_distributed = True
             remap._mesh_ready = False
             remap._mesh_pending = dict(
-                cell_lat=cell_lat, cell_lon=cell_lon, cell_area=cell_area,
-                target_global=target_global, target=target, dtype=dtype,
-                t_lat_start=t_lat_start, t_lon_start=t_lon_start,
-                lat_splits=lat_splits, lon_splits=lon_splits,
-                h_size=h_size, h_rank=h_rank, w_size=w_size, w_rank=w_rank,
+                cell_lat=cell_lat,
+                cell_lon=cell_lon,
+                cell_area=cell_area,
+                target_global=target_global,
+                target=target,
+                dtype=dtype,
+                t_lat_start=t_lat_start,
+                t_lon_start=t_lon_start,
+                lat_splits=lat_splits,
+                lon_splits=lon_splits,
+                h_size=h_size,
+                h_rank=h_rank,
+                w_size=w_size,
+                w_rank=w_rank,
             )
             return remap
 
@@ -691,9 +714,18 @@ class ConservativeRemap(nn.Module):
         with torch.no_grad():
             row_global, col_global = np.divmod(target_global.cell_of(cell_lat, cell_lon), target_global.n_lon)
             cell_lat, cell_lon, cell_area, row_global, col_global = _redistribute_mesh_cells(
-                self, cell_lat, cell_lon, cell_area, row_global, col_global,
-                pending["lat_splits"], pending["h_size"], pending["h_rank"],
-                pending["lon_splits"], pending["w_size"], pending["w_rank"],
+                self,
+                cell_lat,
+                cell_lon,
+                cell_area,
+                row_global,
+                col_global,
+                pending["lat_splits"],
+                pending["h_size"],
+                pending["h_rank"],
+                pending["lon_splits"],
+                pending["w_size"],
+                pending["w_rank"],
                 device,
             )
         flat = (row_global - pending["t_lat_start"]) * target.n_lon + (col_global - pending["t_lon_start"])
@@ -791,14 +823,26 @@ class ConservativeRemap(nn.Module):
             # coordinates onto the field values, so data ends up ordered
             # exactly like self.cell_target/self.cell_weight expect
             data = redistribute_indexed(
-                data, self._mesh_h_keep, self._mesh_h_prev, self._mesh_h_next,
-                self._mesh_h_send_prev, self._mesh_h_send_next,
-                self._mesh_h_recv_prev, self._mesh_h_recv_next, self._mesh_h_group,
+                data,
+                self._mesh_h_keep,
+                self._mesh_h_prev,
+                self._mesh_h_next,
+                self._mesh_h_send_prev,
+                self._mesh_h_send_next,
+                self._mesh_h_recv_prev,
+                self._mesh_h_recv_next,
+                self._mesh_h_group,
             )
             data = redistribute_indexed(
-                data, self._mesh_w_keep, self._mesh_w_prev, self._mesh_w_next,
-                self._mesh_w_send_prev, self._mesh_w_send_next,
-                self._mesh_w_recv_prev, self._mesh_w_recv_next, self._mesh_w_group,
+                data,
+                self._mesh_w_keep,
+                self._mesh_w_prev,
+                self._mesh_w_next,
+                self._mesh_w_send_prev,
+                self._mesh_w_send_next,
+                self._mesh_w_recv_prev,
+                self._mesh_w_recv_next,
+                self._mesh_w_group,
             )
 
         weight = self.cell_weight.to(data.dtype)
@@ -830,7 +874,9 @@ class ConservativeRemap(nn.Module):
             primary = torch.as_tensor(
                 [row * n_lon for row in self.pole_rows.tolist()], dtype=torch.int64, device=flat.device
             )
-            pole_totals = copy_to_parallel_region(reduce_from_parallel_region(totals.index_select(1, primary), "w"), "w")
+            pole_totals = copy_to_parallel_region(
+                reduce_from_parallel_region(totals.index_select(1, primary), "w"), "w"
+            )
             pole_weight = copy_to_parallel_region(
                 reduce_from_parallel_region(target_weight.index_select(0, primary), "w"), "w"
             )

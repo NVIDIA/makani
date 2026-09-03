@@ -86,7 +86,9 @@ class TestRasterProperties(unittest.TestCase):
 
                 field = torch.full((n_src_lat, n_src_lon), 3.7, device=self.device)
                 out = remap(field)
-                self.assertTrue(compare_tensors("constant field", out, torch.full_like(out, 3.7), atol=1e-5, verbose=True))
+                self.assertTrue(
+                    compare_tensors("constant field", out, torch.full_like(out, 3.7), atol=1e-5, verbose=True)
+                )
 
     def test_conservation(self):
         """The area-weighted integral of the field is unchanged by the remap.
@@ -108,7 +110,9 @@ class TestRasterProperties(unittest.TestCase):
                 ).to(self.device)
 
                 rng = np.random.default_rng(42)
-                field = torch.as_tensor(rng.normal(size=(n_src_lat, n_src_lon)), dtype=torch.float64, device=self.device)
+                field = torch.as_tensor(
+                    rng.normal(size=(n_src_lat, n_src_lon)), dtype=torch.float64, device=self.device
+                )
                 out = remap(field)
 
                 src_area = torch.as_tensor(_raster_cell_areas(source_lat, source_lon), device=self.device)
@@ -116,7 +120,9 @@ class TestRasterProperties(unittest.TestCase):
 
                 total_in = (field * src_area).sum()
                 total_out = (out * tgt_area).sum()
-                self.assertTrue(compare_tensors("conserved integral", total_out, total_in, atol=1e-9, rtol=1e-9, verbose=True))
+                self.assertTrue(
+                    compare_tensors("conserved integral", total_out, total_in, atol=1e-9, rtol=1e-9, verbose=True)
+                )
 
     def test_refine_takes_exact_value(self):
         """Where the target is finer than the source, a target cell just takes its source cell's value.
@@ -137,19 +143,23 @@ class TestRasterProperties(unittest.TestCase):
         source_lon = np.linspace(0.0, 360.0, n_src_lon, endpoint=False)
         target_lat = np.linspace(90.0, -90.0, n_tgt_lat)
         target_lon = np.linspace(0.0, 360.0, n_tgt_lon, endpoint=False)
-        remap = ConservativeRemap.from_raster(
-            source_lat, source_lon, target_lat, target_lon, dtype=torch.float64
-        ).to(self.device)
+        remap = ConservativeRemap.from_raster(source_lat, source_lon, target_lat, target_lon, dtype=torch.float64).to(
+            self.device
+        )
 
         # exact nesting: every row of each weight matrix is a one-hot indicator
         lat_max, lat_idx = remap.latitude_weights.max(dim=1)
         lon_max, lon_idx = remap.longitude_weights.max(dim=1)
-        self.assertTrue(compare_tensors("latitude weight row max", lat_max, torch.ones_like(lat_max), atol=1e-8, verbose=True))
+        self.assertTrue(
+            compare_tensors("latitude weight row max", lat_max, torch.ones_like(lat_max), atol=1e-8, verbose=True)
+        )
         self.assertTrue(
             compare_tensors("longitude weight row max", lon_max, torch.ones_like(lon_max), atol=1e-8, verbose=True)
         )
 
-        field = torch.arange(n_src_lat * n_src_lon, dtype=torch.float64, device=self.device).reshape(n_src_lat, n_src_lon)
+        field = torch.arange(n_src_lat * n_src_lon, dtype=torch.float64, device=self.device).reshape(
+            n_src_lat, n_src_lon
+        )
         out = remap(field)
 
         expected = field[lat_idx][:, lon_idx]
@@ -160,7 +170,12 @@ class TestRasterProperties(unittest.TestCase):
 
     def test_pole_rows_constant_across_longitude(self):
         """A target row sitting on a pole is one physical point -- every longitude must agree."""
-        n_src_lat, n_src_lon, n_tgt_lat, n_tgt_lon = 33, 64, 17, 32  # odd counts so a target row lands exactly on a pole
+        n_src_lat, n_src_lon, n_tgt_lat, n_tgt_lon = (
+            33,
+            64,
+            17,
+            32,
+        )  # odd counts so a target row lands exactly on a pole
         source_lat = np.linspace(90.0, -90.0, n_src_lat)
         source_lon = np.linspace(0.0, 360.0, n_src_lon, endpoint=False)
         target_lat = np.linspace(90.0, -90.0, n_tgt_lat)
@@ -239,7 +254,14 @@ class TestMeshProperties(unittest.TestCase):
 
         total_out_exact = (out.reshape(-1) * remap.target_weight).sum()
         self.assertTrue(
-            compare_tensors("conserved integral (exact, vs. target_weight)", total_out_exact, total_in, atol=1e-9, rtol=1e-9, verbose=True)
+            compare_tensors(
+                "conserved integral (exact, vs. target_weight)",
+                total_out_exact,
+                total_in,
+                atol=1e-9,
+                rtol=1e-9,
+                verbose=True,
+            )
         )
 
         tgt_area = torch.as_tensor(_raster_cell_areas(target_lat, target_lon), dtype=torch.float64, device=self.device)

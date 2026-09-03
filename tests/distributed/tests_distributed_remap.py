@@ -118,9 +118,11 @@ class TestDistributedConservativeRemap(unittest.TestCase):
         target_lon = np.linspace(0.0, 360.0, n_tgt_lon, endpoint=False)
 
         rng = np.random.default_rng(1234)
-        global_field_np = np.sin(np.radians(source_lat))[:, None] * 2.0 + 0.3 * np.cos(
-            3.0 * np.radians(source_lon)
-        )[None, :] + rng.normal(scale=0.05, size=(n_src_lat, n_src_lon))
+        global_field_np = (
+            np.sin(np.radians(source_lat))[:, None] * 2.0
+            + 0.3 * np.cos(3.0 * np.radians(source_lon))[None, :]
+            + rng.normal(scale=0.05, size=(n_src_lat, n_src_lon))
+        )
         global_field = torch.as_tensor(global_field_np, dtype=torch.float32, device=self.device)
         global_field.requires_grad = True
 
@@ -166,8 +168,10 @@ class TestDistributedConservativeRemap(unittest.TestCase):
         rng = np.random.default_rng(5678)
         cell_lat, cell_lon = _fibonacci_mesh(n_cells)
         cell_area = np.full(n_cells, 4.0 * np.pi / n_cells)
-        values_np = np.sin(np.radians(cell_lat)) * 2.0 + 0.3 * np.cos(3.0 * np.radians(cell_lon)) + rng.normal(
-            scale=0.05, size=n_cells
+        values_np = (
+            np.sin(np.radians(cell_lat)) * 2.0
+            + 0.3 * np.cos(3.0 * np.radians(cell_lon))
+            + rng.normal(scale=0.05, size=n_cells)
         )
 
         target_lat = np.linspace(90.0, -90.0, n_lat)
@@ -176,7 +180,9 @@ class TestDistributedConservativeRemap(unittest.TestCase):
         values = torch.as_tensor(values_np, dtype=torch.float32, device=self.device)
         values.requires_grad = True
 
-        serial_remap = ConservativeRemap.from_mesh(cell_lat, cell_lon, cell_area, target_lat, target_lon).to(self.device)
+        serial_remap = ConservativeRemap.from_mesh(cell_lat, cell_lon, cell_area, target_lat, target_lon).to(
+            self.device
+        )
         serial_out = serial_remap(values)
 
         with torch.no_grad():
@@ -235,7 +241,9 @@ class TestDistributedConservativeRemap(unittest.TestCase):
 
         with self.subTest(desc="input gradients"):
             expected_igrad_local = igrad_full[torch.as_tensor(global_indices, dtype=torch.int64, device=self.device)]
-            ok = compare_tensors("input gradients", igrad_local, expected_igrad_local, atol=tol, rtol=tol, verbose=verbose)
+            ok = compare_tensors(
+                "input gradients", igrad_local, expected_igrad_local, atol=tol, rtol=tol, verbose=verbose
+            )
             self.assertTrue(reduce_success(ok, self.device), "distributed vs serial input gradients (mesh)")
 
 
