@@ -38,7 +38,7 @@ from makani.models.common.layer_norm import GeometricInstanceNormS2
 from makani.mpu.layer_norm import DistributedGeometricInstanceNormS2, DistributedInstanceNorm2d
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-from .distributed_helpers import _init_grid, _split_helper, _gather_helper, reduce_success, sync_and_barrier
+from .distributed_helpers import _init_grid, _split_helper, _gather_helper, reduce_success, teardown_comms
 from ..testutils import disable_tf32, set_seed, compare_tensors
 
 
@@ -50,7 +50,7 @@ class TestDistributedLayers(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        sync_and_barrier()
+        teardown_comms()
 
     def setUp(self):
         disable_tf32()

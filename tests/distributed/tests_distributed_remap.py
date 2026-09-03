@@ -28,7 +28,7 @@ from makani.mpu.halo import owner_rank
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
-from .distributed_helpers import _init_grid, _split_helper, _gather_helper, reduce_success, sync_and_barrier
+from .distributed_helpers import _init_grid, _split_helper, _gather_helper, reduce_success, teardown_comms
 from ..testutils import compare_tensors, disable_tf32
 
 
@@ -82,7 +82,7 @@ class TestDistributedConservativeRemap(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        sync_and_barrier()
+        teardown_comms()
 
     def setUp(self):
         disable_tf32()
