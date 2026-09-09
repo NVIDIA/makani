@@ -57,6 +57,20 @@ from makani.models.helpers import count_parameters
 from makani import Trainer, EnsembleTrainer
 
 
+def _barrier():
+    """Barrier with an explicit device, matching the rest of makani.
+
+    A bare ``dist.barrier()`` makes NCCL infer the device from the ambient CUDA state. That is
+    correct here (``torch.cuda.set_device`` runs during startup), but it is the wrong convention
+    for this codebase and a known way to deadlock when the inference is wrong.
+    """
+    if not dist.is_initialized():
+        return
+
+    device_ids = [comm.get_local_rank()] if torch.cuda.is_available() else None
+    dist.barrier(device_ids=device_ids)
+
+
 def _env_override(cli_value: int, env_name: str, default: int = 1) -> int:
     """CLI wins when it was given, otherwise fall back to the environment.
 
@@ -363,8 +377,7 @@ def main():
 
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
-    if dist.is_initialized():
-        dist.barrier()
+    _barrier()
 
     if world_rank == 0:
         logging.info(
@@ -376,8 +389,7 @@ def main():
         trainer.train_one_epoch()
     else:
         trainer.validate_one_epoch(epoch=0)
-    if dist.is_initialized():
-        dist.barrier()
+    _barrier()
     wall_time = (time.perf_counter_ns() - wall_start) * 1e-9
 
     if world_rank == 0:
@@ -512,8 +524,7 @@ def main():
         except OSError:
             pass
 
-    if dist.is_initialized():
-        dist.barrier()
+    _barrier()
 
     comm.cleanup()
 
