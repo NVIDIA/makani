@@ -538,6 +538,7 @@ class EnsembleTrainer(Trainer):
             self.iters += 1
 
             torch.cuda.nvtx.range_push(f"train step {train_steps}")
+            self.step_timer.begin_step()
 
             # map to device; materialize to list so we can expand zenith features
             gdata = [x.to(self.device) for x in data]
@@ -634,6 +635,7 @@ class EnsembleTrainer(Trainer):
             # set progress bar prefix
             progress_bar.set_postfix(**pbar_postfix)
 
+            self.step_timer.end_step()
             torch.cuda.nvtx.range_pop()
 
             # profiler step
@@ -703,6 +705,7 @@ class EnsembleTrainer(Trainer):
 
                     if torch.cuda.is_available():
                         torch.cuda.nvtx.range_push(f"eval step {eval_steps}")
+                    self.step_timer.begin_step()
 
                     # map to gpu; materialize to list so we can expand zenith features
                     gdata = [x.to(self.device) for x in data]
@@ -773,6 +776,7 @@ class EnsembleTrainer(Trainer):
                         # update metrics
                         self.metrics.update(pred, targ, loss, idt)
 
+                    self.step_timer.end_step()
                     if torch.cuda.is_available():
                         torch.cuda.nvtx.range_pop()
 
