@@ -85,39 +85,27 @@ class TestPlotComparison(unittest.TestCase):
 class TestVisualizeField(unittest.TestCase):
     def setUp(self):
         rng = np.random.default_rng(1)
-        self.pred = rng.standard_normal((16, 32)).astype(np.float32)
-        self.target = rng.standard_normal((16, 32)).astype(np.float32)
+        self.pred = rng.standard_normal((2, 16, 32)).astype(np.float32)
+        self.target = rng.standard_normal((2, 16, 32)).astype(np.float32)
 
     def test_token_round_trip(self):
         tag = ("epoch_0", "u10m")
-        out_tag, img = visualize_field(tag, "lambda x: x", self.pred, self.target, None, None, 1.0, 0.0, False)
+        out_tag, img = visualize_field(tag, "select", [0], self.pred, self.target, None, None, 1.0, 0.0, False)
         self.assertEqual(out_tag, tag)
         self.assertIsInstance(img, Image.Image)
 
-    def test_functor_is_applied(self):
-        # Use a constant functor; both pred and target collapse to the same value,
-        # so plot_comparison must not raise (vmin == vmax edge case is tolerated by matplotlib).
-        tag = ("t", "f")
-        _, img = visualize_field(
-            tag,
-            "lambda x: np.zeros_like(x)",
-            self.pred,
-            self.target,
-            None,
-            None,
-            1.0,
-            0.0,
-            False,
-        )
+    def test_magnitude_op_is_applied(self):
+        tag = ("t", "windspeed")
+        _, img = visualize_field(tag, "magnitude", [0, 1], self.pred, self.target, None, None, 1.0, 0.0, False)
         self.assertIsInstance(img, Image.Image)
 
     def test_scale_bias_applied(self):
-        # Verify scale*x + bias is computed before the functor by using a functor
-        # whose output depends linearly on the input mean.
+        # Verify scale*x + bias is computed before the op is applied.
         tag = ("t", "f")
         _, img = visualize_field(
             tag,
-            "lambda x: x",
+            "select",
+            [1],
             self.pred,
             self.target,
             None,
@@ -127,6 +115,14 @@ class TestVisualizeField(unittest.TestCase):
             diverging=False,
         )
         self.assertIsInstance(img, Image.Image)
+
+    def test_unknown_op_raises(self):
+        with self.assertRaises(ValueError):
+            visualize_field(("t", "f"), "eval", [0], self.pred, self.target, None, None, 1.0, 0.0, False)
+
+    def test_wrong_channel_count_raises(self):
+        with self.assertRaises(ValueError):
+            visualize_field(("t", "f"), "select", [0, 1], self.pred, self.target, None, None, 1.0, 0.0, False)
 
 
 @unittest.skipUnless(_have_visualize_deps, "matplotlib and/or PIL are not installed")
@@ -166,71 +162,75 @@ class TestResolvePlotList(unittest.TestCase):
     """Unit tests for the symbolic {name}-placeholder resolver."""
 
     def test_single_channel_substituted(self):
-        plot_list = [{"name": "z500", "functor": "lambda x: x[{z500}, ...]", "diverging": False}]
+        plot_list = [{"name": "z500", "op": "select", "channels": ["z500"], "diverging": False}]
         new_list, indices = resolve_plot_list(plot_list, ["u10m", "v10m", "z500", "q100"])
         self.assertEqual(indices, [2])
         # only one referenced channel => it lands at stripped index 0
-        self.assertEqual(new_list[0]["functor"], "lambda x: x[0, ...]")
-        # non-functor fields are preserved
+        self.assertEqual(new_list[0]["channels"], [0])
+        # remaining fields are preserved
         self.assertEqual(new_list[0]["name"], "z500")
+        self.assertEqual(new_list[0]["op"], "select")
         self.assertEqual(new_list[0]["diverging"], False)
 
-    def test_multiple_placeholders_in_single_functor(self):
+    def test_multiple_channels_in_single_entry(self):
         plot_list = [
             {
                 "name": "wind",
-                "functor": "lambda x: np.sqrt(np.square(x[{u10m}, ...]) + np.square(x[{v10m}, ...]))",
+                "op": "magnitude",
+                "channels": ["u10m", "v10m"],
                 "diverging": False,
             }
         ]
         new_list, indices = resolve_plot_list(plot_list, ["u10m", "v10m", "z500"])
         self.assertEqual(indices, [0, 1])
-        self.assertEqual(
-            new_list[0]["functor"],
-            "lambda x: np.sqrt(np.square(x[0, ...]) + np.square(x[1, ...]))",
-        )
+        self.assertEqual(new_list[0]["channels"], [0, 1])
 
     def test_first_seen_ordering(self):
         # channels referenced in a non-source order: stripped indices follow
         # first-appearance order in the plot_list, not the original layout.
         plot_list = [
-            {"name": "a", "functor": "lambda x: x[{q100}, ...]", "diverging": False},
-            {"name": "b", "functor": "lambda x: x[{u10m}, ...]", "diverging": False},
+            {"name": "a", "op": "select", "channels": ["q100"], "diverging": False},
+            {"name": "b", "op": "select", "channels": ["u10m"], "diverging": False},
         ]
         new_list, indices = resolve_plot_list(plot_list, ["u10m", "v10m", "z500", "q100"])
         # q100 seen first -> stripped index 0 -> original index 3
         # u10m seen second -> stripped index 1 -> original index 0
         self.assertEqual(indices, [3, 0])
-        self.assertEqual(new_list[0]["functor"], "lambda x: x[0, ...]")
-        self.assertEqual(new_list[1]["functor"], "lambda x: x[1, ...]")
+        self.assertEqual(new_list[0]["channels"], [0])
+        self.assertEqual(new_list[1]["channels"], [1])
 
     def test_duplicate_references_dedup(self):
         plot_list = [
-            {"name": "a", "functor": "lambda x: x[{z500}, ...]", "diverging": False},
-            {"name": "b", "functor": "lambda x: x[{z500}, ...] * 2", "diverging": False},
+            {"name": "a", "op": "select", "channels": ["z500"], "diverging": False},
+            {"name": "b", "op": "magnitude", "channels": ["z500"], "diverging": False},
         ]
         new_list, indices = resolve_plot_list(plot_list, ["u10m", "z500"])
         self.assertEqual(indices, [1])
-        self.assertEqual(new_list[0]["functor"], "lambda x: x[0, ...]")
-        self.assertEqual(new_list[1]["functor"], "lambda x: x[0, ...] * 2")
-
-    def test_no_placeholders_returns_empty_indices(self):
-        plot_list = [{"name": "raw", "functor": "lambda x: x", "diverging": False}]
-        new_list, indices = resolve_plot_list(plot_list, ["u10m", "v10m"])
-        self.assertEqual(indices, [])
-        self.assertEqual(new_list[0]["functor"], "lambda x: x")
+        self.assertEqual(new_list[0]["channels"], [0])
+        self.assertEqual(new_list[1]["channels"], [0])
 
     def test_unknown_channel_raises(self):
-        plot_list = [{"name": "bad", "functor": "lambda x: x[{nonexistent}, ...]", "diverging": False}]
+        plot_list = [{"name": "bad", "op": "select", "channels": ["nonexistent"], "diverging": False}]
+        with self.assertRaises(ValueError):
+            resolve_plot_list(plot_list, ["u10m", "v10m"])
+
+    def test_unknown_op_raises(self):
+        plot_list = [{"name": "bad", "op": "exec", "channels": ["u10m"], "diverging": False}]
+        with self.assertRaises(ValueError):
+            resolve_plot_list(plot_list, ["u10m", "v10m"])
+
+    def test_wrong_channel_count_raises(self):
+        plot_list = [{"name": "bad", "op": "select", "channels": ["u10m", "v10m"], "diverging": False}]
         with self.assertRaises(ValueError):
             resolve_plot_list(plot_list, ["u10m", "v10m"])
 
     def test_does_not_mutate_input(self):
-        original = "lambda x: x[{z500}, ...]"
-        plot_list = [{"name": "z500", "functor": original, "diverging": False}]
+        original = ["z500"]
+        plot_list = [{"name": "z500", "op": "select", "channels": original, "diverging": False}]
         resolve_plot_list(plot_list, ["z500"])
-        # input dict's functor string should be unchanged
-        self.assertEqual(plot_list[0]["functor"], original)
+        # input dict's channel list should be unchanged
+        self.assertEqual(plot_list[0]["channels"], ["z500"])
+        self.assertEqual(original, ["z500"])
 
 
 @unittest.skipUnless(_have_visualize_deps and _have_moviepy, "matplotlib, PIL, or moviepy is not installed")
@@ -238,9 +238,10 @@ class TestVisualizationWrapper(unittest.TestCase):
     """End-to-end smoke test for the multiprocess visualization pipeline."""
 
     def _make_wrapper(self, num_workers=1):
+        # no channel_names => channels are direct indices into the incoming tensors
         plot_list = [
-            {"name": "u10m", "functor": "lambda x: x", "diverging": False},
-            {"name": "t2m", "functor": "lambda x: x", "diverging": True},
+            {"name": "u10m", "op": "select", "channels": [0], "diverging": False},
+            {"name": "t2m", "op": "select", "channels": [1], "diverging": True},
         ]
         return VisualizationWrapper(
             log_to_wandb=False,
@@ -254,7 +255,7 @@ class TestVisualizationWrapper(unittest.TestCase):
             num_workers=num_workers,
         )
 
-    def _add_frames(self, wrapper, n_frames=3, shape=(16, 32)):
+    def _add_frames(self, wrapper, n_frames=3, shape=(2, 16, 32)):
         rng = np.random.default_rng(2)
         for i in range(n_frames):
             pred = rng.standard_normal(shape).astype(np.float32)
@@ -308,8 +309,8 @@ class TestVisualizationWrapper(unittest.TestCase):
         wrapper = self._make_wrapper()
         try:
             rng = np.random.default_rng(3)
-            pred = rng.standard_normal((8, 16)).astype(np.float32)
-            target = rng.standard_normal((8, 16)).astype(np.float32)
+            pred = rng.standard_normal((2, 8, 16)).astype(np.float32)
+            target = rng.standard_normal((2, 8, 16)).astype(np.float32)
             wrapper.add(tag="0", prediction=pred, target=target)
             # two entries in plot_list => two submitted requests
             self.assertEqual(len(wrapper.requests), 2)
@@ -321,10 +322,11 @@ class TestVisualizationWrapper(unittest.TestCase):
         plot_list = [
             {
                 "name": "wind",
-                "functor": "lambda x: np.sqrt(np.square(x[{u10m}, ...]) + np.square(x[{v10m}, ...]))",
+                "op": "magnitude",
+                "channels": ["u10m", "v10m"],
                 "diverging": False,
             },
-            {"name": "z500", "functor": "lambda x: x[{z500}, ...]", "diverging": False},
+            {"name": "z500", "op": "select", "channels": ["z500"], "diverging": False},
         ]
         scale = np.arange(len(channel_names), dtype=np.float32) + 1.0  # [1, 2, 3, 4, 5]
         bias = np.arange(len(channel_names), dtype=np.float32) * 10.0  # [0, 10, 20, 30, 40]
@@ -340,11 +342,8 @@ class TestVisualizationWrapper(unittest.TestCase):
         )
         try:
             self.assertEqual(wrapper.channel_indices, [0, 1, 2])
-            self.assertEqual(
-                wrapper.plot_list[0]["functor"],
-                "lambda x: np.sqrt(np.square(x[0, ...]) + np.square(x[1, ...]))",
-            )
-            self.assertEqual(wrapper.plot_list[1]["functor"], "lambda x: x[2, ...]")
+            self.assertEqual(wrapper.plot_list[0]["channels"], [0, 1])
+            self.assertEqual(wrapper.plot_list[1]["channels"], [2])
             np.testing.assert_array_equal(wrapper.scale, np.array([1.0, 2.0, 3.0]))
             np.testing.assert_array_equal(wrapper.bias, np.array([0.0, 10.0, 20.0]))
         finally:
@@ -353,8 +352,8 @@ class TestVisualizationWrapper(unittest.TestCase):
     def test_channel_names_path_runs_end_to_end(self):
         channel_names = ["u10m", "v10m", "z500", "q100", "t2m"]
         plot_list = [
-            {"name": "z500", "functor": "lambda x: x[{z500}, ...]", "diverging": False},
-            {"name": "q100", "functor": "lambda x: x[{q100}, ...]", "diverging": True},
+            {"name": "z500", "op": "select", "channels": ["z500"], "diverging": False},
+            {"name": "q100", "op": "select", "channels": ["q100"], "diverging": True},
         ]
         with tempfile.TemporaryDirectory() as tmp:
             cwd = os.getcwd()

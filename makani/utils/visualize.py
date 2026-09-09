@@ -15,7 +15,7 @@
 
 import os
 import io
-import re
+from collections import namedtuple
 from typing import Optional
 import multiprocessing as mp
 import numpy as np
@@ -26,24 +26,57 @@ import wandb
 
 import torch
 
-_PLACEHOLDER_RE = re.compile(r"\{(\w+)\}")
+
+def _op_select(x, channels):
+    return x[channels[0], ...]
+
+
+def _op_magnitude(x, channels):
+    return np.sqrt(sum(np.square(x[c, ...]) for c in channels))
+
+
+_PlotOp = namedtuple("_PlotOp", ["func", "min_channels", "max_channels"])
+
+# Registry of the operations a plot list entry may request. Entries name an op
+# from this table rather than carrying lambda source, which keeps plot lists
+# pure data: they are never evaluated as code, wherever they come from.
+PLOT_OPS = {
+    "select": _PlotOp(_op_select, 1, 1),
+    "magnitude": _PlotOp(_op_magnitude, 1, None),
+}
+
+
+def _check_plot_item(item):
+    """Validate a plot list entry against :data:`PLOT_OPS`, returning its channel list."""
+    op = item["op"]
+    if op not in PLOT_OPS:
+        raise ValueError(f"unknown plot op {op!r}, expected one of {sorted(PLOT_OPS)}")
+
+    channels = list(item["channels"])
+    spec = PLOT_OPS[op]
+    if len(channels) < spec.min_channels or (spec.max_channels is not None and len(channels) > spec.max_channels):
+        upper = "any number of" if spec.max_channels is None else spec.max_channels
+        raise ValueError(f"plot op {op!r} takes {spec.min_channels} to {upper} channels, got {len(channels)}")
+
+    return channels
 
 
 def resolve_plot_list(plot_list, channel_names):
     """
-    Resolve symbolic ``{name}`` channel references in functor strings.
+    Resolve symbolic channel references in a plot list.
 
-    Each functor string in ``plot_list`` may reference channels by name using
-    ``{name}`` placeholders (e.g. ``"lambda x: x[{z500}, ...]"``). This walks
-    the list, collects the union of referenced channels in first-seen order,
-    rewrites each functor to index into a stripped tensor of just those
-    channels, and returns the new plot list together with the indices into the
-    original ``channel_names`` layout.
+    Each entry of ``plot_list`` is a dict naming an op from :data:`PLOT_OPS` and
+    the channels it applies to, e.g.
+    ``{"name": "z500", "op": "select", "channels": ["z500"], "diverging": False}``.
+    This walks the list, collects the union of referenced channels in first-seen
+    order, rewrites each entry's channels to indices into a stripped tensor
+    holding just those channels, and returns the new plot list together with the
+    indices into the original ``channel_names`` layout.
     """
     ordered_refs = []
     seen = set()
     for item in plot_list:
-        for name in _PLACEHOLDER_RE.findall(item["functor"]):
+        for name in _check_plot_item(item):
             if name not in seen:
                 seen.add(name)
                 ordered_refs.append(name)
@@ -53,13 +86,13 @@ def resolve_plot_list(plot_list, channel_names):
     channel_indices = []
     for name in ordered_refs:
         if name not in channel_names:
-            raise ValueError(f"functor references channel {name!r} which is not in channel_names")
+            raise ValueError(f"plot list references channel {name!r} which is not in channel_names")
         channel_indices.append(channel_names.index(name))
 
     new_plot_list = []
     for item in plot_list:
         new_item = dict(item)
-        new_item["functor"] = _PLACEHOLDER_RE.sub(lambda m: str(stripped_index[m.group(1)]), item["functor"])
+        new_item["channels"] = [stripped_index[name] for name in item["channels"]]
         new_plot_list.append(new_item)
 
     return new_plot_list, channel_indices
@@ -233,20 +266,28 @@ def _draw_progress_bar(image, progress: float, y_pos: float = 0.5, margin: int =
 
 
 def visualize_field(
-    tag, func_string, prediction, target, lat, lon, scale, bias, diverging, progress: Optional[float] = None
+    tag, op, channels, prediction, target, lat, lon, scale, bias, diverging, progress: Optional[float] = None
 ):
+    """
+    Render a prediction/ground-truth comparison for a single field.
+
+    ``op`` names an entry of :data:`PLOT_OPS` and ``channels`` are the channel
+    indices it is applied to, after ``prediction`` and ``target`` have been
+    unscaled with ``scale`` and ``bias``. Returns ``(tag, image)``.
+    """
     torch.cuda.nvtx.range_push("visualize_field")
 
-    # get func handle:
-    func_handle = eval(func_string)
+    # look the op up in the registry; unknown ops are an error, never code to run
+    channels = _check_plot_item({"op": op, "channels": channels})
+    func_handle = PLOT_OPS[op].func
 
     # unscale:
     pred = scale * prediction + bias
     targ = scale * target + bias
 
-    # apply functor:
-    pred = func_handle(pred)
-    targ = func_handle(targ)
+    # apply op:
+    pred = func_handle(pred, channels)
+    targ = func_handle(targ, channels)
 
     # generate image
     image = plot_comparison(
@@ -269,7 +310,16 @@ def visualize_field(
 
 
 class VisualizationWrapper(object):
-    "Handles visualization during training"
+    """
+    Handles visualization during training.
+
+    ``plot_list`` is a list of dicts, one per rendered field, each with a
+    ``name``, an ``op`` naming an entry of :data:`PLOT_OPS`, the ``channels``
+    that op applies to, and a ``diverging`` flag selecting the colormap. If
+    ``channel_names`` is given, channels are named and resolved against it;
+    otherwise they must already be integer indices into the tensors passed to
+    :meth:`add`.
+    """
 
     def __init__(
         self,
@@ -289,13 +339,17 @@ class VisualizationWrapper(object):
         self.path = path
         self.prefix = prefix
 
-        # If channel_names is provided, resolve {name} placeholders in functor
-        # strings to indices into a stripped tensor that contains only the
+        # If channel_names is provided, resolve the symbolic channel names in the
+        # plot list to indices into a stripped tensor that contains only the
         # referenced channels. This avoids shipping unused channels to the
-        # renderer subprocesses.
+        # renderer subprocesses. Without channel_names the plot list is expected
+        # to index the incoming tensors directly.
         if channel_names is not None:
             self.plot_list, self.channel_indices = resolve_plot_list(plot_list, channel_names)
         else:
+            for item in plot_list:
+                if not all(isinstance(c, (int, np.integer)) for c in _check_plot_item(item)):
+                    raise ValueError("without channel_names, plot list channels must be integer indices")
             self.plot_list = plot_list
             self.channel_indices = None
 
@@ -329,13 +383,13 @@ class VisualizationWrapper(object):
 
         for item in self.plot_list:
             field_name = item["name"]
-            func_string = item["functor"]
             plot_diverge = item["diverging"]
             self.requests.append(
                 self.executor.submit(
                     visualize_field,
                     (tag, field_name),
-                    func_string,
+                    item["op"],
+                    item["channels"],
                     pred,
                     tar,
                     self.lat,
