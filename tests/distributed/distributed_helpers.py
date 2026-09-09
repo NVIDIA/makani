@@ -239,3 +239,43 @@ def sync_and_barrier():
         torch.cuda.synchronize()
     if dist.is_initialized():
         dist.barrier()
+
+
+def teardown_comms():
+    """Barrier, finalize torch_harmonics' distributed state, then destroy the process group.
+
+    Mirrors ``torch_harmonics``'s own distributed-test teardown exactly
+    (``tests/testutils.py::teardown_distributed_context``): a barrier, then
+    ``thd.finalize()``, then ``dist.destroy_process_group()`` (here via
+    ``comm.cleanup()``, which also resets ``makani.utils.comm``'s
+    ``DistributedManager`` singleton).
+
+    Without the barrier, cleanup falls to physicsnemo's
+    ``DistributedManager.cleanup`` ``atexit`` handler, which runs
+    uncoordinated per-rank at interpreter exit -- one rank's NCCL
+    heartbeat-monitor thread can end up polling the TCPStore rendezvous
+    server after another rank has already torn its side down, producing a
+    (benign, but noisy) ``[W] TCPStore ... recvBytes ... Connection was
+    likely closed`` warning at shutdown.
+
+    Without ``thd.finalize()``: ``_init_grid`` registers this class's
+    ``h_group``/``w_group`` with ``torch_harmonics.distributed`` via
+    ``thd.init(...)``, and per physicsnemo's own comment on
+    ``DistributedManager.cleanup``, "destroying group.WORLD is enough for
+    all process groups to get destroyed" -- so a bare ``dist.destroy_process_group()``
+    leaves ``thd``'s cached process-group handles pointing at already-destroyed
+    C++ objects, with ``torch_harmonics.distributed.is_initialized()`` still
+    reporting ``True``. ``thd.finalize()`` explicitly destroys those two
+    handles and resets that flag first, so nothing is left dangling before
+    the world group goes down.
+
+    This is what makes it safe for a *later* test class/module in the same
+    process to call ``_init_grid`` again with a different grid shape --
+    calling ``comm.init()``/``thd.init()`` on top of state left over from an
+    unclean teardown would otherwise be undefined. No-ops when
+    torch.distributed is unavailable.
+    """
+    sync_and_barrier()
+    if dist.is_initialized():
+        thd.finalize()
+    comm.cleanup()

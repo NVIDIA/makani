@@ -30,7 +30,7 @@ from makani.utils.dataloader import get_dataloader
 
 from ..testutils import init_hdf5_dataset, compare_arrays
 from ..test_dataloader import init_dataset_params, get_sample
-from .distributed_helpers import _init_grid, _gather_helper, reduce_success, sync_and_barrier
+from .distributed_helpers import _init_grid, _gather_helper, reduce_success, sync_and_barrier, teardown_comms
 
 
 _have_dali = importlib.util.find_spec("nvidia.dali") is not None
@@ -107,6 +107,9 @@ class TestDistributedDataloaderCheckpoint(unittest.TestCase):
         sync_and_barrier()
         if cls.world_rank == 0 and cls.tmpdir is not None and os.path.isdir(cls.tmpdir):
             shutil.rmtree(cls.tmpdir, ignore_errors=True)
+        # barrier again (every rank waits for rank 0's cleanup above) then
+        # explicitly destroy the process group -- see teardown_comms's docstring
+        teardown_comms()
 
     def _make_loader(self):
         params = init_dataset_params(
@@ -152,6 +155,13 @@ class TestDistributedDataloaderCheckpoint(unittest.TestCase):
         num_consumed = 2
         num_compared = 2
 
+        def fp_summary(fps):
+            # short, printable stand-in for the raw fingerprint bytes: first 8 hex
+            # digits of each entry's hash, so a mismatch is legible in test output
+            import hashlib
+
+            return [hashlib.sha1(fp).hexdigest()[:8] for fp in fps]
+
         loader = self._make_loader()
         iterator = iter(loader)
         self._collect(iterator, num_consumed)
@@ -160,6 +170,13 @@ class TestDistributedDataloaderCheckpoint(unittest.TestCase):
         state_dicts = Driver.gather_dataloader_state(loader)
 
         with self.subTest(desc="one state per data-parallel rank"):
+            ok = (state_dicts is not None) and (len(state_dicts) == comm.get_size("data"))
+            if verbose and not ok:
+                print(
+                    f"[rank {self.world_rank}] data comm: rank={comm.get_rank('data')} size={comm.get_size('data')} "
+                    f"state_dicts={state_dicts}",
+                    flush=True,
+                )
             self.assertIsNotNone(state_dicts)
             self.assertEqual(len(state_dicts), comm.get_size("data"))
 
@@ -176,8 +193,18 @@ class TestDistributedDataloaderCheckpoint(unittest.TestCase):
         # lockstep), so a wrong pick from the list would still yield this rank's
         # samples. test_state_from_a_different_shard_is_rejected covers that.
         with self.subTest(desc="restored loader resumes this rank's sequence"):
+            ok = resumed == reference
+            if verbose and not ok:
+                print(
+                    f"[rank {self.world_rank}] data comm: rank={comm.get_rank('data')} size={comm.get_size('data')}\n"
+                    f"[rank {self.world_rank}] gathered state_dicts: {state_dicts}\n"
+                    f"[rank {self.world_rank}] my scattered entry: {state_dicts[comm.get_rank('data')]}\n"
+                    f"[rank {self.world_rank}] reference fingerprints: {fp_summary(reference)}\n"
+                    f"[rank {self.world_rank}] resumed    fingerprints: {fp_summary(resumed)}",
+                    flush=True,
+                )
             self.assertTrue(
-                reduce_success(resumed == reference, self.device),
+                reduce_success(ok, self.device),
                 msg=f"rank {self.world_rank} did not resume its own sample sequence",
             )
 
@@ -187,8 +214,16 @@ class TestDistributedDataloaderCheckpoint(unittest.TestCase):
         fresh = self._collect(iter(self._make_loader()), num_compared)
 
         with self.subTest(desc="loader without restore does not resume"):
+            ok = fresh != reference
+            if verbose and not ok:
+                print(
+                    f"[rank {self.world_rank}] data comm: rank={comm.get_rank('data')} size={comm.get_size('data')}\n"
+                    f"[rank {self.world_rank}] reference fingerprints: {fp_summary(reference)}\n"
+                    f"[rank {self.world_rank}] fresh      fingerprints: {fp_summary(fresh)}",
+                    flush=True,
+                )
             self.assertTrue(
-                reduce_success(fresh != reference, self.device),
+                reduce_success(ok, self.device),
                 msg=f"rank {self.world_rank} resumed without restoring a state",
             )
 

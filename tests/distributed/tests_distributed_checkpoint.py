@@ -26,7 +26,7 @@ from makani.utils import comm
 from makani.utils.driver import Driver
 from makani.utils.checkpoint_helpers import gather_model_state_dict
 
-from .distributed_helpers import _init_grid, reduce_success, sync_and_barrier
+from .distributed_helpers import _init_grid, reduce_success, sync_and_barrier, teardown_comms
 
 
 class _ShardedTestModel(nn.Module):
@@ -133,6 +133,9 @@ class TestDistributedCheckpoint(unittest.TestCase):
         sync_and_barrier()
         if cls.world_rank == 0 and cls.tmpdir is not None and os.path.isdir(cls.tmpdir):
             shutil.rmtree(cls.tmpdir, ignore_errors=True)
+        # barrier again (every rank waits for rank 0's cleanup above) then
+        # explicitly destroy the process group -- see teardown_comms's docstring
+        teardown_comms()
 
     def _build_local_slice(self, seed: int = 12345) -> torch.Tensor:
         """
