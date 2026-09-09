@@ -83,7 +83,7 @@ By default, the inference script will perform inference on the out-of-sample dat
 `makani/benchmark.py` measures the training or inference step time of a model on synthetic data, so that architectures and parallel decompositions can be compared without a dataset. The model is selected with `--yaml_config` and `--config` exactly as for training:
 
 ```bash
-mpirun -np 8 --allow-run-as-root python -u makani/benchmark.py \
+mpirun -np 8 --allow-run-as-root python -u -m makani.benchmark \
     --yaml_config="config/fourcastnet3.yaml" --config="fcn3_sc2_edim45_layers10_pretrain1" \
     --mode=train --h_parallel_size=2 --ensemble_parallel_size=2 \
     --ensemble_size=4 --batch_size=8 --benchmark_steps=20 --benchmark_warmup_steps=5

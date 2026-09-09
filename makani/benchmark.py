@@ -19,7 +19,7 @@ The model comes from a config file and config line, exactly as for ``train.py``
 and ``ensemble.py`` -- so anything in ``config/`` can be benchmarked without
 touching this file:
 
-    mpirun -np 8 python -u makani/benchmark.py \\
+    mpirun -np 8 python -u -m makani.benchmark \\
         --yaml_config=config/fourcastnet3.yaml \\
         --config=fcn3_sc2_edim45_layers10_pretrain1 \\
         --mode=train --h_parallel_size=2 --ensemble_parallel_size=2 \\
@@ -40,6 +40,7 @@ channel list -- see :func:`makani.utils.benchmark.generate_metadata_json`.
 import os
 import time
 import logging
+import tempfile
 
 import torch
 import torch.distributed as dist
@@ -269,16 +270,22 @@ def main():
 
     # output directory. Kept separate from the training exp_dir: a benchmark writes results,
     # not experiments, and should not land in the middle of a training run's output tree.
+    # The run id is broadcast rather than computed per rank: two ranks that call strftime on
+    # opposite sides of a second boundary would otherwise disagree about the directory name.
     run_id = "{spec}_{mode}_{stamp}".format(
         spec=decomposition["spec"], mode=args.mode, stamp=time.strftime("%Y%m%d-%H%M%S")
     )
+    if dist.is_initialized():
+        run_id_buffer = [run_id]
+        dist.broadcast_object_list(run_id_buffer, src=0)
+        run_id = run_id_buffer[0]
+
     output_dir = os.path.abspath(args.output_dir)
     exp_dir = os.path.join(output_dir, "runs", run_id)
 
-    if world_rank == 0:
-        os.makedirs(os.path.join(exp_dir, "training_checkpoints"), exist_ok=True)
-    if dist.is_initialized():
-        dist.barrier()
+    # every rank creates it: with a container-local output directory this path exists on one
+    # node but not on the others, and a rank that assumes rank 0 made it fails on the far node
+    os.makedirs(os.path.join(exp_dir, "training_checkpoints"), exist_ok=True)
 
     params["exp_dir"] = output_dir
     params["experiment_dir"] = exp_dir
@@ -303,19 +310,31 @@ def main():
     # dataset descriptor: generated from the config unless one was prescribed
     if args.metadata_json_path is not None:
         metadata_json_path = os.path.abspath(args.metadata_json_path)
+        metadata_read_path = metadata_json_path
         metadata_source = "provided"
     else:
         if args.use_real_data:
             raise ValueError("--use_real_data requires --metadata_json_path pointing at the dataset descriptor.")
-        metadata_json_path = os.path.join(exp_dir, "benchmark_metadata.json")
+
         metadata_source = "generated"
+        metadata_json_path = os.path.join(exp_dir, "benchmark_metadata.json")
+
+        # Every rank generates its own copy, into a node-local path, and reads that. Writing it
+        # once on rank 0 and having the others read it back requires the output directory to be
+        # on a shared filesystem -- which it is not when the job runs with a container-local
+        # workdir, so the ranks on every other node would fail to find it. The content is a pure
+        # function of the resolved config, so the copies are identical by construction and no
+        # barrier or broadcast is needed. The rank-0 copy in exp_dir is kept for provenance.
+        metadata_read_path = os.path.join(
+            tempfile.gettempdir(), f"makani-benchmark-metadata-{run_id}-rank{world_rank}.json"
+        )
+        benchmark_utils.generate_metadata_json(params, metadata_read_path, dhours=args.dhours)
+
         if world_rank == 0:
             benchmark_utils.generate_metadata_json(params, metadata_json_path, dhours=args.dhours)
-        if dist.is_initialized():
-            dist.barrier()
 
-    params["metadata_json_path"] = metadata_json_path
-    params, _ = parse_dataset_metadata(metadata_json_path, params=params)
+    params["metadata_json_path"] = metadata_read_path
+    params, _ = parse_dataset_metadata(metadata_read_path, params=params)
 
     # size the epoch so that a single pass over the loader is exactly the benchmark. The dummy
     # loader yields one batch per "sample" and shards by the full data group, so the step count
@@ -465,6 +484,13 @@ def main():
 
         print(benchmark_utils.format_record(record))
         logging.info(f"appended benchmark record to {results_path}")
+
+    # drop the node-local descriptor copy; the rank-0 copy in exp_dir is the one kept
+    if (metadata_source == "generated") and (metadata_read_path != metadata_json_path):
+        try:
+            os.remove(metadata_read_path)
+        except OSError:
+            pass
 
     if dist.is_initialized():
         dist.barrier()
