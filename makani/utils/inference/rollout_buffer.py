@@ -51,6 +51,44 @@ def _barrier(device):
     dist.barrier(device_ids=device_ids)
 
 
+def _driver_available(name: str) -> bool:
+    """
+    Report whether this h5py/HDF5 build can open files with the ``name`` VFD.
+
+    Neither optional driver we care about is guaranteed to exist: ``direct`` is
+    compiled in only when h5py is built with ``H5PY_DIRECT_VFD=1`` against an
+    HDF5 configured with ``--enable-direct-vfd``, and ``gds`` is not upstream at
+    all — it ships as an out-of-tree plugin. h5py resolves driver names against a
+    registry that the build and any plugins populate at import time, so querying
+    it is the honest capability check: it follows whatever image we happen to be
+    running in, with nothing for the caller to keep in sync.
+    """
+    try:
+        return name in h5.registered_drivers()
+    except Exception:
+        # very old h5py without the driver registry — treat as unsupported
+        return False
+
+
+def odirect_available() -> bool:
+    """Whether the HDF5 ``direct`` VFD (O_DIRECT writes) is usable here."""
+    return _driver_available("direct")
+
+
+def gds_available() -> bool:
+    """Whether the HDF5 ``gds`` VFD (GPUDirect Storage writes) is usable here."""
+    return _driver_available("gds")
+
+
+def _unavailable_driver_message(flag: str, driver: str, how: str) -> str:
+    """Actionable message for a VFD the caller asked for but this image lacks."""
+    return (
+        f"{flag}=True but this HDF5/h5py build has no '{driver}' driver "
+        f"(registered drivers: {sorted(h5.registered_drivers())}). {how} "
+        f"Drop {flag} to use the default POSIX writer."
+    )
+
+
 def _as_numpy(tensor: torch.Tensor, ctype, nptype):
     """
     Reinterpret a (CUDA) tensor's ``data_ptr()`` as a numpy view without a host copy.
@@ -244,6 +282,16 @@ class RolloutBuffer(DataBuffer):
         # in ``_create_output_file`` where we know whether ``mpi_comm`` was created.
         if enable_odirect and output_file is None:
             raise ValueError("enable_odirect=True requires output_file to be set.")
+        # Fail here rather than deep inside h5py: asking for a VFD this image was not
+        # built with is a setup mistake, and "Unknown driver type" does not say so.
+        if enable_odirect and not odirect_available():
+            raise RuntimeError(
+                _unavailable_driver_message(
+                    "enable_odirect",
+                    "direct",
+                    "Rebuild h5py with H5PY_DIRECT_VFD=1 against an HDF5 configured with --enable-direct-vfd.",
+                )
+            )
         self.enable_odirect = enable_odirect
         self.odirect_alignment = odirect_alignment
 
@@ -255,6 +303,17 @@ class RolloutBuffer(DataBuffer):
         # O_DIRECT and GDS open the file with different VFDs; only one can win.
         if enable_odirect and enable_gds:
             raise ValueError("enable_odirect and enable_gds are mutually exclusive — pick one I/O backend.")
+        # Fail here rather than deep inside h5py: asking for GDS on an image that
+        # lacks the VFD is a setup mistake, and "Unknown driver type" does not say so.
+        if enable_gds and not gds_available():
+            raise RuntimeError(
+                _unavailable_driver_message(
+                    "enable_gds",
+                    "gds",
+                    "The GDS VFD is not upstream yet — it needs an image built with the "
+                    "out-of-tree vfd-gds plugin (see docker/Dockerfile.internal.gds).",
+                )
+            )
         self.enable_gds = enable_gds
 
         # streaming mode has no in-memory fallback — every update writes to disk.
@@ -373,6 +432,13 @@ class RolloutBuffer(DataBuffer):
                 raise ValueError(
                     "enable_odirect=True is incompatible with the MPI-IO driver "
                     "(used whenever world_size > 1). Use a per-rank file layout or disable O_DIRECT."
+                )
+            # Same story for GDS: one driver per file handle, and mpio has already won.
+            # Without this the flag would be silently ignored on multi-rank runs.
+            if self.enable_gds:
+                raise ValueError(
+                    "enable_gds=True is incompatible with the MPI-IO driver "
+                    "(used whenever world_size > 1). Use a per-rank file layout or disable GDS."
                 )
             # initialize MPI. This call is collective!
             self.file_handle = h5.File(output_file, "w", driver="mpio", comm=self.mpi_comm)
