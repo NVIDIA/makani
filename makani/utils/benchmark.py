@@ -252,6 +252,14 @@ def get_environment_record() -> Dict[str, Any]:
         "cudnn_version": torch.backends.cudnn.version() if torch.backends.cudnn.is_available() else None,
         "git_commit": _run_git(["rev-parse", "HEAD"]),
         "git_dirty": bool(_run_git(["status", "--porcelain", "--untracked-files=no"])),
+        # CPU affinity, because a run launched under a pinning wrapper (bindpcie and friends)
+        # and one launched without it differ by a real margin in step time -- host-side launch
+        # overhead, dataloader workers and NUMA locality all move. Without this, the two are
+        # indistinguishable in the results file.
+        "cpu_affinity_count": len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else None,
+        "cpu_count": os.cpu_count(),
+        "omp_num_threads": os.environ.get("OMP_NUM_THREADS"),
+        "torch_num_threads": torch.get_num_threads(),
     }
 
     if torch.cuda.is_available():
