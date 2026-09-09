@@ -347,12 +347,27 @@ def main():
     params["n_eval_samples_per_epoch"] = epoch_samples
 
     # build the trainer and run the measured pass
+    if world_rank == 0:
+        logging.info(
+            f"building the model. At {params['img_shape_x']}x{params['img_shape_y']} the spherical "
+            "harmonic transforms are precomputed on the host and this takes a while."
+        )
+
     trainer, trainer_name = build_trainer(params, world_rank)
+
+    # the trainers time every setup phase but only print the breakdown from train(), which the
+    # benchmark bypasses. Printing it here is what tells a long model init apart from a hang.
+    trainer._log_timers()
 
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
     if dist.is_initialized():
         dist.barrier()
+
+    if world_rank == 0:
+        logging.info(
+            f"running {args.benchmark_warmup_steps} warmup + {args.benchmark_steps} measured " f"{args.mode} steps"
+        )
 
     wall_start = time.perf_counter_ns()
     if args.mode == "train":
@@ -362,6 +377,9 @@ def main():
     if dist.is_initialized():
         dist.barrier()
     wall_time = (time.perf_counter_ns() - wall_start) * 1e-9
+
+    if world_rank == 0:
+        logging.info(f"measured pass finished in {wall_time:.1f}s, collecting timings")
 
     # collect timings. The step time of the run is the max over ranks, taken per step: a
     # collective step is only done when its slowest participant is done.
