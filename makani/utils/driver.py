@@ -30,6 +30,12 @@ import torch.optim.lr_scheduler as lr_scheduler
 import logging
 import wandb
 
+# wandb.util.generate_id was the public spelling for years and is gone in recent releases (it is
+# absent in 0.30, still present in 0.22). This location holds in every version from the declared
+# floor of 0.13.7 through 0.30, so it is importable across the whole supported range rather than
+# forcing the dependency to a narrower one.
+from wandb.sdk.lib.runid import generate_id as generate_run_id
+
 # makani dependencies
 from makani.utils.YParams import YParams
 from makani.utils.features import get_auxiliary_channels
@@ -314,7 +320,7 @@ class Driver(metaclass=abc.ABCMeta):
             # check if we want to resume or not
             if not params.resuming:
                 # generate run id
-                params["wandb_run_id"] = wandb.util.generate_id()
+                params["wandb_run_id"] = generate_run_id()
 
                 # create a lost of tags:
                 # paralellism:

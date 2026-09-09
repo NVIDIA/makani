@@ -349,8 +349,10 @@ def main():
     # build the trainer and run the measured pass
     if world_rank == 0:
         logging.info(
-            f"building the model. At {params['img_shape_x']}x{params['img_shape_y']} the spherical "
-            "harmonic transforms are precomputed on the host and this takes a while."
+            "setting up the trainer: dataloaders, then the model, then the optimizer and the "
+            f"gradient reduction hooks. At {params['img_shape_x']}x{params['img_shape_y']} the model "
+            "step precomputes its spherical harmonic transforms on the host, which dominates setup "
+            "and looks like a stall; the phase breakdown below says where the time went."
         )
 
     trainer, trainer_name = build_trainer(params, world_rank)
