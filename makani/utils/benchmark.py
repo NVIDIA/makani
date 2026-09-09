@@ -431,20 +431,26 @@ def generate_metadata_json(params, path: str, dhours: int = 1, grid_type: Option
     is the documented path for dummy-data experiments and keeps the resolution
     defined in exactly one place (the model config).
     """
-    if not params.is_set("img_shape_x") or not params.is_set("img_shape_y"):
+    # The checks below use ``in`` (item access) rather than ``is_set`` (attribute access) on
+    # purpose: ``ParamsBase`` does not mirror attribute assignment into its dict, and
+    # ``parse_dataset_metadata`` -- the consumer of this descriptor -- indexes ``params`` by
+    # item. Validating through the attribute path would let a params object that satisfies this
+    # function still fail with a bare KeyError from inside the parser.
+    if ("img_shape_x" not in params) or ("img_shape_y" not in params):
         raise ValueError(
             "Generating a synthetic dataset descriptor requires img_shape_x and img_shape_y in the model "
             "config: without coordinates in the descriptor, the grid is reconstructed from the declared "
             "grid type and those shapes. Add them to the config, or pass --metadata_json_path explicitly."
         )
 
-    channel_names = params.get("channel_names", None)
-    if not channel_names:
+    if ("channel_names" not in params) or (not params["channel_names"]):
         raise ValueError(
             "Generating a synthetic dataset descriptor requires channel_names in the model config, since "
             "the descriptor's channel list is derived from it. Pass --metadata_json_path explicitly to use "
             "a real dataset descriptor instead."
         )
+
+    channel_names = params["channel_names"]
 
     if grid_type is None:
         grid_type = params.get("data_grid_type", None) or "equiangular"

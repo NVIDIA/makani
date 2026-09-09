@@ -137,9 +137,13 @@ class TestGeneratedMetadata(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.TemporaryDirectory()
 
+        # item assignment, not attribute assignment: ParamsBase keeps the two apart and
+        # parse_dataset_metadata indexes params by item, which is also how a config read
+        # from yaml populates it. get_default_parameters() sets these as attributes only.
         self.params = get_default_parameters()
-        self.params.img_shape_x = 32
-        self.params.img_shape_y = 64
+        self.params["img_shape_x"] = 32
+        self.params["img_shape_y"] = 64
+        self.params["channel_names"] = list(self.params.channel_names)
 
     def tearDown(self):
         self.tmpdir.cleanup()
@@ -152,19 +156,34 @@ class TestGeneratedMetadata(unittest.TestCase):
         with open(path, "r") as f:
             metadata = json.load(f)
 
-        self.assertEqual(metadata["coords"]["channel"], list(self.params.channel_names))
+        self.assertEqual(metadata["coords"]["channel"], list(self.params["channel_names"]))
         self.assertEqual(metadata["dhours"], 6)
 
-        self.params.metadata_json_path = path
+        self.params["metadata_json_path"] = path
         params, _ = parse_dataset_metadata(path, params=self.params)
 
         # coordinates are absent from the descriptor and reconstructed from the grid type
-        self.assertEqual(len(params["lat"]), self.params.img_shape_x)
-        self.assertEqual(len(params["lon"]), self.params.img_shape_y)
-        self.assertEqual(len(params["in_channels"]), len(self.params.channel_names))
+        self.assertEqual(len(params["lat"]), self.params["img_shape_x"])
+        self.assertEqual(len(params["lon"]), self.params["img_shape_y"])
+        self.assertEqual(len(params["in_channels"]), len(self.params["channel_names"]))
 
     def test_missing_shapes_raise(self):
+        """The shape check has to fire on the access path the parser uses.
+
+        get_default_parameters() sets img_shape_x as an attribute, so a check written against
+        the attribute path would pass here and then fail with a KeyError inside the parser.
+        """
         params = get_default_parameters()
+        params["channel_names"] = list(params.channel_names)
+
+        with self.assertRaises(ValueError):
+            benchmark_utils.generate_metadata_json(params, os.path.join(self.tmpdir.name, "m.json"))
+
+    def test_missing_channel_names_raise(self):
+        params = get_default_parameters()
+        params["img_shape_x"] = 32
+        params["img_shape_y"] = 64
+
         with self.assertRaises(ValueError):
             benchmark_utils.generate_metadata_json(params, os.path.join(self.tmpdir.name, "m.json"))
 
