@@ -231,6 +231,7 @@ class Inferencer(Driver):
         wb2_compatible: Optional[bool] = False,
         enable_odirect: bool = False,
         odirect_alignment: int = 0,
+        enable_gds: bool = False,
         profiler=None,
     ):
         """
@@ -264,6 +265,7 @@ class Inferencer(Driver):
             wb2_compatible=wb2_compatible,
             enable_odirect=enable_odirect,
             odirect_alignment=odirect_alignment,
+            enable_gds=enable_gds,
             profiler=profiler,
         )
 
@@ -289,6 +291,7 @@ class Inferencer(Driver):
         wb2_compatible: Optional[bool] = False,
         enable_odirect: bool = False,
         odirect_alignment: int = 0,
+        enable_gds: bool = False,
         profiler=None,
     ):
 
@@ -312,6 +315,7 @@ class Inferencer(Driver):
             wb2_compatible=wb2_compatible,
             enable_odirect=enable_odirect,
             odirect_alignment=odirect_alignment,
+            enable_gds=enable_gds,
             profiler=profiler,
         )
 
@@ -334,6 +338,7 @@ class Inferencer(Driver):
         wb2_compatible: Optional[bool] = False,
         enable_odirect: bool = False,
         odirect_alignment: int = 0,
+        enable_gds: bool = False,
         profiler=None,
     ):
 
@@ -398,6 +403,7 @@ class Inferencer(Driver):
                 output_memory_buffer_size=output_memory_buffer_size,
                 enable_odirect=enable_odirect,
                 odirect_alignment=odirect_alignment,
+                enable_gds=enable_gds,
             )
         else:
             rollout_buffer = None
@@ -803,6 +809,7 @@ class Inferencer(Driver):
         wb2_compatible=False,
         enable_odirect: bool = False,
         odirect_alignment: int = 0,
+        enable_gds: bool = False,
         profiler=None,
     ):
         """
@@ -874,6 +881,7 @@ class Inferencer(Driver):
             wb2_compatible=wb2_compatible,
             enable_odirect=enable_odirect,
             odirect_alignment=odirect_alignment,
+            enable_gds=enable_gds,
             profiler=profiler,
         )
 
