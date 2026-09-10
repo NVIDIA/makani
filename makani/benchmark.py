@@ -596,6 +596,10 @@ def main():
         },
         "metadata": {
             "source": metadata_source,
+            # what the run stands in for: the config's dataset_name when it declares one,
+            # otherwise whatever the descriptor carries. Without this the grid shape is the only
+            # thing telling two synthetic runs apart in the results file.
+            "dataset_name": params.get("dataset", {}).get("name"),
             "path": metadata_json_path,
             "sha256": benchmark_utils.hash_file(metadata_json_path),
             "grid_type": params["data_grid_type"],

@@ -142,8 +142,11 @@ def describe_group(record):
     config = record["config"]
     model = record["model"]
 
+    dataset = (record.get("metadata") or {}).get("dataset_name")
+    dataset = f"{dataset}  " if dataset else ""
+
     return (
-        f"{config['yaml_path']}:{config['config_name']}  [{record['mode']}]  "
+        f"{config['yaml_path']}:{config['config_name']}  [{record['mode']}]  {dataset}"
         f"{model['nettype']} {model['img_shape_x']}x{model['img_shape_y']}x{model['n_in_channels']}, "
         f"global batch {record['batching']['global_batch_size']}, ensemble {record['batching']['ensemble_size']}, "
         f"amp={model['amp_mode']}, jit={model['jit_mode']}"
