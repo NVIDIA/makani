@@ -20,6 +20,7 @@ from torch import nn
 import torch.nn.functional as F
 
 from makani.utils import comm
+from makani.utils.functions import contiguous_complex_safe
 from torch_harmonics.distributed import compute_split_shapes
 from torch_harmonics.distributed import distributed_transpose_azimuth as distributed_transpose_w
 from torch_harmonics.distributed import distributed_transpose_polar as distributed_transpose_h
@@ -61,8 +62,9 @@ class DistributedRealFFT1(nn.Module):
         # do first FFT
         x = torch.fft.rfft(x, n=self.nlon, dim=-1, norm=norm)
 
-        # mode truncation
-        x = x[..., : self.mmax].contiguous()
+        # mode truncation. The slice is over a complex tensor, so the copy goes through the
+        # real view -- inductor cannot codegen a copy on a complex buffer (KeyError: 'complex64')
+        x = contiguous_complex_safe(x[..., : self.mmax])
 
         # transpose: after this, m is split and c is local
         if self.comm_size_w > 1:
@@ -156,8 +158,9 @@ class DistributedRealFFT2(nn.Module):
         # do first FFT
         x = torch.fft.rfft(x, n=self.nlon, dim=-1, norm=norm)
 
-        # mode truncation
-        x = x[..., : self.mmax].contiguous()
+        # mode truncation. The slice is over a complex tensor, so the copy goes through the
+        # real view -- inductor cannot codegen a copy on a complex buffer (KeyError: 'complex64')
+        x = contiguous_complex_safe(x[..., : self.mmax])
 
         # transpose: after this, m is split and c is local
         if self.comm_size_w > 1:

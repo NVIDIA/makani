@@ -18,6 +18,7 @@ import unittest
 import torch
 
 from makani.models.preprocessor_helpers import get_bias_correction, get_static_features
+from makani.utils.features import get_auxiliary_channels
 
 import sys
 import os
@@ -229,6 +230,95 @@ class TestGetStaticFeatures(unittest.TestCase):
         """Raises IOError when copernicus_emb_path does not exist."""
         self.params.add_copernicus_emb = True
         self.params.copernicus_emb_path = "/nonexistent/copernicus.npy"
+        with self.assertRaises(IOError):
+            get_static_features(self.params)
+
+
+# ===========================================================================
+# 3. Synthetic-data stand-ins for the invariants
+# ===========================================================================
+class TestSyntheticStaticFeatures(unittest.TestCase):
+    """On synthetic data the invariant files do not exist, so they are stood in for.
+
+    The widths are checked against get_auxiliary_channels rather than hard-coded: the stand-in
+    cannot derive its channel count from the data the way the one-hot encoded real fields do, so
+    the two accountings have to be kept in agreement explicitly or the model's input channel
+    count changes without anything complaining.
+    """
+
+    def setUp(self):
+        set_seed(333)
+        self.params = get_default_parameters()
+        self.params.img_shape_x = IMG_H
+        self.params.img_shape_y = IMG_W
+        self.params.enable_synthetic_data = True
+
+    def _expected_channels(self, **flags):
+        return len(get_auxiliary_channels(**flags))
+
+    def test_orography(self):
+        self.params.add_orography = True
+        self.params.orography_path = "/nonexistent/orography.nc"
+
+        out = get_static_features(self.params)
+
+        self.assertEqual(tuple(out.shape), (1, self._expected_channels(add_orography=True), IMG_H, IMG_W))
+
+    def test_landmask_one_hot(self):
+        self.params.add_landmask = True
+        self.params.landmask_path = "/nonexistent/land_sea_mask.nc"
+
+        out = get_static_features(self.params)
+
+        expected = self._expected_channels(add_landmask=True, landmask_preprocessing="floor")
+        self.assertEqual(tuple(out.shape), (1, expected, IMG_H, IMG_W))
+        # one-hot: exactly one channel is set per grid point
+        torch.testing.assert_close(out.sum(dim=1), torch.ones(1, IMG_H, IMG_W))
+
+    def test_landmask_raw(self):
+        self.params.add_landmask = True
+        self.params.landmask_preprocessing = "raw"
+        self.params.landmask_path = "/nonexistent/land_sea_mask.nc"
+
+        out = get_static_features(self.params)
+
+        expected = self._expected_channels(add_landmask=True, landmask_preprocessing="raw")
+        self.assertEqual(tuple(out.shape), (1, expected, IMG_H, IMG_W))
+
+    def test_soiltype(self):
+        self.params.add_soiltype = True
+        self.params.soiltype_path = "/nonexistent/soiltype.nc"
+
+        out = get_static_features(self.params)
+
+        self.assertEqual(tuple(out.shape), (1, self._expected_channels(add_soiltype=True), IMG_H, IMG_W))
+
+    def test_copernicus_emb(self):
+        self.params.add_copernicus_emb = True
+        self.params.copernicus_emb_path = "/nonexistent/copernicus.npy"
+
+        out = get_static_features(self.params)
+
+        self.assertEqual(tuple(out.shape), (1, self._expected_channels(add_copernicus_emb=True), IMG_H, IMG_W))
+
+    def test_combined_invariants(self):
+        """The fcn3 configuration: orography plus land-sea mask."""
+        self.params.add_orography = True
+        self.params.orography_path = "/invariants/orography.nc"
+        self.params.add_landmask = True
+        self.params.landmask_path = "/invariants/land_sea_mask.nc"
+
+        out = get_static_features(self.params)
+
+        expected = self._expected_channels(add_orography=True, add_landmask=True, landmask_preprocessing="floor")
+        self.assertEqual(tuple(out.shape), (1, expected, IMG_H, IMG_W))
+
+    def test_real_data_still_raises(self):
+        """Without synthetic data a missing invariant is still a hard error."""
+        self.params.enable_synthetic_data = False
+        self.params.add_orography = True
+        self.params.orography_path = "/nonexistent/orography.nc"
+
         with self.assertRaises(IOError):
             get_static_features(self.params)
 

@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import time
+import logging
 from typing import Optional, Union, List
 
 import numpy as np
@@ -95,12 +96,20 @@ class Inferencer(Driver):
         if self.params.log_to_screen:
             self.logger.info("initializing data loader")
 
-        # manually overwrites the dataloader to multifiles. No other dartaloader is supported for inference at the current time
-        self.params["multifiles"] = True
+        # Only the multifiles and the synthetic dataloaders can serve inference: both address
+        # samples by index and by time, which is how the rollout schedule is built. Anything else
+        # is overridden to multifiles.
+        #
+        # ..note::
+        #     The second attribute check here used to read ``hasattr(self.params, "amp")`` while
+        #     assigning ``enable_synthetic_data``, which disabled synthetic data for every config
+        #     that did not happen to carry an ``amp`` key -- i.e. effectively always. Whatever it
+        #     was meant to guard, it was not that.
         if not hasattr(self.params, "enable_synthetic_data"):
             self.params["enable_synthetic_data"] = False
-        if not hasattr(self.params, "amp"):
-            self.params["enable_synthetic_data"] = False
+
+        if not self.params["enable_synthetic_data"]:
+            self.params["multifiles"] = True
 
         # the file path is taken from inf_data_path to perform inference on the out of sample dataset
         self.valid_dataloader, self.valid_data_shapes, _ = get_dataloader(
@@ -188,24 +197,37 @@ class Inferencer(Driver):
         if self.world_rank == 0:
             print(self.model)
 
-        if self.log_to_screen:
-            self.logger.info(
-                f"Loading pretrained checkpoint {self.params.checkpoint_path} in {self.params.load_checkpoint} mode"
+        # Performance work -- benchmarking the rollout, or the output writer with O_DIRECT/GDS --
+        # does not depend on the weights being trained, and requiring a checkpoint would mean
+        # staging one just to measure IO. Skipping the restore is opt-in and loud: scoring random
+        # weights while believing them trained would be a far worse failure than a missing file.
+        self.random_weights = self.params.get("allow_random_weights", False)
+
+        if self.random_weights:
+            logging.warning(
+                "Skipping the checkpoint restore: allow_random_weights is set, so this model carries "
+                "randomly initialized weights. Any forecast or score produced by this run is meaningless."
+            )
+            self.checkpoint_version_current = 0
+        else:
+            if self.log_to_screen:
+                self.logger.info(
+                    f"Loading pretrained checkpoint {self.params.checkpoint_path} in {self.params.load_checkpoint} mode"
+                )
+
+            # restore from checkpoint
+            checkpoint_path = self.params.checkpoint_path
+            self.checkpoint_version_current = get_latest_checkpoint_version(checkpoint_path)
+            checkpoint_path = checkpoint_path.format(
+                checkpoint_version=self.checkpoint_version_current, mp_rank="{mp_rank}"
             )
 
-        # restore from checkpoint
-        checkpoint_path = self.params.checkpoint_path
-        self.checkpoint_version_current = get_latest_checkpoint_version(checkpoint_path)
-        checkpoint_path = checkpoint_path.format(
-            checkpoint_version=self.checkpoint_version_current, mp_rank="{mp_rank}"
-        )
-
-        self.restore_from_checkpoint(
-            checkpoint_path,
-            model=self.model,
-            checkpoint_mode=self.params.load_checkpoint,
-            strict=self.params.get("strict_restore", True),
-        )
+            self.restore_from_checkpoint(
+                checkpoint_path,
+                model=self.model,
+                checkpoint_mode=self.params.load_checkpoint,
+                strict=self.params.get("strict_restore", True),
+            )
 
         # loss handler
         self.loss_obj = LossHandler(self.params)
@@ -597,6 +619,7 @@ class Inferencer(Driver):
 
                     if torch.cuda.is_available():
                         torch.cuda.nvtx.range_push(f"inference step {idt}, rollout step {idte}")
+                    self.step_timer.begin_step()
 
                     # move input to GPU
                     gtoken = list(map(lambda x: x.to(self.device), token))
@@ -726,6 +749,7 @@ class Inferencer(Driver):
 
                             zonal_spectrum_buffer.update(prede, targ.unsqueeze(1), idte - 1)
 
+                    self.step_timer.end_step()
                     if torch.cuda.is_available():
                         torch.cuda.nvtx.range_pop()
 
@@ -745,9 +769,14 @@ class Inferencer(Driver):
         else:
             logs = dict()
 
-        # wait for the copying and writing to disk to finish
+        # wait for the copying and writing to disk to finish. Timed separately and recorded: in
+        # buffered mode most of the write lands here rather than in the rollout steps, so a
+        # per-step figure alone would understate what writing the output actually costs.
+        self.output_finalize_seconds = 0.0
         if rollout_buffer is not None:
+            finalize_start = time.perf_counter_ns()
             rollout_buffer.finalize()
+            self.output_finalize_seconds = (time.perf_counter_ns() - finalize_start) * 1e-9
 
         # record bias
         if bias_buffer is not None:

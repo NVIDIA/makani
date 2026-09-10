@@ -23,6 +23,7 @@ import numpy as np
 from makani.utils.dataloaders.data_helpers import (
     get_lat_lon_grid,
     get_data_normalization,
+    get_time_diff_stds,
     get_climatology,
     get_timestamp,
     get_date_from_string,
@@ -131,6 +132,35 @@ class TestGetDataNormalization(unittest.TestCase):
         self.params.global_stds_path = "/nonexistent/stds.npy"
         with self.assertRaises(FileNotFoundError):
             get_data_normalization(self.params)
+
+    def test_synthetic_data_needs_no_stats_files(self):
+        """Synthetic data has no statistics, and the .npy files it would load do not exist."""
+        self.params.enable_synthetic_data = True
+        self.params.normalization = "zscore"
+        self.params.global_means_path = "/nonexistent/means.npy"
+        self.params.global_stds_path = "/nonexistent/stds.npy"
+
+        bias, scale = get_data_normalization(self.params)
+
+        num_channels = len(self.params.channel_names)
+        self.assertEqual(bias.shape, (1, num_channels, 1, 1))
+        self.assertEqual(scale.shape, (1, num_channels, 1, 1))
+        np.testing.assert_array_equal(bias, np.zeros_like(bias))
+        np.testing.assert_array_equal(scale, np.ones_like(scale))
+
+    def test_synthetic_time_diff_stds_need_no_files(self):
+        """The same holds for the time-difference stats a temp_diff_normalization loss wants."""
+        self.params.enable_synthetic_data = True
+        self.params.time_diff_stds_path = "/nonexistent/time_diff_stds.npy"
+
+        time_diff_stds = get_time_diff_stds(self.params)
+
+        num_channels = len(self.params.channel_names)
+        self.assertEqual(time_diff_stds.shape, (1, num_channels, 1, 1))
+        np.testing.assert_array_equal(time_diff_stds, np.ones_like(time_diff_stds))
+
+        # the loss indexes the flattened array with out_channels, so it has to be long enough
+        self.assertGreater(len(time_diff_stds.flatten()), max(self.params.out_channels))
 
 
 # ===========================================================================

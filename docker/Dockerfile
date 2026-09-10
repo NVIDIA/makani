@@ -100,6 +100,7 @@ COPY docker /opt/makani/docker
 COPY data_process /opt/makani/data_process
 COPY datasets /opt/makani/datasets
 COPY makani /opt/makani/makani
+COPY scripts /opt/makani/scripts
 COPY tests /opt/makani/tests
 COPY pyproject.toml /opt/makani/pyproject.toml
 COPY README.md /opt/makani/README.md
