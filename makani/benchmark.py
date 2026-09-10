@@ -353,7 +353,11 @@ def main():
     # The run id is broadcast rather than computed per rank: two ranks that call strftime on
     # opposite sides of a second boundary would otherwise disagree about the directory name.
     run_id = "{spec}_{mode}_{stamp}".format(
-        spec=decomposition["spec"], mode=args.mode, stamp=time.strftime("%Y%m%d-%H%M%S")
+        # UTC, matching the record's timestamp: run directories from different machines then
+        # sort chronologically against each other instead of by whatever zone each was in
+        spec=decomposition["spec"],
+        mode=args.mode,
+        stamp=time.strftime("%Y%m%d-%H%M%SZ", time.gmtime()),
     )
     if dist.is_initialized():
         run_id_buffer = [run_id]
@@ -559,19 +563,26 @@ def main():
             "comparability_keys": None,
             "benchmark_overrides": overrides,
         },
+        # ..note::
+        #     Read through ``get`` rather than by item. ``Driver._set_data_shapes`` settles the
+        #     resolved geometry -- N_in_channels, N_out_channels, the img_shape_* keys -- with
+        #     attribute assignment, and ``ParamsBase`` does not mirror that into its dict, so
+        #     ``params["N_in_channels"]`` raises while ``params.get`` finds it. For the shapes,
+        #     ``get`` also returns the value the model was actually built with rather than the
+        #     one the yaml declared.
         "model": {
-            "nettype": params["nettype"],
+            "nettype": params.get("nettype"),
             "num_parameters": int(num_parameters),
             "parameter_bytes": int(param_bytes),
-            "img_shape_x": params["img_shape_x"],
-            "img_shape_y": params["img_shape_y"],
-            "n_in_channels": params["N_in_channels"],
-            "n_out_channels": params["N_out_channels"],
-            "n_history": params["n_history"],
-            "n_future": params["n_future"],
-            "amp_mode": params["amp_mode"],
-            "jit_mode": params["jit_mode"],
-            "checkpointing_level": params["checkpointing_level"],
+            "img_shape_x": params.get("img_shape_x"),
+            "img_shape_y": params.get("img_shape_y"),
+            "n_in_channels": params.get("N_in_channels"),
+            "n_out_channels": params.get("N_out_channels"),
+            "n_history": params.get("n_history"),
+            "n_future": params.get("n_future"),
+            "amp_mode": params.get("amp_mode"),
+            "jit_mode": params.get("jit_mode"),
+            "checkpointing_level": params.get("checkpointing_level"),
         },
         "decomposition": decomposition,
         "batching": {

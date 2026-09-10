@@ -35,6 +35,7 @@ Three separate concerns live here:
 import os
 import json
 import time
+import datetime
 import socket
 import hashlib
 import getpass
@@ -246,7 +247,8 @@ def get_environment_record() -> Dict[str, Any]:
     record = {
         "hostname": socket.gethostname(),
         "user": getpass.getuser(),
-        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        # UTC, so runs from machines in different zones sort and compare directly
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "torch_version": torch.__version__,
         "cuda_version": torch.version.cuda,
         "cudnn_version": torch.backends.cudnn.version() if torch.backends.cudnn.is_available() else None,

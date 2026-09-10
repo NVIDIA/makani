@@ -15,6 +15,8 @@
 
 import torch
 
+from makani.utils.functions import contiguous_complex_safe
+
 
 def _contract_lmwise(ac: torch.Tensor, bc: torch.Tensor) -> torch.Tensor:
     return torch.einsum("bgixy,gioxy->bgoxy", ac, bc)
@@ -34,7 +36,7 @@ def _contract_sep_lwise(ac: torch.Tensor, bc: torch.Tensor) -> torch.Tensor:
 
 def _contract_dense_pytorch(x, weight, separable=False, operator_type="diagonal"):
     """Dense spectral convolution contraction dispatching to the appropriate compiled einsum kernel."""
-    x = x.contiguous()
+    x = contiguous_complex_safe(x)
 
     if separable:
         if operator_type == "diagonal":
@@ -51,7 +53,7 @@ def _contract_dense_pytorch(x, weight, separable=False, operator_type="diagonal"
         else:
             raise ValueError(f"Unknown operator type {operator_type}")
 
-    return x.contiguous()
+    return contiguous_complex_safe(x)
 
 
 # Dense channel-mixing contractions used by SpectralAttention. These were dropped
