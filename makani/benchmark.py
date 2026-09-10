@@ -55,6 +55,7 @@ from makani.utils.profiling import Timer
 from makani.models.helpers import count_parameters
 
 from makani import Trainer, EnsembleTrainer
+from makani.utils.inference.inferencer import Inferencer
 
 
 def _barrier():
@@ -94,8 +95,25 @@ def get_benchmark_argument_parser():
         "--mode",
         default="train",
         type=str,
-        choices=["train", "inference"],
-        help="Benchmark the training step or the inference (autoregressive rollout) step.",
+        choices=["train", "validate", "inference"],
+        help="What to measure. 'train' is a training step (forward, loss, backward, gradient "
+        "reduction, optimizer). 'validate' is the trainer's autoregressive eval rollout, "
+        "including the training-side metrics and loss. 'inference' is the deployment path "
+        "through the Inferencer, which additionally exercises the output writer.",
+    )
+    parser.add_argument(
+        "--write_output",
+        action="store_true",
+        help="In inference mode, write the rollout to disk so the output path (and its O_DIRECT "
+        "or GDS driver) is part of the measurement.",
+    )
+    parser.add_argument(
+        "--output_channels",
+        default=[],
+        type=str,
+        nargs="+",
+        help="Channels to write in inference mode. Defaults to all output channels, which is what "
+        "sets the write bandwidth.",
     )
     parser.add_argument("--ensemble_parallel_size", default=1, type=int, help="Ensemble parallelization")
     parser.add_argument(
@@ -179,6 +197,9 @@ def setup_params(args):
     params["multistep_checkpoint"] = args.multistep_checkpoint
     params["split_data_channels"] = args.split_data_channels
     params["disable_ddp"] = args.disable_ddp
+    # read with hard indexing by the trainers (find_unused_parameters in the reduction hooks),
+    # so it has to be present rather than merely defaulted
+    params["enable_grad_anomaly_detection"] = args.enable_grad_anomaly_detection
     params["enable_odirect"], params["odirect_alignment"] = argument_parser.parse_odirect_config(args.odirect_config)
     params["enable_s3"] = args.enable_s3
 
@@ -194,7 +215,11 @@ def setup_params(args):
         "load_checkpoint": "legacy",
         "resuming": False,
         "pretrained": False,
-        "skip_validation": True,
+        # skip_validation is deliberately NOT set. It is only read by the trainers' train()
+        # loop, which the benchmark bypasses by calling train_one_epoch()/validate_one_epoch()
+        # directly, so it suppresses nothing here -- but get_scheduler rejects it outright for
+        # ReduceLROnPlateau (the scheduler every fcn3 pretrain config inherits), which turned a
+        # no-op override into a hard failure at trainer construction.
         "skip_training": False,
         "print_timings_frequency": -1,
         "dump_weights_and_grads": 0,
@@ -208,6 +233,11 @@ def setup_params(args):
     if args.rollout_steps > 0:
         overrides["valid_autoreg_steps"] = args.rollout_steps
 
+    if args.mode == "inference":
+        # the inferencer restores a checkpoint unless told otherwise; a rollout on random weights
+        # is meaningless as a forecast but identical as a workload, which is what is measured here
+        overrides["allow_random_weights"] = True
+
     for key, value in overrides.items():
         params[key] = value
 
@@ -220,6 +250,37 @@ def build_trainer(params, world_rank):
         return EnsembleTrainer(params, world_rank), "EnsembleTrainer"
 
     return Trainer(params, world_rank), "Trainer"
+
+
+def run_inference(inferencer, params, args, output_file):
+    """Drive the rollout through the index-list entry point.
+
+    ``score_model`` runs the whole date range; the benchmark needs a fixed amount of work, so it
+    goes through ``inference_indexlist`` and hands it exactly enough initial conditions to cover
+    the warmup plus the measured steps. Metrics are off: they are scoring cost, not inference
+    cost, and the deployment question here is the rollout plus the writer.
+    """
+    rollout_steps = int(params["valid_autoreg_steps"])
+    steps_per_ic = rollout_steps + 1
+
+    total_steps = args.benchmark_warmup_steps + args.benchmark_steps
+    num_ics = max(1, -(-total_steps // steps_per_ic)) * int(params["batch_size"])
+
+    output_channels = args.output_channels if args.output_channels else params["channel_names"]
+
+    return inferencer.inference_indexlist(
+        indices=list(range(num_ics)),
+        rollout_steps=rollout_steps,
+        dhours=params["dhours"],
+        batch_size=int(params["batch_size"]),
+        compute_metrics=False,
+        output_channels=(output_channels if output_file is not None else []),
+        output_file=output_file,
+        output_memory_buffer_size=params.get("output_memory_buffer_size", None),
+        enable_odirect=params["enable_odirect"],
+        odirect_alignment=params["odirect_alignment"],
+        enable_gds=params.get("enable_gds", False),
+    )
 
 
 def main():
@@ -250,6 +311,11 @@ def main():
     torch.backends.cudnn.benchmark = True
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
+
+    if args.enable_grad_anomaly_detection:
+        # matches the other entrypoints. Note this makes the measurement meaningless as a
+        # performance number -- anomaly mode adds per-op bookkeeping to every backward.
+        torch.autograd.set_detect_anomaly(True)
 
     # batching
     params["world_size"] = comm.get_world_size()
@@ -360,6 +426,14 @@ def main():
     params["n_eval_samples"] = epoch_samples
     params["n_eval_samples_per_epoch"] = epoch_samples
 
+    if args.mode == "inference":
+        # the rollout schedule walks forward dt per autoregressive step, so the dataset has to
+        # hold the initial conditions *and* every index the rollout reaches, or SortedIndexSampler
+        # silently drops the incomplete rollouts and the measured pass comes up short
+        rollout_span = (int(params["valid_autoreg_steps"]) + 1 + params["n_history"]) * int(params["dt"])
+        params["n_eval_samples"] = epoch_samples + rollout_span + 1
+        params["n_eval_samples_per_epoch"] = params["n_eval_samples"]
+
     # build the trainer and run the measured pass
     if world_rank == 0:
         logging.info(
@@ -369,11 +443,18 @@ def main():
             "and looks like a stall; the phase breakdown below says where the time went."
         )
 
-    trainer, trainer_name = build_trainer(params, world_rank)
+    output_file = None
+    if args.mode == "inference":
+        driver_obj = Inferencer(params, world_rank)
+        driver_name = "Inferencer"
+        if args.write_output:
+            output_file = os.path.join(exp_dir, "rollout.h5")
+    else:
+        driver_obj, driver_name = build_trainer(params, world_rank)
 
-    # the trainers time every setup phase but only print the breakdown from train(), which the
+    # the drivers time every setup phase but only print the breakdown from train(), which the
     # benchmark bypasses. Printing it here is what tells a long model init apart from a hang.
-    trainer._log_timers()
+    driver_obj._log_timers()
 
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
@@ -386,9 +467,11 @@ def main():
 
     wall_start = time.perf_counter_ns()
     if args.mode == "train":
-        trainer.train_one_epoch()
+        driver_obj.train_one_epoch()
+    elif args.mode == "validate":
+        driver_obj.validate_one_epoch(epoch=0)
     else:
-        trainer.validate_one_epoch(epoch=0)
+        run_inference(driver_obj, params, args, output_file)
     _barrier()
     wall_time = (time.perf_counter_ns() - wall_start) * 1e-9
 
@@ -397,7 +480,7 @@ def main():
 
     # collect timings. The step time of the run is the max over ranks, taken per step: a
     # collective step is only done when its slowest participant is done.
-    local_timings = trainer.step_timer.timings_ms()
+    local_timings = driver_obj.step_timer.timings_ms()
     global_timings = benchmark_utils.reduce_step_timings(local_timings)
 
     if len(global_timings) == 0:
@@ -420,11 +503,17 @@ def main():
         dist.all_reduce(buf, op=dist.ReduceOp.MAX)
         memory = {"max_allocated_gb": buf[0].item(), "max_reserved_gb": buf[1].item()}
 
-    num_parameters, param_bytes, _ = count_parameters(trainer.model, trainer.device)
+    num_parameters, param_bytes, _ = count_parameters(driver_obj.model, driver_obj.device)
 
-    # throughput. For inference one step is a full rollout episode, so the per-rollout-step
-    # figure is reported alongside it.
-    rollout_steps = int(params["valid_autoreg_steps"]) + 1 if args.mode == "inference" else 1
+    # Throughput. What one timed step covers differs by mode, because the timers sit where each
+    # loop's natural unit is: the trainer's eval loop brackets a whole rollout episode, while the
+    # inferencer brackets each autoregressive step individually. Reporting the ratio makes the
+    # two comparable instead of silently differing by a factor of valid_autoreg_steps + 1.
+    if args.mode == "validate":
+        rollout_steps = int(params["valid_autoreg_steps"]) + 1
+    else:
+        rollout_steps = 1
+
     step_seconds = timing["median_ms"] * 1e-3
     throughput = {
         "samples_per_second": params["global_batch_size"] / step_seconds,
@@ -433,11 +522,28 @@ def main():
         "median_ms_per_rollout_step": timing["median_ms"] / rollout_steps,
     }
 
+    # Output writing, for inference mode. The finalize time is reported separately because in
+    # buffered mode most of the write happens there, after the timed loop -- a per-step median
+    # alone would make writing look free.
+    output = {"enabled": output_file is not None}
+    if output_file is not None:
+        output.update(
+            {
+                "path": output_file,
+                "channels": len(args.output_channels) if args.output_channels else len(params["channel_names"]),
+                "finalize_seconds": getattr(driver_obj, "output_finalize_seconds", None),
+                "bytes_written": os.path.getsize(output_file) if os.path.isfile(output_file) else None,
+                "enable_odirect": params["enable_odirect"],
+                "odirect_alignment": params["odirect_alignment"],
+                "enable_gds": params.get("enable_gds", False),
+            }
+        )
+
     record = {
         "run_id": run_id,
         "run_tag": args.run_tag,
         "mode": args.mode,
-        "trainer": trainer_name,
+        "driver": driver_name,
         "benchmark": {
             "warmup_steps": args.benchmark_warmup_steps,
             "requested_steps": args.benchmark_steps,
@@ -489,6 +595,7 @@ def main():
         "timing_local": timing_local,
         "throughput": throughput,
         "memory": memory,
+        "output": output,
         "environment": benchmark_utils.get_environment_record(),
     }
 
