@@ -48,9 +48,12 @@ COLUMNS = [
     ("p10_ms", "p10 [ms]"),
     ("p90_ms", "p90 [ms]"),
     ("samples_per_s", "samples/s"),
-    ("memory_gb", "peak [GiB]"),
+    ("mem_max_gb", "peak max [GiB]"),
+    ("mem_mean_gb", "peak mean [GiB]"),
+    ("dev_max_gb", "device max [GiB]"),
     ("speedup", "speedup"),
     ("gpu", "gpu"),
+    ("cpu", "cpu"),
 ]
 
 
@@ -68,6 +71,56 @@ def load_records(paths):
                     print(f"warning: skipping {path}:{lineno}: {e}", file=sys.stderr)
 
     return records
+
+
+#: Vendor prefixes stripped for display, matching torch-harmonics' benchmarks/run.py::_fmt_arch
+#: so a device is named the same in both suites' tables. Duplicated rather than imported: this
+#: script reads result files and should stay runnable without makani (and therefore torch).
+_ARCH_STRIP = ("NVIDIA ", "AMD ", "Intel ")
+
+
+def _fmt_arch(name):
+    if not name:
+        return name
+
+    for prefix in _ARCH_STRIP:
+        if name.startswith(prefix):
+            return name[len(prefix) :]
+
+    return name
+
+
+def _device_columns(environment):
+    """Name the hardware the way torch-harmonics' benchmarks do.
+
+    ``gpu_label`` wins when set: pre-release parts report a placeholder through the driver, and
+    the label is then the only accurate name for the part.
+    """
+    gpu = environment.get("gpu_label") or _fmt_arch(environment.get("gpu_name"))
+
+    return {"gpu": gpu, "cpu": _fmt_arch(environment.get("cpu_name"))}
+
+
+def _memory_columns(memory):
+    """Flatten the per-GPU memory spread into table columns.
+
+    Records written before the memory block gained its min/max/mean shape carried a single
+    ``max_allocated_gb``; those are read as the max so old result files still tabulate.
+    """
+    if not memory:
+        return {"mem_max_gb": None, "mem_mean_gb": None, "dev_max_gb": None}
+
+    if "max_allocated_gb" in memory:
+        return {"mem_max_gb": round(memory["max_allocated_gb"], 1), "mem_mean_gb": None, "dev_max_gb": None}
+
+    peak = memory.get("peak_allocated_gb") or {}
+    device = memory.get("device_used_gb") or {}
+
+    return {
+        "mem_max_gb": round(peak["max"], 1) if "max" in peak else None,
+        "mem_mean_gb": round(peak["mean"], 1) if "mean" in peak else None,
+        "dev_max_gb": round(device["max"], 1) if "max" in device else None,
+    }
 
 
 def record_row(record, baseline_ms=None):
@@ -88,8 +141,8 @@ def record_row(record, baseline_ms=None):
         "p10_ms": round(timing["p10_ms"], 1),
         "p90_ms": round(timing["p90_ms"], 1),
         "samples_per_s": round(record["throughput"]["samples_per_second"], 2),
-        "memory_gb": round(record["memory"]["max_allocated_gb"], 1) if record.get("memory") else None,
-        "gpu": record["environment"].get("gpu_name"),
+        **_memory_columns(record.get("memory") or {}),
+        **_device_columns(record.get("environment") or {}),
     }
 
     # step time relative to the least-decomposed run in the group. Above 1 means the

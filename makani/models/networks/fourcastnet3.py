@@ -179,6 +179,7 @@ class DiscreteContinuousEncoder(nn.Module):
         activation_function=nn.GELU,
         groups=1,
         bias=False,
+        fused_disco=False,
     ):
         super().__init__()
 
@@ -202,6 +203,7 @@ class DiscreteContinuousEncoder(nn.Module):
             groups=groups,
             bias=bias,
             theta_cutoff=theta_cutoff,
+            fused=fused_disco,
         )
         if comm.get_size("spatial") > 1:
             self.conv.weight.is_shared_mp = ["spatial"]
@@ -320,6 +322,7 @@ class DiscreteContinuousDecoder(nn.Module):
         groups=1,
         bias=False,
         upsample_sht=False,
+        fused_disco=False,
     ):
         super().__init__()
 
@@ -378,6 +381,7 @@ class DiscreteContinuousDecoder(nn.Module):
             groups=groups,
             bias=False,
             theta_cutoff=theta_cutoff,
+            fused=fused_disco,
         )
         if comm.get_size("spatial") > 1:
             self.conv.weight.is_shared_mp = ["spatial"]
@@ -409,11 +413,23 @@ class DiscreteContinuousDecoder(nn.Module):
         if hasattr(self, "mlp"):
             x = self.mlp(x)
 
+        # Only the upsample needs fp32: it is a spherical transform (or a resampling built on
+        # one), and the quadrature is not safe to run in half precision. The DISCO convolution
+        # that follows is a local contraction with no such requirement, so it runs in the
+        # ambient precision instead.
+        #
+        # That distinction is not only about accuracy. torch-harmonics dispatches the DISCO
+        # convolution to its kpacked kernel only for fp16/bf16 inputs; in fp32 it falls back to
+        # a path that materializes the K-expanded intermediate, which at km-scale resolutions is
+        # tens of GiB and OOMs. ``torch.autocast`` cannot fix this on its own -- it converts
+        # inputs for registered ops only, and the DISCO convolution is a custom op -- so the
+        # cast has to be explicit.
         with amp.autocast(device_type=x.device.type, enabled=False):
             x = x.to(torch.float32)
             x = self.upsample(x)
-            x = self.conv(x)
+
         x = x.to(dtype=dtype)
+        x = self.conv(x)
 
         return x
 
@@ -496,6 +512,7 @@ class NeuralOperatorBlock(nn.Module):
         basis_norm_mode="mean",
         checkpointing_level=0,
         bias=False,
+        fused_disco=False,
     ):
         super().__init__()
 
@@ -531,6 +548,7 @@ class NeuralOperatorBlock(nn.Module):
                 grid_out=inverse_transform.grid,
                 bias=False,
                 theta_cutoff=theta_cutoff,
+                fused=fused_disco,
             )
             if comm.get_size("spatial") > 1:
                 self.local_conv.weight.is_shared_mp = ["spatial"]
@@ -687,6 +705,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         checkpointing_level=0,
         freeze_encoder=False,
         freeze_processor=False,
+        fused_disco=False,
         **kwargs,
     ):
         super().__init__()
@@ -748,6 +767,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
             groups=math.gcd(self.n_atmo_chans, self.atmo_embed_dim),
             bias=bias,
             use_mlp=encoder_mlp,
+            fused_disco=fused_disco,
         )
 
         # encoder for the auxiliary channels
@@ -766,6 +786,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
                 groups=math.gcd(self.n_surf_chans, self.surf_embed_dim),
                 bias=bias,
                 use_mlp=encoder_mlp,
+                fused_disco=fused_disco,
             )
 
         # decoder for the atmospheric variables
@@ -784,6 +805,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
             bias=bias,
             use_mlp=encoder_mlp,
             upsample_sht=upsample_sht,
+            fused_disco=fused_disco,
         )
 
         # decoder for the surface variables
@@ -803,6 +825,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
                 bias=bias,
                 use_mlp=encoder_mlp,
                 upsample_sht=upsample_sht,
+                fused_disco=fused_disco,
             )
 
         # encoder for the auxiliary channels
@@ -821,6 +844,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
                 groups=math.gcd(self.n_aux_chans, self.aux_embed_dim),
                 bias=bias,
                 use_mlp=encoder_mlp,
+                fused_disco=fused_disco,
             )
 
         # dropout
@@ -858,6 +882,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
                 basis_norm_mode=filter_basis_norm_mode,
                 bias=bias,
                 checkpointing_level=checkpointing_level,
+                fused_disco=fused_disco,
             )
 
             self.blocks.append(block)

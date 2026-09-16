@@ -147,6 +147,15 @@ def get_benchmark_argument_parser():
     )
     parser.add_argument("--run_tag", default=None, type=str, help="Free-form label stored with the run.")
     parser.add_argument(
+        "--gpu_label",
+        default=None,
+        type=str,
+        help="What the GPU actually is, recorded verbatim in the environment block. Pre-release "
+        "parts report a placeholder name through the driver ('NVIDIA Graphics Device'), so on "
+        "those this is the only way the results file can say what the run was measured on. "
+        "Also settable via MAKANI_BENCHMARK_GPU_LABEL.",
+    )
+    parser.add_argument(
         "--metadata_json_path",
         default=None,
         type=str,
@@ -496,16 +505,9 @@ def main():
     timing = benchmark_utils.summarize_timings(global_timings)
     timing_local = benchmark_utils.summarize_timings(local_timings)
 
-    # memory, max over ranks
-    memory = benchmark_utils.get_memory_record()
-    if memory and dist.is_initialized():
-        buf = torch.tensor(
-            [memory["max_allocated_gb"], memory["max_reserved_gb"]],
-            dtype=torch.float64,
-            device=torch.device(f"cuda:{comm.get_local_rank()}"),
-        )
-        dist.all_reduce(buf, op=dist.ReduceOp.MAX)
-        memory = {"max_allocated_gb": buf[0].item(), "max_reserved_gb": buf[1].item()}
+    # Memory, as the spread over GPUs. Collected here, after the measured pass, so the peaks
+    # include everything the steps allocate lazily rather than only what construction reserved.
+    memory = benchmark_utils.gather_memory_record()
 
     num_parameters, param_bytes, _ = count_parameters(driver_obj.model, driver_obj.device)
 
@@ -611,7 +613,7 @@ def main():
         "throughput": throughput,
         "memory": memory,
         "output": output,
-        "environment": benchmark_utils.get_environment_record(),
+        "environment": benchmark_utils.get_environment_record(gpu_label=args.gpu_label),
     }
 
     # comparability: the decomposition and the world size are deliberately not part of this,

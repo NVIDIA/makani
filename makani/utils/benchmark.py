@@ -33,9 +33,11 @@ Three separate concerns live here:
 """
 
 import os
+import re
 import json
 import time
 import datetime
+import platform
 import socket
 import hashlib
 import getpass
@@ -237,7 +239,71 @@ def _run_git(args: List[str]) -> Optional[str]:
     return out.stdout.strip()
 
 
-def get_environment_record() -> Dict[str, Any]:
+#: Vendor prefixes stripped for display, matching torch-harmonics' benchmarks/run.py::_fmt_arch
+#: so the two suites name the same hardware identically.
+_ARCH_STRIP = ("NVIDIA ", "AMD ", "Intel ")
+
+
+def format_arch(name: Optional[str]) -> Optional[str]:
+    """Strip the vendor prefix from a device name, as torch-harmonics' benchmarks do."""
+    if not name:
+        return name
+
+    for prefix in _ARCH_STRIP:
+        if name.startswith(prefix):
+            return name[len(prefix) :]
+
+    return name
+
+
+def get_cpu_name() -> str:
+    """A cleaned-up CPU model string, or 'Generic CPU' if it cannot be determined.
+
+    Deliberately identical to ``_get_cpu_name`` in torch-harmonics' ``benchmarks/bench.py``,
+    including the probe order and the cleaning rules, so a CPU reported by the makani benchmark
+    and by the torch-harmonics benchmark is named the same string and the two sets of results
+    can be lined up without a translation table.
+
+    ``/proc/cpuinfo`` carries ``model name`` on x86 but not on aarch64, which is why ``lscpu``
+    is tried next -- that is where Grace reports ``Neoverse-V2``.
+    """
+
+    def _clean(name: str) -> str:
+        name = re.sub(r"\s+@\s+[\d.]+\s*GHz.*", "", name)  # drop "@ 2.00GHz" suffix
+        name = name.replace("(R)", "").replace("(TM)", "")  # drop trademark noise
+        return re.sub(r" {2,}", " ", name).strip()
+
+    try:
+        with open("/proc/cpuinfo") as f:
+            for line in f:
+                if line.startswith("model name"):
+                    return _clean(line.split(":", 1)[1].strip())
+    except OSError:
+        pass
+
+    try:
+        out = subprocess.check_output(["lscpu"], text=True, stderr=subprocess.DEVNULL)
+        for line in out.splitlines():
+            if line.startswith("Model name"):
+                return _clean(line.split(":", 1)[1].strip())
+    except Exception:
+        pass
+
+    try:
+        out = subprocess.check_output(
+            ["sysctl", "-n", "machdep.cpu.brand_string"], text=True, stderr=subprocess.DEVNULL
+        ).strip()
+        if out:
+            return _clean(out)
+    except Exception:
+        pass
+
+    name = platform.processor()
+
+    return _clean(name) if name else "Generic CPU"
+
+
+def get_environment_record(gpu_label: Optional[str] = None) -> Dict[str, Any]:
     """Software and hardware identity of the run.
 
     Carried as annotation rather than as part of the comparability hash: a run
@@ -246,6 +312,9 @@ def get_environment_record() -> Dict[str, Any]:
     """
     record = {
         "hostname": socket.gethostname(),
+        # named exactly as torch-harmonics' benchmarks name it, so results from the two suites
+        # can be joined on the hardware without a translation table
+        "cpu_name": get_cpu_name(),
         "user": getpass.getuser(),
         # UTC, so runs from machines in different zones sort and compare directly
         "timestamp": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -268,9 +337,18 @@ def get_environment_record() -> Dict[str, Any]:
         props = torch.cuda.get_device_properties(torch.cuda.current_device())
         record.update(
             {
+                # Pre-release parts report a placeholder here ("NVIDIA Graphics Device"): the
+                # driver's name table only carries shipped boards. The fields below identify the
+                # chip well enough to tell such runs apart, and --gpu_label records what it
+                # actually was when only a human knows.
                 "gpu_name": props.name,
+                "gpu_label": gpu_label or os.environ.get("MAKANI_BENCHMARK_GPU_LABEL", None),
                 "gpu_memory_gb": round(props.total_memory / 1024**3, 1),
                 "gpu_capability": f"{props.major}.{props.minor}",
+                "gpu_multiprocessor_count": props.multi_processor_count,
+                "gpu_l2_cache_mb": (
+                    round(props.L2_cache_size / 1024**2, 1) if hasattr(props, "L2_cache_size") else None
+                ),
                 "gpus_per_node": torch.cuda.device_count(),
             }
         )
@@ -285,15 +363,72 @@ def get_environment_record() -> Dict[str, Any]:
     return record
 
 
+#: Memory quantities collected per rank, in the order they are packed into the gather buffer.
+_MEMORY_FIELDS = ("peak_allocated_gb", "peak_reserved_gb", "allocated_gb", "reserved_gb", "device_used_gb")
+
+
 def get_memory_record() -> Dict[str, Any]:
-    """Peak device memory over the run, in GiB."""
+    """This rank's device memory, in GiB.
+
+    The ``peak_*`` figures are high-water marks since the last
+    ``reset_peak_memory_stats``, which the benchmark issues just before the measured pass -- so
+    they cover everything the steps touch, including workspaces allocated lazily on the first
+    step (attention, cuDNN, NCCL) rather than at construction. Reading them after the pass is
+    what makes that true; reading them earlier would miss whatever the steps allocate.
+
+    ``device_used_gb`` comes from the driver rather than from torch's allocator, so unlike the
+    other four it also counts the CUDA context, NCCL buffers and any cuBLAS/cuDNN workspace held
+    outside the caching allocator. It is the number that matches nvidia-smi, and the one to look
+    at when asking whether a decomposition fits.
+    """
     if not torch.cuda.is_available():
         return {}
 
+    free, total = torch.cuda.mem_get_info()
+
     return {
-        "max_allocated_gb": torch.cuda.max_memory_allocated() / 1024**3,
-        "max_reserved_gb": torch.cuda.max_memory_reserved() / 1024**3,
+        "peak_allocated_gb": torch.cuda.max_memory_allocated() / 1024**3,
+        "peak_reserved_gb": torch.cuda.max_memory_reserved() / 1024**3,
+        "allocated_gb": torch.cuda.memory_allocated() / 1024**3,
+        "reserved_gb": torch.cuda.memory_reserved() / 1024**3,
+        "device_used_gb": (total - free) / 1024**3,
     }
+
+
+def gather_memory_record() -> Dict[str, Any]:
+    """The per-GPU memory footprint across the job, as min/max/mean per quantity.
+
+    Ranks do not all carry the same memory: a spatial decomposition leaves the polar ranks with
+    different shard shapes, and rank 0 additionally holds whatever the logging and reporting
+    path allocates. A single max hides that, so each quantity is reported as its spread over
+    ranks -- max answers "does it fit", min and mean together say how evenly the decomposition
+    loaded the GPUs.
+    """
+    local = get_memory_record()
+
+    if not local:
+        return {}
+
+    if not dist.is_initialized() or comm.get_world_size() == 1:
+        return {field: {"min": local[field], "max": local[field], "mean": local[field]} for field in _MEMORY_FIELDS}
+
+    device = torch.device(f"cuda:{comm.get_local_rank()}")
+    values = torch.tensor([local[field] for field in _MEMORY_FIELDS], dtype=torch.float64, device=device)
+
+    gathered = torch.empty((comm.get_world_size(), len(_MEMORY_FIELDS)), dtype=torch.float64, device=device)
+    dist.all_gather_into_tensor(gathered, values)
+    gathered = gathered.cpu()
+
+    record = {}
+    for index, field in enumerate(_MEMORY_FIELDS):
+        column = gathered[:, index]
+        record[field] = {
+            "min": column.min().item(),
+            "max": column.max().item(),
+            "mean": column.mean().item(),
+        }
+
+    return record
 
 
 # Keys dropped before hashing a configuration for comparability. These are the
@@ -523,10 +658,19 @@ def format_record(record: Dict[str, Any]) -> str:
     ]
 
     if memory:
-        lines.append(
-            f"  peak memory         : {memory['max_allocated_gb']:.1f} GiB allocated, "
-            f"{memory['max_reserved_gb']:.1f} GiB reserved"
-        )
+        # min/max/mean over GPUs: max says whether it fits, the spread says how evenly the
+        # decomposition loaded them
+        for field, label in (
+            ("peak_allocated_gb", "peak allocated"),
+            ("peak_reserved_gb", "peak reserved"),
+            ("device_used_gb", "device used"),
+        ):
+            stats = memory.get(field)
+            if stats:
+                lines.append(
+                    f"  {label:<20}: {stats['max']:.1f} GiB max, {stats['mean']:.1f} GiB mean, "
+                    f"{stats['min']:.1f} GiB min  (over {dec['world_size']} GPUs)"
+                )
 
     lines += [
         f"  spec                : {dec['spec']}",

@@ -257,6 +257,13 @@ ICON_R02B09approx:
     # identifies the run in the benchmark record, and in the generated dataset descriptor
     dataset_name: "ICON_R02B09approx"
 
+    # Fused DISCO convolutions: the weight einsum runs before the collectives, so the
+    # K-expanded intermediate is recomputed in backward instead of saved. K times less
+    # activation memory and K times less collective volume, at the cost of one extra
+    # contraction in backward -- without it the km-scale configs OOM on the local_conv's
+    # K-expanded tensor. Requires CUDA and torch-harmonics' optimized kernels.
+    fused_disco: !!bool True
+
     # 0.045 deg equiangular: 180/4000 in latitude, 360/8000 in longitude
     img_shape_x: 4001
     img_shape_y: 8000
@@ -276,6 +283,13 @@ ICON_R02B08approx:
 
     # identifies the run in the benchmark record, and in the generated dataset descriptor
     dataset_name: "ICON_R02B08approx"
+
+    # Fused DISCO convolutions: the weight einsum runs before the collectives, so the
+    # K-expanded intermediate is recomputed in backward instead of saved. K times less
+    # activation memory and K times less collective volume, at the cost of one extra
+    # contraction in backward -- without it the km-scale configs OOM on the local_conv's
+    # K-expanded tensor. Requires CUDA and torch-harmonics' optimized kernels.
+    fused_disco: !!bool True
 
     # 0.09 deg equiangular: 180/2000 in latitude, 360/4000 in longitude
     img_shape_x: 2001
