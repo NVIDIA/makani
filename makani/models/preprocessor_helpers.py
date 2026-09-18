@@ -69,6 +69,37 @@ def get_bias_correction(params):
     return bias
 
 
+def _synthesize_invariant(params, path):
+    """Whether to stand in for an invariant field instead of reading it from disk.
+
+    Only when running on synthetic data *and* the file is not there: a synthetic-data run with
+    the real invariants mounted keeps using them, and a run on real data still fails loudly on a
+    missing path, since a model trained without its orography is a silently different model.
+    """
+    return bool(params.get("enable_synthetic_data", False)) and ((path is None) or (not os.path.isfile(path)))
+
+
+def _synthetic_invariant(params, num_channels: int, one_hot: bool = False) -> torch.Tensor:
+    """A stand-in invariant field of the right shape, for synthetic-data runs.
+
+    The channel count is passed in rather than derived from the data, because the real code path
+    derives it *from the values*: ``one_hot()`` on a land-sea mask infers two classes because the
+    mask contains both. A synthetic field would infer whatever its own values imply, which would
+    quietly disagree with the width ``get_auxiliary_channels`` already committed to and change
+    the model's input channel count.
+
+    The values are the normalized form directly -- zeros for a continuous field, a one-hot vector
+    on the first class for a categorical one -- so the caller skips normalization, which for a
+    constant field would divide by a zero standard deviation.
+    """
+    field = torch.zeros((1, num_channels, params.img_shape_x, params.img_shape_y), dtype=torch.float32)
+
+    if one_hot:
+        field[:, 0, :, :] = 1.0
+
+    return field
+
+
 def get_static_features(params):
     r"""
     Assemble the time-invariant feature channels for the model input.
@@ -190,21 +221,25 @@ def get_static_features(params):
             static_features = static_features[:, :, start_x:end_x:subsampling_factor, start_y:end_y:subsampling_factor]
 
     if params.get("add_orography", False):
-        from makani.utils.auxiliary_fields import get_orography
-
         orography_path = params.get("orography_path", None)
-        if not os.path.isfile(orography_path):
-            raise IOError(f"Specify a valid orography path, got {orography_path}")
 
         with torch.no_grad():
-            oro = torch.as_tensor(get_orography(orography_path), dtype=torch.float32)
-            oro = torch.reshape(oro, (1, 1, oro.shape[0], oro.shape[1]))
-
-            eps = 1e-6
-            if normalizer is not None:
-                oro = normalizer(oro, eps=eps)
+            if _synthesize_invariant(params, orography_path):
+                oro = _synthetic_invariant(params, num_channels=1)
             else:
-                oro = (oro - torch.mean(oro)) / (torch.std(oro) + eps)
+                from makani.utils.auxiliary_fields import get_orography
+
+                if not os.path.isfile(orography_path):
+                    raise IOError(f"Specify a valid orography path, got {orography_path}")
+
+                oro = torch.as_tensor(get_orography(orography_path), dtype=torch.float32)
+                oro = torch.reshape(oro, (1, 1, oro.shape[0], oro.shape[1]))
+
+                eps = 1e-6
+                if normalizer is not None:
+                    oro = normalizer(oro, eps=eps)
+                else:
+                    oro = (oro - torch.mean(oro)) / (torch.std(oro) + eps)
 
             # shard
             oro = oro[:, :, start_x:end_x:subsampling_factor, start_y:end_y:subsampling_factor]
@@ -215,26 +250,37 @@ def get_static_features(params):
                 static_features = torch.cat([static_features, oro], dim=1)
 
     if params.get("add_landmask", False):
-        from makani.utils.auxiliary_fields import get_land_mask
-
         landmask_path = params.get("landmask_path", None)
-        if not os.path.isfile(landmask_path):
-            raise IOError(f"Specify a valid landmask path, got {landmask_path}")
 
         landmask_preprocessing = params.get("landmask_preprocessing", "floor")
         with torch.no_grad():
-            if landmask_preprocessing == "floor":
+            if _synthesize_invariant(params, landmask_path):
+                # one-hot encoded for "floor"/"round", so the width is fixed at two by
+                # get_auxiliary_channels -- it cannot be inferred from synthetic values the way
+                # one_hot() infers it from real ones, and getting it wrong would silently change
+                # the model's input channel count
+                num_channels = 1 if landmask_preprocessing == "raw" else 2
+                lsm = _synthetic_invariant(params, num_channels=num_channels, one_hot=(num_channels > 1))
+            elif not os.path.isfile(landmask_path):
+                raise IOError(f"Specify a valid landmask path, got {landmask_path}")
+            elif landmask_preprocessing == "floor":
+                from makani.utils.auxiliary_fields import get_land_mask
+
                 lsm = torch.as_tensor(get_land_mask(landmask_path), dtype=torch.long)
                 # one hot encode and move channels to front:
                 lsm = torch.permute(torch.nn.functional.one_hot(lsm), (2, 0, 1)).to(torch.float32)
                 lsm = torch.reshape(lsm, (1, lsm.shape[0], lsm.shape[1], lsm.shape[2]))
             elif landmask_preprocessing == "round":
+                from makani.utils.auxiliary_fields import get_land_mask
+
                 lsm = torch.as_tensor(get_land_mask(landmask_path), dtype=torch.float32).round()
                 lsm = lsm.to(torch.long)
                 # one hot encode and move channels to front:
                 lsm = torch.permute(torch.nn.functional.one_hot(lsm), (2, 0, 1)).to(torch.float32)
                 lsm = torch.reshape(lsm, (1, lsm.shape[0], lsm.shape[1], lsm.shape[2]))
             elif landmask_preprocessing == "raw":
+                from makani.utils.auxiliary_fields import get_land_mask
+
                 lsm = torch.as_tensor(get_land_mask(landmask_path), dtype=torch.float32)
                 lsm = torch.reshape(lsm, (1, 1, lsm.shape[0], lsm.shape[1]))
 
@@ -249,18 +295,23 @@ def get_static_features(params):
                 static_features = torch.cat([static_features, lsm], dim=1)
 
     if params.get("add_soiltype", False):
-        from makani.utils.auxiliary_fields import get_soiltype
-
         soiltype_path = params.get("soiltype_path", None)
-        if not os.path.isfile(soiltype_path):
-            raise IOError(f"Specify a valid soiltype path, got {soiltype_path}")
 
         with torch.no_grad():
-            st = torch.as_tensor(get_soiltype(soiltype_path), dtype=torch.long)
+            if _synthesize_invariant(params, soiltype_path):
+                # eight one-hot soil classes, per get_auxiliary_channels
+                st = _synthetic_invariant(params, num_channels=8, one_hot=True)
+            else:
+                from makani.utils.auxiliary_fields import get_soiltype
 
-            # one hot encode and move channels to front:
-            st = torch.permute(torch.nn.functional.one_hot(st), (2, 0, 1)).to(torch.float32)
-            st = torch.reshape(st, (1, st.shape[0], st.shape[1], st.shape[2]))
+                if not os.path.isfile(soiltype_path):
+                    raise IOError(f"Specify a valid soiltype path, got {soiltype_path}")
+
+                st = torch.as_tensor(get_soiltype(soiltype_path), dtype=torch.long)
+
+                # one hot encode and move channels to front:
+                st = torch.permute(torch.nn.functional.one_hot(st), (2, 0, 1)).to(torch.float32)
+                st = torch.reshape(st, (1, st.shape[0], st.shape[1], st.shape[2]))
 
             # no normalization since the data is one hot encoded
 
@@ -273,25 +324,30 @@ def get_static_features(params):
                 static_features = torch.cat([static_features, st], dim=1)
 
     if params.get("add_copernicus_emb", False):
-        from makani.utils.auxiliary_fields import get_copernicus_emb
-
         copernicus_emb_path = params.get("copernicus_emb_path", None)
-        if not os.path.isfile(copernicus_emb_path):
-            raise IOError(f"Specify a valid copernicus embedding path, got {copernicus_emb_path}")
 
         with torch.no_grad():
-            emb = get_copernicus_emb(copernicus_emb_path)
-
-            # one hot encode and move channels to front:
-            emb = torch.permute(emb, (2, 0, 1))
-            emb = torch.reshape(emb, (1, emb.shape[0], emb.shape[1], emb.shape[2]))
-
-            # no normalization since the data is already in the right format
-            eps = 1e-6
-            if normalizer is not None:
-                emb = normalizer(emb, eps=eps)
+            if _synthesize_invariant(params, copernicus_emb_path):
+                # eight embedding channels, per get_auxiliary_channels
+                emb = _synthetic_invariant(params, num_channels=8)
             else:
-                emb = (emb - torch.mean(emb)) / (torch.std(emb) + eps)
+                from makani.utils.auxiliary_fields import get_copernicus_emb
+
+                if not os.path.isfile(copernicus_emb_path):
+                    raise IOError(f"Specify a valid copernicus embedding path, got {copernicus_emb_path}")
+
+                emb = get_copernicus_emb(copernicus_emb_path)
+
+                # one hot encode and move channels to front:
+                emb = torch.permute(emb, (2, 0, 1))
+                emb = torch.reshape(emb, (1, emb.shape[0], emb.shape[1], emb.shape[2]))
+
+                # no normalization since the data is already in the right format
+                eps = 1e-6
+                if normalizer is not None:
+                    emb = normalizer(emb, eps=eps)
+                else:
+                    emb = (emb - torch.mean(emb)) / (torch.std(emb) + eps)
 
             # shard
             emb = emb[:, :, start_x:end_x:subsampling_factor, start_y:end_y:subsampling_factor]

@@ -236,7 +236,11 @@ class SpectralConv(nn.Module):
 
         with amp.autocast(device_type=x.device.type, enabled=False):
             x = x.to(torch.float32)
-            x = self.forward_transform(x).contiguous()
+            # No .contiguous() on the transform output: it is contiguous by construction, and a
+            # copy over a complex buffer cannot be codegen'd by inductor -- triton has no complex
+            # type, so the kernel signature fails with KeyError: 'complex64'. Matches the fix in
+            # torch_harmonics.spectral_convolution.
+            x = self.forward_transform(x)
             if self.scale_residual:
                 residual = self.inverse_transform(x)
 
@@ -247,7 +251,9 @@ class SpectralConv(nn.Module):
         B, C, H, W = x.shape
         x = x.reshape(B, self.num_groups, C // self.num_groups, H, W)
         xp = self._contract(x, self.weight)
-        x = xp.reshape(B, self.out_channels, H, W).contiguous()
+        # merge the group axes on the real view: the contraction output can be non-contiguous, in
+        # which case this reshape copies, and that copy must not be over a complex buffer (above)
+        x = torch.view_as_complex(torch.view_as_real(xp).reshape(B, self.out_channels, H, W, 2).contiguous())
 
         with amp.autocast(device_type=x.device.type, enabled=False):
             x = self.inverse_transform(x)

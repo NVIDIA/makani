@@ -232,6 +232,74 @@ fcn3_sc2_edim45_layers10_pretrain1:
     n_train_samples_per_epoch: 26880
     n_eval_samples: 256
 
+###########################################################################################################################
+# benchmark configurations
+###########################################################################################################################
+
+# FCN3 at km-scale resolution, for benchmarking against ICON output.
+#
+# The EXCLAIM DYAMOND run the ICON reader was written against is R02B10 (83,886,080 cells,
+# ~2.47 km mean cell spacing), which remaps to roughly 8118 x 16234 equiangular. This config is
+# deliberately one refinement level coarser: 4001 x 8000 is 0.045 deg = 5.0 km, which matches
+# R02B09 (20,971,520 cells, 4.93 km) -- hence "approx". It is 32x the points of the 0.25 deg
+# ERA5 configs rather than 126x, which keeps the benchmark runnable on a sane number of GPUs.
+#
+# Channels, architecture and losses are inherited unchanged from the ensemble base, so a run of
+# this against fcn3_sc2_edim45_layers10_pretrain1 isolates the effect of resolution alone.
+#
+# ..note::
+#     This is a synthetic-shape benchmark. The grid matches what remapped ICON data would look
+#     like; it is not ICON data, and nothing here reads the ICON backend.
+ICON_R02B09approx:
+    <<: *ENSEMBLE_BASE
+    wandb_group: "ICON_R02B09approx"
+
+    # identifies the run in the benchmark record, and in the generated dataset descriptor
+    dataset_name: "ICON_R02B09approx"
+
+    # Fused DISCO convolutions: the weight einsum runs before the collectives, so the
+    # K-expanded intermediate is recomputed in backward instead of saved. K times less
+    # activation memory and K times less collective volume, at the cost of one extra
+    # contraction in backward -- without it the km-scale configs OOM on the local_conv's
+    # K-expanded tensor. Requires CUDA and torch-harmonics' optimized kernels.
+    fused_disco: !!bool True
+
+    # 0.045 deg equiangular: 180/4000 in latitude, 360/8000 in longitude
+    img_shape_x: 4001
+    img_shape_y: 8000
+
+    # main hyper parameters
+    ensemble_size: 4
+    batch_size: 1
+    lr: 5E-4
+
+# The same benchmark one refinement level coarser again: 2001 x 4000 is 0.09 deg = 10.0 km,
+# which matches R02B08 (5,242,880 cells, 9.86 km mean cell spacing). 8.0M points, 7.7x the
+# 0.25 deg ERA5 configs and a quarter of ICON_R02B09approx -- the rung to start on if the
+# 4001 x 8000 config does not fit.
+ICON_R02B08approx:
+    <<: *ENSEMBLE_BASE
+    wandb_group: "ICON_R02B08approx"
+
+    # identifies the run in the benchmark record, and in the generated dataset descriptor
+    dataset_name: "ICON_R02B08approx"
+
+    # Fused DISCO convolutions: the weight einsum runs before the collectives, so the
+    # K-expanded intermediate is recomputed in backward instead of saved. K times less
+    # activation memory and K times less collective volume, at the cost of one extra
+    # contraction in backward -- without it the km-scale configs OOM on the local_conv's
+    # K-expanded tensor. Requires CUDA and torch-harmonics' optimized kernels.
+    fused_disco: !!bool True
+
+    # 0.09 deg equiangular: 180/2000 in latitude, 360/4000 in longitude
+    img_shape_x: 2001
+    img_shape_y: 4000
+
+    # main hyper parameters
+    ensemble_size: 4
+    batch_size: 1
+    lr: 5E-4
+
 fcn3_sc2_edim45_layers10_pretrain1_subsample2:
     <<: *ENSEMBLE_BASE
     wandb_group: "fcn3_sc2_edim45_layers10_pretrain1"

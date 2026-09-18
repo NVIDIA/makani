@@ -524,6 +524,7 @@ class Trainer(Driver):
 
             if torch.cuda.is_available():
                 torch.cuda.nvtx.range_push(f"train step {train_steps}")
+            self.step_timer.begin_step()
 
             # map to device
             gdata = map(lambda x: x.to(self.device), data)
@@ -611,6 +612,7 @@ class Trainer(Driver):
             # set progress bar prefix
             progress_bar.set_postfix(**pbar_postfix)
 
+            self.step_timer.end_step()
             if torch.cuda.is_available():
                 torch.cuda.nvtx.range_pop()
 
@@ -678,6 +680,7 @@ class Trainer(Driver):
 
                     if torch.cuda.is_available():
                         torch.cuda.nvtx.range_push(f"eval step {eval_steps}")
+                    self.step_timer.begin_step()
 
                     # map to gpu
                     gdata = map(lambda x: x.to(self.device), data)
@@ -722,6 +725,7 @@ class Trainer(Driver):
                         # append history
                         inpt = self.preprocessor.append_history(inpt, pred, idt)
 
+                    self.step_timer.end_step()
                     if torch.cuda.is_available():
                         torch.cuda.nvtx.range_pop()
 

@@ -14,6 +14,8 @@
 # limitations under the License.
 
 import logging
+import datetime
+from bisect import bisect_right
 from typing import Optional, List, Tuple
 import glob
 import torch
@@ -32,7 +34,7 @@ from makani.utils.dataloaders.data_shapes import DataShapes
 from makani.utils.grids import GridConverter
 
 # data helpers
-from .data_helpers import get_lat_lon_grid
+from .data_helpers import get_lat_lon_grid, get_date_from_string, get_date_from_timestamp
 
 
 class DummyLoader(object):
@@ -305,3 +307,109 @@ class DummyLoader(object):
             return result
         else:
             raise StopIteration()
+
+
+class DummyInferenceDataset(DummyLoader, torch.utils.data.Dataset):
+    """Map-style synthetic dataset for the inference pipeline.
+
+    ``DummyLoader`` is an iterator that hands back the same pre-allocated batch forever, which
+    suits a training benchmark. The inferencer cannot use it: it wraps its dataset in a
+    ``torch.utils.data.DataLoader`` driven by a ``SortedIndexSampler``, so it needs a map-style
+    dataset addressable by index, with timestamps that advance -- the rollout schedule is built
+    from index arithmetic and the output written by ``RolloutBuffer`` is labelled by time.
+
+    This subclass reuses ``DummyLoader``'s geometry (sharding, cropping, resampling, grid
+    conversion) and replaces the iteration protocol with indexed access. Two deliberate
+    differences from the parent:
+
+    * Samples are allocated on the **host**, not the device. The inferencer builds its loader
+      with ``num_workers`` and ``pin_memory=True``; CUDA tensors cannot cross a worker process
+      boundary or be pinned. It also makes the measurement more faithful, since real inference
+      pays the H2D copy.
+    * The payload is allocated once and returned for every index, as in the parent. The values
+      are meaningless either way, and re-randomizing per sample would put host-side RNG work
+      into a measurement aimed at the model and the output path.
+
+    Timestamps are synthesized from ``start_date`` at a spacing of ``dhours``, so
+    ``get_date_from_timestamp`` and the rollout buffer's time coordinates behave as they would
+    on a real dataset.
+    """
+
+    def __init__(self, *args, start_date: Optional[str] = "2020-01-01T00:00:00Z", **kwargs):
+        # the parent allocates its batch on this device; force the host, and keep the batch
+        # dimension minimal since indexed access never uses the parent's buffers
+        kwargs["device"] = torch.device("cpu")
+        kwargs["batch_size"] = 1
+
+        super().__init__(*args, **kwargs)
+
+        # timestamps as float seconds, matching what MultifilesDataset stores
+        start = get_date_from_string(start_date)
+        self.datestamps = [start + datetime.timedelta(hours=self.dhours * idx) for idx in range(self.n_samples_total)]
+        self.timestamps = np.asarray([stamp.timestamp() for stamp in self.datestamps], dtype=np.float64)
+        self.start_date = self.datestamps[0]
+        self.end_date = self.datestamps[-1]
+
+        # per-sample payload: the parent's buffers carry a batch dimension the sampler supplies
+        sample_shape = (self.n_history + 1, self.n_in_channels, self.return_shape[0], self.return_shape[1])
+        self.sample_inp = torch.zeros(sample_shape, dtype=torch.float32).uniform_()
+
+        target_shape = (self.n_future + 1, self.n_out_channels, self.return_shape[0], self.return_shape[1])
+        self.sample_tar = torch.zeros(target_shape, dtype=torch.float32).uniform_()
+
+        if self.add_zenith:
+            self.sample_zen = torch.zeros(
+                (self.n_history + 1, 1, self.return_shape[0], self.return_shape[1]), dtype=torch.float32
+            )
+            self.sample_zen_tar = torch.zeros(
+                (self.n_future + 1, 1, self.return_shape[0], self.return_shape[1]), dtype=torch.float32
+            )
+
+    def __len__(self):
+        # mirrors MultifilesDataset: the last samples cannot start a full history/future window
+        toff = 1 if self.return_target else 0
+        return self.n_samples_total - self.dt * (self.n_history + self.n_future + toff)
+
+    def _timestamps_at(self, global_idx, offset_start, offset_end):
+        return self.timestamps[global_idx + self.dt * offset_start : global_idx + self.dt * offset_end : self.dt]
+
+    def get_sample_at_index(self, global_idx, return_target=True):
+        result = (self.sample_inp,)
+        if return_target:
+            result += (self.sample_tar,)
+
+        if self.add_zenith:
+            result += (self.sample_zen,)
+            if return_target:
+                result += (self.sample_zen_tar,)
+
+        if self.return_timestamp:
+            inp_time = self._timestamps_at(global_idx, 0, self.n_history + 1)
+            result += (torch.as_tensor(inp_time, dtype=torch.float64),)
+            if return_target:
+                tar_time = self._timestamps_at(global_idx, self.n_history + 1, self.n_history + self.n_future + 2)
+                result += (torch.as_tensor(tar_time, dtype=torch.float64),)
+
+        return result
+
+    def __getitem__(self, global_idx):
+        return self.get_sample_at_index(global_idx, return_target=self.return_target)
+
+    def get_index_at_time(self, tstamp):
+        if not isinstance(tstamp, datetime.datetime):
+            tstamp = get_date_from_timestamp(tstamp)
+
+        if (tstamp < self.start_date) or (tstamp > self.end_date):
+            return None
+
+        return bisect_right(self.datestamps, tstamp) - 1
+
+    def get_time_at_index(self, global_idx):
+        return self.datestamps[global_idx]
+
+    def get_sample_at_time(self, timestamp):
+        global_idx = self.get_index_at_time(timestamp)
+        if global_idx is None:
+            raise IndexError(f"Time stamp {timestamp} is out of range of the dataset.")
+
+        return self.get_sample_at_index(global_idx, return_target=self.return_target)
