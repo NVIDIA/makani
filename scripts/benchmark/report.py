@@ -78,6 +78,10 @@ def load_records(paths):
 #: script reads result files and should stay runnable without makani (and therefore torch).
 _ARCH_STRIP = ("NVIDIA ", "AMD ", "Intel ")
 
+#: Mirrors makani.utils.benchmark._PLACEHOLDER_GPU_NAMES, for records written before
+#: gpu_name_is_placeholder existed.
+_PLACEHOLDER_GPU_NAMES = ("NVIDIA Graphics Device", "Graphics Device", "NVIDIA Device")
+
 
 def _fmt_arch(name):
     if not name:
@@ -96,7 +100,15 @@ def _device_columns(environment):
     ``gpu_label`` wins when set: pre-release parts report a placeholder through the driver, and
     the label is then the only accurate name for the part.
     """
-    gpu = environment.get("gpu_label") or _fmt_arch(environment.get("gpu_name"))
+    gpu = environment.get("gpu_label")
+
+    if not gpu:
+        name = environment.get("gpu_name")
+        # a driver placeholder names nothing; fall back to the capability/SM/memory fingerprint
+        if environment.get("gpu_name_is_placeholder") or name in _PLACEHOLDER_GPU_NAMES:
+            gpu = environment.get("gpu_descriptor") or _fmt_arch(name)
+        else:
+            gpu = _fmt_arch(name)
 
     return {"gpu": gpu, "cpu": _fmt_arch(environment.get("cpu_name"))}
 

@@ -303,6 +303,28 @@ def get_cpu_name() -> str:
     return _clean(name) if name else "Generic CPU"
 
 
+#: Names the driver returns for parts it has no entry for -- every pre-release board reports one
+#: of these, so "the GPU is unnamed" has to be detected rather than assumed from the string.
+_PLACEHOLDER_GPU_NAMES = ("NVIDIA Graphics Device", "Graphics Device", "NVIDIA Device")
+
+
+def gpu_name_is_placeholder(name: Optional[str]) -> bool:
+    """Whether the driver declined to name this part."""
+    return (name is None) or (name.strip() in _PLACEHOLDER_GPU_NAMES)
+
+
+def describe_gpu(props) -> str:
+    """A factual fingerprint of a GPU, for parts the driver cannot name.
+
+    Deliberately *not* a marketing name: mapping a compute capability to an architecture would
+    be a guess, and a wrong one recorded in a results file is worse than none. Capability, SM
+    count and memory are what the driver actually reports, they are stable across runs, and they
+    are specific enough to tell two unnamed parts apart. Use ``--gpu_label`` to record the real
+    name when a human knows it.
+    """
+    return f"sm{props.major}{props.minor}-{props.multi_processor_count}sm-{round(props.total_memory / 1024**3)}gb"
+
+
 def get_environment_record(gpu_label: Optional[str] = None) -> Dict[str, Any]:
     """Software and hardware identity of the run.
 
@@ -343,6 +365,9 @@ def get_environment_record(gpu_label: Optional[str] = None) -> Dict[str, Any]:
                 # actually was when only a human knows.
                 "gpu_name": props.name,
                 "gpu_label": gpu_label or os.environ.get("MAKANI_BENCHMARK_GPU_LABEL", None),
+                # what to call this part when neither the driver nor a human named it
+                "gpu_name_is_placeholder": gpu_name_is_placeholder(props.name),
+                "gpu_descriptor": describe_gpu(props),
                 "gpu_memory_gb": round(props.total_memory / 1024**3, 1),
                 "gpu_capability": f"{props.major}.{props.minor}",
                 "gpu_multiprocessor_count": props.multi_processor_count,
