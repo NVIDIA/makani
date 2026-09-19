@@ -1101,6 +1101,56 @@ class TestConcatenateDatasetChannelsAndTime(unittest.TestCase):
                     self.assertEqual(f_conc[H5_PATH].dims[1].label, "Channel name")
 
 
+class TestH5Convert(unittest.TestCase):
+
+    @classmethod
+    def setUpClass(cls):
+        # Create temporary directory
+        cls.tmpdir = tempfile.TemporaryDirectory()
+        tmp_path = cls.tmpdir.name
+
+        # Create annotated dataset
+        path = os.path.join(tmp_path, "data")
+        os.makedirs(path, exist_ok=True)
+        cls.train_path, _, _, _, _, _, _ = init_hdf5_dataset(path, num_samples_per_year=8, annotate=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmpdir.cleanup()
+
+    def test_h5_convert(self):
+        from data_process.h5_convert import h5_convert
+
+        output_path = os.path.join(self.tmpdir.name, "converted")
+        os.makedirs(output_path)
+
+        # batchsize 3 over 8 samples exercises the partial last batch
+        h5_convert(
+            self.train_path,
+            output_path,
+            chunksize="auto",
+            compression_mode="gzip",
+            compression_parameter=4,
+            batchsize=3,
+        )
+
+        files = sorted([f for f in os.listdir(self.train_path) if f.endswith(".h5")])
+        self.assertEqual(sorted(os.listdir(output_path)), files)
+
+        for fname in files:
+            with (
+                h5.File(os.path.join(self.train_path, fname), "r") as fin,
+                h5.File(os.path.join(output_path, fname), "r") as fout,
+            ):
+                with self.subTest(file=fname, desc="data"):
+                    self.assertEqual(fout[H5_PATH].compression, "gzip")
+                    self.assertTrue(compare_arrays("data", fout[H5_PATH][...], fin[H5_PATH][...]))
+                for idx, key in enumerate(["timestamp", "channel", "lat", "lon"]):
+                    with self.subTest(file=fname, desc=key):
+                        self.assertEqual(fout[key][...].tolist(), fin[key][...].tolist())
+                        self.assertEqual(fout[H5_PATH].dims[idx][key][...].tolist(), fin[key][...].tolist())
+
+
 class TestGetStats(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
