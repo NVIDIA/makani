@@ -401,6 +401,15 @@ def save_model_package(params):
     Saves out a self-contained model-package.
     The idea is to save anything necessary for inference beyond the checkpoints in one location.
     """
+    if params.get("enable_synthetic_data", False):
+        # A package exists to make a checkpoint usable for inference elsewhere: it bundles the
+        # normalization statistics and the invariant fields next to the config. A synthetic run
+        # has neither -- the .npy and .nc files it would copy do not exist, which is what used to
+        # make this raise -- and its checkpoint is random weights over made-up data, so there is
+        # nothing worth packaging even if the files were there.
+        logging.info("Skipping model package: synthetic data carries no statistics or invariants to package.")
+        return
+
     # save out the current state of the parameters, make it human readable
     config_path = os.path.join(params.experiment_dir, "config.json")
 

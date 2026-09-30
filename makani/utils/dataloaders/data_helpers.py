@@ -25,10 +25,38 @@ def get_lat_lon_grid(img_shape):
     return latitude, longitude
 
 
+def _synthetic_num_channels(params):
+    """Channel count of the (nonexistent) synthetic dataset, as the stats arrays would have it.
+
+    The stats files a real dataset ships cover every channel in the dataset, and callers index
+    the result with ``params.out_channels``, so the length has to follow the dataset's channel
+    list rather than the model's input count.
+    """
+    if hasattr(params, "data_channel_names"):
+        return len(params.data_channel_names)
+    if hasattr(params, "channel_names"):
+        return len(params.channel_names)
+
+    return params.N_in_channels
+
+
 def get_data_normalization(params):
 
     bias = None
     scale = None
+
+    if getattr(params, "enable_synthetic_data", False):
+        # Synthetic data is drawn from a uniform distribution and has no statistics to speak of;
+        # the .npy files a real dataset ships do not exist for it, and loading them is what used
+        # to make every synthetic-data run die in get_dataloader. Identity normalization keeps
+        # the shapes right for every consumer without touching disk, which is the same choice
+        # get_climatology already makes for the synthetic case, and matches the zero bias / unit
+        # scale that DummyLoader hands out through get_input_normalization.
+        num_channels = _synthetic_num_channels(params)
+        bias = np.zeros((1, num_channels, 1, 1), dtype=np.float32)
+        scale = np.ones((1, num_channels, 1, 1), dtype=np.float32)
+
+        return bias, scale
 
     if hasattr(params, "normalization"):
         if params.normalization == "minmax":
@@ -67,6 +95,11 @@ def get_data_normalization(params):
 def get_time_diff_stds(params):
 
     time_diff_stds = None
+
+    if getattr(params, "enable_synthetic_data", False):
+        # same reasoning as in get_data_normalization: a unit scale, so that a loss configured
+        # with temp_diff_normalization does not need statistics the synthetic dataset cannot have
+        return np.ones((1, _synthetic_num_channels(params), 1, 1), dtype=np.float32)
 
     if hasattr(params, "time_diff_stds_path"):
         time_diff_stds = np.load(params.time_diff_stds_path)

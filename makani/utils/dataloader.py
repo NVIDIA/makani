@@ -74,8 +74,10 @@ def init_distributed_io(params):
 def get_dataloader(params, files_pattern, device, mode="train", dali_device=None):
     init_distributed_io(params)
 
-    if (mode == "inference") and (not params.get("multifiles", False)):
-        raise NotImplementedError("Error, only multifiles dataloader is supported in inference mode.")
+    if (mode == "inference") and not (params.get("multifiles", False) or params.enable_synthetic_data):
+        raise NotImplementedError(
+            "Error, only the multifiles and the synthetic dataloaders are supported in inference mode."
+        )
 
     # get data normalization
     bias, scale = get_data_normalization(params)
@@ -155,7 +157,7 @@ def get_dataloader(params, files_pattern, device, mode="train", dali_device=None
         data_shapes = dataset.data_shapes
 
     elif params.enable_synthetic_data:
-        from makani.utils.dataloaders.data_loader_dummy import DummyLoader
+        from makani.utils.dataloaders.data_loader_dummy import DummyLoader, DummyInferenceDataset
 
         # use for true dummy loading
         img_shape_x = params.get("img_shape_x", None)
@@ -164,7 +166,11 @@ def get_dataloader(params, files_pattern, device, mode="train", dali_device=None
         if (img_shape_x is not None) and (img_shape_y is not None):
             img_shape = (img_shape_x, img_shape_y)
 
-        dataloader = DummyLoader(
+        # inference drives its dataset by index and by time, which the iterator form cannot
+        # serve; the map-style variant carries the same geometry with indexed access
+        loader_handle = DummyInferenceDataset if (mode == "inference") else DummyLoader
+
+        dataloader = loader_handle(
             location=files_pattern,
             device=device,
             batch_size=params.get("batch_size"),
@@ -199,6 +205,15 @@ def get_dataloader(params, files_pattern, device, mode="train", dali_device=None
         )
 
         data_shapes = dataloader.data_shapes
+
+        if mode == "inference":
+            # the inferencer drives the dataset directly, so it has to stay reachable -- the
+            # same stub the multifiles path hands back
+            dataset = dataloader
+            dataloader = types.SimpleNamespace(dataset=dataset)
+            dataloader.lat_lon = dataset.lat_lon
+            dataloader.get_output_normalization = dataset.get_output_normalization
+            dataloader.get_input_normalization = dataset.get_input_normalization
 
         # not needed for the no multifiles case
         sampler = None

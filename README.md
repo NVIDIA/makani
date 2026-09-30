@@ -78,6 +78,32 @@ By default, the inference script will perform inference on the out-of-sample dat
 | Bias file                 | `--bias_file`                                 | file path for bias output    |
 | Spectrum file             | `--spectrum_file`                             | file path for spectra output |
 
+### Benchmarking:
+
+`makani/benchmark.py` measures the training or inference step time of a model on synthetic data, so that architectures and parallel decompositions can be compared without a dataset. The model is selected with `--yaml_config` and `--config` exactly as for training:
+
+```bash
+mpirun -np 8 --allow-run-as-root python -u -m makani.benchmark \
+    --yaml_config="config/fourcastnet3.yaml" --config="fcn3_sc2_edim45_layers10_pretrain1" \
+    --mode=train --h_parallel_size=2 --ensemble_parallel_size=2 \
+    --ensemble_size=4 --batch_size=8 --benchmark_steps=20 --benchmark_warmup_steps=5
+```
+
+The decomposition is always prescribed externally: it comes from the CLI arguments above, or from the corresponding `MAKANI_H_PARALLEL_SIZE`, `MAKANI_W_PARALLEL_SIZE`, `MAKANI_MATMUL_PARALLEL_SIZE` and `MAKANI_ENSEMBLE_PARALLEL_SIZE` environment variables when a job script prescribes it. Whatever the communicators were actually built with is recorded with the result, together with the config file, the config line, the resolved model hyperparameters and the software and hardware environment.
+
+Each run appends one JSON record to `--output_dir`, and the full resolved configuration is written next to it for reproduction. Records carry a comparability hash over the parts of the configuration that must agree for two step times to mean the same thing — the decomposition and world size are deliberately excluded, since those are the axes being compared:
+
+```bash
+# aggregate into a table, grouped by what is actually comparable
+python scripts/benchmark/report.py benchmark_results/results.jsonl
+
+# optional: print launch commands for every valid decomposition of 8 ranks
+python scripts/benchmark/sweep.py --gpus 8 --ensemble-size 4 \
+    --yaml-config config/fourcastnet3.yaml --config fcn3_sc2_edim45_layers10_pretrain1
+```
+
+Step times are measured with CUDA events, reduced element-wise across ranks (a collective step ends when its slowest participant does), and summarized by their median after discarding the warmup steps.
+
 ## More about Makani
 
 ### Project structure
@@ -107,6 +133,7 @@ makani
 │   │   ├── trainer_profile.py  # copy of trainer.py used for profiling
 │   │   └── trainer.py          # main file for handling training
 │   ├── ...
+│   ├── benchmark.py            # CLI script for measuring step time on synthetic data
 │   ├── inference.py            # CLI script for launching inference
 │   ├── train.py                # CLI script for launching training
 ├── tests                       # test files

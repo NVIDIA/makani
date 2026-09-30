@@ -31,6 +31,7 @@ import os
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from .testutils import disable_tf32, set_seed, compare_tensors
+from makani.utils.functions import contiguous_complex_safe
 
 # ---------------------------------------------------------------------------
 # Fixed small dimensions — tests run on CPU
@@ -269,6 +270,47 @@ class TestContractionBackward(unittest.TestCase):
             self.assertIsNotNone(tensor.grad, f"{name}: {label}.grad is None")
             self.assertFalse(torch.isnan(tensor.grad).any(), f"{name}: NaN in {label}.grad")
             self.assertFalse(torch.isinf(tensor.grad).any(), f"{name}: Inf in {label}.grad")
+
+
+class TestContiguousComplexSafe(unittest.TestCase):
+    """The complex-safe contiguous() has to be a pure re-view, not a numerical change.
+
+    It exists because inductor cannot codegen a copy over a complex buffer (triton has no
+    complex type: KeyError: 'complex64'), so the copy is taken on the real (..., 2) view
+    instead. That is only a legitimate substitution if the values and the resulting layout
+    match what plain .contiguous() would have produced.
+    """
+
+    def setUp(self):
+        set_seed(333)
+
+    def test_complex_values_preserved(self):
+        # transpose to make it non-contiguous, which is the case that actually copies
+        x = torch.randn(4, 8, 6, dtype=torch.complex64).transpose(-1, -2)
+        self.assertFalse(x.is_contiguous())
+
+        out = contiguous_complex_safe(x)
+
+        self.assertTrue(out.is_contiguous())
+        self.assertEqual(out.dtype, x.dtype)
+        self.assertTrue(torch.equal(out, x.contiguous()))
+
+    def test_already_contiguous_complex(self):
+        x = torch.randn(2, 3, 4, dtype=torch.complex64)
+
+        out = contiguous_complex_safe(x)
+
+        self.assertTrue(out.is_contiguous())
+        self.assertTrue(torch.equal(out, x))
+
+    def test_real_tensor_takes_plain_path(self):
+        x = torch.randn(4, 8, 6).transpose(-1, -2)
+
+        out = contiguous_complex_safe(x)
+
+        self.assertTrue(out.is_contiguous())
+        self.assertEqual(out.dtype, torch.float32)
+        self.assertTrue(torch.equal(out, x.contiguous()))
 
 
 if __name__ == "__main__":

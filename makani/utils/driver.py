@@ -30,11 +30,18 @@ import torch.optim.lr_scheduler as lr_scheduler
 import logging
 import wandb
 
+# wandb.util.generate_id was the public spelling for years and is gone in recent releases (it is
+# absent in 0.30, still present in 0.22). This location holds in every version from the declared
+# floor of 0.13.7 through 0.30, so it is importable across the whole supported range rather than
+# forcing the dependency to a narrower one.
+from wandb.sdk.lib.runid import generate_id as generate_run_id
+
 # makani dependencies
 from makani.utils.YParams import YParams
 from makani.utils.features import get_auxiliary_channels
 from makani.utils.grid_types import DEFAULT_GRID_TYPE
 from makani.utils import comm
+from makani.utils.benchmark import StepTimer
 from makani.utils.dataloaders.data_helpers import get_data_normalization
 from makani.utils.training.training_helpers import get_parameter_groups
 from makani.utils.checkpoint_helpers import (
@@ -95,6 +102,14 @@ class Driver(metaclass=abc.ABCMeta):
 
         # update params
         self.params = self._set_default_parameters(params)
+
+        # per-step timer for benchmarking. Disabled unless benchmark_mode is set, in which
+        # case makani/benchmark.py reads the timings back out after the loop -- the training
+        # and inference loops call into it unconditionally and pay nothing when it is off.
+        self.step_timer = StepTimer(
+            enabled=bool(self.params.get("benchmark_mode", False)),
+            warmup_steps=int(self.params.get("benchmark_warmup_steps", 0)),
+        )
 
         # set up distributed communicators, even if it is a non-distributed instance
         self.world_rank = world_rank
@@ -305,7 +320,7 @@ class Driver(metaclass=abc.ABCMeta):
             # check if we want to resume or not
             if not params.resuming:
                 # generate run id
-                params["wandb_run_id"] = wandb.util.generate_id()
+                params["wandb_run_id"] = generate_run_id()
 
                 # create a lost of tags:
                 # paralellism:

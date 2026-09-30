@@ -41,3 +41,21 @@ def expand_ensemble(x: torch.Tensor, ensemble_size: int) -> torch.Tensor:
     if ensemble_size <= 1:
         return x
     return x.unsqueeze(1).repeat_interleave(ensemble_size, dim=1).reshape(x.shape[0] * ensemble_size, *x.shape[1:])
+
+
+def contiguous_complex_safe(x: torch.Tensor) -> torch.Tensor:
+    """``contiguous()``, taken on the real view when the tensor is complex.
+
+    Inductor cannot generate code for a copy over a complex buffer: triton has no complex type,
+    so the kernel signature lookup fails with ``KeyError: 'complex64'`` and compilation of the
+    whole graph aborts. Viewing the tensor in its real ``(..., 2)`` form turns the copy into an
+    ordinary float one, with the same result and the same memory layout, and lets the surrounding
+    graph compile. Real tensors take the plain path unchanged.
+
+    This mirrors what torch-harmonics does in its own spectral convolution and SHT for the same
+    reason; anything on a compiled path that copies a spectrum needs it.
+    """
+    if not x.is_complex():
+        return x.contiguous()
+
+    return torch.view_as_complex(torch.view_as_real(x).contiguous())

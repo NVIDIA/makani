@@ -23,7 +23,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from makani.models.model_package import ModelWrapper
+from makani.models.model_package import ModelWrapper, save_model_package
 from makani.models.stepper import SingleStepWrapper
 
 from .testutils import set_seed, get_default_parameters, compare_tensors, NUM_CHANNELS, IMG_SIZE_H, IMG_SIZE_W
@@ -317,6 +317,35 @@ class TestNoiseBatchGuard(_ModelPackageTestBase):
 
         with self.assertRaises(RuntimeError):
             wrapper(x, self._times(4))
+
+
+class TestSaveModelPackage(unittest.TestCase):
+    """A synthetic-data run has no statistics or invariants to package."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+
+        self.params = get_default_parameters()
+        self.params.experiment_dir = self.tmpdir.name
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def test_synthetic_data_writes_nothing(self):
+        self.params.enable_synthetic_data = True
+        self.params.add_orography = True
+        self.params.orography_path = "/nonexistent/orography.nc"
+
+        save_model_package(self.params)
+
+        self.assertEqual(os.listdir(self.tmpdir.name), [])
+
+    def test_real_data_still_writes_the_config(self):
+        self.params.enable_synthetic_data = False
+
+        save_model_package(self.params)
+
+        self.assertIn("config.json", os.listdir(self.tmpdir.name))
 
 
 if __name__ == "__main__":
