@@ -123,7 +123,7 @@ def h5_convert(
 
             # get dimension scales
             timestamps = fin["timestamp"][...]
-            channel_names = fin["channel_names"][...]
+            channel_names = fin["channel"][...]
             channel_names = [c.decode("ascii").strip() for c in channel_names.tolist()]
             chanlen = max([len(v) for v in channel_names])
             lat = fin["lat"]
