@@ -1118,24 +1118,37 @@ class TestH5Convert(unittest.TestCase):
     def tearDownClass(cls):
         cls.tmpdir.cleanup()
 
-    def test_h5_convert(self):
+    @parameterized.expand(
+        [
+            ("auto", False, None),
+            ("auto", True, None),
+            # one sample is 5 x 64 x 128 x 4 bytes = 160 KiB, so 1 MiB holds 6 of the 8 samples
+            ("1MB", False, (6, 5, 64, 128)),
+            ("1MB", True, (6, 64, 128, 5)),
+        ]
+    )
+    def test_h5_convert(self, chunksize, transpose, expected_chunks):
         from data_process.h5_convert import h5_convert
 
-        output_path = os.path.join(self.tmpdir.name, "converted")
+        output_path = os.path.join(self.tmpdir.name, f"converted_{chunksize}_{transpose}")
         os.makedirs(output_path)
 
         # batchsize 3 over 8 samples exercises the partial last batch
         h5_convert(
             self.train_path,
             output_path,
-            chunksize="auto",
+            chunksize=chunksize,
             compression_mode="gzip",
             compression_parameter=4,
             batchsize=3,
+            transpose=transpose,
         )
 
         files = sorted([f for f in os.listdir(self.train_path) if f.endswith(".h5")])
         self.assertEqual(sorted(os.listdir(output_path)), files)
+
+        perm = (0, 2, 3, 1) if transpose else (0, 1, 2, 3)
+        keys = ["timestamp", "channel", "lat", "lon"]
 
         for fname in files:
             with (
@@ -1144,11 +1157,36 @@ class TestH5Convert(unittest.TestCase):
             ):
                 with self.subTest(file=fname, desc="data"):
                     self.assertEqual(fout[H5_PATH].compression, "gzip")
-                    self.assertTrue(compare_arrays("data", fout[H5_PATH][...], fin[H5_PATH][...]))
-                for idx, key in enumerate(["timestamp", "channel", "lat", "lon"]):
+                    if expected_chunks is not None:
+                        self.assertEqual(fout[H5_PATH].chunks, expected_chunks)
+                    self.assertTrue(compare_arrays("data", fout[H5_PATH][...], np.transpose(fin[H5_PATH][...], perm)))
+                for key in keys:
                     with self.subTest(file=fname, desc=key):
                         self.assertEqual(fout[key][...].tolist(), fin[key][...].tolist())
-                        self.assertEqual(fout[H5_PATH].dims[idx][key][...].tolist(), fin[key][...].tolist())
+                for odim, idim in enumerate(perm):
+                    key = keys[idim]
+                    with self.subTest(file=fname, desc=f"dim {odim}"):
+                        self.assertEqual(fout[H5_PATH].dims[odim].label, fin[H5_PATH].dims[idim].label)
+                        self.assertEqual(fout[H5_PATH].dims[odim][key][...].tolist(), fin[key][...].tolist())
+
+    @parameterized.expand(
+        [
+            # everything fits into a single chunk
+            ((8, 5, 64, 128), 4, 2**30, (8, 5, 64, 128)),
+            # a single sample does not fit, split channels next
+            ((8, 5, 64, 128), 4, 100 * 1024, (1, 3, 64, 128)),
+            # a single channel does not fit, split lat next
+            ((8, 5, 64, 128), 4, 10 * 1024, (1, 1, 20, 128)),
+            # budget below a single element still yields a valid chunk
+            ((8, 5, 64, 128), 4, 1, (1, 1, 1, 1)),
+        ]
+    )
+    def test_chunk_shape_from_bytes(self, shape, itemsize, target_bytes, expected):
+        from data_process.h5_convert import _chunk_shape_from_bytes
+
+        chunks = _chunk_shape_from_bytes(shape, itemsize, target_bytes)
+        self.assertEqual(chunks, expected)
+        self.assertLessEqual(np.prod(chunks) * itemsize, max(target_bytes, itemsize))
 
 
 class TestGetStats(unittest.TestCase):
