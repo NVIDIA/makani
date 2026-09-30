@@ -14,12 +14,25 @@
 # limitations under the License.
 
 import os
-from typing import Optional
+import math
+from typing import Optional, Tuple
 import glob
 import argparse as ap
 import h5py as h5
 import numpy as np
 from tqdm import tqdm
+
+
+def _chunk_shape_from_bytes(shape: Tuple[int, ...], itemsize: int, target_bytes: int) -> Tuple[int, ...]:
+    """Chunk shape of roughly target_bytes, splitting the outermost dimensions first."""
+    chunks = []
+    budget = max(1, target_bytes // itemsize)
+    for idx, extent in enumerate(shape):
+        inner = math.prod(shape[idx + 1 :])
+        count = min(extent, max(1, budget // inner))
+        chunks.append(count)
+        budget = max(1, budget // count)
+    return tuple(chunks)
 
 
 def h5_convert(
@@ -47,8 +60,9 @@ def h5_convert(
         Chunksize specified as string for the HDF5 dataset in the new file, The following values are supported:
         none: no chunking, the whole dataset is in a single chunk
         auto: use HDF5 automatic chunking.
-        <some number>MB: set chunk size to <some number> megabytes
+        <some number>MB: chunks of at most <some number> megabytes, splitting the outermost dimensions first
         (chunk_0, chunk_1, chunk_2, chunk_3): set chunk size independently for the individual dimensions.
+        The chunk dimensions refer to the output layout, i.e. NHWC if transpose is set.
     compression_mode : str
         Compression mode for the HDF5 dataset. Supported values are:
         none: no compression
@@ -69,15 +83,17 @@ def h5_convert(
     """
 
     # set chunksize
+    chunkbytes = None
     if chunksize == "auto":
         chunksize = True
         print("Setting chunksize to auto")
     elif chunksize == "none":
         chunksize = None
         print("Setting chunksize to none")
-    elif "MB" in chunksize:
-        chunksize = int(chunksize.replace("MB", "")) * 1024 * 1024
-        print(f"Setting chunksize to {chunksize} MB")
+    elif chunksize.endswith("MB"):
+        chunkbytes = int(chunksize.replace("MB", "")) * 1024 * 1024
+        print(f"Setting chunksize to {chunksize}")
+        chunksize = None
     elif len(chunksize.split(",")) > 1:
         chunksize = tuple([int(x) for x in chunksize.split(",")])
         print(f"Setting chunksize to {chunksize}")
@@ -88,7 +104,7 @@ def h5_convert(
     files = glob.glob(os.path.join(input_dir, "*.h5"))
 
     # assemble kwargs
-    kwargs = dict(chunks=chunksize)
+    kwargs = dict()
     if compression_mode == "szip":
         kwargs["compression"] = "szip"
     elif compression_mode == "lzf":
@@ -129,10 +145,19 @@ def h5_convert(
             lat = fin["lat"]
             lon = fin["lon"]
 
+            # output layout: NCHW, or NHWC if transposing
+            perm = (0, 2, 3, 1) if transpose else (0, 1, 2, 3)
+            out_shape = tuple(data_handle.shape[p] for p in perm)
+
+            if chunkbytes is not None:
+                chunks = _chunk_shape_from_bytes(out_shape, data_handle.dtype.itemsize, chunkbytes)
+            else:
+                chunks = chunksize
+
             with h5.File(ofname, "w") as fout:
 
                 # output dataset
-                fout.create_dataset(entry_key, data_handle.shape, dtype=data_handle.dtype, **kwargs)
+                fout.create_dataset(entry_key, out_shape, dtype=data_handle.dtype, chunks=chunks, **kwargs)
 
                 # dimension scales
                 fout.create_dataset("timestamp", data=timestamps)
@@ -147,17 +172,11 @@ def h5_convert(
                 fout["lat"].make_scale("lat")
                 fout["lon"].make_scale("lon")
 
-                # label dimensions
-                fout[entry_key].dims[0].label = fin[entry_key].dims[0].label
-                fout[entry_key].dims[1].label = fin[entry_key].dims[1].label
-                fout[entry_key].dims[2].label = fin[entry_key].dims[2].label
-                fout[entry_key].dims[3].label = fin[entry_key].dims[3].label
-
-                # attach scales
-                fout[entry_key].dims[0].attach_scale(fout["timestamp"])
-                fout[entry_key].dims[1].attach_scale(fout["channel"])
-                fout[entry_key].dims[2].attach_scale(fout["lat"])
-                fout[entry_key].dims[3].attach_scale(fout["lon"])
+                # label dimensions and attach scales, following the output layout
+                scales = ["timestamp", "channel", "lat", "lon"]
+                for odim, idim in enumerate(perm):
+                    fout[entry_key].dims[odim].label = fin[entry_key].dims[idim].label
+                    fout[entry_key].dims[odim].attach_scale(fout[scales[idim]])
 
                 # write data in batched fashion
                 for start in tqdm(range(0, data_handle.shape[0], batchsize)):
