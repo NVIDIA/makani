@@ -1751,6 +1751,32 @@ class TestRolloutBufferStreaming(unittest.TestCase):
             with self.subTest(desc="timestamps match"):
                 self.assertTrue(np.array_equal(f_c["timestamp"][...], f_g["timestamp"][...]))
 
+    def test_gds_view_rejects_cpu_tensor(self, verbose=False):
+        # The GDS path hands a raw pointer to cuFile, so a host tensor must be
+        # rejected rather than silently passed through. Flipping enable_gds on a
+        # plain buffer exercises the check without needing the GDS driver.
+        buf = self._make_buffer(output_file=None)
+        buf.enable_gds = True
+        with self.assertRaises(ValueError):
+            buf._np_view_for_write(torch.zeros(2, 3))
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA required for GDS view contiguity test")
+    def test_gds_view_rejects_non_contiguous_cuda_tensor(self, verbose=False):
+        # A contiguous copy made inside _np_view_for_write would be a temporary
+        # nobody holds a reference to, so non-contiguous input must be rejected.
+        cuda_dev = torch.device("cuda", torch.cuda.current_device())
+        buf = self._make_buffer(output_file=None)
+        buf.enable_gds = True
+        tensor = torch.zeros(3, 2, device=cuda_dev).t()
+        with self.subTest(desc="non-contiguous raises"):
+            with self.assertRaises(ValueError):
+                buf._np_view_for_write(tensor)
+        # the view never dereferences GPU memory on host, so only check its metadata
+        with self.subTest(desc="contiguous accepted"):
+            arr = buf._np_view_for_write(tensor.contiguous())
+            self.assertEqual(arr.shape, (2, 3))
+            self.assertEqual(arr.dtype, np.float32)
+
 
 if __name__ == "__main__":
     unittest.main()
