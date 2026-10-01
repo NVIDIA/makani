@@ -423,6 +423,8 @@ class Inferencer(Driver):
                 output_file=output_file,
                 output_channels=output_channels,
                 output_memory_buffer_size=output_memory_buffer_size,
+                # GDS writes straight from GPU memory, so the staging buffer has to live there too
+                buffer_device=self.device if enable_gds else torch.device("cpu"),
                 enable_odirect=enable_odirect,
                 odirect_alignment=odirect_alignment,
                 enable_gds=enable_gds,

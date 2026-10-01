@@ -336,6 +336,14 @@ class RolloutBuffer(DataBuffer):
         # bulk copy at flush time.
         self.buffer_device = torch.device(buffer_device) if isinstance(buffer_device, str) else buffer_device
 
+        # GDS hands raw pointers to cuFile, so the write source must live on the GPU:
+        # streaming writes straight from ``device``, buffered writes from ``buffer_device``.
+        if self.enable_gds:
+            gds_source = self.device if self.streaming_mode else self.buffer_device
+            if gds_source.type != "cuda":
+                which = "device" if self.streaming_mode else "buffer_device"
+                raise ValueError(f"enable_gds=True requires {which} to be a CUDA device, got {gds_source}.")
+
         # store additional members
         self.img_shape = img_shape
         self.local_shape = local_shape
@@ -555,14 +563,21 @@ class RolloutBuffer(DataBuffer):
         Produce the numpy buffer to hand to ``write_direct``.
 
         With GDS, returns a zero-copy view of GPU memory (and pre-syncs CUDA so any
-        producer kernels have committed). Without GDS, returns a contiguous host
-        array — bringing the tensor over from a non-CPU device if necessary.
+        producer kernels have committed). The view does not own the memory, so the
+        tensor must already be contiguous and the caller must keep it alive until the
+        write completes — making a contiguous copy here would hand cuFile a pointer
+        to a temporary that may be freed before the write. Without GDS, returns a
+        contiguous host array — bringing the tensor over from a non-CPU device if necessary.
         """
         if self.enable_gds:
-            if self.device.type == "cuda":
-                torch.cuda.synchronize(device=self.device)
+            if (tensor.device.type != "cuda") or (not tensor.is_contiguous()):
+                raise ValueError(
+                    f"GDS writes need a contiguous CUDA tensor, got device={tensor.device}, "
+                    f"contiguous={tensor.is_contiguous()}."
+                )
+            torch.cuda.synchronize(device=tensor.device)
             ctype, nptype = self._CTYPE_BY_DTYPE[tensor.dtype]
-            return _as_numpy(tensor.contiguous(), ctype, nptype)
+            return _as_numpy(tensor, ctype, nptype)
         src = tensor if tensor.device.type == "cpu" else tensor.cpu()
         return np.ascontiguousarray(src.numpy())
 
@@ -687,8 +702,11 @@ class RolloutBuffer(DataBuffer):
         lon_range = slice(self.local_offset[1], self.local_offset[1] + self.local_shape[1])
 
         # GDS path keeps data on GPU and hands the pointer to cuFile;
-        # non-GDS path copies to host first.
-        predp_arr = self._np_view_for_write(predp.detach())
+        # non-GDS path copies to host first. Bind the contiguous tensors to locals so
+        # they outlive the zero-copy GDS views until write_direct returns.
+        predp = predp.detach().contiguous()
+        tstamps = tstamps.detach().contiguous()
+        predp_arr = self._np_view_for_write(predp)
 
         self.rollout_buffer_disk.write_direct(
             predp_arr,
@@ -697,7 +715,7 @@ class RolloutBuffer(DataBuffer):
 
         # write timestamps once per IC (on the first leadtime), single-writer
         if (idt == 0) and (comm.get_rank("model") == 0) and (comm.get_rank("ensemble") == 0):
-            tarr = self._np_view_for_write(tstamps.detach())
+            tarr = self._np_view_for_write(tstamps)
             self.timestamp_buffer_disk.write_direct(
                 tarr,
                 dest_sel=batch_range,
