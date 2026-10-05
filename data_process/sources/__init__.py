@@ -82,6 +82,15 @@ class Source(object):
         """
         raise NotImplementedError
 
+    def skipped_channel_indices(self) -> List[int]:
+        """Indices of the metadata channels this source cannot provide.
+
+        The converter writes these as missing: NaN in the fields and cleared in
+        ``valid_data``. A source that cannot provide a channel and is not told to
+        skip it should fail in its constructor instead.
+        """
+        return []
+
     def summary(self) -> Optional[str]:
         """Optional line printed once the conversion is done."""
         return None

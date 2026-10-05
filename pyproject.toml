@@ -38,11 +38,10 @@ maintainers = [
 
 description = "Massively parallel training of machine-learning based weather and climate models"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 
 classifiers = [
     "Development Status :: 3 - Alpha",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",

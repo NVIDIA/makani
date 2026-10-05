@@ -14,7 +14,7 @@
 # limitations under the License.
 
 from typing import Callable, Dict, Optional
-from itertools import batched
+from itertools import islice
 import os
 import sys
 import json
@@ -25,28 +25,38 @@ import h5py as h5
 import datetime as dt
 import argparse as ap
 
-# MPI
-from mpi4py import MPI
-
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from makani.utils.dataloaders.ncar_helpers import NCAR_ERA5_BUCKET
-from data_process.data_process_helpers import DistributedProgressBar
 from data_process.date_range import add_date_range_arguments, date_range_from_args, yearly_sample_times
 from data_process.sources import Source
 
 
+def _batched(items, size):
+    """Consecutive tuples of up to ``size`` items; ``itertools.batched`` needs Python 3.12."""
+    iterator = iter(items)
+    while batch := tuple(islice(iterator, size)):
+        yield batch
+
+
 def _create_output_file(ofile, comm, entry_key, timestamps, channel_names, lat, lon) -> h5.File:
-    """Create a yearly makani file with its datasets and dimension scales, for parallel writing."""
+    """Create a yearly makani file with its datasets and dimension scales.
+
+    The file is opened for parallel writing on ``comm``, or serially if ``comm`` is None.
+    """
     chanlen = max([len(v) for v in channel_names])
     dataset_shape = (len(timestamps), len(channel_names), len(lat), len(lon))
 
-    f = h5.File(ofile, "w", driver="mpio", comm=comm)
+    f = h5.File(ofile, "w", driver="mpio", comm=comm) if comm is not None else h5.File(ofile, "w")
     # Declare NaN as the fill value, so that missing data is self describing to
     # any HDF5 reader. The fill time has to stay "never": parallel HDF5
     # allocates storage at creation, so any other fill time would write the
-    # whole dataset once up front just to prefill it. As a consequence, sources
-    # have to write the NaN for missing samples explicitly.
-    f.create_dataset(entry_key, dataset_shape, dtype=np.float32, fillvalue=np.nan, fill_time="never")
+    # whole dataset once up front just to prefill it. As a consequence, missing
+    # data has to be written as NaN explicitly. The fill time is set on a
+    # property list rather than through create_dataset, whose fill_time keyword
+    # is newer than the h5py versions supported.
+    dcpl = h5.h5p.create(h5.h5p.DATASET_CREATE)
+    dcpl.set_fill_time(h5.h5d.FILL_TIME_NEVER)
+    f.create_dataset(entry_key, dataset_shape, dtype=np.float32, fillvalue=np.nan, dcpl=dcpl)
 
     # create dimension scales
     # datasets
@@ -73,6 +83,15 @@ def _create_output_file(ofile, comm, entry_key, timestamps, channel_names, lat, 
     f[entry_key].dims[3].attach_scale(f["lon"])
 
     return f
+
+
+def _write_missing(out, entry_key, samples, channel_indices):
+    """Write NaN and clear ``valid_data`` for ``channel_indices`` at a contiguous run of samples."""
+    tstart, tend = samples[0][0], samples[-1][0] + 1
+    nan = np.full((tend - tstart, *out[entry_key].shape[2:]), np.nan, dtype=np.float32)
+    for cidx in channel_indices:
+        out[entry_key][tstart:tend, cidx, ...] = nan
+        out["valid_data"][tstart:tend, cidx] = 0
 
 
 def convert(
@@ -121,6 +140,10 @@ def convert(
     verbose : bool
         Enable for more printing.
     """
+
+    # imported here so that the helpers above can be used and tested without MPI
+    from mpi4py import MPI
+    from data_process.data_process_helpers import DistributedProgressBar
 
     # get comm ranks and size
     comm = MPI.COMM_WORLD.Dup()
@@ -182,10 +205,14 @@ def convert(
         timestamps = np.array([t.timestamp() for t in times], dtype=np.float64)
         f = _create_output_file(ofile, comm, entry_key, timestamps, channel_names, lat, lon)
 
-        # populate fields
+        # populate fields; channels the source cannot provide are written as
+        # missing, since the fill value is declared but never written
+        skipped_channels = source.skipped_channel_indices()
         source.begin_year(units_local)
-        for unit_batch in batched(units_local, source.units_per_fill):
+        for unit_batch in _batched(units_local, source.units_per_fill):
             source.fill(f, entry_key, list(unit_batch))
+            if skipped_channels:
+                _write_missing(f, entry_key, [sample for unit in unit_batch for sample in unit], skipped_channels)
 
             # update progressbar
             pbar.update_counter(sum(len(unit) for unit in unit_batch))

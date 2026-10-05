@@ -66,9 +66,7 @@ class Wb2Source(Source):
     ):
         super().__init__(metadata, comm_rank)
         self.units_per_fill = batch_size
-        self.skip_missing_channels = skip_missing_channels
         self.impute_missing_timestamps = impute_missing_timestamps
-        self.skipped_channels = set()
 
         # split in surface and atmospheric channels
         (
@@ -98,16 +96,26 @@ class Wb2Source(Source):
             raise ValueError(f"Unknown coord_mode: {coord_mode}. Must be one of: match, force-flip-lat, force")
         self.wb2_data = wb2_data
 
-    def _check_channel(self, name_wb2: str) -> bool:
-        """Return whether ``name_wb2`` is in the dataset, failing unless missing channels are to be skipped."""
-        if name_wb2 in self.wb2_data:
-            return True
-        if not self.skip_missing_channels:
-            raise IndexError(f"Key {name_wb2} not found in dataset.")
-        if (self.comm_rank == 0) and name_wb2 not in self.skipped_channels:
-            print(f"Key {name_wb2} not found in dataset, skipping")
-        self.skipped_channels.add(name_wb2)
-        return False
+        # variables absent from the store, settled up front so that the
+        # converter can write their channels as missing
+        wanted = list(dict.fromkeys(self.surface_channel_names_wb2 + self.atmospheric_channel_names_wb2))
+        self.missing_wb2 = [name for name in wanted if name not in wb2_data]
+        if self.missing_wb2:
+            if not skip_missing_channels:
+                raise IndexError(f"Keys {self.missing_wb2} not found in dataset.")
+            if comm_rank == 0:
+                print(f"Keys {self.missing_wb2} not found in dataset, skipping")
+
+    def skipped_channel_indices(self) -> List[int]:
+        skipped = [
+            self.channel_names.index(sc)
+            for sc, scwb2 in zip(self.surface_channel_names, self.surface_channel_names_wb2)
+            if scwb2 in self.missing_wb2
+        ]
+        for ac, acwb2 in zip(self.atmospheric_channel_names, self.atmospheric_channel_names_wb2):
+            if acwb2 in self.missing_wb2:
+                skipped += [self.channel_names.index(ac + str(alevel)) for alevel in self.atmospheric_levels]
+        return skipped
 
     def fill(self, out: h5.File, entry_key: str, units: List[Unit]):
         samples = [sample for unit in units for sample in unit]
@@ -120,7 +128,7 @@ class Wb2Source(Source):
         # surface channel variables
         for sc, scwb2 in zip(self.surface_channel_names, self.surface_channel_names_wb2):
             cidx = self.channel_names.index(sc)
-            if not self._check_channel(scwb2):
+            if scwb2 in self.missing_wb2:
                 continue
             wb2_sel = self.wb2_data[scwb2]
             data = wb2_sel[wb2_sel["time"].isin(timebatch)].values
@@ -138,7 +146,7 @@ class Wb2Source(Source):
         # (time, level=all, H, W), so per-level .sel(level=...) inside the
         # loop made each level refetch the same chunk from storage.
         for ac, acwb2 in zip(self.atmospheric_channel_names, self.atmospheric_channel_names_wb2):
-            if not self._check_channel(acwb2):
+            if acwb2 in self.missing_wb2:
                 continue
 
             wb2_sel_all = self.wb2_data[acwb2].sel(level=list(self.atmospheric_levels))
@@ -168,4 +176,4 @@ class Wb2Source(Source):
         return data
 
     def summary(self) -> Optional[str]:
-        return f"Skipped channels: {list(self.skipped_channels)}"
+        return f"Skipped channels: {self.missing_wb2}"

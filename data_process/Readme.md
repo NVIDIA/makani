@@ -103,7 +103,8 @@ data into Makani-compatible yearly `.h5` files.
      - `match` (default): use xarray `.sel()` to reorder input coordinates to match the metadata file.
      - `force-flip-lat`: flip the latitude axis of the input without coordinate matching.
      - `force`: read data as-is, no reordering — assumes input already matches metadata.
-   - Omit `--skip_missing_channels` / `--impute_missing_timestamps` to fail fast on gaps.
+   - `--skip_missing_channels` writes channels absent from the store as missing (NaN, `valid_data` cleared).
+     Omit it and `--impute_missing_timestamps` to fail fast on gaps.
 
 The command writes one Makani-format `.h5` file per requested year in `output_dir`
 with shared dimension scales (`timestamp`, `channel`, `lat`, `lon`) and a
@@ -140,7 +141,8 @@ Flags you may want to use:
   larger than the converted output; without this flag nothing is staged locally.
 - `--accumulation_hours` sets the window used for accumulated channels such as `tp`.
   It defaults to `dhours`, so a 6-hourly dataset gets 6-hourly accumulations.
-- `--skip_missing_channels` drops channels that have no NCAR counterpart instead of failing.
+- `--skip_missing_channels` writes channels that have no NCAR counterpart as missing (NaN, `valid_data`
+  cleared) instead of failing.
 - `--impute_missing_timestamps` writes NaN and clears `valid_data` for data that is not on
   the bucket instead of failing. Imputation works per channel group and day: if anything a
   group needs for a day is missing, all of that group's channels are imputed for the day.

@@ -1328,7 +1328,7 @@ class TestGetStats(unittest.TestCase):
 
 # conversion scripts, with the extras each needs to be importable at all
 _CONVERTERS = [
-    ("data_process.convert_era5_to_makani_input", ["mpi4py", "h5py"]),
+    ("data_process.convert_era5_to_makani_input", ["h5py"]),
     ("data_process.sources.ncar", ["h5py"]),
     ("data_process.sources.wb2", ["xarray", "h5py"]),
     ("data_process.convert_makani_output_to_wb2", ["mpi4py", "xarray", "dask", "h5py"]),

@@ -429,6 +429,10 @@ class NcarSource(Source):
         self.store = NcarStore(bucket, cache_dir=cache_dir, prefetch_workers=prefetch_workers)
         self.grid_checked = set()
 
+    def skipped_channel_indices(self) -> List[int]:
+        covered = {cidx for group in self.groups for cidx in group.channel_indices}
+        return [cidx for cidx in range(len(self.channel_names)) if cidx not in covered]
+
     def split_units(self, samples: List[Sample]) -> List[Unit]:
         """Bucket the samples by calendar day."""
         days = OrderedDict()
@@ -496,9 +500,11 @@ class NcarSource(Source):
             self.store.release(analysis_pl_key(group.variables[0], day))
         names = [self.channel_names[cidx] for cidx in group.channel_indices]
         print(f"Imputing {day} for {', '.join(names)}: {error}")
+        # one explicit array per write, rather than a scalar h5py would expand row by row
+        nan = np.full((len(self.lat), len(self.lon)), np.nan, dtype=np.float32)
         for sample_index, _ in day_times:
             for cidx in group.channel_indices:
-                out[entry_key][sample_index, cidx, ...] = np.nan
+                out[entry_key][sample_index, cidx, ...] = nan
                 out["valid_data"][sample_index, cidx] = 0
 
     def close(self):
