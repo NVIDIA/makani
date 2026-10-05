@@ -51,6 +51,7 @@ import contextlib
 import datetime as dt
 import io
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -71,6 +72,7 @@ from .testutils import (
     init_zarr_dataset,
     init_wb2_zarr_dataset,
     compare_arrays,
+    local_timezone,
 )
 
 # ---------------------------------------------------------------------------
@@ -1144,6 +1146,19 @@ class TestPartialYearTimestamps(unittest.TestCase):
         np.testing.assert_array_equal(inp_time, exp_inp)
         np.testing.assert_array_equal(tar_time, exp_tar)
         self.assertEqual(dt.datetime.fromtimestamp(inp_time[0], tz=dt.timezone.utc).month, 7)
+
+    @unittest.skipUnless(hasattr(time, "tzset"), "TZ manipulation is POSIX only")
+    def test_naive_times_are_taken_as_utc(self):
+        # the backends hand out aware datetimes, but a naive one must not pick up
+        # the offset of whichever machine the training runs on
+        from makani.utils.dataloaders.sample_source import _to_seconds
+
+        naive = [dt.datetime(_YEARS[0], 7, 1, 6)]
+        expected = dt.datetime(_YEARS[0], 7, 1, 6, tzinfo=dt.timezone.utc).timestamp()
+        for zone in ("UTC", "Europe/Berlin", "America/Los_Angeles"):
+            with local_timezone(zone):
+                with self.subTest(zone=zone):
+                    np.testing.assert_array_equal(_to_seconds(naive), [expected])
 
 
 if __name__ == "__main__":

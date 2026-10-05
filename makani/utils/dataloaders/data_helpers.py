@@ -182,6 +182,20 @@ def get_timestamp(year, hour):
     return jan_01_epoch + dt.timedelta(hours=hour)
 
 
+def as_utc(date):
+    """Return ``date`` as a timezone aware UTC datetime.
+
+    A naive datetime is taken to be UTC already and merely labelled as such; an
+    aware one is converted. See :func:`get_date_from_string` for why the naive
+    case cannot be left to ``astimezone`` or ``timestamp``, both of which would
+    assume the local zone of the machine.
+    """
+    if date.tzinfo is None:
+        return date.replace(tzinfo=dt.timezone.utc)
+
+    return date.astimezone(dt.timezone.utc)
+
+
 def get_date_from_string(isostring):
     """Parse an ISO 8601 date string into a timezone aware UTC datetime.
 
@@ -198,12 +212,7 @@ def get_date_from_string(isostring):
         the failure this helper exists to prevent, so the check is on
         ``tzinfo`` rather than on an exception that no longer fires.
     """
-    date = dt.datetime.fromisoformat(isostring)
-
-    if date.tzinfo is None:
-        return date.replace(tzinfo=dt.timezone.utc)
-
-    return date.astimezone(dt.timezone.utc)
+    return as_utc(dt.datetime.fromisoformat(isostring))
 
 
 def get_date_from_timestamp(timestamp):

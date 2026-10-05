@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import contextlib
 import datetime as dt
 import time
 import unittest
@@ -26,6 +25,7 @@ from makani.utils.dataloaders.data_helpers import (
     get_time_diff_stds,
     get_climatology,
     get_timestamp,
+    as_utc,
     get_date_from_string,
     get_date_from_timestamp,
     get_timedelta_from_timestamp,
@@ -36,7 +36,7 @@ import sys
 import os
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from .testutils import set_seed, get_default_parameters
+from .testutils import set_seed, get_default_parameters, local_timezone as _local_timezone
 
 UTC = dt.timezone.utc
 
@@ -248,20 +248,24 @@ class TestGetTimestamp(unittest.TestCase):
 # ===========================================================================
 # 5. get_date_from_string
 # ===========================================================================
-@contextlib.contextmanager
-def _local_timezone(name):
-    """Run the enclosed block as if the machine were in another timezone."""
-    previous = os.environ.get("TZ")
-    os.environ["TZ"] = name
-    time.tzset()
-    try:
-        yield
-    finally:
-        if previous is None:
-            os.environ.pop("TZ", None)
-        else:
-            os.environ["TZ"] = previous
-        time.tzset()
+class TestAsUtc(unittest.TestCase):
+
+    def test_naive_is_labelled_not_converted(self):
+        self.assertEqual(as_utc(dt.datetime(2020, 6, 15, 12)), dt.datetime(2020, 6, 15, 12, tzinfo=UTC))
+
+    def test_aware_is_converted(self):
+        plus_five = dt.timezone(dt.timedelta(hours=5))
+        result = as_utc(dt.datetime(2020, 6, 15, 17, tzinfo=plus_five))
+        self.assertEqual(result.tzinfo, UTC)
+        self.assertEqual(result, dt.datetime(2020, 6, 15, 12, tzinfo=UTC))
+
+    @unittest.skipUnless(hasattr(time, "tzset"), "TZ manipulation is POSIX only")
+    def test_does_not_depend_on_the_machine_timezone(self):
+        expected = dt.datetime(2020, 6, 15, 12, tzinfo=UTC).timestamp()
+        for zone in ("UTC", "Europe/Berlin", "America/Los_Angeles"):
+            with _local_timezone(zone):
+                with self.subTest(zone=zone):
+                    self.assertEqual(as_utc(dt.datetime(2020, 6, 15, 12)).timestamp(), expected)
 
 
 class TestGetDateFromString(unittest.TestCase):

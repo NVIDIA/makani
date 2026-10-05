@@ -15,6 +15,8 @@
 
 from packaging import version
 import os
+import contextlib
+import time
 import re
 import json
 import datetime as dt
@@ -64,6 +66,22 @@ def disable_tf32():
             torch.backends.cuda.matmul.allow_tf32 = False
             torch.backends.cudnn.allow_tf32 = False
     return
+
+
+@contextlib.contextmanager
+def local_timezone(name):
+    """Run the enclosed block as if the machine were in another timezone."""
+    previous = os.environ.get("TZ")
+    os.environ["TZ"] = name
+    time.tzset()
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous
+        time.tzset()
 
 
 def get_default_parameters():

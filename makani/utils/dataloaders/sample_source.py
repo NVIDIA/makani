@@ -49,13 +49,17 @@ import torch
 
 from ..grid_types import DEFAULT_GRID_TYPE
 from .backends import get_backend
-from .data_helpers import get_date_from_string, get_date_from_timestamp, get_date_ranges
+from .data_helpers import as_utc, get_date_from_string, get_date_from_timestamp, get_date_ranges
 
 
 def _to_seconds(times) -> np.ndarray:
-    """Convert discovered times to float seconds: since the epoch for datetimes, as offsets for timedeltas."""
+    """Convert discovered times to float seconds: since the epoch for datetimes, as offsets for timedeltas.
+
+    Datetimes go through :func:`as_utc` first, since ``timestamp`` on a naive
+    datetime would assume the local zone of the machine.
+    """
     return np.asarray(
-        [t.total_seconds() if isinstance(t, timedelta) else t.timestamp() for t in times], dtype=np.float64
+        [t.total_seconds() if isinstance(t, timedelta) else as_utc(t).timestamp() for t in times], dtype=np.float64
     )
 
 
