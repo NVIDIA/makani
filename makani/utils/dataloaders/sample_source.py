@@ -39,7 +39,6 @@ epoch.
 import logging
 import math
 import time
-from datetime import timedelta
 from bisect import bisect_right
 from itertools import accumulate
 from typing import Optional
@@ -49,18 +48,7 @@ import torch
 
 from ..grid_types import DEFAULT_GRID_TYPE
 from .backends import get_backend
-from .data_helpers import as_utc, get_date_from_string, get_date_from_timestamp, get_date_ranges
-
-
-def _to_seconds(times) -> np.ndarray:
-    """Convert discovered times to float seconds: since the epoch for datetimes, as offsets for timedeltas.
-
-    Datetimes go through :func:`as_utc` first, since ``timestamp`` on a naive
-    datetime would assume the local zone of the machine.
-    """
-    return np.asarray(
-        [t.total_seconds() if isinstance(t, timedelta) else as_utc(t).timestamp() for t in times], dtype=np.float64
-    )
+from .data_helpers import get_date_from_string, get_date_from_timestamp, get_date_ranges, get_seconds_from_times
 
 
 class SampleSource(object):
@@ -423,7 +411,7 @@ class SampleSource(object):
         global_idx = self.file_offsets[file_idx] + local_idx
         inp_time = self.timestamps[global_idx - self.dt * self.n_history : global_idx + 1 : self.dt]
         tar_time = self.timestamps[global_idx + self.dt : global_idx + self.dt * (self.n_future + 1) + 1 : self.dt]
-        return _to_seconds(inp_time), _to_seconds(tar_time)
+        return get_seconds_from_times(inp_time), get_seconds_from_times(tar_time)
 
     def _compute_zenith_angle(self, inp_times, tar_times):
         torch.cuda.nvtx.range_push("SampleSource:_compute_zenith_angle")

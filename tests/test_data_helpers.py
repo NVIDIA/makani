@@ -28,6 +28,7 @@ from makani.utils.dataloaders.data_helpers import (
     as_utc,
     get_date_from_string,
     get_date_from_timestamp,
+    get_seconds_from_times,
     get_timedelta_from_timestamp,
     get_date_ranges,
 )
@@ -266,6 +267,32 @@ class TestAsUtc(unittest.TestCase):
             with _local_timezone(zone):
                 with self.subTest(zone=zone):
                     self.assertEqual(as_utc(dt.datetime(2020, 6, 15, 12)).timestamp(), expected)
+
+
+class TestGetSecondsFromTimes(unittest.TestCase):
+    """Shared by the multifiles loader and SampleSource to turn discovered times into floats."""
+
+    def test_datetimes_become_epoch_seconds(self):
+        plus_five = dt.timezone(dt.timedelta(hours=5))
+        times = [
+            dt.datetime(2020, 6, 15, 12, tzinfo=UTC),
+            dt.datetime(2020, 6, 15, 17, tzinfo=plus_five),
+            dt.datetime(2020, 6, 15, 12),
+        ]
+        expected = dt.datetime(2020, 6, 15, 12, tzinfo=UTC).timestamp()
+        np.testing.assert_array_equal(get_seconds_from_times(times), [expected] * 3)
+
+    def test_timedeltas_become_offsets(self):
+        times = [dt.timedelta(hours=6), dt.timedelta(days=1)]
+        np.testing.assert_array_equal(get_seconds_from_times(times), [6 * 3600.0, 86400.0])
+
+    @unittest.skipUnless(hasattr(time, "tzset"), "TZ manipulation is POSIX only")
+    def test_naive_times_do_not_depend_on_the_machine_timezone(self):
+        expected = dt.datetime(2020, 6, 15, 12, tzinfo=UTC).timestamp()
+        for zone in ("UTC", "Europe/Berlin", "America/Los_Angeles"):
+            with _local_timezone(zone):
+                with self.subTest(zone=zone):
+                    np.testing.assert_array_equal(get_seconds_from_times([dt.datetime(2020, 6, 15, 12)]), [expected])
 
 
 class TestGetDateFromString(unittest.TestCase):

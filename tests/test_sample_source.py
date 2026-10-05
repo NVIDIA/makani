@@ -1151,14 +1151,14 @@ class TestPartialYearTimestamps(unittest.TestCase):
     def test_naive_times_are_taken_as_utc(self):
         # the backends hand out aware datetimes, but a naive one must not pick up
         # the offset of whichever machine the training runs on
-        from makani.utils.dataloaders.sample_source import _to_seconds
+        from makani.utils.dataloaders.data_helpers import get_seconds_from_times
 
         naive = [dt.datetime(_YEARS[0], 7, 1, 6)]
         expected = dt.datetime(_YEARS[0], 7, 1, 6, tzinfo=dt.timezone.utc).timestamp()
         for zone in ("UTC", "Europe/Berlin", "America/Los_Angeles"):
             with local_timezone(zone):
                 with self.subTest(zone=zone):
-                    np.testing.assert_array_equal(_to_seconds(naive), [expected])
+                    np.testing.assert_array_equal(get_seconds_from_times(naive), [expected])
 
 
 if __name__ == "__main__":
