@@ -16,9 +16,9 @@ makani
 │   ├── annotate_dataset.py              # annotation of the dataset
 │   ├── concatenate_dataset.py           # concatenation of data files across several years
 │   ├── convert_makani_output_to_wb2.py  # converting makani output to wb2 format
-│   ├── convert_ncar_era5_to_makani_input.py # convert NSF NCAR ERA5 (RDA d633000) in makani format
-│   ├── convert_wb2_to_makani_input.py   # convert wb2 input in makani format
+│   ├── convert_era5_to_makani_input.py  # convert ERA5 (WB2/ARCO or NSF NCAR) in makani format
 │   ├── data_process_helpers.py          # helper functions for distributed Welford reductions
+│   ├── date_range.py                    # date range options shared by the yearly converters
 │   ├── generate_wb2_climatology.py      # generate mask and dataset for climatology data
 │   ├── get_histograms.py                # compute histograms for each variable over a dataset
 │   ├── get_stats.py                     # compute power spectra for each variable over a dataset
@@ -26,6 +26,7 @@ makani
 │   ├── h5_convert.py                    # reformat h5 files to enable compression/chunking
 │   ├── merge_wb2_dataset.py             # add additional fields to an existing makani dataset from the Weatherbench dataset repo
 │   ├── postprocess_stats.py             # postprocessg of stats
+│   ├── sources                          # ERA5 sources of convert_era5_to_makani_input.py (wb2, ncar)
 │   ├── wb2_helpers.py                   # wb2 helper functions
 │   └── Readme.md                        # this file
 ...
@@ -46,14 +47,15 @@ For scoring, the .h5 files are expected to be annotated with the correct metadat
 
 ### Weatherbench
 
-Makani contains several files to enable scoring consistent with Weatherbench2. `generate_wb2_climatology.py` computes climatology data provided by WeatherBench2 (ERA5 data, averaged data from 1990 - 2019) and converts them to a h5 dataset. Additionally, generates a climatology masks used by WB. Other helper functions are contained in `wb2_helpers.py`. `convert_wb2_to_makani_input` can be used to convert Weatherbench2 data such as the ARCO-ERA5 dataset to a makani-compatible format. `convert_makani_output_to_wb` converts makani inference output to Weatherbench2.
+Makani contains several files to enable scoring consistent with Weatherbench2. `generate_wb2_climatology.py` computes climatology data provided by WeatherBench2 (ERA5 data, averaged data from 1990 - 2019) and converts them to a h5 dataset. Additionally, generates a climatology masks used by WB. Other helper functions are contained in `wb2_helpers.py`. `convert_era5_to_makani_input.py wb2` can be used to convert Weatherbench2 data such as the ARCO-ERA5 dataset to a makani-compatible format. `convert_makani_output_to_wb` converts makani inference output to Weatherbench2.
 
 ## Data Processing Examples
 
 ### Date ranges
 
-The converters that write one Makani file per year (Weatherbench and NCAR) select their
-samples with `--start_date` and `--end_date`, both inclusive and in UTC. They take ISO 8601
+`convert_era5_to_makani_input.py` writes one Makani file per year, whichever source it
+reads from (`wb2` or `ncar`, given as subcommand). It selects the samples with
+`--start_date` and `--end_date`, both inclusive and in UTC. They take ISO 8601
 dates such as `2018-01-01` or `2018-01-01T06`, and a bare end date includes the whole day.
 
 - One file `<year>.h5` is written for every year the range touches. The first and last of
@@ -85,7 +87,7 @@ data into Makani-compatible yearly `.h5` files.
    A full example for a metadata file for a dataset which was used to train FourCastNet3 can be found under `examples/metadata.json`.
 2. Run the converter (MPI optional but recommended for speed):
    ```
-   mpirun -n 8 python convert_wb2_to_makani_input.py \
+   mpirun -n 8 python convert_era5_to_makani_input.py wb2 \
      --input_file "gs://weatherbench2/datasets/era5/1959-2022-full_37-1h-0p25deg-chunk-1.zarr-v2" \
      --output_dir "/path/to/output/makani_era5" \
      --metadata_file "/path/to/metadata.json" \
@@ -109,16 +111,16 @@ with shared dimension scales (`timestamp`, `channel`, `lat`, `lon`) and a
 
 ### Creating a Makani dataset from NSF NCAR ERA5 (RDA d633000):
 
-`convert_ncar_era5_to_makani_input.py` reads the public, anonymously accessible bucket
+`convert_era5_to_makani_input.py ncar` reads the public, anonymously accessible bucket
 `s3://nsf-ncar-era5`, which hosts ERA5 from 1940 to the present as netCDF4 on its native
 0.25 degree grid. That grid is already the grid makani expects (latitude 90 to -90,
 longitude 0 to 359.75), so no regridding or latitude flipping takes place and a mismatch
 against the metadata grid is reported as an error rather than silently corrected.
 
-The converter takes the same metadata json as the Weatherbench converter and writes the
-same yearly files, so the two are interchangeable as dataset sources:
+The `ncar` source takes the same metadata json as the `wb2` source and the converter writes
+the same yearly files for both, so the two are interchangeable as dataset sources:
 ```
-mpirun -n 8 python convert_ncar_era5_to_makani_input.py \
+mpirun -n 8 python convert_era5_to_makani_input.py ncar \
   --output_dir "/path/to/output/makani_era5" \
   --metadata_file "/path/to/metadata.json" \
   --start_date 2018-01-01 \

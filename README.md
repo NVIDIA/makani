@@ -210,7 +210,7 @@ The folder `data_process` contains a collection of scripts in order to modify da
 * `annotate_dataset.py` - Adds metadata annotations to HDF5 files including timestamps, latitude/longitude coordinates, and channel names. Ensures uniform time information across datasets by converting to UTC timezone.
 * `concatenate_dataset.py` - Creates virtual HDF5 datasets by combining multiple year files into a single dataset without physical copying, reducing disk overhead.
 * `h5_convert.py` - Reformats HDF5 files to enable compression and chunking. Supports various compression modes (LZF, GZIP, SZIP, scale-offset) and chunking strategies for optimized storage and access.
-* `convert_ncar_era5_to_makani_input.py` - Converts NSF NCAR ERA5 (RDA dataset d633000, hosted on the public `s3://nsf-ncar-era5` bucket) to Makani-compatible HDF5 format. Streams directly from S3 with optional local caching and supports MPI for distributed processing. Total precipitation is reconstructed as the sum of large-scale and convective precipitation.
+* `convert_era5_to_makani_input.py` - Converts ERA5 to Makani-compatible HDF5 format, one file per year over a given date range, with MPI support for distributed processing. The source is chosen by subcommand: `wb2` reads WeatherBench2/ARCO-ERA5 zarr stores, handling channel name translation and data restructuring; `ncar` streams NSF NCAR ERA5 (RDA dataset d633000, on the public `s3://nsf-ncar-era5` bucket) with optional local caching, reconstructing total precipitation as the sum of large-scale and convective precipitation. The sources live in `sources/`.
 Statistics and Analysis
 * `get_stats.py` - Computes comprehensive statistics from datasets including global means, standard deviations, min/max values, time means, and time-difference statistics. Supports MPI for distributed processing.
 * `get_histograms.py` - Generates histograms from dataset distributions, useful for data analysis and validation. Also supports MPI for distributed processing.
@@ -218,7 +218,6 @@ Statistics and Analysis
 
 #### WeatherBench2 Integration
 * `generate_wb2_climatology.py` - Generates WeatherBench2-compatible climatology data and ground profile masks from ERA5 data (1990-2019 averages). Creates HDF5 datasets with user-specified channel selection and ordering.
-* `convert_wb2_to_makani_input.py` - Converts ARCO-ERA5 data (WeatherBench2 format) to Makani-compatible HDF5 format. Handles channel name translation and data restructuring.
 * `convert_makani_output_to_wb2.py` - Converts Makani inference outputs to WeatherBench2 format for evaluation and comparison with other models.
 * `merge_wb2_dataset.py` - Transfers specific channels between Makani HDF5 files. This can be used for channels which are present in Copernicus ERA5 but not on ARCO-ERA5 (such as 10m wind speeds).
 * `wb2_helpers.py` - Utility functions for WeatherBench2 integration, including channel name translation between Makani and WeatherBench2 conventions for both surface and atmospheric variables.

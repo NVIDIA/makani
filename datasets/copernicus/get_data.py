@@ -22,7 +22,7 @@ import warnings
 def main(args):
 
     warnings.warn(
-        "get_data() is deprecated and will be removed in the future. Use data_process/convert_wb2_to_makani_input.py instead.",
+        "get_data() is deprecated and will be removed in the future. Use data_process/convert_era5_to_makani_input.py instead.",
         category=DeprecationWarning,
         stacklevel=2,  # so the warning points to the caller, not this line
     )
