@@ -1089,13 +1089,18 @@ class TestPartialYearTimestamps(unittest.TestCase):
         root = os.path.join(self._tmpdir.name, "partial")
         os.makedirs(root)
 
-        # two consecutive files, the first starting on July 1st
-        first_start = dt.datetime(_YEARS[0], 7, 1, tzinfo=dt.timezone.utc).timestamp()
-        second_start = dt.datetime(_YEARS[0] + 1, 1, 1, tzinfo=dt.timezone.utc).timestamp()
+        # the layout the converters write for a range starting on July 1st: a
+        # partial first year running to its end, then a full year
+        year = _YEARS[0]
+        starts = [dt.datetime(year, 7, 1, tzinfo=dt.timezone.utc), dt.datetime(year + 1, 1, 1, tzinfo=dt.timezone.utc)]
+        ends = [
+            dt.datetime(year + 1, 1, 1, tzinfo=dt.timezone.utc),
+            dt.datetime(year + 2, 1, 1, tzinfo=dt.timezone.utc),
+        ]
         self.file_timestamps = []
-        for year, start in zip([_YEARS[0], _YEARS[0] + 1], [first_start, second_start]):
-            timestamps = start + np.arange(_N_PER_YEAR, dtype=np.float64) * _DHOURS * 3600
-            data = np.zeros((_N_PER_YEAR, _N_CH, _IMG_H, _IMG_W), dtype=np.float32)
+        for year, start, end in zip([year, year + 1], starts, ends):
+            timestamps = np.arange(start.timestamp(), end.timestamp(), _DHOURS * 3600, dtype=np.float64)
+            data = np.zeros((len(timestamps), _N_CH, _IMG_H, _IMG_W), dtype=np.float32)
             with h5py.File(os.path.join(root, f"{year}.h5"), "w") as f:
                 ds = f.create_dataset(H5_PATH, data=data)
                 ts = f.create_dataset("timestamp", data=timestamps)
@@ -1113,14 +1118,22 @@ class TestPartialYearTimestamps(unittest.TestCase):
         tar = times[local_idx + 1 : local_idx + n_future + 2]
         return inp, tar
 
+    def test_files_do_not_overlap(self):
+        # guards the fixture itself: the partial year has to end before the next file starts
+        self.assertLess(self.file_timestamps[0][-1], self.file_timestamps[1][0])
+        last = dt.datetime.fromtimestamp(self.file_timestamps[0][-1], tz=dt.timezone.utc)
+        self.assertEqual((last.month, last.day), (12, 31))
+
     def test_times_come_from_the_file(self):
         es = _make_source(self.root, return_timestamp=True, n_history=1, n_future=1)
         for file_idx in range(2):
-            local_idx = 3
-            inp_time, tar_time = es._compute_timestamps(local_idx, file_idx)
-            exp_inp, exp_tar = self._expected(file_idx, local_idx, n_history=1, n_future=1)
-            np.testing.assert_array_equal(inp_time, exp_inp)
-            np.testing.assert_array_equal(tar_time, exp_tar)
+            # the first and the last window that fit inside the file
+            length = len(self.file_timestamps[file_idx])
+            for local_idx in [1, length - 3]:
+                inp_time, tar_time = es._compute_timestamps(local_idx, file_idx)
+                exp_inp, exp_tar = self._expected(file_idx, local_idx, n_history=1, n_future=1)
+                np.testing.assert_array_equal(inp_time, exp_inp)
+                np.testing.assert_array_equal(tar_time, exp_tar)
 
     def test_returned_times_match_the_first_sample(self):
         es = _make_source(self.root, return_timestamp=True, n_history=1, n_future=1)
