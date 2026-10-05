@@ -79,7 +79,8 @@ data into Makani-compatible yearly `.h5` files.
      --impute_missing_timestamps
    ```
    Flags you may want to use:
-   - `--force_overwrite` to replace existing yearly files.
+   - `--force_overwrite` to replace existing yearly files. Note that a partial yearly file is
+  skipped like any other on a later run, so extending a partial year needs this flag.
    - `--coord_mode` controls how input lat/lon are aligned to the metadata grid:
      - `match` (default): use xarray `.sel()` to reorder input coordinates to match the metadata file.
      - `force-flip-lat`: flip the latitude axis of the input without coordinate matching.
@@ -104,8 +105,14 @@ same yearly files, so the two are interchangeable as dataset sources:
 mpirun -n 8 python convert_ncar_era5_to_makani_input.py \
   --output_dir "/path/to/output/makani_era5" \
   --metadata_file "/path/to/metadata.json" \
-  --years 2018 2019
+  --start_date 2018-01-01 \
+  --end_date 2019-12-31
 ```
+One file is written per year in the range. Both dates are inclusive, and a bare end
+date includes the whole day. A range that ends mid-year yields a partial file for that
+year, which is the way to convert a year that is still being published upstream; the
+analysis streams on the bucket typically run a month or so ahead of the forecast streams
+that `tp` is reconstructed from, so end the range where the slower of the two stops.
 Flags you may want to use:
 - `--cache_dir` keeps the raw NCAR files on local disk, so an interrupted run and any
   later re-conversion do not refetch them. Note that the raw files are considerably
@@ -113,7 +120,8 @@ Flags you may want to use:
 - `--accumulation_hours` sets the window used for accumulated channels such as `tp`.
   It defaults to `dhours`, so a 6-hourly dataset gets 6-hourly accumulations.
 - `--skip_missing_channels` drops channels that have no NCAR counterpart instead of failing.
-- `--force_overwrite` to replace existing yearly files.
+- `--force_overwrite` to replace existing yearly files. Note that a partial yearly file is
+  skipped like any other on a later run, so extending a partial year needs this flag.
 
 Notes on the source data:
 - Data is streamed with byte-range reads. The pressure level files are chunked as one

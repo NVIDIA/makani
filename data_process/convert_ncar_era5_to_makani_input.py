@@ -359,10 +359,25 @@ def _fill_accumulated(store, group, out, entry_key, day, day_times, window_hours
         out[entry_key][sample_index, cidx, ...] = total
 
 
+def _parse_date(value: str, end_of_day: Optional[bool] = False) -> dt.datetime:
+    """Parse an ISO 8601 date or datetime as UTC.
+
+    A bare date such as ``2026-06-30`` means the start of that day, or its last
+    hour if ``end_of_day`` is set, so that an end date is inclusive of the day.
+    """
+    parsed = dt.datetime.fromisoformat(value)
+    if end_of_day and len(value) == 10:
+        parsed = parsed.replace(hour=23)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    return parsed.astimezone(dt.timezone.utc)
+
+
 def convert(
     output_dir: str,
     metadata_file: str,
-    years: List[int],
+    start_date: dt.datetime,
+    end_date: dt.datetime,
     bucket: Optional[str] = NCAR_ERA5_BUCKET,
     entry_key: Optional[str] = "fields",
     cache_dir: Optional[str] = None,
@@ -398,8 +413,14 @@ def convert(
         Example: coords = dict(lat=[-90.0, ..., 90.], lon=[0, ..., 360], channel=["t2m", "u500", "v500", ...])
         Note that the number of entries in coords["lat"] has to match dimension -2 of the dataset, and coords["lon"] dimension -1.
         The length of the channel names has to match dimension -3 (or dimension 1, which is the same) of the dataset.
-    years : List[int]
-        List of years to extract from the cloud dataset
+    start_date : datetime.datetime
+        First time to extract, inclusive. Samples stay on the ``dhours`` grid
+        anchored at 00Z on January 1st, so a start date off that grid is
+        rounded up to the next sample.
+    end_date : datetime.datetime
+        Last time to extract, inclusive. One file is written for every year
+        touched by the range; the first and last of them may be partial years,
+        which is how a year still being published upstream is converted.
     bucket : str
         Name of the S3 bucket holding the NCAR ERA5 data.
     entry_key : str
@@ -463,16 +484,29 @@ def convert(
     store = NcarStore(bucket, cache_dir=cache_dir, prefetch_workers=prefetch_workers)
     grid_checked = set()
 
+    if end_date < start_date:
+        raise ValueError(f"End date {end_date} lies before start date {start_date}.")
+
     # check total number of entries:
     num_entries_total = 0
+    years = []
     timelist = []
-    for year in years:
-        start_date = dt.datetime(year=year, day=1, month=1, tzinfo=dt.timezone.utc)
-        end_date = dt.datetime(year=year, day=31, month=12, hour=23, tzinfo=dt.timezone.utc)
-        hours_in_year = int((end_date - start_date).total_seconds() // 3600)
-        times = [start_date + h * dt.timedelta(hours=1) for h in range(0, hours_in_year + 1, dhours)]
+    for year in range(start_date.year, end_date.year + 1):
+        year_start = dt.datetime(year=year, day=1, month=1, tzinfo=dt.timezone.utc)
+        year_end = dt.datetime(year=year, day=31, month=12, hour=23, tzinfo=dt.timezone.utc)
+        hours_in_year = int((year_end - year_start).total_seconds() // 3600)
+        times = [year_start + h * dt.timedelta(hours=1) for h in range(0, hours_in_year + 1, dhours)]
+        times = [t for t in times if start_date <= t <= end_date]
+        if not times:
+            continue
+        years.append(year)
         timelist.append(times)
         num_entries_total += len(times)
+    if not years:
+        raise ValueError(f"No samples on the {dhours}h grid between {start_date} and {end_date}.")
+    if comm_rank == 0:
+        for year, times in zip(years, timelist):
+            print(f"{year}: {len(times)} samples from {times[0]:%Y-%m-%dT%H} to {times[-1]:%Y-%m-%dT%H}")
 
     # set up distributed progressbar
     pbar = DistributedProgressBar(num_entries_total, comm)
@@ -603,7 +637,8 @@ def main(args):
     convert(
         output_dir=args.output_dir,
         metadata_file=args.metadata_file,
-        years=args.years,
+        start_date=_parse_date(args.start_date),
+        end_date=_parse_date(args.end_date, end_of_day=True),
         bucket=args.bucket,
         cache_dir=args.cache_dir,
         accumulation_hours=args.accumulation_hours,
@@ -620,7 +655,19 @@ if __name__ == "__main__":
     parser = ap.ArgumentParser()
     parser.add_argument("--output_dir", type=str, help="Local directory for output files.", required=True)
     parser.add_argument("--metadata_file", type=str, help="Local file with metadata.", required=True)
-    parser.add_argument("--years", type=int, nargs="+", help="Which years to convert", required=True)
+    parser.add_argument(
+        "--start_date",
+        type=str,
+        help="First date to convert, inclusive, as ISO 8601 in UTC, e.g. 2018-01-01 or 2018-01-01T06.",
+        required=True,
+    )
+    parser.add_argument(
+        "--end_date",
+        type=str,
+        help="Last date to convert, inclusive, as ISO 8601 in UTC. A bare date includes the whole day. "
+        "One file is written per year in the range, partial at either end if needed.",
+        required=True,
+    )
     parser.add_argument("--bucket", type=str, default=NCAR_ERA5_BUCKET, help="S3 bucket with NCAR ERA5 data")
     parser.add_argument("--cache_dir", type=str, default=None, help="Optional directory to cache raw NCAR files in")
     parser.add_argument(
