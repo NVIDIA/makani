@@ -1074,5 +1074,64 @@ class TestOpenRetries(unittest.TestCase):
         sleep.assert_not_called()
 
 
+class TestPartialYearTimestamps(unittest.TestCase):
+    """Times returned for a file that does not start on January 1st.
+
+    The converters write partial years when a date range starts or ends
+    mid-year. The times have to come from the file's timestamp scale: deriving
+    them from the year in the file name and the row index places every sample
+    of a mid-year start months too early, which goes unnoticed in the data but
+    breaks zenith angles and anything keyed on the returned times.
+    """
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        root = os.path.join(self._tmpdir.name, "partial")
+        os.makedirs(root)
+
+        # two consecutive files, the first starting on July 1st
+        first_start = dt.datetime(_YEARS[0], 7, 1, tzinfo=dt.timezone.utc).timestamp()
+        second_start = dt.datetime(_YEARS[0] + 1, 1, 1, tzinfo=dt.timezone.utc).timestamp()
+        self.file_timestamps = []
+        for year, start in zip([_YEARS[0], _YEARS[0] + 1], [first_start, second_start]):
+            timestamps = start + np.arange(_N_PER_YEAR, dtype=np.float64) * _DHOURS * 3600
+            data = np.zeros((_N_PER_YEAR, _N_CH, _IMG_H, _IMG_W), dtype=np.float32)
+            with h5py.File(os.path.join(root, f"{year}.h5"), "w") as f:
+                ds = f.create_dataset(H5_PATH, data=data)
+                ts = f.create_dataset("timestamp", data=timestamps)
+                ts.make_scale("timestamp")
+                ds.dims[0].attach_scale(ts)
+            self.file_timestamps.append(timestamps)
+        self.root = root
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def _expected(self, file_idx, local_idx, n_history, n_future):
+        times = self.file_timestamps[file_idx]
+        inp = times[local_idx - n_history : local_idx + 1]
+        tar = times[local_idx + 1 : local_idx + n_future + 2]
+        return inp, tar
+
+    def test_times_come_from_the_file(self):
+        es = _make_source(self.root, return_timestamp=True, n_history=1, n_future=1)
+        for file_idx in range(2):
+            local_idx = 3
+            inp_time, tar_time = es._compute_timestamps(local_idx, file_idx)
+            exp_inp, exp_tar = self._expected(file_idx, local_idx, n_history=1, n_future=1)
+            np.testing.assert_array_equal(inp_time, exp_inp)
+            np.testing.assert_array_equal(tar_time, exp_tar)
+
+    def test_returned_times_match_the_first_sample(self):
+        es = _make_source(self.root, return_timestamp=True, n_history=1, n_future=1)
+        _inp, _tar, inp_time, tar_time = es(_SampleInfo(idx_in_epoch=0, epoch_idx=0, iteration=0))
+
+        # with shuffling off, the first sample is the first valid window of the July file
+        exp_inp, exp_tar = self._expected(0, es.indices_select[0], n_history=1, n_future=1)
+        np.testing.assert_array_equal(inp_time, exp_inp)
+        np.testing.assert_array_equal(tar_time, exp_tar)
+        self.assertEqual(dt.datetime.fromtimestamp(inp_time[0], tz=dt.timezone.utc).month, 7)
+
+
 if __name__ == "__main__":
     unittest.main()
