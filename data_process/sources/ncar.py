@@ -393,6 +393,13 @@ class NcarSource(Source):
         against the ranks placed per node.
     skip_missing_channels : bool
         Setting this flag to True will skip channels without an NCAR counterpart instead of failing.
+    impute_missing_timestamps : bool
+        Setting this flag to True will write NaN and mark ``valid_data`` for
+        data that is not on the bucket, instead of failing. This works per
+        channel group and day: if any object or timestep a group needs for a
+        day is missing, all of that group's channels are imputed for the whole
+        day. Typical case is converting the current year, where the forecast
+        streams behind ``tp`` lag the analysis streams by about a month.
     """
 
     def __init__(
@@ -404,8 +411,10 @@ class NcarSource(Source):
         accumulation_hours: Optional[int] = None,
         prefetch_workers: Optional[int] = 0,
         skip_missing_channels: Optional[bool] = False,
+        impute_missing_timestamps: Optional[bool] = False,
     ):
         super().__init__(metadata, comm_rank)
+        self.impute_missing_timestamps = impute_missing_timestamps
 
         # group channels by the source file that provides them
         self.groups = build_ncar_channel_groups(self.channel_names, skip_missing_channels=skip_missing_channels)
@@ -450,27 +459,47 @@ class NcarSource(Source):
         for day_times in units:
             day = day_times[0][1].date()
             for group in self.groups:
-                if group.kind == "pl":
-                    _fill_pressure_levels(
-                        self.store, group, out, entry_key, day, day_times, self.lat, self.lon, self.grid_checked
-                    )
-                elif group.kind == "sfc":
-                    _fill_surface(
-                        self.store, group, out, entry_key, day, day_times, self.lat, self.lon, self.grid_checked
-                    )
-                else:
-                    _fill_accumulated(
-                        self.store,
-                        group,
-                        out,
-                        entry_key,
-                        day,
-                        day_times,
-                        self.accumulation_hours,
-                        self.lat,
-                        self.lon,
-                        self.grid_checked,
-                    )
+                try:
+                    self._fill_group(out, entry_key, group, day, day_times)
+                except (FileNotFoundError, IndexError) as error:
+                    # a missing object surfaces as FileNotFoundError, a missing
+                    # timestep within an object as IndexError from _coord_index
+                    if not self.impute_missing_timestamps:
+                        raise
+                    self._impute(out, entry_key, group, day, day_times, error)
+
+    def _fill_group(self, out, entry_key, group, day, day_times):
+        if group.kind == "pl":
+            _fill_pressure_levels(
+                self.store, group, out, entry_key, day, day_times, self.lat, self.lon, self.grid_checked
+            )
+        elif group.kind == "sfc":
+            _fill_surface(self.store, group, out, entry_key, day, day_times, self.lat, self.lon, self.grid_checked)
+        else:
+            _fill_accumulated(
+                self.store,
+                group,
+                out,
+                entry_key,
+                day,
+                day_times,
+                self.accumulation_hours,
+                self.lat,
+                self.lon,
+                self.grid_checked,
+            )
+
+    def _impute(self, out, entry_key, group, day, day_times, error):
+        """Write NaN for all channels of ``group`` on ``day`` and mark them invalid."""
+        if group.kind == "pl":
+            # the fill bailed out before releasing the day's pressure level file
+            self.store.release(analysis_pl_key(group.variables[0], day))
+        names = [self.channel_names[cidx] for cidx in group.channel_indices]
+        print(f"Imputing {day} for {', '.join(names)}: {error}")
+        for sample_index, _ in day_times:
+            for cidx in group.channel_indices:
+                out[entry_key][sample_index, cidx, ...] = np.nan
+                out["valid_data"][sample_index, cidx] = 0
 
     def close(self):
         self.store.close()

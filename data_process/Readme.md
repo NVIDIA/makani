@@ -107,7 +107,10 @@ data into Makani-compatible yearly `.h5` files.
 
 The command writes one Makani-format `.h5` file per requested year in `output_dir`
 with shared dimension scales (`timestamp`, `channel`, `lat`, `lon`) and a
-`valid_data` mask that tracks imputed or missing values.
+`valid_data` mask that tracks imputed or missing values. Imputed values are NaN, and the
+`fields` dataset declares NaN as its HDF5 fill value (`h5dump -p` shows it), so missing
+data is self describing. The fill value is declaration only: HDF5 never prefills the
+dataset, since under parallel HDF5 that would mean writing every yearly file twice.
 
 ### Creating a Makani dataset from NSF NCAR ERA5 (RDA d633000):
 
@@ -129,7 +132,8 @@ mpirun -n 8 python convert_era5_to_makani_input.py ncar \
 See [Date ranges](#date-ranges) for how the range maps to files. NCAR publishes with a
 lag, and the analysis streams on the bucket typically run a month or so ahead of the
 forecast streams that `tp` is reconstructed from, so when converting the current year,
-end the range where the slower of the two stops.
+either end the range where the slower of the two stops, or end it with the analysis and
+pass `--impute_missing_timestamps`, which leaves `tp` NaN and invalid for the gap.
 Flags you may want to use:
 - `--cache_dir` keeps the raw NCAR files on local disk, so an interrupted run and any
   later re-conversion do not refetch them. Note that the raw files are considerably
@@ -137,6 +141,9 @@ Flags you may want to use:
 - `--accumulation_hours` sets the window used for accumulated channels such as `tp`.
   It defaults to `dhours`, so a 6-hourly dataset gets 6-hourly accumulations.
 - `--skip_missing_channels` drops channels that have no NCAR counterpart instead of failing.
+- `--impute_missing_timestamps` writes NaN and clears `valid_data` for data that is not on
+  the bucket instead of failing. Imputation works per channel group and day: if anything a
+  group needs for a day is missing, all of that group's channels are imputed for the day.
 - `--force_overwrite` to replace existing yearly files. See [Date ranges](#date-ranges).
 
 Notes on the source data:

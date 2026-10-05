@@ -41,7 +41,12 @@ def _create_output_file(ofile, comm, entry_key, timestamps, channel_names, lat, 
     dataset_shape = (len(timestamps), len(channel_names), len(lat), len(lon))
 
     f = h5.File(ofile, "w", driver="mpio", comm=comm)
-    f.create_dataset(entry_key, dataset_shape, dtype=np.float32)
+    # Declare NaN as the fill value, so that missing data is self describing to
+    # any HDF5 reader. The fill time has to stay "never": parallel HDF5
+    # allocates storage at creation, so any other fill time would write the
+    # whole dataset once up front just to prefill it. As a consequence, sources
+    # have to write the NaN for missing samples explicitly.
+    f.create_dataset(entry_key, dataset_shape, dtype=np.float32, fillvalue=np.nan, fill_time="never")
 
     # create dimension scales
     # datasets
@@ -236,6 +241,7 @@ def main(args):
             accumulation_hours=args.accumulation_hours,
             prefetch_workers=args.prefetch_workers,
             skip_missing_channels=args.skip_missing_channels,
+            impute_missing_timestamps=args.impute_missing_timestamps,
         )
     else:
         raise ValueError(f"Unknown source {args.source}.")
@@ -259,6 +265,11 @@ def build_parser() -> ap.ArgumentParser:
     common.add_argument("--metadata_file", type=str, help="Local file with metadata.", required=True)
     add_date_range_arguments(common)
     common.add_argument("--skip_missing_channels", action="store_true", help="Skip missing channels and do not fail")
+    common.add_argument(
+        "--impute_missing_timestamps",
+        action="store_true",
+        help="Write NaN and clear valid_data for data missing from the source, instead of failing",
+    )
     common.add_argument("--force_overwrite", action="store_true", help="Overwrite existing files")
     common.add_argument("--verbose", action="store_true")
 
@@ -275,7 +286,6 @@ def build_parser() -> ap.ArgumentParser:
         choices=["match", "force-flip-lat", "force"],
         help="How to align input lat/lon to metadata: match (default), force-flip-lat, force",
     )
-    wb2.add_argument("--impute_missing_timestamps", action="store_true", help="Impute missing timestamps")
 
     ncar = sources.add_parser("ncar", parents=[common], help="NSF NCAR ERA5 (RDA d633000) on S3")
     ncar.add_argument("--bucket", type=str, default=NCAR_ERA5_BUCKET, help="S3 bucket with NCAR ERA5 data")
