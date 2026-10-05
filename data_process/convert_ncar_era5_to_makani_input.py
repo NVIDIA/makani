@@ -42,6 +42,7 @@ from makani.utils.dataloaders.ncar_helpers import (
     to_ncar_hours,
 )
 from data_process.data_process_helpers import DistributedProgressBar
+from data_process.date_range import add_date_range_arguments, date_range_from_args, yearly_sample_times
 
 
 class NcarStore(object):
@@ -362,7 +363,8 @@ def _fill_accumulated(store, group, out, entry_key, day, day_times, window_hours
 def convert(
     output_dir: str,
     metadata_file: str,
-    years: List[int],
+    start_date: dt.datetime,
+    end_date: dt.datetime,
     bucket: Optional[str] = NCAR_ERA5_BUCKET,
     entry_key: Optional[str] = "fields",
     cache_dir: Optional[str] = None,
@@ -398,8 +400,14 @@ def convert(
         Example: coords = dict(lat=[-90.0, ..., 90.], lon=[0, ..., 360], channel=["t2m", "u500", "v500", ...])
         Note that the number of entries in coords["lat"] has to match dimension -2 of the dataset, and coords["lon"] dimension -1.
         The length of the channel names has to match dimension -3 (or dimension 1, which is the same) of the dataset.
-    years : List[int]
-        List of years to extract from the cloud dataset
+    start_date : datetime.datetime
+        First time to extract, inclusive. Samples stay on the ``dhours`` grid
+        anchored at 00Z on January 1st, so a start date off that grid is
+        rounded up to the next sample.
+    end_date : datetime.datetime
+        Last time to extract, inclusive. One file is written for every year
+        touched by the range; the first and last of them may be partial years,
+        which is how a year still being published upstream is converted.
     bucket : str
         Name of the S3 bucket holding the NCAR ERA5 data.
     entry_key : str
@@ -464,15 +472,11 @@ def convert(
     grid_checked = set()
 
     # check total number of entries:
-    num_entries_total = 0
-    timelist = []
-    for year in years:
-        start_date = dt.datetime(year=year, day=1, month=1, tzinfo=dt.timezone.utc)
-        end_date = dt.datetime(year=year, day=31, month=12, hour=23, tzinfo=dt.timezone.utc)
-        hours_in_year = int((end_date - start_date).total_seconds() // 3600)
-        times = [start_date + h * dt.timedelta(hours=1) for h in range(0, hours_in_year + 1, dhours)]
-        timelist.append(times)
-        num_entries_total += len(times)
+    years, timelist = zip(*yearly_sample_times(start_date, end_date, dhours))
+    num_entries_total = sum(len(times) for times in timelist)
+    if comm_rank == 0:
+        for year, times in zip(years, timelist):
+            print(f"{year}: {len(times)} samples from {times[0]:%Y-%m-%dT%H} to {times[-1]:%Y-%m-%dT%H}")
 
     # set up distributed progressbar
     pbar = DistributedProgressBar(num_entries_total, comm)
@@ -600,10 +604,12 @@ def convert(
 
 
 def main(args):
+    start_date, end_date = date_range_from_args(args)
     convert(
         output_dir=args.output_dir,
         metadata_file=args.metadata_file,
-        years=args.years,
+        start_date=start_date,
+        end_date=end_date,
         bucket=args.bucket,
         cache_dir=args.cache_dir,
         accumulation_hours=args.accumulation_hours,
@@ -620,7 +626,7 @@ if __name__ == "__main__":
     parser = ap.ArgumentParser()
     parser.add_argument("--output_dir", type=str, help="Local directory for output files.", required=True)
     parser.add_argument("--metadata_file", type=str, help="Local file with metadata.", required=True)
-    parser.add_argument("--years", type=int, nargs="+", help="Which years to convert", required=True)
+    add_date_range_arguments(parser)
     parser.add_argument("--bucket", type=str, default=NCAR_ERA5_BUCKET, help="S3 bucket with NCAR ERA5 data")
     parser.add_argument("--cache_dir", type=str, default=None, help="Optional directory to cache raw NCAR files in")
     parser.add_argument(

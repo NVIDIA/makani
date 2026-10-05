@@ -48,7 +48,7 @@ import torch
 
 from ..grid_types import DEFAULT_GRID_TYPE
 from .backends import get_backend
-from .data_helpers import get_date_from_string, get_date_from_timestamp, get_date_ranges, get_timestamp
+from .data_helpers import get_date_from_string, get_date_from_timestamp, get_date_ranges, get_seconds_from_times
 
 
 class SampleSource(object):
@@ -406,21 +406,12 @@ class SampleSource(object):
         return self._reorder_channels(self.inp_buff, self.tar_buff)
 
     def _compute_timestamps(self, local_idx, file_idx):
-        year = self.years[file_idx]
-
-        inp_time = np.asarray(
-            [
-                get_timestamp(year, hour=(idx * self.dhours)).timestamp()
-                for idx in range(local_idx - self.dt * self.n_history, local_idx + 1, self.dt)
-            ]
-        )
-        tar_time = np.asarray(
-            [
-                get_timestamp(year, hour=(idx * self.dhours)).timestamp()
-                for idx in range(local_idx + self.dt, local_idx + self.dt * (self.n_future + 1) + 1, self.dt)
-            ]
-        )
-        return inp_time, tar_time
+        # the times the backend discovered, not ones derived from the year label:
+        # a file need not start on January 1st, a partial year being the obvious case
+        global_idx = self.file_offsets[file_idx] + local_idx
+        inp_time = self.timestamps[global_idx - self.dt * self.n_history : global_idx + 1 : self.dt]
+        tar_time = self.timestamps[global_idx + self.dt : global_idx + self.dt * (self.n_future + 1) + 1 : self.dt]
+        return get_seconds_from_times(inp_time), get_seconds_from_times(tar_time)
 
     def _compute_zenith_angle(self, inp_times, tar_times):
         torch.cuda.nvtx.range_push("SampleSource:_compute_zenith_angle")

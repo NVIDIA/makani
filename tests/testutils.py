@@ -15,6 +15,8 @@
 
 from packaging import version
 import os
+import contextlib
+import time
 import re
 import json
 import datetime as dt
@@ -64,6 +66,22 @@ def disable_tf32():
             torch.backends.cuda.matmul.allow_tf32 = False
             torch.backends.cudnn.allow_tf32 = False
     return
+
+
+@contextlib.contextmanager
+def local_timezone(name):
+    """Run the enclosed block as if the machine were in another timezone."""
+    previous = os.environ.get("TZ")
+    os.environ["TZ"] = name
+    time.tzset()
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous
+        time.tzset()
 
 
 def get_default_parameters():
@@ -589,7 +607,9 @@ def init_wb2_zarr_dataset(
     return train_path, num_train, test_path, num_test, stats_path, metadata_path, None
 
 
-def compare_tensors(msg, tensor1, tensor2, atol=1e-8, rtol=1e-5, verbose=False):
+def compare_tensors(msg, tensor1, tensor2, atol=1e-8, rtol=1e-5, verbose=False, shape_check=False):
+    # shape_check: require identical shapes, since torch.allclose broadcasts and
+    # would otherwise let a tensor of the wrong shape pass on matching values
 
     # some None checks
     if tensor1 is None and tensor2 is None:
@@ -602,6 +622,10 @@ def compare_tensors(msg, tensor1, tensor2, atol=1e-8, rtol=1e-5, verbose=False):
         allclose = False
         if verbose:
             print("tensor1 is not None and tensor2 is None")
+    elif shape_check and tensor1.shape != tensor2.shape:
+        allclose = False
+        if verbose:
+            print(f"Shape mismatch on {msg}: {tuple(tensor1.shape)} vs {tuple(tensor2.shape)}")
     else:
         diff = torch.abs(tensor1 - tensor2)
         abs_diff = torch.mean(diff, dim=0)
@@ -628,7 +652,9 @@ def compare_tensors(msg, tensor1, tensor2, atol=1e-8, rtol=1e-5, verbose=False):
     return allclose
 
 
-def compare_arrays(msg, array1, array2, atol=1e-8, rtol=1e-5, verbose=False):
+def compare_arrays(msg, array1, array2, atol=1e-8, rtol=1e-5, verbose=False, shape_check=False):
+    # shape_check: require identical shapes, since np.allclose broadcasts and
+    # would otherwise let an array of the wrong shape pass on matching values
     # some None checks
     if array1 is None and array2 is None:
         allclose = True
@@ -640,6 +666,10 @@ def compare_arrays(msg, array1, array2, atol=1e-8, rtol=1e-5, verbose=False):
         allclose = False
         if verbose:
             print("array1 is not None and array2 is None")
+    elif shape_check and np.shape(array1) != np.shape(array2):
+        allclose = False
+        if verbose:
+            print(f"Shape mismatch on {msg}: {np.shape(array1)} vs {np.shape(array2)}")
     else:
         # some sanitization
         if array1.ndim == 0:
