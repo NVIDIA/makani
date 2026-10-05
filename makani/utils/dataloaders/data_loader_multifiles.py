@@ -41,6 +41,7 @@ from torch.utils.data import Dataset
 # for data normalization
 from makani.utils.dataloaders.data_helpers import (
     get_date_from_timestamp,
+    get_seconds_from_times,
     get_timedelta_from_timestamp,
 )
 
@@ -207,8 +208,7 @@ class MultifilesDataset(Dataset):
         # the by-time lookups compare against; the sample tuple carries the same
         # times as float seconds, which is what a tensor can hold
         self.datestamps = metadata.timestamps
-        to_seconds = (lambda t: t.total_seconds()) if self.relative_timestamp else (lambda t: t.timestamp())
-        self.timestamps = np.asarray([to_seconds(stamp) for stamp in self.datestamps], dtype=np.float64)
+        self.timestamps = get_seconds_from_times(self.datestamps)
         self.img_shape = metadata.grid.shape
         self.total_channels = metadata.total_channels
         self.lat_lon = (metadata.grid.lat.tolist(), metadata.grid.lon.tolist())

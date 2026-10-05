@@ -51,6 +51,7 @@ import contextlib
 import datetime as dt
 import io
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -71,6 +72,7 @@ from .testutils import (
     init_zarr_dataset,
     init_wb2_zarr_dataset,
     compare_arrays,
+    local_timezone,
 )
 
 # ---------------------------------------------------------------------------
@@ -1072,6 +1074,100 @@ class TestOpenRetries(unittest.TestCase):
             self.source._open_with_retries(0)
 
         sleep.assert_not_called()
+
+
+class TestPartialYearTimestamps(unittest.TestCase):
+    """Times returned for a file that does not start on January 1st.
+
+    The converters write partial years when a date range starts or ends
+    mid-year. The times have to come from the file's timestamp scale: deriving
+    them from the year in the file name and the row index places every sample
+    of a mid-year start months too early, which goes unnoticed in the data but
+    breaks zenith angles and anything keyed on the returned times.
+    """
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        root = os.path.join(self._tmpdir.name, "partial")
+        os.makedirs(root)
+
+        # the layout the converters write for a range starting on July 1st: a
+        # partial first year running to its end, then a full year
+        year = _YEARS[0]
+        starts = [dt.datetime(year, 7, 1, tzinfo=dt.timezone.utc), dt.datetime(year + 1, 1, 1, tzinfo=dt.timezone.utc)]
+        ends = [
+            dt.datetime(year + 1, 1, 1, tzinfo=dt.timezone.utc),
+            dt.datetime(year + 2, 1, 1, tzinfo=dt.timezone.utc),
+        ]
+        self.file_timestamps = []
+        for year, start, end in zip([year, year + 1], starts, ends):
+            timestamps = np.arange(start.timestamp(), end.timestamp(), _DHOURS * 3600, dtype=np.float64)
+            data = np.zeros((len(timestamps), _N_CH, _IMG_H, _IMG_W), dtype=np.float32)
+            with h5py.File(os.path.join(root, f"{year}.h5"), "w") as f:
+                ds = f.create_dataset(H5_PATH, data=data)
+                ts = f.create_dataset("timestamp", data=timestamps)
+                ts.make_scale("timestamp")
+                ds.dims[0].attach_scale(ts)
+            self.file_timestamps.append(timestamps)
+        self.root = root
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def _expected(self, file_idx, local_idx, n_history, n_future):
+        times = self.file_timestamps[file_idx]
+        inp = times[local_idx - n_history : local_idx + 1]
+        tar = times[local_idx + 1 : local_idx + n_future + 2]
+        return inp, tar
+
+    def test_files_do_not_overlap(self):
+        # guards the fixture itself: the partial year has to end before the next file starts
+        self.assertLess(self.file_timestamps[0][-1], self.file_timestamps[1][0])
+        last = dt.datetime.fromtimestamp(self.file_timestamps[0][-1], tz=dt.timezone.utc)
+        self.assertEqual((last.month, last.day), (12, 31))
+
+    def test_times_come_from_the_file(self):
+        es = _make_source(self.root, return_timestamp=True, n_history=1, n_future=1)
+        for file_idx in range(2):
+            # the first and the last window that fit inside the file
+            length = len(self.file_timestamps[file_idx])
+            for local_idx in [1, length - 3]:
+                inp_time, tar_time = es._compute_timestamps(local_idx, file_idx)
+                exp_inp, exp_tar = self._expected(file_idx, local_idx, n_history=1, n_future=1)
+                self.assertTrue(compare_arrays("input times", inp_time, exp_inp, atol=0.0, rtol=0.0, shape_check=True))
+                self.assertTrue(compare_arrays("target times", tar_time, exp_tar, atol=0.0, rtol=0.0, shape_check=True))
+
+    def test_returned_times_match_the_first_sample(self):
+        es = _make_source(self.root, return_timestamp=True, n_history=1, n_future=1)
+        _inp, _tar, inp_time, tar_time = es(_SampleInfo(idx_in_epoch=0, epoch_idx=0, iteration=0))
+
+        # with shuffling off, the first sample is the first valid window of the July file
+        exp_inp, exp_tar = self._expected(0, es.indices_select[0], n_history=1, n_future=1)
+        self.assertTrue(compare_arrays("input times", inp_time, exp_inp, atol=0.0, rtol=0.0, shape_check=True))
+        self.assertTrue(compare_arrays("target times", tar_time, exp_tar, atol=0.0, rtol=0.0, shape_check=True))
+        self.assertEqual(dt.datetime.fromtimestamp(inp_time[0], tz=dt.timezone.utc).month, 7)
+
+    @unittest.skipUnless(hasattr(time, "tzset"), "TZ manipulation is POSIX only")
+    def test_naive_times_are_taken_as_utc(self):
+        # the backends hand out aware datetimes, but a naive one must not pick up
+        # the offset of whichever machine the training runs on
+        from makani.utils.dataloaders.data_helpers import get_seconds_from_times
+
+        naive = [dt.datetime(_YEARS[0], 7, 1, 6)]
+        expected = dt.datetime(_YEARS[0], 7, 1, 6, tzinfo=dt.timezone.utc).timestamp()
+        for zone in ("UTC", "Europe/Berlin", "America/Los_Angeles"):
+            with local_timezone(zone):
+                with self.subTest(zone=zone):
+                    self.assertTrue(
+                        compare_arrays(
+                            "naive epoch seconds",
+                            get_seconds_from_times(naive),
+                            np.array([expected]),
+                            atol=0.0,
+                            rtol=0.0,
+                            shape_check=True,
+                        )
+                    )
 
 
 if __name__ == "__main__":
