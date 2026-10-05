@@ -50,6 +50,22 @@ Makani contains several files to enable scoring consistent with Weatherbench2. `
 
 ## Data Processing Examples
 
+### Date ranges
+
+The converters that write one Makani file per year (Weatherbench and NCAR) select their
+samples with `--start_date` and `--end_date`, both inclusive and in UTC. They take ISO 8601
+dates such as `2018-01-01` or `2018-01-01T06`, and a bare end date includes the whole day.
+
+- One file `<year>.h5` is written for every year the range touches. The first and last of
+  them are partial if the range starts or ends mid-year, which is how a year that is still
+  being published upstream gets converted.
+- Samples always sit on the `dhours` grid anchored at 00Z on January 1st, so a start date
+  off that grid is rounded up to the next sample.
+- An existing yearly file is skipped, partial or not. With `--force_overwrite` it is
+  replaced by exactly the samples of the new range; nothing from the old file is kept.
+  To extend a partial year, rerun with a range covering the whole period you want in the
+  file, so that every file stays free of gaps.
+
 ### Creating a Makani dataset from Weatherbench (ARCO-ERA5):
 
 Below is a minimal end-to-end example for converting ARCO-ERA5 (Weatherbench2) Zarr
@@ -73,14 +89,14 @@ data into Makani-compatible yearly `.h5` files.
      --input_file "gs://weatherbench2/datasets/era5/1959-2022-full_37-1h-0p25deg-chunk-1.zarr-v2" \
      --output_dir "/path/to/output/makani_era5" \
      --metadata_file "/path/to/metadata.json" \
-     --years 2018 2019 \
+     --start_date 2018-01-01 \
+     --end_date 2019-12-31 \
      --batch_size 8 \
      --skip_missing_channels \
      --impute_missing_timestamps
    ```
    Flags you may want to use:
-   - `--force_overwrite` to replace existing yearly files. Note that a partial yearly file is
-  skipped like any other on a later run, so extending a partial year needs this flag.
+   - `--force_overwrite` to replace existing yearly files. See [Date ranges](#date-ranges).
    - `--coord_mode` controls how input lat/lon are aligned to the metadata grid:
      - `match` (default): use xarray `.sel()` to reorder input coordinates to match the metadata file.
      - `force-flip-lat`: flip the latitude axis of the input without coordinate matching.
@@ -108,11 +124,10 @@ mpirun -n 8 python convert_ncar_era5_to_makani_input.py \
   --start_date 2018-01-01 \
   --end_date 2019-12-31
 ```
-One file is written per year in the range. Both dates are inclusive, and a bare end
-date includes the whole day. A range that ends mid-year yields a partial file for that
-year, which is the way to convert a year that is still being published upstream; the
-analysis streams on the bucket typically run a month or so ahead of the forecast streams
-that `tp` is reconstructed from, so end the range where the slower of the two stops.
+See [Date ranges](#date-ranges) for how the range maps to files. NCAR publishes with a
+lag, and the analysis streams on the bucket typically run a month or so ahead of the
+forecast streams that `tp` is reconstructed from, so when converting the current year,
+end the range where the slower of the two stops.
 Flags you may want to use:
 - `--cache_dir` keeps the raw NCAR files on local disk, so an interrupted run and any
   later re-conversion do not refetch them. Note that the raw files are considerably
@@ -120,8 +135,7 @@ Flags you may want to use:
 - `--accumulation_hours` sets the window used for accumulated channels such as `tp`.
   It defaults to `dhours`, so a 6-hourly dataset gets 6-hourly accumulations.
 - `--skip_missing_channels` drops channels that have no NCAR counterpart instead of failing.
-- `--force_overwrite` to replace existing yearly files. Note that a partial yearly file is
-  skipped like any other on a later run, so extending a partial year needs this flag.
+- `--force_overwrite` to replace existing yearly files. See [Date ranges](#date-ranges).
 
 Notes on the source data:
 - Data is streamed with byte-range reads. The pressure level files are chunked as one

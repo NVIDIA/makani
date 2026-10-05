@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional, List
+from typing import Optional
 from itertools import batched
 import os
 import sys
@@ -32,13 +32,15 @@ from mpi4py import MPI
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from makani.utils.dataloaders.wb2_helpers import split_convert_channel_names, gcs_storage_options
 from data_process.data_process_helpers import DistributedProgressBar
+from data_process.date_range import add_date_range_arguments, date_range_from_args, yearly_sample_times
 
 
 def convert(
     input_file: str,
     output_dir: str,
     metadata_file: str,
-    years: List[int],
+    start_date: dt.datetime,
+    end_date: dt.datetime,
     batch_size: Optional[int] = 32,
     entry_key: Optional[str] = "fields",
     coord_mode: Optional[str] = "match",
@@ -69,8 +71,13 @@ def convert(
         Example: coords = dict(lat=[-90.0, ..., 90.], lon=[0, ..., 360], channel=["t2m", "u500", "v500", ...])
         Note that the number of entries in coords["lat"] has to match dimension -2 of the dataset, and coords["lon"] dimension -1.
         The length of the channel names has to match dimension -3 (or dimension 1, which is the same) of the dataset.
-    years : List[int]
-        List of years to extract from the cloud dataset
+    start_date : datetime.datetime
+        First time to extract, inclusive. Samples stay on the ``dhours`` grid
+        anchored at 00Z on January 1st, so a start date off that grid is
+        rounded up to the next sample.
+    end_date : datetime.datetime
+        Last time to extract, inclusive. One file is written for every year
+        touched by the range; the first and last of them may be partial years.
     batch_size : int
         Batch size in which the samples are processed. This does not have any effect on the statistics (besides small numerical changes because of order of operations), but
         is merely a performance setting. Bigger batches are more efficient but require more memory.
@@ -139,15 +146,8 @@ def convert(
         raise ValueError(f"Unknown coord_mode: {coord_mode}. Must be one of: match, force-flip-lat, force")
 
     # check total number of entries:
-    num_entries_total = 0
-    timelist = []
-    for year in years:
-        start_date = dt.datetime(year=year, day=1, month=1, tzinfo=dt.timezone.utc)
-        end_date = dt.datetime(year=year, day=31, month=12, hour=23, tzinfo=dt.timezone.utc)
-        hours_in_year = int((end_date - start_date).total_seconds() // 3600)
-        times = [start_date + h * dt.timedelta(hours=1) for h in range(0, hours_in_year + 1, dhours)]
-        timelist.append(times)
-        num_entries_total += len(times)
+    years, timelist = zip(*yearly_sample_times(start_date, end_date, dhours))
+    num_entries_total = sum(len(times) for times in timelist)
 
     # set up distributed progressbar
     pbar = DistributedProgressBar(num_entries_total, comm)
@@ -316,12 +316,14 @@ def convert(
 
 
 def main(args):
+    start_date, end_date = date_range_from_args(args)
     # concatenate files with timestamp information
     convert(
         input_file=args.input_file,
         output_dir=args.output_dir,
         metadata_file=args.metadata_file,
-        years=args.years,
+        start_date=start_date,
+        end_date=end_date,
         batch_size=args.batch_size,
         coord_mode=args.coord_mode,
         force_overwrite=args.force_overwrite,
@@ -338,7 +340,7 @@ if __name__ == "__main__":
     parser.add_argument("--input_file", type=str, help="WB2 input file", required=True)
     parser.add_argument("--output_dir", type=str, help="Local directory for output files.", required=True)
     parser.add_argument("--metadata_file", type=str, help="Local file with metadata.", required=True)
-    parser.add_argument("--years", type=int, nargs="+", help="Which years to convert", required=True)
+    add_date_range_arguments(parser)
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size for writing chunks")
     parser.add_argument(
         "--coord_mode",
