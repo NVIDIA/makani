@@ -1134,8 +1134,8 @@ class TestPartialYearTimestamps(unittest.TestCase):
             for local_idx in [1, length - 3]:
                 inp_time, tar_time = es._compute_timestamps(local_idx, file_idx)
                 exp_inp, exp_tar = self._expected(file_idx, local_idx, n_history=1, n_future=1)
-                self.assertTrue(compare_arrays("input times", inp_time, exp_inp, atol=0.0, rtol=0.0))
-                self.assertTrue(compare_arrays("target times", tar_time, exp_tar, atol=0.0, rtol=0.0))
+                self.assertTrue(compare_arrays("input times", inp_time, exp_inp, atol=0.0, rtol=0.0, shape_check=True))
+                self.assertTrue(compare_arrays("target times", tar_time, exp_tar, atol=0.0, rtol=0.0, shape_check=True))
 
     def test_returned_times_match_the_first_sample(self):
         es = _make_source(self.root, return_timestamp=True, n_history=1, n_future=1)
@@ -1143,8 +1143,8 @@ class TestPartialYearTimestamps(unittest.TestCase):
 
         # with shuffling off, the first sample is the first valid window of the July file
         exp_inp, exp_tar = self._expected(0, es.indices_select[0], n_history=1, n_future=1)
-        self.assertTrue(compare_arrays("input times", inp_time, exp_inp, atol=0.0, rtol=0.0))
-        self.assertTrue(compare_arrays("target times", tar_time, exp_tar, atol=0.0, rtol=0.0))
+        self.assertTrue(compare_arrays("input times", inp_time, exp_inp, atol=0.0, rtol=0.0, shape_check=True))
+        self.assertTrue(compare_arrays("target times", tar_time, exp_tar, atol=0.0, rtol=0.0, shape_check=True))
         self.assertEqual(dt.datetime.fromtimestamp(inp_time[0], tz=dt.timezone.utc).month, 7)
 
     @unittest.skipUnless(hasattr(time, "tzset"), "TZ manipulation is POSIX only")
@@ -1165,6 +1165,7 @@ class TestPartialYearTimestamps(unittest.TestCase):
                             np.array([expected]),
                             atol=0.0,
                             rtol=0.0,
+                            shape_check=True,
                         )
                     )
 

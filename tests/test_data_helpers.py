@@ -280,17 +280,29 @@ class TestGetSecondsFromTimes(unittest.TestCase):
             dt.datetime(2020, 6, 15, 12),
         ]
         expected = dt.datetime(2020, 6, 15, 12, tzinfo=UTC).timestamp()
-        seconds = get_seconds_from_times(times)
-        # compare_arrays broadcasts, so the length is checked on its own; times are
-        # compared exactly, since a relative tolerance on epoch seconds hides hour shifts
-        self.assertEqual(seconds.shape, (3,))
-        self.assertTrue(compare_arrays("epoch seconds", seconds, np.full(3, expected), atol=0.0, rtol=0.0))
+        # times are compared exactly and shape aware: a relative tolerance on epoch
+        # seconds would accept shifts of hours, and broadcasting a wrong shape
+        self.assertTrue(
+            compare_arrays(
+                "epoch seconds",
+                get_seconds_from_times(times),
+                np.full(3, expected),
+                atol=0.0,
+                rtol=0.0,
+                shape_check=True,
+            )
+        )
 
     def test_timedeltas_become_offsets(self):
         times = [dt.timedelta(hours=6), dt.timedelta(days=1)]
         self.assertTrue(
             compare_arrays(
-                "offset seconds", get_seconds_from_times(times), np.array([6 * 3600.0, 86400.0]), atol=0.0, rtol=0.0
+                "offset seconds",
+                get_seconds_from_times(times),
+                np.array([6 * 3600.0, 86400.0]),
+                atol=0.0,
+                rtol=0.0,
+                shape_check=True,
             )
         )
 
@@ -302,7 +314,9 @@ class TestGetSecondsFromTimes(unittest.TestCase):
                 with self.subTest(zone=zone):
                     seconds = get_seconds_from_times([dt.datetime(2020, 6, 15, 12)])
                     self.assertTrue(
-                        compare_arrays("naive epoch seconds", seconds, np.array([expected]), atol=0.0, rtol=0.0)
+                        compare_arrays(
+                            "naive epoch seconds", seconds, np.array([expected]), atol=0.0, rtol=0.0, shape_check=True
+                        )
                     )
 
 
