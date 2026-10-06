@@ -23,6 +23,7 @@ from makani.utils import comm
 
 from makani.utils.dataloaders.data_helpers import get_data_normalization, get_time_diff_stds
 from makani.mpu.mappings import gather_from_parallel_region, reduce_from_parallel_region
+from makani.utils.missing_data import fill_missing, missing_values
 
 from .losses import LossType, GeometricLpLoss, SpectralLpLoss, SpectralH1Loss, SpectralAMSELoss
 from .losses import CRPSLoss, SpectralCRPSLoss, GradientCRPSLoss, VortDivCRPSLoss
@@ -346,7 +347,7 @@ class LossHandler(nn.Module):
         return prdm
 
     def _mask_missing_targets(self, prd: torch.Tensor, prdm: torch.Tensor, tar: torch.Tensor):
-        """Take target points that are NaN out of every loss.
+        """Take missing target points out of every loss, see :mod:`makani.utils.missing_data`.
 
         At those points the target, every ensemble member and the ensemble mean
         are all set to the same detached value, the (mean) prediction itself.
@@ -361,12 +362,12 @@ class LossHandler(nn.Module):
         would cost a device synchronization on every step; on complete targets
         it changes nothing.
         """
-        missing = torch.isnan(tar)
+        missing = missing_values(tar)
         fill = prdm.detach()
-        tar = torch.where(missing, fill, tar)
-        prdm = torch.where(missing, fill, prdm)
+        tar = fill_missing(tar, fill, missing)
+        prdm = fill_missing(prdm, fill, missing)
         if prd.dim() == 5:
-            prd = torch.where(missing.unsqueeze(1), fill.unsqueeze(1), prd)
+            prd = fill_missing(prd, fill.unsqueeze(1), missing.unsqueeze(1))
         else:
             prd = prdm
         return prd, prdm, tar

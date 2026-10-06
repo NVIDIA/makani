@@ -25,6 +25,7 @@ import numpy as np
 import torch
 
 from makani.utils import LossHandler
+from makani.utils.missing_data import fill_missing, missing_values, missing_weights
 from makani.utils.losses import (
     CRPSLoss,
     SpectralCRPSLoss,
@@ -1717,6 +1718,51 @@ class TestLossHandler(unittest.TestCase):
 
 
 # ===========================================================================
+class TestMissingData(unittest.TestCase):
+    """The shared definition of missing target values, used by the losses and the metrics."""
+
+    def setUp(self):
+        self.x = torch.tensor([[1.0, torch.nan], [3.0, torch.nan]])
+        self.missing = torch.tensor([[False, True], [False, True]])
+
+    def test_missing_values_are_nan(self):
+        self.assertTrue(torch.equal(missing_values(self.x), self.missing))
+
+    def test_fill_with_constant(self):
+        filled = fill_missing(self.x, 0.0)
+        self.assertTrue(
+            compare_tensors(
+                "filled", filled, torch.tensor([[1.0, 0.0], [3.0, 0.0]]), atol=0.0, rtol=0.0, shape_check=True
+            )
+        )
+
+    def test_fill_with_tensor_and_given_mask(self):
+        fill = torch.full_like(self.x, 7.0)
+        filled = fill_missing(self.x, fill, self.missing)
+        self.assertTrue(
+            compare_tensors(
+                "filled", filled, torch.tensor([[1.0, 7.0], [3.0, 7.0]]), atol=0.0, rtol=0.0, shape_check=True
+            )
+        )
+
+    def test_weights_without_and_with_existing_weights(self):
+        expected = torch.tensor([[1.0, 0.0], [1.0, 0.0]])
+        self.assertTrue(
+            compare_tensors("weights", missing_weights(self.missing), expected, atol=0.0, rtol=0.0, shape_check=True)
+        )
+        wgt = torch.tensor([[2.0, 2.0], [0.5, 0.5]])
+        self.assertTrue(
+            compare_tensors(
+                "combined weights",
+                missing_weights(self.missing, wgt),
+                wgt * expected,
+                atol=0.0,
+                rtol=0.0,
+                shape_check=True,
+            )
+        )
+
+
 class TestComputeChannelWeightingHelper(unittest.TestCase):
     """Tests for _compute_channel_weighting_helper in base_loss.py.
 
