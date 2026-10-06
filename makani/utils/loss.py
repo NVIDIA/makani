@@ -336,6 +336,41 @@ class LossHandler(nn.Module):
             self.running_var.fill_(1)
             self.num_batches_tracked.zero_()
 
+    def _ensemble_mean(self, prd: torch.Tensor) -> torch.Tensor:
+        """Mean over the ensemble dimension of a 5D prediction, across ranks if distributed; 4D passes through."""
+        if prd.dim() != 5:
+            return prd
+        prdm = torch.mean(prd, dim=1)
+        if self.ensemble_distributed:
+            prdm = reduce_from_parallel_region(prdm, "ensemble") / float(comm.get_size("ensemble"))
+        return prdm
+
+    def _mask_missing_targets(self, prd: torch.Tensor, prdm: torch.Tensor, tar: torch.Tensor):
+        """Take target points that are NaN out of every loss.
+
+        At those points the target, every ensemble member and the ensemble mean
+        are all set to the same detached value, the (mean) prediction itself.
+        Every loss then sees perfect agreement there, so the points contribute
+        nothing, and since the value is detached no gradient flows back from
+        them. Filling with the prediction rather than a constant keeps the
+        fields smooth for the spectral losses: the only jump left at the edge
+        of a missing region is the prediction error there. The ensemble mean is
+        already reduced across ranks, so the fill agrees between them.
+
+        This is done unconditionally rather than behind a check for NaN, which
+        would cost a device synchronization on every step; on complete targets
+        it changes nothing.
+        """
+        missing = torch.isnan(tar)
+        fill = prdm.detach()
+        tar = torch.where(missing, fill, tar)
+        prdm = torch.where(missing, fill, prdm)
+        if prd.dim() == 5:
+            prd = torch.where(missing.unsqueeze(1), fill.unsqueeze(1), prd)
+        else:
+            prd = prdm
+        return prd, prdm, tar
+
     def _extract_input_state(self, inp: torch.Tensor) -> torch.Tensor:
         """
         Extract last timestep from flattened history input.
@@ -367,6 +402,11 @@ class LossHandler(nn.Module):
         # otherwise we assume that the dims are
         # batch, channel, h, w
 
+        # take missing target values out of the losses. This has to come before
+        # the random slicing, which mixes channels and would spread the NaN
+        prdm = self._ensemble_mean(prd)
+        prd, prdm, tar = self._mask_missing_targets(prd, prdm, tar)
+
         # if random slices are enabled, we need to recombine both prediction and targets across the channel dimension
         if self.random_slice_loss:
             n_channels = prd.shape[-3]
@@ -389,14 +429,9 @@ class LossHandler(nn.Module):
                 prd = nn.functional.conv2d(prd, rslice)
             tar = nn.functional.conv2d(tar, rslice)
 
-        # compute average over ensemble dim if requested:
-        # TODO: change the behavior to instead compute the expected value of the deterministic losses
-        if prd.dim() == 5:
-            prdm = torch.mean(prd, dim=1)
-            if self.ensemble_distributed:
-                prdm = reduce_from_parallel_region(prdm, "ensemble") / float(comm.get_size("ensemble"))
-        else:
-            prdm = prd
+            # the slice mixes channels, so the ensemble average has to follow it
+            # TODO: change the behavior to instead compute the expected value of the deterministic losses
+            prdm = self._ensemble_mean(prd)
 
         # transform to tendency space if any loss requires it
         if inp is not None and any(self.loss_requires_input):

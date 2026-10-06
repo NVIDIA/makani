@@ -75,6 +75,24 @@ _loss_params = [
     ([{"type": "drift_regularization"}], False),
 ]
 
+# losses checked for masking of missing (NaN) targets in the LossHandler,
+# covering losses on the grid, spectral ones and the relative variant
+_missing_target_deterministic_params = [
+    ([{"type": "l1", "channel_weights": "constant"}],),
+    ([{"type": "l2", "channel_weights": "constant"}],),
+    ([{"type": "l2", "channel_weights": "constant", "parameters": {"relative": True}}],),
+    ([{"type": "spectral l2", "channel_weights": "constant"}],),
+    ([{"type": "h1", "channel_weights": "constant"}],),
+    ([{"type": "amse", "channel_weights": "constant"}],),
+    ([{"type": "drift_regularization"}],),
+]
+
+_missing_target_probabilistic_params = [
+    ([{"type": "ensemble_crps", "channel_weights": "constant", "parameters": {"crps_type": "skillspread"}}],),
+    ([{"type": "ensemble_spectral_crps", "channel_weights": "constant"}],),
+    ([{"type": "l2_energy_score", "channel_weights": "constant"}],),
+]
+
 _loss_weighted_params = [
     ([{"type": "l1"}], False),
     ([{"type": "l1", "parameters": {"relative": True}}], False),
@@ -1621,6 +1639,81 @@ class TestLossHandler(unittest.TestCase):
                 verbose=verbose,
             )
         )
+
+    # ------------------------------------------------------------------
+    # missing targets: NaN in the target is taken out of every loss
+    # ------------------------------------------------------------------
+
+    def _missing_mask(self, shape):
+        """Scattered missing points, plus one entirely missing field."""
+        generator = torch.Generator().manual_seed(1234)
+        missing = torch.rand(shape, generator=generator) < 0.1
+        missing[0, 1] = True
+        return missing
+
+    def _assert_masked(self, out, prd, missing, verbose=False):
+        self.assertTrue(torch.isfinite(out), "loss is not finite with missing targets")
+        out.backward()
+        self.assertFalse(torch.isnan(prd.grad).any(), "gradient contains NaN")
+        # no gradient may reach the prediction from a missing target point
+        masked_grad = prd.grad[missing.unsqueeze(1).expand_as(prd)] if prd.dim() == 5 else prd.grad[missing]
+        self.assertTrue(
+            compare_tensors(
+                "gradient at missing points",
+                masked_grad,
+                torch.zeros_like(masked_grad),
+                atol=0.0,
+                rtol=0.0,
+                verbose=verbose,
+                shape_check=True,
+            )
+        )
+
+    @parameterized.expand(_missing_target_deterministic_params)
+    def test_missing_targets_deterministic(self, losses, verbose=False):
+        """NaN targets give a finite loss, no gradient from the missing points, and
+        the same loss as a target that equals the prediction there."""
+        self.params.losses = losses
+        loss_obj = LossHandler(self.params, compile=self.compile)
+
+        shape = (self.params.batch_size, self.params.N_out_channels, self.params.img_shape_x, self.params.img_shape_y)
+        missing = self._missing_mask(shape)
+        prd = torch.randn(*shape, requires_grad=True)
+        tar = torch.randn(*shape)
+
+        out = loss_obj(prd, torch.where(missing, torch.nan, tar))
+
+        # missing points count as perfectly predicted
+        reference = loss_obj(prd.detach(), torch.where(missing, prd.detach(), tar))
+        self.assertTrue(compare_tensors("loss", out.detach(), reference, verbose=verbose))
+
+        self._assert_masked(out, prd, missing, verbose=verbose)
+
+    @parameterized.expand(_missing_target_probabilistic_params)
+    def test_missing_targets_probabilistic(self, losses, verbose=False):
+        """With an ensemble, the missing points are taken out for every member."""
+        self.params.losses = losses
+        loss_obj = LossHandler(self.params, compile=self.compile)
+
+        shape = (self.params.batch_size, self.params.N_out_channels, self.params.img_shape_x, self.params.img_shape_y)
+        missing = self._missing_mask(shape)
+        prd = torch.randn(shape[0], 5, *shape[1:], requires_grad=True)
+        tar = torch.where(missing, torch.nan, torch.randn(*shape))
+
+        self._assert_masked(loss_obj(prd, tar), prd, missing, verbose=verbose)
+
+    def test_missing_targets_with_random_slices(self, verbose=False):
+        """The masking happens before the random slice, which mixes channels and would spread the NaN."""
+        self.params.losses = [{"type": "l2", "channel_weights": "constant"}]
+        self.params.random_slice_loss = True
+        loss_obj = LossHandler(self.params, compile=self.compile)
+
+        shape = (self.params.batch_size, self.params.N_out_channels, self.params.img_shape_x, self.params.img_shape_y)
+        missing = self._missing_mask(shape)
+        prd = torch.randn(*shape, requires_grad=True)
+        tar = torch.where(missing, torch.nan, torch.randn(*shape))
+
+        self._assert_masked(loss_obj(prd, tar), prd, missing, verbose=verbose)
 
 
 # ===========================================================================
