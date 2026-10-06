@@ -115,8 +115,11 @@ def _crps_ensemble_kernel(observation: torch.Tensor, forecasts: torch.Tensor, we
 
     integral = integral + torch.clamp(observation - forecast, min=0.0)
 
-    # set to nan for first forecasts nan
-    integral = torch.where(nanmasklist[0], torch.nan, integral)
+    # a NaN member makes the score NaN. NaN in the prediction is a failure of
+    # the model, which must not be scored around; the sorting moves NaN members
+    # to the end, so checking only the first member would just catch all of
+    # them being NaN. Missing observations are taken care of before this.
+    integral = torch.where(nanmask, torch.nan, integral)
 
     return torch.squeeze(integral, dim=0)
 

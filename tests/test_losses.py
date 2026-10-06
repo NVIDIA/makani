@@ -90,6 +90,7 @@ _missing_target_deterministic_params = [
 
 _missing_target_probabilistic_params = [
     ([{"type": "ensemble_crps", "channel_weights": "constant", "parameters": {"crps_type": "skillspread"}}],),
+    ([{"type": "ensemble_crps", "channel_weights": "constant", "parameters": {"crps_type": "cdf"}}],),
     ([{"type": "ensemble_spectral_crps", "channel_weights": "constant"}],),
     ([{"type": "l2_energy_score", "channel_weights": "constant"}],),
 ]
@@ -1702,6 +1703,30 @@ class TestLossHandler(unittest.TestCase):
         tar = torch.where(missing, torch.nan, torch.randn(*shape))
 
         self._assert_masked(loss_obj(prd, tar), prd, missing, verbose=verbose)
+
+    @parameterized.expand(_missing_target_deterministic_params + _missing_target_probabilistic_params)
+    def test_nan_predictions_are_not_masked(self, losses, verbose=False):
+        """Only NaN in the target means missing data. NaN coming out of the model is
+        a failure and has to reach the loss, whether the target is valid there or not."""
+        self.params.losses = losses
+        loss_obj = LossHandler(self.params, compile=self.compile)
+        probabilistic = "ensemble" in losses[0]["type"] or "energy_score" in losses[0]["type"]
+
+        shape = (self.params.batch_size, self.params.N_out_channels, self.params.img_shape_x, self.params.img_shape_y)
+        missing = self._missing_mask(shape)
+        tar = torch.where(missing, torch.nan, torch.randn(*shape))
+        valid_point = torch.nonzero(torch.logical_not(missing))[0].tolist()
+        missing_point = torch.nonzero(missing)[0].tolist()
+
+        for desc, point in [("valid target", valid_point), ("missing target", missing_point)]:
+            with self.subTest(at=desc):
+                prd = torch.randn(shape[0], 5, *shape[1:]) if probabilistic else torch.randn(*shape)
+                if probabilistic:
+                    # a single member going NaN is enough
+                    prd[point[0], 0, point[1], point[2], point[3]] = torch.nan
+                else:
+                    prd[tuple(point)] = torch.nan
+                self.assertTrue(torch.isnan(loss_obj(prd, tar)), f"NaN prediction at a {desc} point was masked")
 
     def test_missing_targets_with_random_slices(self, verbose=False):
         """The masking happens before the random slice, which mixes channels and would spread the NaN."""
