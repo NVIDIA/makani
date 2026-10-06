@@ -14,13 +14,9 @@
 # limitations under the License.
 
 """
-Non-distributed unit tests for the pure-Python helpers in
-``makani.utils.checkpoint_helpers``:
-
-  * ``get_latest_checkpoint_version``
-  * ``get_model_state_dict_prefix``
-  * ``prepend_prefix_to_state_dict``
-  * ``load_checkpoint``
+Non-distributed tests for checkpointing: the pure-Python helpers in
+``makani.utils.checkpoint_helpers``, and saving and restoring a model through
+the ``Driver`` end to end.
 
 The distributed gather/scatter round-trip is covered separately by
 ``tests/distributed/tests_distributed_checkpoint.py``.
@@ -32,9 +28,10 @@ import unittest
 import tempfile
 from collections import OrderedDict
 from unittest import mock
-
 import torch
 import torch.nn as nn
+import time
+from parameterized import parameterized
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
@@ -48,6 +45,25 @@ from makani.utils.checkpoint_helpers import (
     scatter_dataloader_state_dict,
     UNSAFE_LOAD_ENV_VAR,
 )
+from makani.models.common import MLP
+from makani.utils.driver import Driver
+from .testutils import disable_tf32, set_seed, get_default_parameters, compare_arrays
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint helpers: makani.utils.checkpoint_helpers
+# ---------------------------------------------------------------------------
+#
+# Non-distributed unit tests for the pure-Python helpers in
+# ``makani.utils.checkpoint_helpers``:
+#
+#   * ``get_latest_checkpoint_version``
+#   * ``get_model_state_dict_prefix``
+#   * ``prepend_prefix_to_state_dict``
+#   * ``load_checkpoint``
+#
+# The distributed gather/scatter round-trip is covered separately by
+# ``tests/distributed/tests_distributed_checkpoint.py``.
 
 
 class UnsupportedPayload:
@@ -403,6 +419,192 @@ class TestDataloaderStateHelpers(unittest.TestCase):
         # resuming into a different data-parallel decomposition cannot be honored
         with self.assertRaises(ValueError):
             scatter_dataloader_state_dict([{}, {}])
+
+
+# ---------------------------------------------------------------------------
+# Saving and restoring through the Driver
+# ---------------------------------------------------------------------------
+
+
+class TestSaveRestore(unittest.TestCase):
+
+    def setUp(self):
+
+        disable_tf32()
+        set_seed(333)
+
+        self.params = get_default_parameters()
+
+        self.params.history_normalization_mode = "none"
+
+        # generating the image logic that is typically used by the dataloader
+        self.params.img_shape_x = 36
+        self.params.img_shape_y = 72
+        self.params.img_local_shape_x = self.params.img_crop_shape_x = self.params.img_shape_x
+        self.params.img_local_shape_y = self.params.img_crop_shape_y = self.params.img_shape_y
+        self.params.img_local_offset_x = 0
+        self.params.img_local_offset_y = 0
+
+        # also set the batch size for testing
+        self.params.batch_size = 4
+
+    def test_get_latest_checkpoint_version(self):
+
+        def create_empty(filename):
+            with open(filename, "w") as fp:
+                pass
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            create_empty(os.path.join(tempdir, "checkpoint_mp1_v2.tar"))
+            time.sleep(3)
+            create_empty(os.path.join(tempdir, "checkpoint_mp0_v2.tar"))
+            time.sleep(3)
+            create_empty(os.path.join(tempdir, "checkpoint_mp1_v0.tar"))
+            time.sleep(3)
+            create_empty(os.path.join(tempdir, "checkpoint_mp0_v0.tar"))
+            time.sleep(3)
+            create_empty(os.path.join(tempdir, "checkpoint_mp1_v1.tar"))
+            time.sleep(3)
+            create_empty(os.path.join(tempdir, "checkpoint_mp0_v1.tar"))
+
+            version = get_latest_checkpoint_version(
+                os.path.join(tempdir, "checkpoint_mp0_v{checkpoint_version}.tar"), verbose=False
+            )
+
+        self.assertTrue(version == 1)
+
+    def test_get_latest_checkpoint_version_default(self):
+        version = get_latest_checkpoint_version("checkpoint_mp0.tar", verbose=False)
+        self.assertTrue(version == 0)
+
+    @parameterized.expand(["legacy", "flexible"])
+    def test_save_restore(self, checkpoint_mode, verbose=False):
+        """
+        Tests initialization of all the models and the forward and backward pass
+        """
+
+        model = MLP(
+            self.params.N_in_channels,
+            hidden_features=2 * self.params.N_in_channels,
+            out_features=self.params.N_out_channels,
+            act_layer=nn.GELU,
+            output_bias=True,
+            input_format="nchw",
+            drop_rate=0.0,
+        )
+
+        inp_shape = (
+            self.params.batch_size,
+            self.params.N_in_channels,
+            self.params.img_shape_x,
+            self.params.img_shape_y,
+        )
+
+        # prepare some dummy data
+        inp = torch.randn(*inp_shape)
+        inp.requires_grad = True
+
+        # do forward pass:
+        out_before = model(inp).detach().cpu().numpy()
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            # checkpoint path
+            checkpoint_path = os.path.join(tempdir, "ckpt.tar")
+
+            # store checkpoint
+            Driver.save_checkpoint(checkpoint_path, model=model, checkpoint_mode=checkpoint_mode)
+
+            # scramble model
+            with torch.no_grad():
+                for p in model.parameters():
+                    p.zero_()
+
+            # reload checkpoint
+            Driver.restore_from_checkpoint(
+                checkpoint_path,
+                model=model,
+                loss=None,
+                optimizer=None,
+                scheduler=None,
+                counters=None,
+                checkpoint_mode=checkpoint_mode,
+            )
+
+        # do forward pass
+        out_after = model(inp).detach().cpu().numpy()
+
+        # compare
+        self.assertTrue(compare_arrays("output", out_before, out_after, rtol=1e-6, atol=1e-6, verbose=verbose))
+
+    @parameterized.expand(["legacy", "flexible"])
+    def test_saved_checkpoint_loads_with_safe_unpickler(self, checkpoint_mode):
+        """
+        Everything ``Driver.save_checkpoint`` writes must be readable by the restricted
+        (``weights_only=True``) unpickler used in ``load_checkpoint``, otherwise checkpoints
+        written by makani could not be read back by makani.
+
+        This exercises the full store dict -- model state carrying the ``sharded_dims_mp``
+        sharding metadata, comm grid, loss/optimizer/scheduler state and the counters.
+        """
+
+        model = MLP(
+            self.params.N_in_channels,
+            hidden_features=2 * self.params.N_in_channels,
+            out_features=self.params.N_out_channels,
+            act_layer=nn.GELU,
+            output_bias=True,
+            input_format="nchw",
+            drop_rate=0.0,
+        )
+
+        # tag a parameter as sharded. In a single-rank test no layer sets this by itself, but the
+        # attribute is what convert_checkpoint keys off, so the round-trip has to preserve it.
+        sharded_name, sharded_param = next(iter(model.named_parameters()))
+        sharded_param.sharded_dims_mp = ["matmul", None]
+
+        loss = nn.MSELoss()
+        optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1)
+        counters = {"iters": 7, "epoch": 3}
+
+        # take one step so the optimizer actually carries state tensors
+        inp = torch.randn(
+            self.params.batch_size, self.params.N_in_channels, self.params.img_shape_x, self.params.img_shape_y
+        )
+        loss(model(inp), torch.zeros_like(model(inp))).backward()
+        optimizer.step()
+        scheduler.step()
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            checkpoint_path = os.path.join(tempdir, "ckpt_mp{mp_rank}.tar")
+
+            Driver.save_checkpoint(
+                checkpoint_path,
+                model=model,
+                loss=loss,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                counters=counters,
+                checkpoint_mode=checkpoint_mode,
+            )
+
+            # load it back through the safe loader. A raise here means the safe globals
+            # allowlist is out of sync with what save_checkpoint writes.
+            checkpoint = load_checkpoint(checkpoint_path.format(mp_rank=0))
+
+        self.assertIn("model_state", checkpoint)
+        self.assertEqual(checkpoint["iters"], 7)
+        self.assertEqual(checkpoint["epoch"], 3)
+        self.assertIn("optimizer_state_dict", checkpoint)
+        self.assertIn("scheduler_state_dict", checkpoint)
+
+        # the sharding metadata must survive the round-trip, otherwise convert_checkpoint
+        # would silently treat a sharded tensor as unsharded
+        restored = checkpoint["model_state"][sharded_name]
+        self.assertTrue(
+            hasattr(restored, "sharded_dims_mp"), f"sharding metadata lost for {sharded_name} in {checkpoint_mode} mode"
+        )
+        self.assertEqual(restored.sharded_dims_mp, ["matmul", None])
 
 
 if __name__ == "__main__":
