@@ -358,6 +358,18 @@ class LossHandler(nn.Module):
         of a missing region is the prediction error there. The ensemble mean is
         already reduced across ranks, so the fill agrees between them.
 
+        The masking is deliberately per pixel: every valid point contributes
+        equally to the loss, and a sample is not renormalized by how much of it
+        is valid. A partly missing sample therefore contributes in proportion
+        to its valid area. For example, take a batch of two samples with the
+        same pointwise error everywhere, one complete and one with half of its
+        grid missing. With an absolute loss the second sample contributes half
+        as much as the first, and the batch loss is 3/4 of what a fully valid
+        batch would give; renormalizing per sample would count both fully. The relative losses
+        follow the same rule, the prediction standing in for the missing target
+        in their denominator. The metrics, in contrast, renormalize to the
+        valid area.
+
         This is done unconditionally rather than behind a check for NaN, which
         would cost a device synchronization on every step; on complete targets
         it changes nothing.
