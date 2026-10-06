@@ -26,6 +26,7 @@ import torch
 
 from makani.utils import LossHandler
 from makani.utils.missing_data import fill_missing, missing_values, missing_weights
+from makani.utils.losses.base_loss import abs_pow
 from makani.utils.losses import (
     CRPSLoss,
     SpectralCRPSLoss,
@@ -1764,6 +1765,36 @@ class TestLossHandler(unittest.TestCase):
 
 
 # ===========================================================================
+class TestAbsPow(unittest.TestCase):
+    """abs_pow must match |x|**e and keep the gradient finite where x vanishes."""
+
+    def test_forward_matches(self):
+        x = torch.tensor([-2.0, -0.5, 0.0, 0.3, 4.0])
+        for exponent in [0.5, 1.0, 2.0]:
+            with self.subTest(exponent=exponent):
+                self.assertTrue(
+                    compare_tensors(
+                        "abs_pow", abs_pow(x, exponent), x.abs().pow(exponent), atol=0.0, rtol=0.0, shape_check=True
+                    )
+                )
+
+    def test_gradient_is_finite_at_zero(self):
+        for exponent in [0.5, 1.0, 2.0]:
+            with self.subTest(exponent=exponent):
+                x = torch.tensor([0.0, 0.0, 1.0], requires_grad=True)
+                abs_pow(x, exponent).sum().backward()
+                self.assertTrue(torch.isfinite(x.grad).all(), f"non-finite gradient for exponent {exponent}")
+                self.assertEqual(x.grad[0].item(), 0.0)
+
+    def test_mmd_with_small_exponent_at_perfect_forecast(self):
+        """With beta < 1 the per point |x|**beta used to give a NaN gradient where members coincide."""
+        fn = GaussianMMDLoss(**_GEOM_KWARGS, beta=0.5)
+        tar = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
+        fc = tar.unsqueeze(1).expand(_BATCH, 5, _NUM_CH, _IMG_H, _IMG_W).clone().requires_grad_(True)
+        fn(fc, tar).sum().backward()
+        self.assertFalse(torch.isnan(fc.grad).any(), "NaN in the gradient at a perfect forecast")
+
+
 class TestMissingData(unittest.TestCase):
     """The shared definition of missing target values, used by the losses and the metrics."""
 

@@ -17,7 +17,7 @@ from typing import Optional, Tuple, List
 
 import torch
 
-from makani.utils.losses.base_loss import GeometricBaseLoss, LossType
+from makani.utils.losses.base_loss import GeometricBaseLoss, LossType, abs_pow
 from makani.utils import comm
 
 
@@ -151,8 +151,8 @@ class GaussianMMDLoss(GeometricBaseLoss):
         num_ensemble = forecasts.shape[0]
 
         # use broadcasting semantics to compute spread and skill and sum over channels (vector norm)
-        espread = (forecasts.unsqueeze(1) - forecasts.unsqueeze(0)).abs().pow(self.beta)
-        eskill = (observations - forecasts).abs().pow(self.beta)
+        espread = abs_pow(forecasts.unsqueeze(1) - forecasts.unsqueeze(0), self.beta)
+        eskill = abs_pow(observations - forecasts, self.beta)
 
         # do the spatial reduction
         if spatial_weights is not None:
@@ -173,7 +173,7 @@ class GaussianMMDLoss(GeometricBaseLoss):
             espread = reduce_from_parallel_region(espread, "spatial")
             eskill = reduce_from_parallel_region(eskill, "spatial")
 
-        # do the channel reduction while ignoring NaNs
+        # do the channel reduction
         # if channel weights are required they should be added here to the reduction
         if self.channel_reduction:
             espread = espread.sum(dim=-2, keepdim=True)

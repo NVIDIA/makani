@@ -19,7 +19,7 @@ import math
 import torch
 from torch import amp
 
-from makani.utils.losses.base_loss import GeometricBaseLoss, SpectralBaseLoss, LossType
+from makani.utils.losses.base_loss import GeometricBaseLoss, SpectralBaseLoss, LossType, abs_pow
 from makani.utils import comm
 
 # distributed stuff
@@ -159,9 +159,9 @@ class LpEnergyScoreLoss(GeometricBaseLoss):
         # espread: index all upper-triangular pairs via combinations — avoids the O(E^2 * B * C * H*W)
         # full outer-product; peak allocation is O(P * B * C * H*W) where P = E*(E-1)/2.
         idx = torch.combinations(torch.arange(num_ensemble, device=forecasts.device), r=2)  # (P, 2)
-        diff = (forecasts[idx[:, 0]] - forecasts[idx[:, 1]]).abs().pow(self.p)  # (P, B, C, H*W)
+        diff = abs_pow(forecasts[idx[:, 0]] - forecasts[idx[:, 1]], self.p)  # (P, B, C, H*W)
 
-        eskill = (observations - forecasts).abs().pow(self.p)
+        eskill = abs_pow(observations - forecasts, self.p)
 
         # do the spatial reduction
         if spatial_weights is not None:
@@ -182,7 +182,7 @@ class LpEnergyScoreLoss(GeometricBaseLoss):
             diff = reduce_from_parallel_region(diff, "spatial")
             eskill = reduce_from_parallel_region(eskill, "spatial")
 
-        # do the channel reduction while ignoring NaNs
+        # do the channel reduction
         # if channel weights are required they should be added here to the reduction
         if self.channel_reduction:
             diff = diff.sum(dim=-1, keepdim=True)  # (P, B, 1)
