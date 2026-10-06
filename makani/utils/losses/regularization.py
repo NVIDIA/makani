@@ -180,9 +180,6 @@ class SpectralRegularization(SpectralBaseLoss):
         # B, E, C, H, W (where H, W are spectral dims now)
         C, H, W = forecasts.shape[-3:]
 
-        # get nanmask from the observarions
-        nanmasks = torch.logical_or(torch.isnan(observations), torch.isnan(forecasts))
-
         # do the summation over the ms first to obtain the PSDs
         forecasts = (self.lm_weights * forecasts).sum(dim=-1)
         observations = (self.lm_weights * observations).sum(dim=-1)

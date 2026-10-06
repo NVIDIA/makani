@@ -251,10 +251,11 @@ _COMMON_BATCHSIZE = [
 class TestLossCommon(unittest.TestCase):
     """Common property tests executed directly against every loss class.
 
-    Three properties are verified:
+    Four properties are verified:
       1. ``test_nonneg``                — loss >= 0 elementwise
       2. ``test_zero_on_perfect_prediction`` — loss ≈ 0 when prd == tar
       3. ``test_batchsize_independence``    — loss[i] is unaffected by other samples in the batch
+      4. ``test_nan_propagates``            — NaN in prediction or target is not masked
     """
 
     _E = 5  # ensemble size used for probabilistic losses
@@ -351,6 +352,26 @@ class TestLossCommon(unittest.TestCase):
             compare_tensors(f"{name} batchsize", loss_single[0], loss_batch[0], verbose=verbose),
             f"{name}: loss[0] differs between single-sample and full-batch evaluation",
         )
+
+    @parameterized.expand(_COMMON_BATCHSIZE)
+    def test_nan_propagates(self, name):
+        """The losses assume finite inputs and contain no NaN handling of their own:
+        a NaN in the prediction or the target makes the loss of that sample and
+        channel NaN. Missing targets are taken care of before the losses, see
+        makani.utils.missing_data."""
+        fn = self._make(name)
+        for where in ["prediction", "target"]:
+            with self.subTest(nan_in=where):
+                prd, tar = self._make_prd_tar(name)
+                if where == "target":
+                    tar[0, 0, 3, 5] = torch.nan
+                elif prd.dim() == 5:
+                    # a single ensemble member is enough
+                    prd[0, 0, 0, 3, 5] = torch.nan
+                else:
+                    prd[0, 0, 3, 5] = torch.nan
+                loss = fn(prd, tar)
+                self.assertTrue(torch.isnan(loss[0, 0]), f"{name}: NaN in the {where} was masked")
 
 
 # ===========================================================================
