@@ -403,6 +403,13 @@ class LossHandler(nn.Module):
         # otherwise we assume that the dims are
         # batch, channel, h, w
 
+        # A non-finite prediction is a failure of the model and must never be
+        # scored around. Only NaN in the target means missing data, but some
+        # losses also mask NaN in the forecasts or treat a NaN observation as
+        # missing, so this is enforced here for all of them: the returned loss
+        # is NaN whenever the prediction is not finite anywhere.
+        prediction_failed = torch.logical_not(torch.isfinite(prd).all())
+
         # take missing target values out of the losses. This has to come before
         # the random slicing, which mixes channels and would spread the NaN
         prdm = self._ensemble_mean(prd)
@@ -526,5 +533,6 @@ class LossHandler(nn.Module):
 
         # compute average over batch and weighted sum over channels
         loss = torch.mean(torch.sum(chw * all_losses, dim=1), dim=0)
+        loss = torch.where(prediction_failed, torch.nan, loss)
 
         return loss
