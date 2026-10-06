@@ -252,6 +252,12 @@ class TestWb2Source(_OutputFileCase):
 
         return Wb2Source(_metadata(self.channels), 0, input_file=self.store, **options)
 
+    def test_nonpositive_batch_size_is_rejected(self):
+        for batch_size in [0, -1]:
+            with self.subTest(batch_size=batch_size):
+                with self.assertRaises(ValueError):
+                    self._make(skip_missing_channels=True, batch_size=batch_size)
+
     def test_missing_variable_fails_without_skipping(self):
         with self.assertRaises(IndexError):
             self._make()

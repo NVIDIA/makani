@@ -65,6 +65,9 @@ class Wb2Source(Source):
         impute_missing_timestamps: Optional[bool] = False,
     ):
         super().__init__(metadata, comm_rank)
+        # a nonpositive batch would never fill anything, leaving the files written but empty
+        if batch_size <= 0:
+            raise ValueError(f"batch_size has to be positive, got {batch_size}.")
         self.units_per_fill = batch_size
         self.impute_missing_timestamps = impute_missing_timestamps
 
