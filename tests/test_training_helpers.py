@@ -22,6 +22,7 @@ from makani.utils.training.training_helpers import (
     _compute_total_grad_norm,
     normalize_weights,
     get_parameter_groups,
+    NonFiniteLossCheck,
 )
 
 import sys
@@ -287,6 +288,39 @@ class TestParameterGroups(unittest.TestCase):
         for bad in ("selective", "Transformer", "none", ""):
             with self.assertRaises(ValueError):
                 get_parameter_groups(self.model, self.wd, bad)
+
+
+class TestNonFiniteLossCheck(unittest.TestCase):
+    """The check runs single process here; the all-reduce of the flag is skipped without torch.distributed."""
+
+    def test_finite_loss_passes(self):
+        check = NonFiniteLossCheck()
+        for _ in range(3):
+            check(torch.tensor(1.5), step=1)
+
+    def test_non_finite_loss_raises(self):
+        for value in [float("nan"), float("inf"), -float("inf")]:
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(FloatingPointError, "step 7 of epoch 2"):
+                    NonFiniteLossCheck()(torch.tensor(value), step=7, epoch=2)
+
+    def test_tolerance_with_grad_scaler(self):
+        check = NonFiniteLossCheck(max_consecutive=2, grad_scaler_enabled=True)
+        nan = torch.tensor(float("nan"))
+        check(nan, step=1)
+        check(nan, step=2)
+        # a finite step resets the count
+        check(torch.tensor(1.0), step=3)
+        check(nan, step=4)
+        check(nan, step=5)
+        with self.assertRaises(FloatingPointError):
+            check(nan, step=6)
+
+    def test_no_tolerance_without_grad_scaler(self):
+        # without the scaler a tolerated step would be applied to the weights
+        check = NonFiniteLossCheck(max_consecutive=2, grad_scaler_enabled=False)
+        with self.assertRaises(FloatingPointError):
+            check(torch.tensor(float("nan")), step=1)
 
 
 if __name__ == "__main__":
