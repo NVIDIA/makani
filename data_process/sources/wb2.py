@@ -78,8 +78,11 @@ class Wb2Source(Source):
         ) = split_convert_channel_names(self.channel_names)
 
         # open cloud dataset and align to metadata grid
-        storage_options = gcs_storage_options() if input_file.startswith(("gs://", "gcs://")) else {}
-        wb2_data = xr.open_dataset(input_file, engine="zarr", storage_options=storage_options)
+        # storage options only for remote stores: zarr 3 rejects them, even empty, for a local path
+        open_options = {}
+        if input_file.startswith(("gs://", "gcs://")):
+            open_options["storage_options"] = gcs_storage_options()
+        wb2_data = xr.open_dataset(input_file, engine="zarr", **open_options)
         # some WB2 zarrs store atmospheric/surface fields as (..., longitude, latitude);
         # the rest of this routine assumes (..., latitude, longitude).
         wb2_data = wb2_data.transpose(..., "latitude", "longitude")
