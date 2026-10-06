@@ -13,25 +13,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""NSF NCAR ERA5 (RDA d633000) source, read from the public ``nsf-ncar-era5`` S3 bucket.
+
+The NCAR grid is already the makani grid, so no regridding or latitude flipping
+takes place; a mismatch against the metadata grid is an error rather than
+something this source tries to fix.
+"""
+
 from typing import Dict, List, Optional
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 import io
 import threading
 import os
-import sys
-import json
-import time
 import numpy as np
 import h5py as h5
-import datetime as dt
-import argparse as ap
 import warnings
 
-# MPI
-from mpi4py import MPI
-
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from makani.utils.dataloaders.ncar_helpers import (
     NCAR_ERA5_BUCKET,
     accumulation_key,
@@ -41,8 +39,7 @@ from makani.utils.dataloaders.ncar_helpers import (
     resolve_accumulation_segments,
     to_ncar_hours,
 )
-from data_process.data_process_helpers import DistributedProgressBar
-from data_process.date_range import add_date_range_arguments, date_range_from_args, yearly_sample_times
+from data_process.sources import Sample, Source, Unit
 
 
 class NcarStore(object):
@@ -360,58 +357,23 @@ def _fill_accumulated(store, group, out, entry_key, day, day_times, window_hours
         out[entry_key][sample_index, cidx, ...] = total
 
 
-def convert(
-    output_dir: str,
-    metadata_file: str,
-    start_date: dt.datetime,
-    end_date: dt.datetime,
-    bucket: Optional[str] = NCAR_ERA5_BUCKET,
-    entry_key: Optional[str] = "fields",
-    cache_dir: Optional[str] = None,
-    accumulation_hours: Optional[int] = None,
-    prefetch_workers: Optional[int] = 0,
-    force_overwrite: Optional[bool] = False,
-    skip_missing_channels: Optional[bool] = False,
-    verbose: Optional[bool] = False,
-):
-    """Convert NSF NCAR ERA5 (RDA d633000) data on S3 to makani format.
+class NcarSource(Source):
+    """Read ERA5 from the NSF NCAR bucket on S3.
 
-    Data is streamed from the public bucket straight into one makani HDF5 file
-    per year, without staging the source netCDF files, unless ``cache_dir`` is
-    given. The NCAR grid is already the makani grid, so no regridding or
-    latitude flipping takes place; a mismatch against the metadata grid is an
-    error rather than something this routine tries to fix.
-
-    This routine supports distributed processing via mpi4py. Work is split over
-    whole days rather than individual timestamps, because the pressure level
-    files are chunked as one chunk per timestep across all levels and splitting
-    a day across ranks would make several ranks fetch and decompress the same
-    chunk.
+    Work is split over whole days rather than individual timestamps, because the
+    pressure level files are chunked as one chunk per timestep across all levels
+    and splitting a day across ranks would make several ranks fetch and
+    decompress the same chunk. Days are handed out in contiguous runs, so that a
+    rank keeps hitting the same monthly surface file.
 
     Parameters
     ----------
-    output_dir : str
-        Directory to where output files will be written to (makani format). One file per year will be written.
-    metadata_file : str
-        name of the file to read metadata from. The metadata is a json file, and after reading it should be a
-        dictionary containing metadata describing the dataset. Most important entries are:
-        dhours: distance between subsequent samples in hours
-        coords: this is a dictionary which contains two lists, latitude and longitude coordinates in degrees as well as channel names.
-        Example: coords = dict(lat=[-90.0, ..., 90.], lon=[0, ..., 360], channel=["t2m", "u500", "v500", ...])
-        Note that the number of entries in coords["lat"] has to match dimension -2 of the dataset, and coords["lon"] dimension -1.
-        The length of the channel names has to match dimension -3 (or dimension 1, which is the same) of the dataset.
-    start_date : datetime.datetime
-        First time to extract, inclusive. Samples stay on the ``dhours`` grid
-        anchored at 00Z on January 1st, so a start date off that grid is
-        rounded up to the next sample.
-    end_date : datetime.datetime
-        Last time to extract, inclusive. One file is written for every year
-        touched by the range; the first and last of them may be partial years,
-        which is how a year still being published upstream is converted.
+    metadata : Dict
+        Dataset metadata, see :class:`data_process.sources.Source`.
+    comm_rank : int
+        MPI rank, used to restrict informational output to rank 0.
     bucket : str
         Name of the S3 bucket holding the NCAR ERA5 data.
-    entry_key : str
-        This is the HDF5 dataset name of the data in the files. Defaults to "fields".
     cache_dir : str, optional
         Directory used to cache the raw NCAR files. Without it nothing is written
         to local disk, but an interrupted run has to refetch everything. Note that
@@ -429,122 +391,56 @@ def convert(
         While streaming, peak memory grows by roughly this many object sizes,
         and pressure level objects are on the order of a gigabyte, so weigh it
         against the ranks placed per node.
-    force_overwrite : bool
-        Setting this flag to True will overwrite existing files.
     skip_missing_channels : bool
         Setting this flag to True will skip channels without an NCAR counterpart instead of failing.
-    verbose : bool
-        Enable for more printing.
+    impute_missing_timestamps : bool
+        Setting this flag to True will write NaN and mark ``valid_data`` for
+        data that is not on the bucket, instead of failing. This works per
+        channel group and day: if any object or timestep a group needs for a
+        day is missing, all of that group's channels are imputed for the whole
+        day. Typical case is converting the current year, where the forecast
+        streams behind ``tp`` lag the analysis streams by about a month.
     """
 
-    # get comm ranks and size
-    comm = MPI.COMM_WORLD.Dup()
-    comm_rank = comm.Get_rank()
-    comm_size = comm.Get_size()
+    def __init__(
+        self,
+        metadata: Dict,
+        comm_rank: int,
+        bucket: Optional[str] = NCAR_ERA5_BUCKET,
+        cache_dir: Optional[str] = None,
+        accumulation_hours: Optional[int] = None,
+        prefetch_workers: Optional[int] = 0,
+        skip_missing_channels: Optional[bool] = False,
+        impute_missing_timestamps: Optional[bool] = False,
+    ):
+        super().__init__(metadata, comm_rank)
+        self.impute_missing_timestamps = impute_missing_timestamps
 
-    # timer
-    start_time = time.perf_counter()
-
-    # get metadata info
-    metadata = None
-    if comm_rank == 0:
-        with open(metadata_file, "r") as f:
-            metadata = json.load(f)
-    metadata = comm.bcast(metadata, root=0)
-    dhours = metadata["dhours"]
-    channel_names = metadata["coords"]["channel"]
-    chanlen = max([len(v) for v in channel_names])
-    lat = metadata["coords"]["lat"]
-    lon = metadata["coords"]["lon"]
-
-    # group channels by the source file that provides them
-    groups = build_ncar_channel_groups(channel_names, skip_missing_channels=skip_missing_channels)
-    if accumulation_hours is None:
-        accumulation_hours = dhours
-    if comm_rank == 0:
-        covered = sum(len(g.channel_indices) for g in groups)
-        if covered != len(channel_names):
-            warnings.warn(f"Skipping {len(channel_names) - covered} channels without an NCAR counterpart.")
-        if any(g.kind == "accum" for g in groups):
-            print(f"Accumulated channels use a {accumulation_hours}h window ending at the sample time.")
-
-    store = NcarStore(bucket, cache_dir=cache_dir, prefetch_workers=prefetch_workers)
-    grid_checked = set()
-
-    # check total number of entries:
-    years, timelist = zip(*yearly_sample_times(start_date, end_date, dhours))
-    num_entries_total = sum(len(times) for times in timelist)
-    if comm_rank == 0:
-        for year, times in zip(years, timelist):
-            print(f"{year}: {len(times)} samples from {times[0]:%Y-%m-%dT%H} to {times[-1]:%Y-%m-%dT%H}")
-
-    # set up distributed progressbar
-    pbar = DistributedProgressBar(num_entries_total, comm)
-
-    # do loop over years
-    for idy, year in enumerate(years):
-        times = timelist[idy]
-        dataset_shape = (len(times), len(channel_names), len(lat), len(lon))
-
-        # bucket the samples by calendar day, then hand out contiguous runs of
-        # days so that a rank keeps hitting the same monthly surface file
-        days = OrderedDict()
-        for sample_index, valid_time in enumerate(times):
-            days.setdefault(valid_time.date(), []).append((sample_index, valid_time))
-        days = list(days.items())
-
-        num_days_local = (len(days) + comm_size - 1) // comm_size
-        start_days = min(comm_rank * num_days_local, len(days))
-        end_days = min(start_days + num_days_local, len(days))
-        days_local = days[start_days:end_days]
-        num_samples_local = sum(len(v) for _, v in days_local)
-
-        if verbose:
-            print(f"Rank {comm_rank}: number of local days: {len(days_local)} ({num_samples_local} samples)")
-
-        # helper arrays:
-        timestamps = np.array([t.timestamp() for t in times], dtype=np.float64)
-
-        comm.Barrier()
-        ofile = os.path.join(output_dir, f"{year}.h5")
-        file_exists = False
+        # group channels by the source file that provides them
+        self.groups = build_ncar_channel_groups(self.channel_names, skip_missing_channels=skip_missing_channels)
+        self.accumulation_hours = self.dhours if accumulation_hours is None else accumulation_hours
         if comm_rank == 0:
-            file_exists = os.path.isfile(ofile)
-        file_exists = comm.bcast(file_exists, root=0)
-        if file_exists and not force_overwrite:
-            if comm_rank == 0:
-                print(f"File {ofile} already exists, skipping.")
-            pbar.update_counter(num_samples_local)
-            pbar.update_progress()
-            continue
+            covered = sum(len(g.channel_indices) for g in self.groups)
+            if covered != len(self.channel_names):
+                warnings.warn(f"Skipping {len(self.channel_names) - covered} channels without an NCAR counterpart.")
+            if any(g.kind == "accum" for g in self.groups):
+                print(f"Accumulated channels use a {self.accumulation_hours}h window ending at the sample time.")
 
-        f = h5.File(ofile, "w", driver="mpio", comm=comm)
-        f.create_dataset(entry_key, dataset_shape, dtype=np.float32)
+        self.store = NcarStore(bucket, cache_dir=cache_dir, prefetch_workers=prefetch_workers)
+        self.grid_checked = set()
 
-        # create dimension scales
-        # datasets
-        f.create_dataset("valid_data", data=np.ones((len(timestamps), len(channel_names)), dtype=np.int32))
-        f.create_dataset("timestamp", data=timestamps)
-        f.create_dataset("channel", len(channel_names), dtype=h5.string_dtype(length=chanlen))
-        f["channel"][...] = channel_names
-        f.create_dataset("lat", data=lat)
-        f.create_dataset("lon", data=lon)
-        # scales
-        f["timestamp"].make_scale("timestamp")
-        f["channel"].make_scale("channel")
-        f["lat"].make_scale("lat")
-        f["lon"].make_scale("lon")
-        # label
-        f[entry_key].dims[0].label = "Timestamp in seconds in UTC time zone"
-        f[entry_key].dims[1].label = "Channel name"
-        f[entry_key].dims[2].label = "Latitude in degrees"
-        f[entry_key].dims[3].label = "Longitude in degrees"
-        # attach
-        f[entry_key].dims[0].attach_scale(f["timestamp"])
-        f[entry_key].dims[1].attach_scale(f["channel"])
-        f[entry_key].dims[2].attach_scale(f["lat"])
-        f[entry_key].dims[3].attach_scale(f["lon"])
+    def skipped_channel_indices(self) -> List[int]:
+        covered = {cidx for group in self.groups for cidx in group.channel_indices}
+        return [cidx for cidx in range(len(self.channel_names)) if cidx not in covered]
 
+    def split_units(self, samples: List[Sample]) -> List[Unit]:
+        """Bucket the samples by calendar day."""
+        days = OrderedDict()
+        for sample in samples:
+            days.setdefault(sample[1].date(), []).append(sample)
+        return list(days.values())
+
+    def begin_year(self, units: List[Unit]):
         # Declare the objects to prefetch, so the store can keep the queue topped
         # up across day boundaries rather than in bursts. Only the pressure level
         # files qualify: they are read in full within one day, which is exactly
@@ -552,99 +448,64 @@ def convert(
         # surface and accumulation files are read in slivers spread over a month
         # and are better left on the lazy block-cached path, which also keeps
         # them from sitting in memory whole for weeks of simulated time.
-        pressure_level_groups = [group for group in groups if group.kind == "pl"]
-        store.set_read_plan(
+        pressure_level_groups = [group for group in self.groups if group.kind == "pl"]
+        self.store.set_read_plan(
             [
                 key
-                for day, day_times in days_local
-                for key in _keys_for_day(pressure_level_groups, day, day_times, accumulation_hours)
+                for day_times in units
+                for key in _keys_for_day(
+                    pressure_level_groups, day_times[0][1].date(), day_times, self.accumulation_hours
+                )
             ]
         )
 
-        # populate fields
-        for day, day_times in days_local:
-            for group in groups:
-                if group.kind == "pl":
-                    _fill_pressure_levels(store, group, f, entry_key, day, day_times, lat, lon, grid_checked)
-                elif group.kind == "sfc":
-                    _fill_surface(store, group, f, entry_key, day, day_times, lat, lon, grid_checked)
-                else:
-                    _fill_accumulated(
-                        store, group, f, entry_key, day, day_times, accumulation_hours, lat, lon, grid_checked
-                    )
+    def fill(self, out: h5.File, entry_key: str, units: List[Unit]):
+        for day_times in units:
+            day = day_times[0][1].date()
+            for group in self.groups:
+                try:
+                    self._fill_group(out, entry_key, group, day, day_times)
+                except (FileNotFoundError, IndexError) as error:
+                    # a missing object surfaces as FileNotFoundError, a missing
+                    # timestep within an object as IndexError from _coord_index
+                    if not self.impute_missing_timestamps:
+                        raise
+                    self._impute(out, entry_key, group, day, day_times, error)
 
-            # update progressbar
-            pbar.update_counter(len(day_times))
-            pbar.update_progress()
+    def _fill_group(self, out, entry_key, group, day, day_times):
+        if group.kind == "pl":
+            _fill_pressure_levels(
+                self.store, group, out, entry_key, day, day_times, self.lat, self.lon, self.grid_checked
+            )
+        elif group.kind == "sfc":
+            _fill_surface(self.store, group, out, entry_key, day, day_times, self.lat, self.lon, self.grid_checked)
+        else:
+            _fill_accumulated(
+                self.store,
+                group,
+                out,
+                entry_key,
+                day,
+                day_times,
+                self.accumulation_hours,
+                self.lat,
+                self.lon,
+                self.grid_checked,
+            )
 
-        # we need to wait here
-        if verbose:
-            print(f"Rank {comm_rank}: waiting for barrier on file {ofile}.")
-        comm.Barrier()
+    def _impute(self, out, entry_key, group, day, day_times, error):
+        """Write NaN for all channels of ``group`` on ``day`` and mark them invalid."""
+        if group.kind == "pl":
+            # the fill bailed out before releasing the day's pressure level file
+            self.store.release(analysis_pl_key(group.variables[0], day))
+        names = [self.channel_names[cidx] for cidx in group.channel_indices]
+        print(f"Imputing {day} for {', '.join(names)}: {error}")
+        # one explicit array per write, rather than a scalar h5py would expand row by row
+        nan = np.full((len(self.lat), len(self.lon)), np.nan, dtype=np.float32)
+        for sample_index, _ in day_times:
+            for cidx in group.channel_indices:
+                out[entry_key][sample_index, cidx, ...] = nan
+                out["valid_data"][sample_index, cidx] = 0
 
-        # close file
-        f.close()
-
-    store.close()
-
-    # do a final pbar update
-    comm.Barrier()
-    pbar.update_progress()
-
-    # end time
-    end_time = time.perf_counter()
-    run_time = str(dt.timedelta(seconds=end_time - start_time))
-
-    if comm_rank == 0:
-        print(f"All done. Run time {run_time}.")
-
-    comm.Barrier()
-
-    return
-
-
-def main(args):
-    start_date, end_date = date_range_from_args(args)
-    convert(
-        output_dir=args.output_dir,
-        metadata_file=args.metadata_file,
-        start_date=start_date,
-        end_date=end_date,
-        bucket=args.bucket,
-        cache_dir=args.cache_dir,
-        accumulation_hours=args.accumulation_hours,
-        prefetch_workers=args.prefetch_workers,
-        force_overwrite=args.force_overwrite,
-        skip_missing_channels=args.skip_missing_channels,
-        verbose=args.verbose,
-    )
-
-
-if __name__ == "__main__":
-
-    # argparse
-    parser = ap.ArgumentParser()
-    parser.add_argument("--output_dir", type=str, help="Local directory for output files.", required=True)
-    parser.add_argument("--metadata_file", type=str, help="Local file with metadata.", required=True)
-    add_date_range_arguments(parser)
-    parser.add_argument("--bucket", type=str, default=NCAR_ERA5_BUCKET, help="S3 bucket with NCAR ERA5 data")
-    parser.add_argument("--cache_dir", type=str, default=None, help="Optional directory to cache raw NCAR files in")
-    parser.add_argument(
-        "--accumulation_hours",
-        type=int,
-        default=None,
-        help="Window in hours for accumulated channels such as tp. Defaults to dhours.",
-    )
-    parser.add_argument(
-        "--prefetch_workers",
-        type=int,
-        default=0,
-        help="Background fetch threads per rank. Helps when reads are latency bound; costs roughly "
-        "this many object sizes of memory per rank while streaming.",
-    )
-    parser.add_argument("--skip_missing_channels", action="store_true", help="Skip missing channels and do not fail")
-    parser.add_argument("--force_overwrite", action="store_true", help="Overwrite existing files")
-    parser.add_argument("--verbose", action="store_true")
-    args = parser.parse_args()
-
-    main(args)
+    def close(self):
+        self.store.close()

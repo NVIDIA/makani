@@ -93,8 +93,11 @@ def generate_wb2_climatology(
     ) = split_convert_channel_names(channel_names)
 
     # open zarr file and load the above_ground mask:
-    storage_options = gcs_storage_options() if input_climatology.startswith(("gs://", "gcs://")) else {}
-    clim = xr.open_zarr(input_climatology, storage_options=storage_options)
+    # storage options only for remote stores: zarr 3 rejects them, even empty, for a local path
+    open_options = {}
+    if input_climatology.startswith(("gs://", "gcs://")):
+        open_options["storage_options"] = gcs_storage_options()
+    clim = xr.open_zarr(input_climatology, **open_options)
 
     # above ground data, only relevant levels
     above_ground = clim["above_ground"]
