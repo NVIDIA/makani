@@ -1777,18 +1777,17 @@ class TestConvert(unittest.TestCase):
 #
 # Cross check of the NCAR source against ARCO-ERA5, read through the WB2 source.
 #
-# Both archives hold the same ECMWF reanalysis, but they were produced
-# independently and regridded differently, so they do not agree bitwise and a
-# fixed tolerance would say little. Instead each channel has to match ARCO far
-# better than a deliberately wrong counterpart does: ARCO six hours later, and
-# ARCO at the neighbouring pressure level. That is what the bugs this guards
+# Both archives hold the same ECMWF reanalysis on the same 0.25 degree grid, but
+# were produced independently and are stored at different precisions, so they
+# do not agree bitwise. Each channel therefore has to match ARCO closely, and
+# far better than a deliberately wrong counterpart does: ARCO six hours later,
+# and ARCO at the neighbouring pressure level. That is what the bugs this guards
 # against look like -- a timestep picked off by one, a level mixed up, channels
-# swapped -- while regridding noise affects the right and the wrong comparison
-# alike.
+# swapped.
 #
 # The test reads about a gigabyte from the public S3 and GCS buckets, so it only
-# runs when ``MAKANI_TEST_REMOTE_DATA=1`` is set. It prints the metrics, which is what
-# the margins below were meant to be calibrated from.
+# runs when ``MAKANI_TEST_REMOTE_DATA=1`` is set. It prints the metrics the
+# thresholds below were calibrated from.
 #
 # Total precipitation is left out: ARCO stores it hourly, while the WB2 source
 # expects the 6 hourly accumulation of the WeatherBench2 datasets.
@@ -1811,10 +1810,14 @@ _ARCO_CHANNELS = [f"{var}{level}" for var in ["z", "t"] for level in [500, 550, 
 _ARCO_LAT = np.linspace(90.0, -90.0, 721).tolist()
 _ARCO_LON = (np.arange(1440) * 0.25).tolist()
 
-# a channel has to match ARCO this well, normalized by ARCO's spread ...
-_ARCO_MAX_ERROR = 0.05
+# Calibrated on the dates above: the errors against ARCO, normalized by ARCO's
+# spread, are 2e-5 to 5e-5 for all channels, and the wrong counterparts are at
+# least about 4000 times worse (t850 and z500 against six hours later). The
+# thresholds leave an order of magnitude of headroom on both.
+# a channel has to match ARCO this well ...
+_ARCO_MAX_ERROR = 5e-4
 # ... and this many times better than its wrong counterparts
-_ARCO_MIN_MARGIN = 5.0
+_ARCO_MIN_MARGIN = 400.0
 
 
 def _have_network_dependencies():
