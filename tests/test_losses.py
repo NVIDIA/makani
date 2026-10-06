@@ -25,6 +25,8 @@ import numpy as np
 import torch
 
 from makani.utils import LossHandler
+from makani.utils.missing_data import fill_missing, missing_values, missing_weights
+from makani.utils.losses.base_loss import abs_pow
 from makani.utils.losses import (
     CRPSLoss,
     SpectralCRPSLoss,
@@ -73,6 +75,25 @@ _loss_params = [
     ([{"type": "l2", "channel_weights": "constant"}, {"type": "h1", "channel_weights": "constant"}], True),
     ([{"type": "l2", "channel_weights": "constant"}, {"type": "l1", "channel_weights": "constant"}], True),
     ([{"type": "drift_regularization"}], False),
+]
+
+# losses checked for masking of missing (NaN) targets in the LossHandler,
+# covering losses on the grid, spectral ones and the relative variant
+_missing_target_deterministic_params = [
+    ([{"type": "l1", "channel_weights": "constant"}],),
+    ([{"type": "l2", "channel_weights": "constant"}],),
+    ([{"type": "l2", "channel_weights": "constant", "parameters": {"relative": True}}],),
+    ([{"type": "spectral l2", "channel_weights": "constant"}],),
+    ([{"type": "h1", "channel_weights": "constant"}],),
+    ([{"type": "amse", "channel_weights": "constant"}],),
+    ([{"type": "drift_regularization"}],),
+]
+
+_missing_target_probabilistic_params = [
+    ([{"type": "ensemble_crps", "channel_weights": "constant", "parameters": {"crps_type": "skillspread"}}],),
+    ([{"type": "ensemble_crps", "channel_weights": "constant", "parameters": {"crps_type": "cdf"}}],),
+    ([{"type": "ensemble_spectral_crps", "channel_weights": "constant"}],),
+    ([{"type": "l2_energy_score", "channel_weights": "constant"}],),
 ]
 
 _loss_weighted_params = [
@@ -231,10 +252,11 @@ _COMMON_BATCHSIZE = [
 class TestLossCommon(unittest.TestCase):
     """Common property tests executed directly against every loss class.
 
-    Three properties are verified:
+    Four properties are verified:
       1. ``test_nonneg``                — loss >= 0 elementwise
       2. ``test_zero_on_perfect_prediction`` — loss ≈ 0 when prd == tar
       3. ``test_batchsize_independence``    — loss[i] is unaffected by other samples in the batch
+      4. ``test_nan_propagates``            — NaN in prediction or target is not masked
     """
 
     _E = 5  # ensemble size used for probabilistic losses
@@ -331,6 +353,26 @@ class TestLossCommon(unittest.TestCase):
             compare_tensors(f"{name} batchsize", loss_single[0], loss_batch[0], verbose=verbose),
             f"{name}: loss[0] differs between single-sample and full-batch evaluation",
         )
+
+    @parameterized.expand(_COMMON_BATCHSIZE)
+    def test_nan_propagates(self, name):
+        """The losses assume finite inputs and contain no NaN handling of their own:
+        a NaN in the prediction or the target makes the loss of that sample and
+        channel NaN. Missing targets are taken care of before the losses, see
+        makani.utils.missing_data."""
+        fn = self._make(name)
+        for where in ["prediction", "target"]:
+            with self.subTest(nan_in=where):
+                prd, tar = self._make_prd_tar(name)
+                if where == "target":
+                    tar[0, 0, 3, 5] = torch.nan
+                elif prd.dim() == 5:
+                    # a single ensemble member is enough
+                    prd[0, 0, 0, 3, 5] = torch.nan
+                else:
+                    prd[0, 0, 3, 5] = torch.nan
+                loss = fn(prd, tar)
+                self.assertTrue(torch.isnan(loss[0, 0]), f"{name}: NaN in the {where} was masked")
 
 
 # ===========================================================================
@@ -1622,8 +1664,182 @@ class TestLossHandler(unittest.TestCase):
             )
         )
 
+    # ------------------------------------------------------------------
+    # missing targets: NaN in the target is taken out of every loss
+    # ------------------------------------------------------------------
+
+    def _missing_mask(self, shape):
+        """Scattered missing points, plus one entirely missing field."""
+        generator = torch.Generator().manual_seed(1234)
+        missing = torch.rand(shape, generator=generator) < 0.1
+        missing[0, 1] = True
+        return missing
+
+    def _assert_masked(self, out, prd, missing, verbose=False):
+        self.assertTrue(torch.isfinite(out), "loss is not finite with missing targets")
+        out.backward()
+        self.assertFalse(torch.isnan(prd.grad).any(), "gradient contains NaN")
+        # no gradient may reach the prediction from a missing target point
+        masked_grad = prd.grad[missing.unsqueeze(1).expand_as(prd)] if prd.dim() == 5 else prd.grad[missing]
+        self.assertTrue(
+            compare_tensors(
+                "gradient at missing points",
+                masked_grad,
+                torch.zeros_like(masked_grad),
+                atol=0.0,
+                rtol=0.0,
+                verbose=verbose,
+                shape_check=True,
+            )
+        )
+
+    @parameterized.expand(_missing_target_deterministic_params)
+    def test_missing_targets_deterministic(self, losses, verbose=False):
+        """NaN targets give a finite loss, no gradient from the missing points, and
+        the same loss as a target that equals the prediction there."""
+        self.params.losses = losses
+        loss_obj = LossHandler(self.params, compile=self.compile)
+
+        shape = (self.params.batch_size, self.params.N_out_channels, self.params.img_shape_x, self.params.img_shape_y)
+        missing = self._missing_mask(shape)
+        prd = torch.randn(*shape, requires_grad=True)
+        tar = torch.randn(*shape)
+
+        out = loss_obj(prd, torch.where(missing, torch.nan, tar))
+
+        # missing points count as perfectly predicted
+        reference = loss_obj(prd.detach(), torch.where(missing, prd.detach(), tar))
+        self.assertTrue(compare_tensors("loss", out.detach(), reference, verbose=verbose))
+
+        self._assert_masked(out, prd, missing, verbose=verbose)
+
+    @parameterized.expand(_missing_target_probabilistic_params)
+    def test_missing_targets_probabilistic(self, losses, verbose=False):
+        """With an ensemble, the missing points are taken out for every member."""
+        self.params.losses = losses
+        loss_obj = LossHandler(self.params, compile=self.compile)
+
+        shape = (self.params.batch_size, self.params.N_out_channels, self.params.img_shape_x, self.params.img_shape_y)
+        missing = self._missing_mask(shape)
+        prd = torch.randn(shape[0], 5, *shape[1:], requires_grad=True)
+        tar = torch.where(missing, torch.nan, torch.randn(*shape))
+
+        self._assert_masked(loss_obj(prd, tar), prd, missing, verbose=verbose)
+
+    @parameterized.expand(_missing_target_deterministic_params + _missing_target_probabilistic_params)
+    def test_nan_predictions_are_not_masked(self, losses, verbose=False):
+        """Only NaN in the target means missing data. NaN coming out of the model is
+        a failure and has to reach the loss, whether the target is valid there or not."""
+        self.params.losses = losses
+        loss_obj = LossHandler(self.params, compile=self.compile)
+        probabilistic = "ensemble" in losses[0]["type"] or "energy_score" in losses[0]["type"]
+
+        shape = (self.params.batch_size, self.params.N_out_channels, self.params.img_shape_x, self.params.img_shape_y)
+        missing = self._missing_mask(shape)
+        tar = torch.where(missing, torch.nan, torch.randn(*shape))
+        valid_point = torch.nonzero(torch.logical_not(missing))[0].tolist()
+        missing_point = torch.nonzero(missing)[0].tolist()
+
+        for desc, point in [("valid target", valid_point), ("missing target", missing_point)]:
+            with self.subTest(at=desc):
+                prd = torch.randn(shape[0], 5, *shape[1:]) if probabilistic else torch.randn(*shape)
+                if probabilistic:
+                    # a single member going NaN is enough
+                    prd[point[0], 0, point[1], point[2], point[3]] = torch.nan
+                else:
+                    prd[tuple(point)] = torch.nan
+                self.assertTrue(torch.isnan(loss_obj(prd, tar)), f"NaN prediction at a {desc} point was masked")
+
+    def test_missing_targets_with_random_slices(self, verbose=False):
+        """The masking happens before the random slice, which mixes channels and would spread the NaN."""
+        self.params.losses = [{"type": "l2", "channel_weights": "constant"}]
+        self.params.random_slice_loss = True
+        loss_obj = LossHandler(self.params, compile=self.compile)
+
+        shape = (self.params.batch_size, self.params.N_out_channels, self.params.img_shape_x, self.params.img_shape_y)
+        missing = self._missing_mask(shape)
+        prd = torch.randn(*shape, requires_grad=True)
+        tar = torch.where(missing, torch.nan, torch.randn(*shape))
+
+        self._assert_masked(loss_obj(prd, tar), prd, missing, verbose=verbose)
+
 
 # ===========================================================================
+class TestAbsPow(unittest.TestCase):
+    """abs_pow must match |x|**e and keep the gradient finite where x vanishes."""
+
+    def test_forward_matches(self):
+        x = torch.tensor([-2.0, -0.5, 0.0, 0.3, 4.0])
+        for exponent in [0.5, 1.0, 2.0]:
+            with self.subTest(exponent=exponent):
+                self.assertTrue(
+                    compare_tensors(
+                        "abs_pow", abs_pow(x, exponent), x.abs().pow(exponent), atol=0.0, rtol=0.0, shape_check=True
+                    )
+                )
+
+    def test_gradient_is_finite_at_zero(self):
+        for exponent in [0.5, 1.0, 2.0]:
+            with self.subTest(exponent=exponent):
+                x = torch.tensor([0.0, 0.0, 1.0], requires_grad=True)
+                abs_pow(x, exponent).sum().backward()
+                self.assertTrue(torch.isfinite(x.grad).all(), f"non-finite gradient for exponent {exponent}")
+                self.assertEqual(x.grad[0].item(), 0.0)
+
+    def test_mmd_with_small_exponent_at_perfect_forecast(self):
+        """With beta < 1 the per point |x|**beta used to give a NaN gradient where members coincide."""
+        fn = GaussianMMDLoss(**_GEOM_KWARGS, beta=0.5)
+        tar = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
+        fc = tar.unsqueeze(1).expand(_BATCH, 5, _NUM_CH, _IMG_H, _IMG_W).clone().requires_grad_(True)
+        fn(fc, tar).sum().backward()
+        self.assertFalse(torch.isnan(fc.grad).any(), "NaN in the gradient at a perfect forecast")
+
+
+class TestMissingData(unittest.TestCase):
+    """The shared definition of missing target values, used by the losses and the metrics."""
+
+    def setUp(self):
+        self.x = torch.tensor([[1.0, torch.nan], [3.0, torch.nan]])
+        self.missing = torch.tensor([[False, True], [False, True]])
+
+    def test_missing_values_are_nan(self):
+        self.assertTrue(torch.equal(missing_values(self.x), self.missing))
+
+    def test_fill_with_constant(self):
+        filled = fill_missing(self.x, 0.0)
+        self.assertTrue(
+            compare_tensors(
+                "filled", filled, torch.tensor([[1.0, 0.0], [3.0, 0.0]]), atol=0.0, rtol=0.0, shape_check=True
+            )
+        )
+
+    def test_fill_with_tensor_and_given_mask(self):
+        fill = torch.full_like(self.x, 7.0)
+        filled = fill_missing(self.x, fill, self.missing)
+        self.assertTrue(
+            compare_tensors(
+                "filled", filled, torch.tensor([[1.0, 7.0], [3.0, 7.0]]), atol=0.0, rtol=0.0, shape_check=True
+            )
+        )
+
+    def test_weights_without_and_with_existing_weights(self):
+        expected = torch.tensor([[1.0, 0.0], [1.0, 0.0]])
+        self.assertTrue(
+            compare_tensors("weights", missing_weights(self.missing), expected, atol=0.0, rtol=0.0, shape_check=True)
+        )
+        wgt = torch.tensor([[2.0, 2.0], [0.5, 0.5]])
+        self.assertTrue(
+            compare_tensors(
+                "combined weights",
+                missing_weights(self.missing, wgt),
+                wgt * expected,
+                atol=0.0,
+                rtol=0.0,
+                shape_check=True,
+            )
+        )
+
+
 class TestComputeChannelWeightingHelper(unittest.TestCase):
     """Tests for _compute_channel_weighting_helper in base_loss.py.
 

@@ -180,6 +180,59 @@ def clip_grads(model, max_grad_norm, norm_type=2.0, verbose=False):
     return total_gnorm
 
 
+class NonFiniteLossCheck(object):
+    """Stop training once the loss is no longer finite, on all ranks together.
+
+    A NaN loss in bf16 or fp32 training does not recover: the next optimizer
+    step writes NaN into the weights and every further step is wasted, so it
+    is better to fail right away, before the backward pass, while the step that
+    caused it is still known.
+
+    The decision has to be taken by all ranks together. The training loss is
+    the mean over the local batch, so data parallel ranks see different values,
+    and a rank raising on its own would leave the others waiting in the
+    gradient all-reduce. Whether the loss is finite is therefore all-reduced as
+    a single flag, which costs one scalar collective per step.
+
+    With fp16 and an enabled ``GradScaler``, an occasional non-finite step is
+    expected and handled by the scaler skipping it, so up to
+    ``max_consecutive`` such steps in a row are tolerated there. Without the
+    scaler a tolerated step would already be applied to the weights, so
+    nothing is tolerated.
+
+    Parameters
+    ----------
+    max_consecutive : int, optional
+        Number of consecutive non-finite steps tolerated before raising. Only
+        honoured when ``grad_scaler_enabled`` is set.
+    grad_scaler_enabled : bool, optional
+        Whether the training uses an enabled ``GradScaler``.
+    """
+
+    def __init__(self, max_consecutive: int = 0, grad_scaler_enabled: bool = False):
+        self.max_consecutive = max_consecutive if grad_scaler_enabled else 0
+        self.consecutive = 0
+
+    def __call__(self, loss: torch.Tensor, step: int, epoch: int = None):
+        """Raise ``FloatingPointError`` on every rank if ``loss`` is not finite on any of them."""
+        finite = torch.isfinite(loss.detach()).all().to(torch.float32)
+        if dist.is_initialized() and dist.get_world_size() > 1:
+            dist.all_reduce(finite, op=dist.ReduceOp.MIN)
+
+        if finite.item() > 0.0:
+            self.consecutive = 0
+            return
+
+        self.consecutive += 1
+        if self.consecutive > self.max_consecutive:
+            where = f"step {step}" + (f" of epoch {epoch}" if epoch is not None else "")
+            raise FloatingPointError(
+                f"Training loss is not finite on at least one rank at {where}, for {self.consecutive} "
+                f"consecutive step(s); the loss on this rank is {loss.detach().float().item()}. Stopping before "
+                f"the non-finite values reach the weights."
+            )
+
+
 def wandb_register_activations_monitor(model: nn.Module, step: int):
 
     def check_eligibility(module: nn.Module) -> bool:

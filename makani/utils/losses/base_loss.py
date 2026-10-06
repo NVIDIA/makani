@@ -240,6 +240,25 @@ def _compute_channel_weighting_helper(
     return channel_weights
 
 
+def abs_pow(x: torch.Tensor, exponent: float, eps: float = 1.0e-12) -> torch.Tensor:
+    """``|x| ** exponent`` with a finite gradient where ``x`` vanishes.
+
+    For exponents below one the derivative of ``|x| ** exponent`` diverges at
+    zero, so wherever two ensemble members, or a member and the observation,
+    coincide the backward pass would produce ``0 * inf = NaN``. Values below
+    ``eps`` are therefore evaluated at ``eps``, which keeps the derivative
+    finite, and then replaced by an exact zero, which sends no gradient back
+    to them. The forward value is unchanged; this is the same guard the energy
+    scores apply before taking roots. Exponents of one and above have a finite
+    derivative at zero and are computed directly.
+    """
+    x = x.abs()
+    if exponent >= 1.0:
+        return x.pow(exponent)
+    small = x < eps
+    return torch.where(small, 0.0, torch.where(small, eps, x).pow(exponent))
+
+
 @dataclass
 class LossType(object):
     Deterministic = 1

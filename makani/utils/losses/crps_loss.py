@@ -63,33 +63,19 @@ def _crps_ensemble_kernel(observation: torch.Tensor, forecasts: torch.Tensor, we
     """
 
     # beware: forecasts are assumed sorted in sorted order
-    # get nanmask
-    nanmasks = torch.logical_or(torch.isnan(forecasts), torch.isnan(weights))
-
     # compute total weights
-    nweights = torch.where(nanmasks, 0.0, weights)
-    total_weight = torch.sum(nweights, dim=0)
+    total_weight = torch.sum(weights, dim=0)
 
     # initial values
     obs_cdf = torch.zeros_like(observation)
     forecast_cdf = torch.zeros_like(observation)
     prev_forecast = torch.zeros_like(observation)
     integral = torch.zeros_like(observation)
-    nanmask = torch.zeros_like(observation, dtype=torch.bool)
 
     # split lists
-    nanmasklist = torch.split(nanmasks, 1, dim=0)
     weightslist = torch.split(weights, 1, dim=0)
     forecastlist = torch.split(forecasts, 1, dim=0)
-    for n, token in enumerate(zip(forecastlist, weightslist, nanmasklist)):
-
-        # extract variables
-        tmpforecast, weight, tmpnanmask = token
-
-        # update nanmask
-        nanmask = torch.logical_or(tmpnanmask, nanmask)
-
-        forecast = torch.where(tmpnanmask, prev_forecast, tmpforecast)
+    for forecast, weight in zip(forecastlist, weightslist):
 
         # compute condition
         condition = torch.logical_and(observation < forecast, torch.abs(obs_cdf) < 1.0e-7)
@@ -102,21 +88,16 @@ def _crps_ensemble_kernel(observation: torch.Tensor, forecasts: torch.Tensor, we
         increment = torch.where(condition, term_true, term_false)
 
         # compute integral
-        integral = integral + torch.where(nanmask, 0.0, increment)
+        integral = integral + increment
 
         # update cdf
-        # this only gets updated for values which are not nan
-        obs_cdf_new = torch.where(condition, 1.0, obs_cdf)
-        obs_cdf = torch.where(nanmask, obs_cdf, obs_cdf_new)
+        obs_cdf = torch.where(condition, 1.0, obs_cdf)
         forecast_cdf = forecast_cdf + weight / total_weight
 
         # update forcast
         prev_forecast = forecast
 
     integral = integral + torch.clamp(observation - forecast, min=0.0)
-
-    # set to nan for first forecasts nan
-    integral = torch.where(nanmasklist[0], torch.nan, integral)
 
     return torch.squeeze(integral, dim=0)
 
@@ -129,17 +110,6 @@ def _crps_skillspread_kernel(
     """
 
     observation = observation.unsqueeze(0)
-
-    # get nanmask from observations and forecasts
-    nanmasks = torch.logical_or(torch.isnan(observation), torch.isnan(weights))
-    nanmask_bool = nanmasks.sum(dim=0) != 0
-
-    # impute NaN before computation to avoid 0 * NaN = NaN in backward pass
-    observation = torch.where(torch.isnan(observation), 0.0, observation)
-
-    # compute total weights
-    nweights = torch.where(nanmasks, 0.0, weights)
-    total_weight = torch.sum(nweights, dim=0, keepdim=True)
 
     # get the ranks for the spread computation
     rank = rankdata(forecasts, dim=0)
@@ -156,7 +126,7 @@ def _crps_skillspread_kernel(
     )
     eskill = (observation - forecasts).abs().mean(dim=0)
 
-    crps = torch.where(nanmask_bool, 0.0, eskill - 0.5 * espread)
+    crps = eskill - 0.5 * espread
 
     return crps
 
@@ -172,17 +142,6 @@ def _crps_probability_weighted_moment_kernel(
 
     observation = observation.unsqueeze(0)
 
-    # get nanmask from observations and forecasts
-    nanmasks = torch.logical_or(torch.isnan(observation), torch.isnan(weights))
-    nanmask_bool = nanmasks.sum(dim=0) != 0
-
-    # impute NaN before computation to avoid 0 * NaN = NaN in backward pass
-    observation = torch.where(torch.isnan(observation), 0.0, observation)
-
-    # compute total weights
-    nweights = torch.where(nanmasks, 0.0, weights)
-    total_weight = torch.sum(nweights, dim=0, keepdim=True)
-
     #  ensemble size
     num_ensemble = forecasts.shape[0]
 
@@ -196,9 +155,6 @@ def _crps_probability_weighted_moment_kernel(
 
     crps = eskill + beta0 - 2 * beta1
 
-    # zero out masked positions
-    crps = torch.where(nanmask_bool, 0.0, crps)
-
     return crps
 
 
@@ -210,17 +166,6 @@ def _crps_naive_skillspread_kernel(
     """
 
     observation = observation.unsqueeze(0)
-
-    # get nanmask from observations and forecasts
-    nanmasks = torch.logical_or(torch.isnan(observation), torch.isnan(weights))
-    nanmask_bool = nanmasks.sum(dim=0) != 0
-
-    # impute NaN before computation to avoid 0 * NaN = NaN in backward pass
-    observation = torch.where(torch.isnan(observation), 0.0, observation)
-
-    # compute total weights
-    nweights = torch.where(nanmasks, 0.0, weights)
-    total_weight = torch.sum(nweights, dim=0, keepdim=True)
 
     #  ensemble size
     num_ensemble = forecasts.shape[0]
@@ -234,9 +179,6 @@ def _crps_naive_skillspread_kernel(
     eskill = (observation - forecasts).abs().mean(dim=0)
 
     crps = eskill - 0.5 * espread
-
-    # zero out masked positions
-    crps = torch.where(nanmask_bool, 0.0, crps)
 
     return crps
 

@@ -50,7 +50,7 @@ from makani.models.helpers import count_parameters
 from makani.utils.checkpoint_helpers import get_latest_checkpoint_version
 
 # weight normalizing helper
-from makani.utils.training.training_helpers import get_memory_usage, clip_grads
+from makani.utils.training.training_helpers import get_memory_usage, clip_grads, NonFiniteLossCheck
 
 
 class AutoencoderTrainer(Driver):
@@ -161,6 +161,10 @@ class AutoencoderTrainer(Driver):
 
         # gradient scaler
         self.gscaler = amp.GradScaler("cuda", enabled=self.autocast.grad_scaler_enabled)
+        self.nonfinite_loss_check = NonFiniteLossCheck(
+            max_consecutive=self.params.get("max_nonfinite_loss_steps", 0),
+            grad_scaler_enabled=self.autocast.grad_scaler_enabled,
+        )
 
         # gradient clipping
         self.max_grad_norm = self.params.get("optimizer_max_grad_norm", -1.0)
@@ -532,6 +536,9 @@ class AutoencoderTrainer(Driver):
                     with self.model_train.no_sync():
                         _, loss = self._autoencoder_step(inp)
                 loss = loss * loss_scaling_fact
+
+            # stop on a non-finite loss before it reaches the weights, on all ranks together
+            self.nonfinite_loss_check(loss, step=self.iters, epoch=self.epoch)
 
             self.gscaler.scale(loss).backward()
 

@@ -23,6 +23,7 @@ from makani.utils import comm
 
 from makani.utils.dataloaders.data_helpers import get_data_normalization, get_time_diff_stds
 from makani.mpu.mappings import gather_from_parallel_region, reduce_from_parallel_region
+from makani.utils.missing_data import fill_missing, missing_values
 
 from .losses import LossType, GeometricLpLoss, SpectralLpLoss, SpectralH1Loss, SpectralAMSELoss
 from .losses import CRPSLoss, SpectralCRPSLoss, GradientCRPSLoss, VortDivCRPSLoss
@@ -336,6 +337,53 @@ class LossHandler(nn.Module):
             self.running_var.fill_(1)
             self.num_batches_tracked.zero_()
 
+    def _ensemble_mean(self, prd: torch.Tensor) -> torch.Tensor:
+        """Mean over the ensemble dimension of a 5D prediction, across ranks if distributed; 4D passes through."""
+        if prd.dim() != 5:
+            return prd
+        prdm = torch.mean(prd, dim=1)
+        if self.ensemble_distributed:
+            prdm = reduce_from_parallel_region(prdm, "ensemble") / float(comm.get_size("ensemble"))
+        return prdm
+
+    def _mask_missing_targets(self, prd: torch.Tensor, prdm: torch.Tensor, tar: torch.Tensor):
+        """Take missing target points out of every loss, see :mod:`makani.utils.missing_data`.
+
+        At those points the target, every ensemble member and the ensemble mean
+        are all set to the same detached value, the (mean) prediction itself.
+        Every loss then sees perfect agreement there, so the points contribute
+        nothing, and since the value is detached no gradient flows back from
+        them. Filling with the prediction rather than a constant keeps the
+        fields smooth for the spectral losses: the only jump left at the edge
+        of a missing region is the prediction error there. The ensemble mean is
+        already reduced across ranks, so the fill agrees between them.
+
+        The masking is deliberately per pixel: every valid point contributes
+        equally to the loss, and a sample is not renormalized by how much of it
+        is valid. A partly missing sample therefore contributes in proportion
+        to its valid area. For example, take a batch of two samples with the
+        same pointwise error everywhere, one complete and one with half of its
+        grid missing. With an absolute loss the second sample contributes half
+        as much as the first, and the batch loss is 3/4 of what a fully valid
+        batch would give; renormalizing per sample would count both fully. The relative losses
+        follow the same rule, the prediction standing in for the missing target
+        in their denominator. The metrics, in contrast, renormalize to the
+        valid area.
+
+        This is done unconditionally rather than behind a check for NaN, which
+        would cost a device synchronization on every step; on complete targets
+        it changes nothing.
+        """
+        missing = missing_values(tar)
+        fill = prdm.detach()
+        tar = fill_missing(tar, fill, missing)
+        prdm = fill_missing(prdm, fill, missing)
+        if prd.dim() == 5:
+            prd = fill_missing(prd, fill.unsqueeze(1), missing.unsqueeze(1))
+        else:
+            prd = prdm
+        return prd, prdm, tar
+
     def _extract_input_state(self, inp: torch.Tensor) -> torch.Tensor:
         """
         Extract last timestep from flattened history input.
@@ -367,6 +415,18 @@ class LossHandler(nn.Module):
         # otherwise we assume that the dims are
         # batch, channel, h, w
 
+        # A non-finite prediction is a failure of the model and must never be
+        # scored around. Only NaN in the target means missing data, but some
+        # losses also mask NaN in the forecasts or treat a NaN observation as
+        # missing, so this is enforced here for all of them: the returned loss
+        # is NaN whenever the prediction is not finite anywhere.
+        prediction_failed = torch.logical_not(torch.isfinite(prd).all())
+
+        # take missing target values out of the losses. This has to come before
+        # the random slicing, which mixes channels and would spread the NaN
+        prdm = self._ensemble_mean(prd)
+        prd, prdm, tar = self._mask_missing_targets(prd, prdm, tar)
+
         # if random slices are enabled, we need to recombine both prediction and targets across the channel dimension
         if self.random_slice_loss:
             n_channels = prd.shape[-3]
@@ -389,14 +449,9 @@ class LossHandler(nn.Module):
                 prd = nn.functional.conv2d(prd, rslice)
             tar = nn.functional.conv2d(tar, rslice)
 
-        # compute average over ensemble dim if requested:
-        # TODO: change the behavior to instead compute the expected value of the deterministic losses
-        if prd.dim() == 5:
-            prdm = torch.mean(prd, dim=1)
-            if self.ensemble_distributed:
-                prdm = reduce_from_parallel_region(prdm, "ensemble") / float(comm.get_size("ensemble"))
-        else:
-            prdm = prd
+            # the slice mixes channels, so the ensemble average has to follow it
+            # TODO: change the behavior to instead compute the expected value of the deterministic losses
+            prdm = self._ensemble_mean(prd)
 
         # transform to tendency space if any loss requires it
         if inp is not None and any(self.loss_requires_input):
@@ -490,5 +545,6 @@ class LossHandler(nn.Module):
 
         # compute average over batch and weighted sum over channels
         loss = torch.mean(torch.sum(chw * all_losses, dim=1), dim=0)
+        loss = torch.where(prediction_failed, torch.nan, loss)
 
         return loss

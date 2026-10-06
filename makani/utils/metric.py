@@ -27,6 +27,7 @@ from makani.utils import comm
 # loss stuff
 from makani.utils.dataloaders.data_helpers import get_data_normalization
 from makani.utils.losses import LossType
+from makani.utils.missing_data import fill_missing, missing_values, missing_weights
 from makani.utils.metrics.functions import (
     GeometricL1,
     GeometricRMSE,
@@ -142,22 +143,16 @@ class MetricRollout:
         inpp = inp[..., self.channel_mask, :, :]
         tarp = tar[..., self.channel_mask, :, :]
 
-        # only mask if the target actually contains nans:
-        if self.mask_target_nan and torch.any(torch.isnan(tarp)):
-            wgtt_nan = torch.logical_not(torch.isnan(tarp)).to(torch.float32)
-            tarp = torch.where(wgtt_nan > 0.0, tarp, 0.0)
-        else:
-            wgtt_nan = None
+        wgtt = wgt[..., self.channel_mask, :, :] if wgt is not None else None
 
-        if wgt is not None:
-            wgtt = wgt[..., self.channel_mask, :, :]
-            if wgtt_nan is not None:
-                wgtt = wgtt * wgtt_nan
-        else:
-            if wgtt_nan is not None:
-                wgtt = wgtt_nan
-            else:
-                wgtt = None
+        # missing target values get zero weight, and the metric is renormalized
+        # to the valid area. Only masked if there actually are any, since the
+        # weighted path costs more
+        if self.mask_target_nan:
+            missing = missing_values(tarp)
+            if torch.any(missing):
+                tarp = fill_missing(tarp, 0.0, missing)
+                wgtt = missing_weights(missing, wgtt)
 
         # compute metric
         metric = self.metric_func(inpp, tarp, wgtt)

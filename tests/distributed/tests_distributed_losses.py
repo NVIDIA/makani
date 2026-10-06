@@ -35,6 +35,7 @@ from makani.utils.losses import (
     CoherenceRegularization,
 )
 from makani.utils.losses.energy_score import SpectralCoherenceLoss
+from makani.utils.training.training_helpers import NonFiniteLossCheck
 
 # Add parent directory to path for testutils import
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
@@ -54,6 +55,42 @@ class TestDistributedLoss(unittest.TestCase):
 
     def setUp(self):
         disable_tf32()
+
+    def _raises_nonfinite(self, check, loss, step):
+        """Run the check and report whether it raised, without leaving the test early.
+
+        Leaving early on one rank, as ``assertRaises`` would when that rank does not
+        raise, would leave the other ranks waiting in the next collective.
+        """
+        try:
+            check(loss, step=step)
+        except FloatingPointError:
+            return True
+        return False
+
+    @parameterized.expand([["first rank", 0], ["last rank", -1]])
+    def test_distributed_nonfinite_loss_check(self, desc, nan_rank, verbose=False):
+        """A NaN loss on a single rank stops every rank, and a finite one on all ranks stops none."""
+        nan_rank = nan_rank % self.world_size
+        finite = torch.tensor(1.0, device=self.device)
+        seeded = torch.tensor(float("nan") if self.world_rank == nan_rank else 1.0, device=self.device)
+
+        with self.subTest(desc="finite everywhere"):
+            raised = self._raises_nonfinite(NonFiniteLossCheck(), finite, step=1)
+            self.assertTrue(reduce_success(not raised, self.device), "a finite loss stopped training")
+
+        with self.subTest(desc=f"NaN on the {desc}"):
+            raised = self._raises_nonfinite(NonFiniteLossCheck(), seeded, step=1)
+            # every rank has to raise, not only the one that saw the NaN
+            self.assertTrue(reduce_success(raised, self.device), f"not every rank stopped on a NaN on the {desc}")
+
+        with self.subTest(desc=f"tolerated NaN on the {desc}"):
+            check = NonFiniteLossCheck(max_consecutive=1, grad_scaler_enabled=True)
+            raised_first = self._raises_nonfinite(check, seeded, step=1)
+            raised_second = self._raises_nonfinite(check, seeded, step=2)
+            # the tolerance is counted consistently on every rank
+            self.assertTrue(reduce_success(not raised_first, self.device), "a tolerated NaN stopped training")
+            self.assertTrue(reduce_success(raised_second, self.device), "not every rank stopped past the tolerance")
 
     def _split_helper(self, tensor):
         with torch.no_grad():

@@ -19,7 +19,7 @@ import math
 import torch
 from torch import amp
 
-from makani.utils.losses.base_loss import GeometricBaseLoss, SpectralBaseLoss, LossType
+from makani.utils.losses.base_loss import GeometricBaseLoss, SpectralBaseLoss, LossType, abs_pow
 from makani.utils import comm
 
 # distributed stuff
@@ -152,29 +152,16 @@ class LpEnergyScoreLoss(GeometricBaseLoss):
 
         if self.ensemble_weights is not None:
             raise NotImplementedError("currently only constant ensemble weights are supported")
-        else:
-            ensemble_weights = torch.ones_like(forecasts, device=forecasts.device)
 
         #  ensemble size
         num_ensemble = forecasts.shape[0]
 
-        # get nanmask from observations and forecasts
-        nanmasks = torch.logical_or(torch.isnan(observations), torch.isnan(ensemble_weights))
-        nanmask_bool = nanmasks.sum(dim=0) != 0
-
-        # impute NaN before computation to avoid 0 * NaN = NaN in backward pass
-        observations = torch.where(torch.isnan(observations), 0.0, observations)
-        forecasts = torch.where(torch.isnan(forecasts), 0.0, forecasts)
-
         # espread: index all upper-triangular pairs via combinations — avoids the O(E^2 * B * C * H*W)
         # full outer-product; peak allocation is O(P * B * C * H*W) where P = E*(E-1)/2.
         idx = torch.combinations(torch.arange(num_ensemble, device=forecasts.device), r=2)  # (P, 2)
-        diff = (forecasts[idx[:, 0]] - forecasts[idx[:, 1]]).abs().pow(self.p)  # (P, B, C, H*W)
+        diff = abs_pow(forecasts[idx[:, 0]] - forecasts[idx[:, 1]], self.p)  # (P, B, C, H*W)
 
-        # zero out masked positions
-        diff = torch.where(nanmask_bool.unsqueeze(0), 0.0, diff)
-        eskill = (observations - forecasts).abs().pow(self.p)
-        eskill = torch.where(nanmask_bool, 0.0, eskill)
+        eskill = abs_pow(observations - forecasts, self.p)
 
         # do the spatial reduction
         if spatial_weights is not None:
@@ -195,7 +182,7 @@ class LpEnergyScoreLoss(GeometricBaseLoss):
             diff = reduce_from_parallel_region(diff, "spatial")
             eskill = reduce_from_parallel_region(eskill, "spatial")
 
-        # do the channel reduction while ignoring NaNs
+        # do the channel reduction
         # if channel weights are required they should be added here to the reduction
         if self.channel_reduction:
             diff = diff.sum(dim=-1, keepdim=True)  # (P, B, 1)
@@ -387,21 +374,9 @@ class SobolevEnergyScoreLoss(SpectralBaseLoss):
 
         num_ensemble = forecasts.shape[0]
 
-        # get nanmask from observations and forecasts
-        nanmasks = torch.logical_or(torch.isnan(observations), torch.isnan(forecasts))
-        nanmask_bool = nanmasks.sum(dim=0) != 0
-
-        # impute NaN before computation to avoid 0 * NaN = NaN in backward pass
-        observations = torch.where(torch.isnan(observations), 0.0, observations)
-        forecasts = torch.where(torch.isnan(forecasts), 0.0, forecasts)
-
         # compute the individual distances
         espread = lm_weights_split * (forecasts.unsqueeze(1) - forecasts.unsqueeze(0)).abs().square()
         eskill = lm_weights_split * (observations - forecasts).abs().square()
-
-        # zero out masked positions
-        espread = torch.where(nanmask_bool, 0.0, espread)
-        eskill = torch.where(nanmask_bool, 0.0, eskill)
 
         # do the channel reduction first
         if self.channel_reduction:
@@ -572,20 +547,8 @@ class SpectralL2EnergyScoreLoss(SpectralBaseLoss):
 
         num_ensemble = forecasts.shape[0]
 
-        # get nanmask from observations and forecasts
-        nanmasks = torch.logical_or(torch.isnan(observations), torch.isnan(forecasts))
-        nanmask_bool = nanmasks.sum(dim=0) != 0
-
-        # impute NaN before computation to avoid 0 * NaN = NaN in backward pass
-        observations = torch.where(torch.isnan(observations), 0.0, observations)
-        forecasts = torch.where(torch.isnan(forecasts), 0.0, forecasts)
-
         espread = lm_weights_split * (forecasts.unsqueeze(1) - forecasts.unsqueeze(0)).abs().square()
         eskill = lm_weights_split * (observations - forecasts).abs().square()
-
-        # zero out masked positions
-        espread = torch.where(nanmask_bool, 0.0, espread)
-        eskill = torch.where(nanmask_bool, 0.0, eskill)
 
         # do the channel reduction first
         if self.channel_reduction:
@@ -961,11 +924,6 @@ class CorrectedSpectralL2EnergyScoreLoss(SpectralBaseLoss):
 
         num_ensemble = forecasts.shape[0]
 
-        nanmasks = torch.logical_or(torch.isnan(observations), torch.isnan(forecasts))
-        nanmask_bool = nanmasks.sum(dim=0) != 0
-        observations = torch.where(torch.isnan(observations), 0.0, observations)
-        forecasts = torch.where(torch.isnan(forecasts), 0.0, forecasts)
-
         # PSD per (b, c, l): for Option 2 we need P_pred and P_true
         # P_pred = (1/E) * sum_e sum_m w_m |forecasts[e,b,c,l,m]|^2
         # P_true = sum_m w_m |observations[b,c,l,m]|^2
@@ -982,9 +940,6 @@ class CorrectedSpectralL2EnergyScoreLoss(SpectralBaseLoss):
 
         espread = lm_weights_split * (forecasts.unsqueeze(1) - forecasts.unsqueeze(0)).abs().square()
         eskill = lm_weights_split * (observations - forecasts).abs().square()
-
-        espread = torch.where(nanmask_bool, 0.0, espread)
-        eskill = torch.where(nanmask_bool, 0.0, eskill)
 
         if self.channel_reduction:
             espread = espread.sum(dim=-3, keepdim=True)

@@ -17,7 +17,7 @@ from typing import Optional, Tuple, List
 
 import torch
 
-from makani.utils.losses.base_loss import GeometricBaseLoss, LossType
+from makani.utils.losses.base_loss import GeometricBaseLoss, LossType, abs_pow
 from makani.utils import comm
 
 
@@ -146,27 +146,13 @@ class GaussianMMDLoss(GeometricBaseLoss):
 
         if self.ensemble_weights is not None:
             raise NotImplementedError("currently only constant ensemble weights are supported")
-        else:
-            ensemble_weights = torch.ones_like(forecasts, device=forecasts.device)
 
         #  ensemble size
         num_ensemble = forecasts.shape[0]
 
-        # get nanmask from observations and forecasts
-        nanmasks = torch.logical_or(torch.isnan(observations), torch.isnan(forecasts))
-        nanmask_bool = nanmasks.sum(dim=0) != 0
-
-        # impute NaN before computation to avoid 0 * NaN = NaN in backward pass
-        observations = torch.where(torch.isnan(observations), 0.0, observations)
-        forecasts = torch.where(torch.isnan(forecasts), 0.0, forecasts)
-
         # use broadcasting semantics to compute spread and skill and sum over channels (vector norm)
-        espread = (forecasts.unsqueeze(1) - forecasts.unsqueeze(0)).abs().pow(self.beta)
-        eskill = (observations - forecasts).abs().pow(self.beta)
-
-        # zero out masked positions
-        espread = torch.where(nanmask_bool, 0.0, espread)
-        eskill = torch.where(nanmask_bool, 0.0, eskill)
+        espread = abs_pow(forecasts.unsqueeze(1) - forecasts.unsqueeze(0), self.beta)
+        eskill = abs_pow(observations - forecasts, self.beta)
 
         # do the spatial reduction
         if spatial_weights is not None:
@@ -187,7 +173,7 @@ class GaussianMMDLoss(GeometricBaseLoss):
             espread = reduce_from_parallel_region(espread, "spatial")
             eskill = reduce_from_parallel_region(eskill, "spatial")
 
-        # do the channel reduction while ignoring NaNs
+        # do the channel reduction
         # if channel weights are required they should be added here to the reduction
         if self.channel_reduction:
             espread = espread.sum(dim=-2, keepdim=True)
