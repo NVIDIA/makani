@@ -13,20 +13,37 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""
+Tests for packaging and loading models: model packages and the wrappers they
+are built from, the steppers, the model registry entry points and PhysicsNeMo
+compatibility, and loading parameters that predate the resampled shapes.
+"""
+
 import os
 import shutil
 import tempfile
 import unittest
 import datetime as dt
-
 import numpy as np
 import torch
 import torch.nn as nn
+import sys
+from parameterized import parameterized
+import warnings
+from importlib.metadata import entry_points
+
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 from makani.models.model_package import ModelWrapper, save_model_package
-from makani.models.stepper import SingleStepWrapper
-
+from makani.models.stepper import SingleStepWrapper, MultiStepWrapper
 from .testutils import set_seed, get_default_parameters, compare_tensors, NUM_CHANNELS, IMG_SIZE_H, IMG_SIZE_W
+from makani.utils.YParams import ParamsBase, ensure_resampled_shapes
+from makani.models import model_registry
+
+
+# ---------------------------------------------------------------------------
+# Model packages: makani.models.model_package
+# ---------------------------------------------------------------------------
 
 
 class _LeadingChannelsModel(nn.Module):
@@ -346,6 +363,438 @@ class TestSaveModelPackage(unittest.TestCase):
         save_model_package(self.params)
 
         self.assertIn("config.json", os.listdir(self.tmpdir.name))
+
+
+# ---------------------------------------------------------------------------
+# Steppers: makani.models.stepper
+# ---------------------------------------------------------------------------
+
+
+class _ScaleModel(nn.Module):
+    """
+    Dummy model that scales the most-recent timestep slice by a learnable factor.
+
+    The wrapper feeds (B, (n_history+1)*C, H, W) and expects (B, C, H, W) back, so
+    we slice the trailing C channels (the latest timestep in the flattened-history
+    layout) and multiply by ``scale``. With scale=2 the rollout produces the
+    geometric sequence  pred_k = 2^(k+1) * (last C of initial input), which makes
+    every assertion in this file an exact equality check.
+    """
+
+    def __init__(self, n_out_chans: int, scale: float = 2.0):
+        super().__init__()
+        self.n_out_chans = n_out_chans
+        self.scale = nn.Parameter(torch.tensor(scale, dtype=torch.float32))
+
+    def forward(self, x):
+        return self.scale * x[..., -self.n_out_chans :, :, :]
+
+
+class _StagedScaleModel(_ScaleModel):
+    def encode_process(self, x):
+        return self.scale * x[..., -self.n_out_chans :, :, :]
+
+
+class TestStepper(unittest.TestCase):
+
+    def setUp(self):
+        set_seed(333)
+        self.B = 1
+        self.C = NUM_CHANNELS
+        self.H = IMG_SIZE_H
+        self.W = IMG_SIZE_W
+
+    def _make_params(self, n_history=0, n_future=0, push_forward=False):
+        params = get_default_parameters()
+        params.n_history = n_history
+        params.n_future = n_future
+        params.multistep = {"push_forward": push_forward}
+        return params
+
+    def _make_handle(self):
+        return lambda: _ScaleModel(n_out_chans=self.C, scale=2.0)
+
+    # ------------------------------------------------------------------
+    # SingleStepWrapper
+    # ------------------------------------------------------------------
+
+    def test_single_step_no_history(self):
+        params = self._make_params(n_history=0)
+        wrapper = SingleStepWrapper(params, self._make_handle())
+        wrapper.train()
+        inp = torch.randn(self.B, self.C, self.H, self.W)
+        out = wrapper(inp)
+        self.assertEqual(out.shape, inp.shape)
+        self.assertTrue(compare_tensors("single_step_no_history", out, 2.0 * inp, verbose=False))
+
+    def test_single_step_with_history(self):
+        n_history = 2
+        params = self._make_params(n_history=n_history)
+        wrapper = SingleStepWrapper(params, self._make_handle())
+        wrapper.train()
+        # flattened-history input layout: (n_history+1)*C channels, oldest first
+        inp = torch.randn(self.B, (n_history + 1) * self.C, self.H, self.W)
+        out = wrapper(inp)
+        self.assertEqual(out.shape, (self.B, self.C, self.H, self.W))
+        # only the most-recent timestep slice is consumed by the dummy model
+        self.assertTrue(compare_tensors("single_step_with_history", out, 2.0 * inp[:, -self.C :], verbose=False))
+
+    def test_single_step_encode_process_uses_forward_preprocessing(self):
+        # encode_process must agree with forward on everything up to the decoder.
+        # _StagedScaleModel.encode_process mirrors its forward, so with a
+        # bias-correction/denormalization no-op config the two must match exactly.
+        params = self._make_params(n_history=0)
+        wrapper = SingleStepWrapper(
+            params,
+            lambda: _StagedScaleModel(n_out_chans=self.C, scale=2.0),
+        )
+        inp = torch.randn(self.B, self.C, self.H, self.W)
+
+        features = wrapper.encode_process(inp)
+        expected = wrapper(inp)
+
+        self.assertEqual(features.shape, inp.shape)
+        self.assertTrue(compare_tensors("single_step_encode_process", features, expected, verbose=True))
+
+    def test_single_step_encode_process_batched(self):
+        # the latent path must accept a batch larger than params.batch_size (1),
+        # which is what an ensemble pushing B*E members through as one forward does
+        params = self._make_params(n_history=0)
+        wrapper = SingleStepWrapper(
+            params,
+            lambda: _StagedScaleModel(n_out_chans=self.C, scale=2.0),
+        )
+        batch = 4
+        inp = torch.randn(batch, self.C, self.H, self.W)
+
+        features = wrapper.encode_process(inp)
+
+        self.assertEqual(features.shape, (batch, self.C, self.H, self.W))
+        self.assertTrue(compare_tensors("single_step_encode_process_batched", features, 2.0 * inp, verbose=True))
+
+    def test_single_step_forward_batched(self):
+        # the same must hold for the ordinary forward path
+        params = self._make_params(n_history=0)
+        wrapper = SingleStepWrapper(params, self._make_handle())
+        batch = 4
+        inp = torch.randn(batch, self.C, self.H, self.W)
+
+        out = wrapper(inp)
+
+        self.assertEqual(out.shape, (batch, self.C, self.H, self.W))
+        self.assertTrue(compare_tensors("single_step_forward_batched", out, 2.0 * inp, verbose=True))
+
+    def test_single_step_encode_process_unsupported_backbone(self):
+        # a backbone without encode_process must fail with a clear error rather
+        # than an AttributeError from deep inside the call
+        params = self._make_params(n_history=0)
+        wrapper = SingleStepWrapper(params, self._make_handle())
+        inp = torch.randn(self.B, self.C, self.H, self.W)
+
+        with self.assertRaises(NotImplementedError):
+            wrapper.encode_process(inp)
+
+    # ------------------------------------------------------------------
+    # MultiStepWrapper — train mode produces the full rollout
+    # ------------------------------------------------------------------
+
+    @parameterized.expand([(0,), (1,)])
+    def test_multistep_train_geometric_sequence(self, n_history):
+        n_future = 3
+        params = self._make_params(n_history=n_history, n_future=n_future)
+        wrapper = MultiStepWrapper(params, self._make_handle())
+        wrapper.train()
+
+        in_chans = (n_history + 1) * self.C
+        inp = torch.randn(self.B, in_chans, self.H, self.W)
+        out = wrapper(inp)
+
+        # rollout output: (B, (n_future+1)*C, H, W) — predictions concatenated along channel dim
+        self.assertEqual(out.shape, (self.B, (n_future + 1) * self.C, self.H, self.W))
+
+        # k-th block must equal 2^(k+1) * (last-C slice of inp): each step scales
+        # the previous prediction by 2, and append_history places that prediction
+        # at the most-recent position for the next call
+        last = inp[:, -self.C :]
+        for k in range(n_future + 1):
+            block = out[:, k * self.C : (k + 1) * self.C]
+            self.assertTrue(
+                compare_tensors(
+                    f"multistep_train_step_{k}_h{n_history}",
+                    block,
+                    (2.0 ** (k + 1)) * last,
+                    verbose=False,
+                )
+            )
+
+    # ------------------------------------------------------------------
+    # MultiStepWrapper — eval mode collapses to a single forward
+    # ------------------------------------------------------------------
+
+    def test_multistep_eval_is_single_step(self):
+        n_future = 2
+        params = self._make_params(n_history=0, n_future=n_future)
+        wrapper = MultiStepWrapper(params, self._make_handle())
+        wrapper.eval()
+        inp = torch.randn(self.B, self.C, self.H, self.W)
+        out = wrapper(inp)
+        # _forward_eval returns one step regardless of n_future
+        self.assertEqual(out.shape, (self.B, self.C, self.H, self.W))
+        self.assertTrue(compare_tensors("multistep_eval", out, 2.0 * inp, verbose=False))
+
+    def test_train_eval_dispatch(self):
+        params = self._make_params(n_history=0, n_future=2)
+        wrapper = MultiStepWrapper(params, self._make_handle())
+        inp = torch.randn(self.B, self.C, self.H, self.W)
+
+        wrapper.train()
+        out_train = wrapper(inp)
+        self.assertEqual(out_train.shape[1], (params.n_future + 1) * self.C)
+
+        wrapper.eval()
+        out_eval = wrapper(inp)
+        self.assertEqual(out_eval.shape[1], self.C)
+
+    # ------------------------------------------------------------------
+    # push_forward: same numerics, but a strictly truncated gradient through
+    # the rollout (each step's input is detached, so gradients only flow one
+    # step at a time)
+    # ------------------------------------------------------------------
+
+    def test_push_forward_matches_no_push(self):
+        n_future = 2
+        inp = torch.randn(self.B, self.C, self.H, self.W)
+
+        wrapper_off = MultiStepWrapper(self._make_params(n_future=n_future, push_forward=False), self._make_handle())
+        wrapper_on = MultiStepWrapper(self._make_params(n_future=n_future, push_forward=True), self._make_handle())
+        wrapper_off.train()
+        wrapper_on.train()
+
+        out_off = wrapper_off(inp)
+        out_on = wrapper_on(inp)
+        self.assertTrue(compare_tensors("push_forward_values", out_off, out_on, verbose=False))
+
+    def test_push_forward_truncates_gradient(self):
+        # use ones() so the gradient takes a known closed form and we can
+        # check exact values rather than just an inequality
+        n_future = 2
+        inp = torch.ones(self.B, self.C, self.H, self.W)
+
+        wrapper_off = MultiStepWrapper(self._make_params(n_future=n_future, push_forward=False), self._make_handle())
+        wrapper_on = MultiStepWrapper(self._make_params(n_future=n_future, push_forward=True), self._make_handle())
+        wrapper_off.train()
+        wrapper_on.train()
+
+        # loss = sum of all rollout outputs. With dummy model `pred = scale * last_C(inp)`
+        # and inp=ones, loss reduces to (scale + scale^2 + scale^3) * B*C*H*W.
+        # d/d(scale) without push_forward = (1 + 2*scale + 3*scale^2) * B*C*H*W
+        # d/d(scale) with push_forward    = (1 +   scale +   scale^2) * B*C*H*W
+        # (push_forward detaches each step's input, so dpred_k/dscale only sees
+        #  the direct multiplication, not the chain through earlier scales)
+        wrapper_off(inp).sum().backward()
+        wrapper_on(inp).sum().backward()
+
+        bchw = self.B * self.C * self.H * self.W
+        scale = 2.0
+        expected_off = (1.0 + 2.0 * scale + 3.0 * scale * scale) * bchw
+        expected_on = (1.0 + scale + scale * scale) * bchw
+
+        g_off = wrapper_off.model.scale.grad.item()
+        g_on = wrapper_on.model.scale.grad.item()
+
+        self.assertAlmostEqual(g_off, expected_off, places=3)
+        self.assertAlmostEqual(g_on, expected_on, places=3)
+        # sanity: truncating the rollout strictly reduces gradient magnitude
+        self.assertGreater(g_off, g_on)
+
+
+# ---------------------------------------------------------------------------
+# Model entry points and PhysicsNeMo compatibility
+# ---------------------------------------------------------------------------
+
+
+class TestEntryPoints(unittest.TestCase):
+
+    def setUp(self):
+        self.model_entry_points = {
+            entry_point.name: entry_point
+            for entry_point in entry_points(group="physicsnemo.models")
+            if not entry_point.value.startswith("physicsnemo.experimental.models")
+        }
+
+    @parameterized.expand(["SFNO"])
+    def test_model_entry_points(self, model_name):
+        """Test model entry points"""
+
+        # Check the model entry point.
+        model_ep = self.model_entry_points.get(model_name)
+        with self.subTest(desc="model entry point is not None"):
+            self.assertIsNotNone(model_ep)
+
+        # Try loading the model type.
+        model_type = model_ep.load()
+        with self.subTest(desc="model type is not None"):
+            self.assertIsNotNone(model_type)
+
+        # Create the model.
+        model = model_type()
+        with self.subTest(desc="model is not None"):
+            self.assertIsNotNone(model)
+
+
+class TestPhysicsNeMoCompat(unittest.TestCase):
+    """Guards the PhysicsNeMo 1.x/2.x compatibility contract.
+
+    PhysicsNeMo 2.0 made ``Module.from_torch`` registration opt-in and changed
+    the generated class name. Both changes are silent -- the old call still
+    succeeds, it just stops registering -- so nothing else in the suite would
+    catch a regression here. These tests assert the behavior makani relies on,
+    which :mod:`makani.models.physicsnemo_compat` normalizes across versions.
+    """
+
+    @parameterized.expand(
+        [
+            ("SFNO", "makani.models.networks.sfnonet", "SphericalFourierNeuralOperatorNet"),
+            ("FNO", "makani.models.networks.sfnonet", "FourierNeuralOperatorNet"),
+            ("FCN3", "makani.models.networks.fourcastnet3", "AtmoSphericNeuralOperatorNet"),
+            ("FCN3", "makani.models.networks.fourcastnet3_1", "AtmoSphericNeuralOperatorNet31"),
+        ]
+    )
+    def test_registered_under_legacy_name(self, attr, module_name, torch_class_name):
+        """The wrapped class keeps its 1.x name and stays in the model registry."""
+        import importlib
+
+        from makani.models.physicsnemo_compat import get_model_registry, legacy_registered_name
+
+        ModelRegistry = get_model_registry()
+
+        module = importlib.import_module(module_name)
+        wrapped = getattr(module, attr)
+        expected = legacy_registered_name(getattr(module, torch_class_name))
+
+        with self.subTest(desc="class name matches the PhysicsNeMo 1.x name"):
+            self.assertEqual(wrapped.__name__, expected)
+
+        # Registration is what from_checkpoint resolves against; on 2.x it only
+        # happens because the compat helper passes register=True.
+        with self.subTest(desc="class is registered"):
+            self.assertIn(expected, ModelRegistry().list_models())
+
+    def test_metadata_does_not_set_deprecated_name(self):
+        """Constructing the metadata must not emit a DeprecationWarning.
+
+        ``ModelMetaData.name`` is deprecated and inert on 2.x. makani keeps it
+        off the dataclasses and applies it via the compat helper instead.
+        """
+        from makani.models.networks.sfnonet import SphericalFourierNeuralOperatorNetMetaData
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            SphericalFourierNeuralOperatorNetMetaData()
+
+        offenders = [w for w in caught if issubclass(w.category, DeprecationWarning) and "name" in str(w.message)]
+        self.assertEqual(offenders, [], f"metadata set a deprecated field: {[str(w.message) for w in offenders]}")
+
+
+# ---------------------------------------------------------------------------
+# Loading models without resampled shapes
+# ---------------------------------------------------------------------------
+
+
+class TestResampledShapeFallback(unittest.TestCase):
+    """``img_shape_{x,y}_resampled`` must be optional outside training.
+
+    The resampled shapes are populated at runtime from the dataset (Driver copies
+    them from the dataloader), so they are absent from model packages written
+    before resampling existed and from params assembled by external callers such
+    as earth2studio, which do not pass input shapes at all.
+
+    Consumers read them unconditionally -- ``model_registry.get_model``,
+    ``Preprocessor2D`` and ``ModelWrapper`` -- so without a fallback loading an
+    older SFNO package fails with
+
+        AttributeError: 'ParamsBase' object has no attribute 'img_shape_x_resampled'
+
+    Falling back to the unresampled shape is correct in exactly these cases,
+    since no resampling took place.
+    """
+
+    def setUp(self):
+        set_seed(333)
+
+    def _params_without_resampled(self, nettype):
+        """Params as an older package / an external caller would supply them."""
+        params = get_default_parameters()
+        params.nettype = nettype
+        params.img_shape_x = 36
+        params.img_shape_y = 72
+        params.img_local_shape_x = params.img_crop_shape_x = params.img_shape_x
+        params.img_local_shape_y = params.img_crop_shape_y = params.img_shape_y
+        # deliberately NOT set: img_shape_x_resampled / img_shape_y_resampled
+        for key in ("img_shape_x_resampled", "img_shape_y_resampled"):
+            if hasattr(params, key):
+                delattr(params, key)
+            params.params.pop(key, None)
+        return params
+
+    # -- the helper itself ---------------------------------------------------
+
+    def test_fills_from_unresampled(self):
+        params = self._params_without_resampled("SFNO")
+        ensure_resampled_shapes(params)
+        self.assertEqual(params.img_shape_x_resampled, 36)
+        self.assertEqual(params.img_shape_y_resampled, 72)
+
+    def test_does_not_overwrite_explicit_values(self):
+        """A genuinely resampled config must survive untouched."""
+        params = self._params_without_resampled("SFNO")
+        params.img_shape_x_resampled = 18
+        params.img_shape_y_resampled = 36
+        ensure_resampled_shapes(params)
+        self.assertEqual(params.img_shape_x_resampled, 18)
+        self.assertEqual(params.img_shape_y_resampled, 36)
+
+    def test_is_idempotent(self):
+        params = self._params_without_resampled("SFNO")
+        ensure_resampled_shapes(params)
+        ensure_resampled_shapes(params)
+        self.assertEqual(params.img_shape_x_resampled, 36)
+
+    def test_none_is_treated_as_absent(self):
+        """Driver leaves these as None when no dataset is attached."""
+        params = self._params_without_resampled("SFNO")
+        params.img_shape_x_resampled = None
+        params.img_shape_y_resampled = None
+        ensure_resampled_shapes(params)
+        self.assertEqual(params.img_shape_x_resampled, 36)
+        self.assertEqual(params.img_shape_y_resampled, 72)
+
+    def test_missing_both_raises_clearly(self):
+        """With no shape at all, fail with an actionable message rather than an
+        AttributeError from deep inside model construction."""
+        params = ParamsBase()
+        params.update_params({"nettype": "SFNO"})
+        with self.assertRaises(AttributeError) as cm:
+            ensure_resampled_shapes(params)
+        self.assertIn("img_shape_x", str(cm.exception))
+
+    # -- the reported failure ------------------------------------------------
+
+    @parameterized.expand([("SFNO",), ("FNO",), ("FCN3",)])
+    def test_get_model_without_resampled_shapes(self, nettype):
+        """Regression: this is the exact path that raised for older packages."""
+        params = self._params_without_resampled(nettype)
+        model = model_registry.get_model(params, multistep=False)
+
+        # the fallback must have populated params for the downstream consumers
+        # (Preprocessor2D reads them from this same object)
+        self.assertEqual(params.img_shape_x_resampled, params.img_shape_x)
+        self.assertEqual(params.img_shape_y_resampled, params.img_shape_y)
+
+        inp = torch.randn(1, params.N_in_channels, params.img_shape_x, params.img_shape_y)
+        out = model(inp)
+        self.assertEqual(out.shape, (1, params.N_out_channels, params.img_shape_x, params.img_shape_y))
+        self.assertTrue(torch.isfinite(out).all())
 
 
 if __name__ == "__main__":
