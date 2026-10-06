@@ -1772,7 +1772,7 @@ class TestConvert(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# NCAR against ARCO-ERA5, over the network
+# NCAR against ARCO-ERA5, read from the public archives
 # ---------------------------------------------------------------------------
 #
 # Cross check of the NCAR source against ARCO-ERA5, read through the WB2 source.
@@ -1787,7 +1787,7 @@ class TestConvert(unittest.TestCase):
 # alike.
 #
 # The test reads about a gigabyte from the public S3 and GCS buckets, so it only
-# runs when ``MAKANI_TEST_NETWORK=1`` is set. It prints the metrics, which is what
+# runs when ``MAKANI_TEST_REMOTE_DATA=1`` is set. It prints the metrics, which is what
 # the margins below were meant to be calibrated from.
 #
 # Total precipitation is left out: ARCO stores it hourly, while the WB2 source
@@ -1849,7 +1849,7 @@ def _normalized_error(values, reference):
 
 
 @unittest.skipUnless(
-    os.environ.get("MAKANI_TEST_NETWORK") == "1", "reads from public buckets, set MAKANI_TEST_NETWORK=1"
+    os.environ.get("MAKANI_TEST_REMOTE_DATA") == "1", "reads from public buckets, set MAKANI_TEST_REMOTE_DATA=1"
 )
 @unittest.skipUnless(_have_network_dependencies(), "needs s3fs, gcsfs, xarray and zarr")
 class TestNcarVsArco(unittest.TestCase):
