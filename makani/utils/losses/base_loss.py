@@ -240,7 +240,6 @@ def _compute_channel_weighting_helper(
     return channel_weights
 
 
-@dataclass
 def abs_pow(x: torch.Tensor, exponent: float, eps: float = 1.0e-12) -> torch.Tensor:
     """``|x| ** exponent`` with a finite gradient where ``x`` vanishes.
 
@@ -260,6 +259,7 @@ def abs_pow(x: torch.Tensor, exponent: float, eps: float = 1.0e-12) -> torch.Ten
     return torch.where(small, 0.0, torch.where(small, eps, x).pow(exponent))
 
 
+@dataclass
 class LossType(object):
     Deterministic = 1
     Probabilistic = 2
