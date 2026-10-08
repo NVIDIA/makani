@@ -607,6 +607,11 @@ def init_wb2_zarr_dataset(
     return train_path, num_train, test_path, num_test, stats_path, metadata_path, None
 
 
+def _is_inexact_tensor(tensor):
+    # floating point or complex
+    return tensor.is_floating_point() or tensor.is_complex()
+
+
 def compare_tensors(msg, tensor1, tensor2, atol=1e-8, rtol=1e-5, verbose=False, shape_check=False):
     # shape_check: require identical shapes, since torch.allclose broadcasts and
     # would otherwise let a tensor of the wrong shape pass on matching values
@@ -626,6 +631,18 @@ def compare_tensors(msg, tensor1, tensor2, atol=1e-8, rtol=1e-5, verbose=False, 
         allclose = False
         if verbose:
             print(f"Shape mismatch on {msg}: {tuple(tensor1.shape)} vs {tuple(tensor2.shape)}")
+    elif not (_is_inexact_tensor(tensor1) or _is_inexact_tensor(tensor2)):
+        # integers of any width (or bools): exact, and no difference statistics, since
+        # bools cannot be subtracted, integer tensors have no mean, and unsigned
+        # differences wrap around
+        tensor1, tensor2 = torch.broadcast_tensors(tensor1, tensor2)
+        mismatch = (tensor1 != tensor2).flatten()
+        allclose = not bool(mismatch.any())
+        if not allclose and verbose:
+            first = int(mismatch.nonzero()[0])
+            print(
+                f"{int(mismatch.sum())} mismatching elements on {msg}, first at flat index {first}: {tensor1.flatten()[first]} and {tensor2.flatten()[first]}"
+            )
     else:
         diff = torch.abs(tensor1 - tensor2)
         abs_diff = torch.mean(diff, dim=0)
@@ -652,6 +669,11 @@ def compare_tensors(msg, tensor1, tensor2, atol=1e-8, rtol=1e-5, verbose=False, 
     return allclose
 
 
+def _is_inexact(array):
+    # floating point or complex
+    return np.issubdtype(np.asarray(array).dtype, np.inexact)
+
+
 def compare_arrays(msg, array1, array2, atol=1e-8, rtol=1e-5, verbose=False, shape_check=False):
     # shape_check: require identical shapes, since np.allclose broadcasts and
     # would otherwise let an array of the wrong shape pass on matching values
@@ -670,6 +692,17 @@ def compare_arrays(msg, array1, array2, atol=1e-8, rtol=1e-5, verbose=False, sha
         allclose = False
         if verbose:
             print(f"Shape mismatch on {msg}: {np.shape(array1)} vs {np.shape(array2)}")
+    elif not (_is_inexact(array1) or _is_inexact(array2)):
+        # integers of any width (or bools): exact, and no difference statistics, since
+        # bools cannot be subtracted and unsigned differences wrap around
+        array1, array2 = np.broadcast_arrays(array1, array2)
+        mismatch = (array1 != array2).flatten()
+        allclose = not mismatch.any()
+        if not allclose and verbose:
+            first = int(np.flatnonzero(mismatch)[0])
+            print(
+                f"{int(mismatch.sum())} mismatching elements on {msg}, first at flat index {first}: {array1.flatten()[first]} and {array2.flatten()[first]}"
+            )
     else:
         # some sanitization
         if array1.ndim == 0:
