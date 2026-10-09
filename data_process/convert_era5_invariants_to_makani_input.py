@@ -137,18 +137,26 @@ def convert(
     if verbose:
         print(f"Extracting {len(channel_names)} invariants on a {len(lat)}x{len(lon)} grid: {', '.join(channel_names)}")
 
-    f = _create_output_file(output_file, entry_key, channel_names, lat, lon)
-
-    # populate fields; channels the source cannot provide are written as missing
-    source.fill(f, entry_key)
-    skipped_channels = source.skipped_channel_indices()
-    if skipped_channels:
-        _write_missing(f, entry_key, skipped_channels)
-
-    f.close()
-
-    summary = source.summary()
-    source.close()
+    # Write to a temporary file and move it into place only once it is complete:
+    # a failed run must not leave a partial file behind, which the next run
+    # would otherwise skip as already converted.
+    tmp_file = f"{output_file}.{os.getpid()}.part"
+    try:
+        f = _create_output_file(tmp_file, entry_key, channel_names, lat, lon)
+        try:
+            # populate fields; channels the source cannot provide are written as missing
+            source.fill(f, entry_key)
+            skipped_channels = source.skipped_channel_indices()
+            if skipped_channels:
+                _write_missing(f, entry_key, skipped_channels)
+        finally:
+            f.close()
+        os.replace(tmp_file, output_file)
+        summary = source.summary()
+    finally:
+        source.close()
+        if os.path.isfile(tmp_file):
+            os.remove(tmp_file)
 
     # end time
     end_time = time.perf_counter()

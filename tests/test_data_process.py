@@ -1947,6 +1947,19 @@ class _FakeInvariantSource(InvariantSource):
         return [len(self.channel_names) - 1]
 
 
+class _FailingInvariantSource(_FakeInvariantSource):
+    """Fails after writing the first channel, as an interrupted download would."""
+
+    closed = False
+
+    def fill(self, out, entry_key):
+        out[entry_key][0, ...] = np.zeros((len(self.lat), len(self.lon)), dtype=np.float32)
+        raise FileNotFoundError("lost connection")
+
+    def close(self):
+        _FailingInvariantSource.closed = True
+
+
 class TestConvertInvariants(unittest.TestCase):
     """A full invariant conversion with a source that skips a channel."""
 
@@ -1989,6 +2002,21 @@ class TestConvertInvariants(unittest.TestCase):
         self._convert(force_overwrite=True)
         with h5.File(self.output_file, "r") as f:
             self.assertEqual(f["fields"].shape, (3, len(_LAT), len(_LON)))
+
+    def test_failed_conversion_leaves_no_file_behind(self):
+        from data_process.convert_era5_invariants_to_makani_input import convert
+
+        _FailingInvariantSource.closed = False
+        with self.assertRaises(FileNotFoundError):
+            convert(_FailingInvariantSource, self.output_file, self.metadata_file, ["z", "lsm", "slt"])
+
+        # neither the output nor its temporary file, so that a rerun converts afresh
+        self.assertEqual(os.listdir(self._tmpdir.name), ["metadata.json"])
+        self.assertTrue(_FailingInvariantSource.closed)
+
+        self._convert()
+        with h5.File(self.output_file, "r") as f:
+            self.assertTrue(np.all(f["fields"][1] == 1))
 
     def test_command_line_defaults_to_all_invariants(self):
         from data_process.convert_era5_invariants_to_makani_input import build_parser
