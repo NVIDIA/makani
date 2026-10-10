@@ -31,6 +31,60 @@ from makani.utils.YParams import ParamsBase, ensure_resampled_shapes
 from makani.models import SingleStepWrapper, MultiStepWrapper
 from makani.models import StochasticInterpolantWrapper
 from makani.utils.dataloaders.data_helpers import get_data_normalization
+from makani.utils.features import get_wind_channels
+
+
+def _check_vector_wind_normalization(bias, scale, channel_names: List[str], nettype: str) -> None:
+    r"""
+    Guard for models that encode the wind as a vector field.
+
+    Such models (those with ``requires_vector_wind_normalization = True``) need
+    statistics in which every ``u``/``v`` pair has zero mean and one shared
+    scale, as produced by ``data_process/get_stats.py --wind_angle_aware``. A
+    componentwise mean would make normalization subtract a constant vector
+    field, which is singular at the poles and not band-limited, and the model
+    would silently train on that. Nothing in the normalization files says how
+    they were made, so this is checked at model construction instead.
+
+    Parameters
+    ----------
+    bias, scale : array-like or None
+        Per-channel normalization, in the order of ``channel_names``.
+    channel_names : list of str
+        Output channel names.
+    nettype : str
+        Model name, for the error message.
+
+    Raises
+    ------
+    ValueError
+        If a wind component has a nonzero bias or the two components of a
+        pair have different scales.
+    """
+    if bias is None or scale is None:
+        return
+
+    wind = get_wind_channels(list(channel_names))
+    if len(wind) == 0:
+        return
+
+    bias = torch.as_tensor(bias, dtype=torch.float64).flatten()
+    scale = torch.as_tensor(scale, dtype=torch.float64).flatten()
+    u_idx, v_idx = wind[0::2], wind[1::2]
+
+    bad = [channel_names[c] for c in wind if abs(float(bias[c])) > 1e-6 * float(scale[c])]
+    if bad:
+        raise ValueError(
+            f"{nettype} encodes the wind as a vector field and requires zero normalization bias on wind components, "
+            f"but got a nonzero bias for {bad}. Recompute the statistics with get_stats.py --wind_angle_aware."
+        )
+
+    bad = [(channel_names[u], channel_names[v]) for u, v in zip(u_idx, v_idx) if not torch.isclose(scale[u], scale[v], rtol=1e-5)]
+    if bad:
+        raise ValueError(
+            f"{nettype} requires one shared normalization scale per wind pair, but the scales differ for {bad}. "
+            f"Recompute the statistics with get_stats.py --wind_angle_aware."
+        )
 
 
 def _construct_registry() -> dict:
@@ -216,6 +270,9 @@ def get_model(
             if bias is not None and scale is not None:
                 model_kwargs["normalization_means"] = bias
                 model_kwargs["normalization_stds"] = scale
+
+            if getattr(model_handle, "requires_vector_wind_normalization", False):
+                _check_vector_wind_normalization(bias, scale, params.channel_names, params.nettype)
 
         hydrostatic_balance_means = params.get("hydrostatic_balance_means_path", None)
         if hydrostatic_balance_means is not None:

@@ -591,6 +591,9 @@ class SphericalFourierNeuralOperatorNetV3(nn.Module):
         Ignored; present so model configs can pass extra keys.
     """
 
+    # makes get_model refuse normalization statistics with componentwise wind means
+    requires_vector_wind_normalization = True
+
     def __init__(
         self,
         inp_shape=(721, 1440),

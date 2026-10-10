@@ -19,6 +19,7 @@ import unittest
 
 import torch
 
+from makani.models.model_registry import _check_vector_wind_normalization
 from makani.models.networks.sfnonet_v3 import SphericalFourierNeuralOperatorNetV3, _compute_channel_layout
 from .testutils import disable_tf32, set_seed
 
@@ -97,6 +98,25 @@ class TestSFNOv3(unittest.TestCase):
             out = model(inp)
             out_rot = model(torch.roll(inp, shift, dims=-1))
         self.assertTrue(torch.allclose(torch.roll(out, shift, dims=-1), out_rot, atol=1e-4, rtol=1e-4))
+
+    def test_vector_wind_normalization_guard(self):
+        self.assertTrue(SphericalFourierNeuralOperatorNetV3.requires_vector_wind_normalization)
+        scale = torch.tensor([3.0, 3.0, 1.0, 9.0, 9.0, 1.0])
+        bias = torch.tensor([0.0, 0.0, 280.0, 0.0, 0.0, 5000.0])
+        _check_vector_wind_normalization(bias, scale, CHANNEL_NAMES, "SFNOv3")
+        # stats without wind pairs or without normalization pass trivially
+        _check_vector_wind_normalization(bias, scale, ["t2m"] * 6, "SFNOv3")
+        _check_vector_wind_normalization(None, None, CHANNEL_NAMES, "SFNOv3")
+        # componentwise wind means, as plain z-scoring produces
+        with self.assertRaisesRegex(ValueError, "u500"):
+            bad_bias = bias.clone()
+            bad_bias[3] = 6.65
+            _check_vector_wind_normalization(bad_bias, scale, CHANNEL_NAMES, "SFNOv3")
+        # componentwise wind scales
+        with self.assertRaisesRegex(ValueError, "u10m"):
+            bad_scale = scale.clone()
+            bad_scale[1] = 2.5
+            _check_vector_wind_normalization(bias, bad_scale, CHANNEL_NAMES, "SFNOv3")
 
     def test_wind_roundtrip(self):
         # a band-limited vector field passes projection and synthesis unchanged
