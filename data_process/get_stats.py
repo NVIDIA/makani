@@ -193,18 +193,16 @@ def get_file_stats(
                 }
 
             if wind_indices is not None:
+                # the wind is a tangent vector field: a constant vector field has no meaning on the sphere,
+                # so the mean is zero by definition and the scale is the second moment about zero, shared by
+                # both components. With all partial means zero the Welford merge reduces to summing m2.
                 u_tens = tdata[:, wind_indices[0]]
                 v_tens = tdata[:, wind_indices[1]]
-                wind_magnitude = torch.sqrt(torch.square(u_tens) + torch.square(v_tens))
-                wind_masked, wind_valid_mask = mask_data(wind_magnitude)
+                wind_sq = torch.square(u_tens) + torch.square(v_tens)
+                wind_masked, wind_valid_mask = mask_data(wind_sq)
                 wind_valid_count = torch.sum(quadrature(wind_valid_mask), dim=0)
-                wind_mean = (
-                    torch.sum(quadrature(wind_masked * wind_valid_mask), dim=0, keepdim=False).reshape(1, -1, 1, 1)
-                    / wind_valid_count[None, :, None, None]
-                )
-                wind_m2 = torch.sum(
-                    quadrature(torch.square(wind_masked - wind_mean) * wind_valid_mask), dim=0, keepdim=False
-                ).reshape(1, -1, 1, 1)
+                wind_mean = torch.zeros((1, wind_sq.shape[1], 1, 1), dtype=torch.float64, device=device)
+                wind_m2 = torch.sum(quadrature(wind_masked * wind_valid_mask), dim=0, keepdim=False).reshape(1, -1, 1, 1)
                 tmpstats["wind_meanvar"] = {
                     "type": "meanvar",
                     "counts": wind_valid_count.clone(),
@@ -212,21 +210,15 @@ def get_file_stats(
                 }
 
                 if counts_timediff != 0:
+                    # same treatment for the wind tendency
                     udiff_tens = tdiff[:, wind_indices[0]]
                     vdiff_tens = tdiff[:, wind_indices[1]]
-                    winddiff_magnitude = torch.sqrt(torch.square(udiff_tens) + torch.square(vdiff_tens))
-                    winddiff_masked, winddiff_valid_mask = mask_data(winddiff_magnitude)
+                    winddiff_sq = torch.square(udiff_tens) + torch.square(vdiff_tens)
+                    winddiff_masked, winddiff_valid_mask = mask_data(winddiff_sq)
                     winddiff_valid_count = torch.sum(quadrature(winddiff_valid_mask), dim=0)
-                    winddiff_mean = (
-                        torch.sum(quadrature(winddiff_masked * winddiff_valid_mask), dim=0, keepdim=False).reshape(
-                            1, -1, 1, 1
-                        )
-                        / winddiff_valid_count[None, :, None, None]
-                    )
+                    winddiff_mean = torch.zeros((1, winddiff_sq.shape[1], 1, 1), dtype=torch.float64, device=device)
                     winddiff_m2 = torch.sum(
-                        quadrature(torch.square(winddiff_masked - winddiff_mean) * winddiff_valid_mask),
-                        dim=0,
-                        keepdim=False,
+                        quadrature(winddiff_masked * winddiff_valid_mask), dim=0, keepdim=False
                     ).reshape(1, -1, 1, 1)
                     tmpstats["winddiff_meanvar"] = {
                         "type": "meanvar",
@@ -552,27 +544,27 @@ def get_stats(
             stats["time_diff_meanvar"]["values"][1, ...] / stats["time_diff_meanvar"]["counts"][None, :, None, None]
         )
 
-        # overwrite the wind channels
+        # overwrite the wind channels: zero mean and, per component, the RMS sqrt(E[u^2 + v^2] / 2), so that
+        # normalization rescales the wind vectors without subtracting a constant vector field
         if wind_channels is not None:
             stats["wind_meanvar"]["values"][1, ...] = np.sqrt(
-                stats["wind_meanvar"]["values"][1, ...] / stats["wind_meanvar"]["counts"][None, :, None, None]
+                stats["wind_meanvar"]["values"][1, ...] / stats["wind_meanvar"]["counts"][None, :, None, None] / 2.0
             )
             # there is a numpy bug here: if the leading dim is singleton and the second dim gets selected, the
             # dims are swapped afterwards. Working around this by making use of the fact that batch dim is singleton:
-            stats["global_meanvar"]["values"][1, 0, wind_channels[0], ...] = stats["wind_meanvar"]["values"][1, 0, ...]
-            stats["global_meanvar"]["values"][1, 0, wind_channels[1], ...] = stats["wind_meanvar"]["values"][1, 0, ...]
+            for comp in wind_channels:
+                stats["global_meanvar"]["values"][0, 0, comp, ...] = 0.0
+                stats["global_meanvar"]["values"][1, 0, comp, ...] = stats["wind_meanvar"]["values"][1, 0, ...]
 
             # same for wind diffs
             stats["winddiff_meanvar"]["values"][1, ...] = np.sqrt(
-                stats["winddiff_meanvar"]["values"][1, ...] / stats["winddiff_meanvar"]["counts"][None, :, None, None]
+                stats["winddiff_meanvar"]["values"][1, ...]
+                / stats["winddiff_meanvar"]["counts"][None, :, None, None]
+                / 2.0
             )
-            # again, only overwrite stds:
-            stats["time_diff_meanvar"]["values"][1, 0, wind_channels[0]] = stats["winddiff_meanvar"]["values"][
-                1, 0, ...
-            ]
-            stats["time_diff_meanvar"]["values"][1, 0, wind_channels[1]] = stats["winddiff_meanvar"]["values"][
-                1, 0, ...
-            ]
+            for comp in wind_channels:
+                stats["time_diff_meanvar"]["values"][0, 0, comp, ...] = 0.0
+                stats["time_diff_meanvar"]["values"][1, 0, comp, ...] = stats["winddiff_meanvar"]["values"][1, 0, ...]
 
         # save the stats
         np.save(
@@ -653,7 +645,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--wind_angle_aware",
         action="store_true",
-        help="Just compute mean and magnitude of wind vectors and not componentwise stats",
+        help="Treat u/v pairs as vector fields: zero mean and one shared scale sqrt(E[u^2 + v^2] / 2) per pair, "
+        "instead of componentwise means and stds",
     )
     parser.add_argument(
         "--fail_on_nan", action="store_true", help="When computing stats, code will fail if NaN values are encountered."

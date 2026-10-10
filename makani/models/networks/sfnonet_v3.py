@@ -42,14 +42,11 @@ A cleaned-up, purely spectral SFNO. Compared to :mod:`makani.models.networks.sfn
 * The spectral filter is the linear :class:`~makani.models.common.SpectralConv`
   with one complex weight per degree :math:`\ell` (``"dhconv"``). There is no
   DISCO convolution and no spectral attention.
-* Z-scoring subtracts a constant from ``u`` and ``v``, i.e. the vector field
-  :math:`\bar u\,\hat e_\lambda + \bar v\,\hat e_\phi`, which is singular at the
-  poles and not band-limited. The model adds that bias back (in normalized
-  units) before every vector transform and removes it after every inverse, so
-  the transforms always see the physical wind up to a common scale. This
-  needs the ``normalization_means``/``normalization_stds`` that
-  :func:`~makani.models.model_registry.get_model` passes; without them the
-  offsets are zero.
+* The vector transforms assume that normalization did not subtract a constant
+  from ``u`` and ``v``: a constant vector field is singular at the poles and
+  not band-limited, so a per-component mean would leak into every mode.
+  Statistics computed with ``get_stats.py --wind_angle_aware`` have zero wind
+  means and one shared scale per pair, which is what this model expects.
 * Initialization keeps the variance of the residual stream: blocks are
   pre-norm with a :class:`~makani.models.common.LayerScale` on the branch,
   every linear map is drawn with ``gain / fan_in`` for a unit-variance output,
@@ -267,7 +264,7 @@ class SphericalProjection(nn.Module):
         self.vsht = _make_transform("vsht", *shape, grid_type, lmax)
         self.register_buffer("wind_scale", wind_scale.clone(), persistent=False)
 
-    def forward(self, x, scalar_channels, wind_channels, wind_offset=None):
+    def forward(self, x, scalar_channels, wind_channels):
         r"""
         Parameters
         ----------
@@ -277,9 +274,6 @@ class SphericalProjection(nn.Module):
             Indices of the scalar channels.
         wind_channels : torch.Tensor
             Flat indices ``[u0, v0, u1, v1, ...]`` of the wind pairs; may be empty.
-        wind_offset : torch.Tensor, optional
-            Per-channel constant of shape ``(len(wind_channels),)`` added to the
-            wind components before the transform, to undo the normalization bias.
 
         Returns
         -------
@@ -295,10 +289,8 @@ class SphericalProjection(nn.Module):
             wind_coeffs = None
             if wind_channels.numel() > 0:
                 B, _, H, W = x.shape
-                wind = x[:, wind_channels]
-                if wind_offset is not None:
-                    wind = wind + wind_offset.reshape(1, -1, 1, 1)
-                wind_coeffs = self.vsht(wind.reshape(B, -1, 2, H, W)) * self.wind_scale
+                wind = x[:, wind_channels].reshape(B, -1, 2, H, W)
+                wind_coeffs = self.vsht(wind) * self.wind_scale
         return scalar_coeffs, wind_coeffs
 
 
@@ -324,7 +316,7 @@ class SphericalSynthesis(nn.Module):
         self.ivsht = _make_transform("ivsht", *shape, grid_type, lmax)
         self.register_buffer("wind_scale", wind_scale.clone(), persistent=False)
 
-    def forward(self, scalar_coeffs, wind_coeffs, inverse_permutation, wind_offset=None):
+    def forward(self, scalar_coeffs, wind_coeffs, inverse_permutation):
         r"""
         Parameters
         ----------
@@ -333,8 +325,6 @@ class SphericalSynthesis(nn.Module):
         inverse_permutation : torch.Tensor
             Channel order that restores the original layout from the
             concatenation ``[scalars, u0, v0, u1, v1, ...]``.
-        wind_offset : torch.Tensor, optional
-            The offset the projection added; subtracted from the wind components.
 
         Returns
         -------
@@ -346,10 +336,7 @@ class SphericalSynthesis(nn.Module):
             if wind_coeffs is not None:
                 wind = self.ivsht(wind_coeffs / self.wind_scale)
                 B, _, _, H, W = wind.shape
-                wind = wind.reshape(B, -1, H, W)
-                if wind_offset is not None:
-                    wind = wind - wind_offset.reshape(1, -1, 1, 1)
-                fields.append(wind)
+                fields.append(wind.reshape(B, -1, H, W))
             x = torch.cat(fields, dim=1)[:, inverse_permutation]
         return x
 
@@ -600,10 +587,6 @@ class SphericalFourierNeuralOperatorNetV3(nn.Module):
     checkpointing_level : int, optional
         Gradient checkpointing: 1 for encoder/decoder, 2 adds the MLPs, 3 adds
         whole blocks. By default ``0``.
-    normalization_means, normalization_stds : array-like, optional
-        Per-channel bias and scale of the z-scoring, in the order of
-        ``channel_names``. Used only to undo the bias on wind components
-        around the vector transforms; see the module docstring.
     **kwargs
         Ignored; present so model configs can pass extra keys.
     """
@@ -640,8 +623,6 @@ class SphericalFourierNeuralOperatorNetV3(nn.Module):
         path_drop_rate=0.0,
         mlp_drop_rate=0.0,
         checkpointing_level=0,
-        normalization_means=None,
-        normalization_stds=None,
         **kwargs,
     ):
         super().__init__()
@@ -668,10 +649,6 @@ class SphericalFourierNeuralOperatorNetV3(nn.Module):
             order = torch.tensor(layout[f"scalar_{side}"] + layout[f"wind_{side}"], dtype=torch.long)
             self.register_buffer(f"{side}_inverse_perm", torch.argsort(order), persistent=False)
         self.n_wind_pairs = len(layout["wind_out"]) // 2
-
-        # normalization bias of the wind components in normalized units (mean / std), per output
-        # wind channel and repeated for every history step on the input side
-        self._init_wind_offsets(normalization_means, normalization_stds, layout, n_history)
 
         # spectral cutoff
         self._init_cutoff(lmax, hard_thresholding_fraction)
@@ -802,26 +779,6 @@ class SphericalFourierNeuralOperatorNetV3(nn.Module):
             raise ValueError(f"lmax={lmax} must be at least 1")
         self.lmax = lmax
 
-    def _init_wind_offsets(self, means, stds, layout, n_history):
-        r"""
-        Register ``wind_offset_in`` and ``wind_offset_out``: the constants that
-        z-scoring removed from the wind components, in normalized units.
-        Zero when no statistics are given or there is no wind.
-        """
-        n_wind = len(layout["wind_out"])
-        offset_out = torch.zeros(n_wind, dtype=torch.float32)
-        if (n_wind > 0) and (means is not None) and (stds is not None):
-            means = torch.as_tensor(means, dtype=torch.float32).flatten()
-            stds = torch.as_tensor(stds, dtype=torch.float32).flatten()
-            if means.numel() != self.out_chans or stds.numel() != self.out_chans:
-                raise ValueError(
-                    f"normalization statistics have {means.numel()} / {stds.numel()} entries, expected {self.out_chans}"
-                )
-            idx = torch.tensor(layout["wind_out"], dtype=torch.long)
-            offset_out = means[idx] / stds[idx]
-        self.register_buffer("wind_offset_out", offset_out, persistent=False)
-        self.register_buffer("wind_offset_in", offset_out.repeat(n_history + 1), persistent=False)
-
     def _get_norm_layer_handle(self, normalization_layer):
         embed_dim = self.embed_dim
         if normalization_layer == "layer_norm":
@@ -853,8 +810,8 @@ class SphericalFourierNeuralOperatorNetV3(nn.Module):
 
     def encode(self, x):
         r"""Band-limit the input onto the internal grid and lift it to ``embed_dim`` channels."""
-        coeffs = self.project_in(x, self.scalar_in, self.wind_in, self.wind_offset_in)
-        x = self.synthesize_internal(*coeffs, self.in_inverse_perm, self.wind_offset_in).to(x.dtype)
+        coeffs = self.project_in(x, self.scalar_in, self.wind_in)
+        x = self.synthesize_internal(*coeffs, self.in_inverse_perm).to(x.dtype)
         if self.checkpointing_level >= 1:
             x = checkpoint(self.encoder, x, use_reentrant=False)
         else:
@@ -870,8 +827,8 @@ class SphericalFourierNeuralOperatorNetV3(nn.Module):
             x = checkpoint(self.decoder, x, use_reentrant=False)
         else:
             x = self.decoder(x)
-        coeffs = self.project_internal(x, self.scalar_out, self.wind_out, self.wind_offset_out)
-        return self.synthesize_out(*coeffs, self.out_inverse_perm, self.wind_offset_out).to(dtype)
+        coeffs = self.project_internal(x, self.scalar_out, self.wind_out)
+        return self.synthesize_out(*coeffs, self.out_inverse_perm).to(dtype)
 
     def _forward_features(self, x):
         for blk in self.blocks:
@@ -897,8 +854,8 @@ class SphericalFourierNeuralOperatorNetV3(nn.Module):
             residual = x[:, self.pred_in]
             if self.out_shape != self.inp_shape:
                 # move the skipped state through the same band limit onto the output grid
-                coeffs = self.project_in(residual, self.scalar_out, self.wind_out, self.wind_offset_out)
-                residual = self.synthesize_out(*coeffs, self.out_inverse_perm, self.wind_offset_out)
+                coeffs = self.project_in(residual, self.scalar_out, self.wind_out)
+                residual = self.synthesize_out(*coeffs, self.out_inverse_perm)
 
         x = self.encode(x)
         x = self._forward_features(x)

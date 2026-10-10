@@ -98,23 +98,15 @@ class TestSFNOv3(unittest.TestCase):
             out_rot = model(torch.roll(inp, shift, dims=-1))
         self.assertTrue(torch.allclose(torch.roll(out, shift, dims=-1), out_rot, atol=1e-4, rtol=1e-4))
 
-    def test_wind_offsets(self):
-        means = torch.arange(1.0, 7.0)
-        stds = torch.full((6,), 2.0)
-        model = self._model(normalization_means=means, normalization_stds=stds, n_history=1, inp_chans=12)
-        expected = means[[0, 1, 3, 4]] / 2.0
-        self.assertTrue(torch.equal(model.wind_offset_out.cpu(), expected))
-        self.assertTrue(torch.equal(model.wind_offset_in.cpu(), expected.repeat(2)))
-
     def test_wind_roundtrip(self):
-        # a band-limited vector field passes projection and synthesis unchanged, offsets included
-        model = self._model(normalization_means=torch.ones(6), normalization_stds=torch.ones(6))
+        # a band-limited vector field passes projection and synthesis unchanged
+        model = self._model()
         x = torch.randn(2, 6, *self.inp_shape, device=self.device)
         with torch.no_grad():
-            coeffs = model.project_in(x, model.scalar_out, model.wind_out, model.wind_offset_out)
-            x_bl = model.synthesize_out(*coeffs, model.out_inverse_perm, model.wind_offset_out)
-            coeffs = model.project_in(x_bl, model.scalar_out, model.wind_out, model.wind_offset_out)
-            x_rt = model.synthesize_out(*coeffs, model.out_inverse_perm, model.wind_offset_out)
+            coeffs = model.project_in(x, model.scalar_out, model.wind_out)
+            x_bl = model.synthesize_out(*coeffs, model.out_inverse_perm)
+            coeffs = model.project_in(x_bl, model.scalar_out, model.wind_out)
+            x_rt = model.synthesize_out(*coeffs, model.out_inverse_perm)
         self.assertTrue(torch.allclose(x_bl, x_rt, atol=1e-4, rtol=1e-4))
 
     def test_initialization(self):
@@ -128,8 +120,8 @@ class TestSFNOv3(unittest.TestCase):
         # which says nothing about the initialization
         with torch.no_grad():
             inp = torch.randn(4, model.inp_chans, *self.inp_shape, device=self.device)
-            coeffs = model.project_in(inp, model.scalar_out, model.wind_out, model.wind_offset_out)
-            inp = model.synthesize_out(*coeffs, model.out_inverse_perm, model.wind_offset_out)
+            coeffs = model.project_in(inp, model.scalar_out, model.wind_out)
+            inp = model.synthesize_out(*coeffs, model.out_inverse_perm)
             inp = inp / inp.std(dim=(-2, -1), keepdim=True)
             out = model(inp)
         for h in hooks:
