@@ -47,8 +47,23 @@ from makani.utils.dataloaders.data_helpers import parse_data_normalization_mode
 # es helper
 from makani.utils.dataloaders.data_helpers import get_data_normalization
 from makani.utils.dataloaders.data_shapes import DataShapes
+from makani.utils.dataloaders.batch import (
+    make_batch,
+    INPUT,
+    TARGET,
+    INPUT_DYNAMIC_FEATURES,
+    TARGET_DYNAMIC_FEATURES,
+    INPUT_TIMESTAMP,
+    TARGET_TIMESTAMP,
+    ZENITH,
+)
 from makani.utils.dataloaders.sample_source import SampleSource
 from makani.utils.grids import GridConverter
+
+# DALI names its outputs with flat strings: the batch keys where the batch is flat, and
+# "<side>/<feature>" for the dynamic features, which the batch nests
+_INPUT_ZENITH = f"{INPUT_DYNAMIC_FEATURES}/{ZENITH}"
+_TARGET_ZENITH = f"{TARGET_DYNAMIC_FEATURES}/{ZENITH}"
 
 
 # bump whenever the layout of the dict returned by DaliDataloader.state_dict changes
@@ -110,9 +125,8 @@ class DaliDataloader(object):
                 tzen = data[3]
                 off += 2
 
-            if self.return_timestamp:
-                itime = data[0 + off]
-                ttime = data[1 + off]
+            itime = data[0 + off]
+            ttime = data[1 + off]
 
             # upload to GPU
             if self.dali_device == "gpu":
@@ -148,14 +162,13 @@ class DaliDataloader(object):
             if self.add_zenith:
                 pout = pout + (izen, tzen)
 
-            if self.return_timestamp:
-                pout = pout + (itime, ttime)
+            pout = pout + (itime, ttime)
 
             pipeline.set_outputs(*pout)
 
         return pipeline
 
-    def __init__(self, params, location, train, seed=333, dali_device="gpu", return_timestamp=False):
+    def __init__(self, params, location, train, seed=333, dali_device="gpu"):
         # set up workers and devices
         self.num_data_workers = params.num_data_workers
         # The parallel external_source path requires py_num_workers >= 1 and uses
@@ -203,8 +216,6 @@ class DaliDataloader(object):
         self.out_channels = params.out_channels
         self.subsampling_factor = params.get("subsampling_factor", 1)
         self.add_zenith = params.get("add_zenith", False)
-        # set by the caller like for the other loaders; the trainers have no use for timestamps
-        self.return_timestamp = return_timestamp
         if hasattr(params, "lat") and hasattr(params, "lon"):
             self.lat_lon = (params.lat, params.lon)
         else:
@@ -261,7 +272,8 @@ class DaliDataloader(object):
             device_id=self.device_index,
             truncate_old=True,
             zenith_angle=self.add_zenith,
-            return_timestamp=self.return_timestamp,
+            # every batch carries its timestamps
+            return_timestamp=True,
             lat_lon=self.lat_lon,
             dataset_name=self.dataset_name,
             timestamp_name=params.get("timestamp_name", "timestamp"),
@@ -357,12 +369,11 @@ class DaliDataloader(object):
         self.pipeline = self.get_pipeline(checkpoint=checkpoint)
         self.pipeline.start_py_workers()
 
-        # create iterator
-        outnames = ["inp", "tar"]
+        # create iterator; the names follow the order of the pipeline outputs
+        outnames = [INPUT, TARGET]
         if self.add_zenith:
-            outnames += ["izen", "tzen"]
-        if self.return_timestamp:
-            outnames += ["itime", "ttime"]
+            outnames += [_INPUT_ZENITH, _TARGET_ZENITH]
+        outnames += [INPUT_TIMESTAMP, TARGET_TIMESTAMP]
 
         self.iterator = DALIGenericIterator(
             [self.pipeline],
@@ -501,26 +512,21 @@ class DaliDataloader(object):
         return self.num_steps_per_epoch
 
     def __iter__(self):
-        # self.iterator.reset()
         for token in self.iterator:
-            inp = token[0]["inp"]
-            tar = token[0]["tar"]
+            outputs = token[0]
 
-            # construct result
-            result = (inp, tar)
-
-            if self.add_zenith:
-                izen = token[0]["izen"]
-                tzen = token[0]["tzen"]
-                result = result + (izen, tzen)
-
-            # convert grid
+            # the grid is converted after DALI, which has no op for it
             with torch.no_grad():
-                result = tuple(map(lambda x: self.grid_converter(x), result))
+                inp = self.grid_converter(outputs[INPUT])
+                tar = self.grid_converter(outputs[TARGET])
+                inp_zenith = self.grid_converter(outputs[_INPUT_ZENITH]) if self.add_zenith else None
+                tar_zenith = self.grid_converter(outputs[_TARGET_ZENITH]) if self.add_zenith else None
 
-            if self.return_timestamp:
-                itime = token[0]["itime"]
-                ttime = token[0]["ttime"]
-                result = result + (itime, ttime)
-
-            yield result
+            yield make_batch(
+                inp=inp,
+                inp_timestamp=outputs[INPUT_TIMESTAMP],
+                tar=tar,
+                tar_timestamp=outputs[TARGET_TIMESTAMP],
+                inp_zenith=inp_zenith,
+                tar_zenith=tar_zenith,
+            )
