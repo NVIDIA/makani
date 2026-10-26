@@ -182,11 +182,11 @@ _metric_handler_params = [
 
 def _valid_area_reference(metric_name, fct, obs, area_weight):
     """
-    ACC, spread or SSR of every sample over the area its weights cover, averaged over the samples with valid points.
+    ACC, spread or SSR of every sample over the area its weights cover, averaged over the samples weighted by that area.
 
     area_weight are the quadrature weights times the mask, in the shape of obs.
     """
-    # a sample without valid points gives NaN, which nanmean leaves out
+    # a sample without valid points gives NaN with zero area, which nansum leaves out
     with np.errstate(invalid="ignore"):
 
         def area_mean(x):
@@ -203,7 +203,8 @@ def _valid_area_reference(metric_name, fct, obs, area_weight):
             else:
                 score = np.sqrt(spread / (area_mean(np.square(fct_mean - obs)) - spread / ens_size))
 
-    return np.nanmean(score, axis=0)
+    area = np.sum(area_weight, axis=(-2, -1))
+    return np.nansum(score * area, axis=0) / np.sum(area, axis=0)
 
 
 @parameterized_class(("device",), _devices)
@@ -447,11 +448,12 @@ class TestMetrics(unittest.TestCase):
     @parameterized.expand(["acc", "ssr", "spread"], skip_on_empty=True)
     def test_masked_metrics(self, metric_name, verbose=False):
         """
-        ACC, SSR and spread of masked data are those over the valid area, whatever the weights integrate to.
+        ACC, SSR and spread of masked data are those over the valid area of every sample, averaged over the samples
+        weighted by that area, whatever the weights integrate to.
 
         Missing target values, SST over land say, reach the metrics as zero weights. These metrics are normalized by
-        the weights of every sample already, so a sample has to count once when they are finalized. Counting it with
-        the area its weights integrate to, as for an area average, divides them by that area a second time.
+        the weights of every sample already, so forward scales every sample by its valid area, which is what
+        compute_counts counts it with, like an area average such as the L1 error.
         """
         batch_size, ensemble_size, num_channels, nlat, nlon = 4, 8, 3, 17, 32
 
@@ -466,10 +468,11 @@ class TestMetrics(unittest.TestCase):
             batch_reduction="sum",
         ).to(self.device)
 
-        # a static mask over about a third of the grid, plus a channel that is missing entirely in one sample, which
-        # has to stay out of the average
+        # a static mask over about a third of the grid, a sample with a smaller valid area, which has to count less,
+        # and a channel that is missing entirely in one sample, which has to stay out of the average
         mask = torch.ones(batch_size, num_channels, nlat, nlon, device=self.device)
         mask[..., : nlon // 3] = 0.0
+        mask[1, :, : nlat // 2] = 0.0
         mask[0, 1] = 0.0
 
         truth = torch.randn(batch_size, num_channels, nlat, nlon, device=self.device)

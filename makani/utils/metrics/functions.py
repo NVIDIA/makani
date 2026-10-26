@@ -133,9 +133,6 @@ class GeometricRMSE(GeometricBaseMetric):
 
 
 class GeometricACC(GeometricBaseMetric):
-    # the ACC of a sample is a ratio of integrals over the same weights
-    normalized_by_weights = True
-
     def __init__(
         self,
         grid_type: str,
@@ -202,6 +199,9 @@ class GeometricACC(GeometricBaseMetric):
         # compute ratio
         if self.method == "macro":
             acc = cov_xy / (torch.sqrt(var_x * var_y) + self.eps)
+            if weight is not None:
+                # weight the ACC of every sample by its valid area, compute_counts counts it with that area
+                acc = acc * self.quadrature(weight.to(dtype=acc.dtype))
         else:
             # stack along dim -1:
             # we form the ratio in the finalization step
@@ -222,9 +222,6 @@ class GeometricACC(GeometricBaseMetric):
 
 
 class GeometricSpread(GeometricBaseMetric):
-    # forward normalizes the weighted spread of a sample by the area of its weights
-    normalized_by_weights = True
-
     def __init__(
         self,
         grid_type: str,
@@ -260,7 +257,7 @@ class GeometricSpread(GeometricBaseMetric):
                     "Batch reduction mode 'mean' is not supported when weights are provided. Use 'sum' instead."
                 )
             elif self.batch_reduction == "sum":
-                counts = torch.sum(self.weighted_counts(weight.to(dtype=inp.dtype)), dim=0)
+                counts = torch.sum(self.quadrature(weight.to(dtype=inp.dtype)), dim=0)
             else:
                 raise ValueError(f"Batch reduction mode '{self.batch_reduction}' is not supported")
         else:
@@ -298,19 +295,23 @@ class GeometricSpread(GeometricBaseMetric):
         # compute the local portion of skill and spread
         spread = torch.sum(torch.square(predictions.unsqueeze(1) - forecasts), dim=1)
 
-        # compute quadrature, with weights normalized by the area they cover. A sample without
-        # nonzero weights gets zero spread and counts zero, see weighted_counts
+        # compute quadrature, the spread over the valid area of every sample
         if weight is not None:
             weight = weight.to(dtype=spread.dtype)
-            area = torch.clamp(self.quadrature(weight), min=torch.finfo(spread.dtype).tiny)
-            spread = self.quadrature(spread * weight) / area
+            area = self.quadrature(weight)
+            spread = self.quadrature(spread * weight) / torch.clamp(area, min=torch.finfo(spread.dtype).tiny)
         else:
             spread = self.quadrature(spread)
+            area = None
 
         # average spread over ensemble
         if comm.get_size("ensemble") > 1:
             spread = reduce_from_parallel_region(spread, "ensemble")
         spread = torch.sqrt(spread / float(ens_size - 1))
+
+        # weight the spread of every sample by its valid area, compute_counts counts it with that area
+        if area is not None:
+            spread = spread * area
 
         # final reduction
         if self.channel_reduction == "mean":
@@ -327,9 +328,6 @@ class GeometricSpread(GeometricBaseMetric):
 
 
 class GeometricSSR(GeometricBaseMetric):
-    # the SSR of a sample is a ratio of integrals over the same weights
-    normalized_by_weights = True
-
     def __init__(
         self,
         grid_type: str,
@@ -373,7 +371,7 @@ class GeometricSSR(GeometricBaseMetric):
                     "Batch reduction mode 'mean' is not supported when weights are provided. Use 'sum' instead."
                 )
             elif self.batch_reduction == "sum":
-                counts = torch.sum(self.weighted_counts(weight.to(dtype=inp.dtype)), dim=0)
+                counts = torch.sum(self.quadrature(weight.to(dtype=inp.dtype)), dim=0)
             else:
                 raise ValueError(f"Batch reduction mode '{self.batch_reduction}' is not supported")
         else:
@@ -427,6 +425,9 @@ class GeometricSSR(GeometricBaseMetric):
 
         # compute the SSR including weighting factor
         ssr = torch.sqrt(spread / torch.clamp(skill - spread / float(ens_size), min=self.eps))
+        if weight is not None:
+            # weight the SSR of every sample by its valid area, compute_counts counts it with that area
+            ssr = ssr * self.quadrature(weight.to(dtype=ssr.dtype))
 
         # reduce
         if self.channel_reduction == "mean":
