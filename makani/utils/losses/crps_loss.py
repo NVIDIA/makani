@@ -300,6 +300,13 @@ class CRPSLoss(GeometricBaseLoss):
         # observations: batch, channels, lat, lon
         B, E, C, H, W = forecasts.shape
 
+        # flatten the spatial weights like the score below. The single member path needs them as well, only the
+        # ensemble path splits them further
+        if spatial_weights is not None:
+            spatial_weights_split = spatial_weights.flatten(start_dim=-2, end_dim=-1)
+        else:
+            spatial_weights_split = None
+
         # if ensemble dim is one dimensional then computing the score is quick:
         if (not self.ensemble_distributed) and (E == 1):
             # in this case, CRPS is straightforward
@@ -318,12 +325,8 @@ class CRPSLoss(GeometricBaseLoss):
             observations = observations.reshape(B, C, H * W)
             if self.ensemble_distributed:
                 observations = scatter_to_parallel_region(observations, -1, "ensemble")
-            if spatial_weights is not None:
-                spatial_weights_split = spatial_weights.flatten(start_dim=-2, end_dim=-1)
-                if self.ensemble_distributed:
-                    spatial_weights_split = scatter_to_parallel_region(spatial_weights_split, -1, "ensemble")
-            else:
-                spatial_weights_split = None
+            if (spatial_weights_split is not None) and self.ensemble_distributed:
+                spatial_weights_split = scatter_to_parallel_region(spatial_weights_split, -1, "ensemble")
 
             # run appropriate crps kernel to compute it pointwise
             if self.crps_type == "cdf":
@@ -719,6 +722,13 @@ class GradientCRPSLoss(GradientBaseLoss):
         forecasts = forecasts.reshape(B, E, C, H, W)
         observations = observations.reshape(B, C, H, W)
 
+        # flatten the spatial weights like the score below. The single member path needs them as well, only the
+        # ensemble path splits them further
+        if spatial_weights is not None:
+            spatial_weights_split = spatial_weights.flatten(start_dim=-2, end_dim=-1)
+        else:
+            spatial_weights_split = None
+
         # if ensemble dim is one dimensional then computing the score is quick:
         if (not self.ensemble_distributed) and (E == 1):
             # in this case, CRPS is straightforward
@@ -737,8 +747,7 @@ class GradientCRPSLoss(GradientBaseLoss):
             observations = observations.reshape(B, C, H * W)
             if self.ensemble_distributed:
                 observations = scatter_to_parallel_region(observations, -1, "ensemble")
-            if spatial_weights is not None:
-                spatial_weights_split = spatial_weights.flatten(start_dim=-2, end_dim=-1)
+            if (spatial_weights_split is not None) and self.ensemble_distributed:
                 spatial_weights_split = scatter_to_parallel_region(spatial_weights_split, -1, "ensemble")
 
             # run appropriate crps kernel to compute it pointwise
@@ -895,6 +904,13 @@ class VortDivCRPSLoss(VortDivBaseLoss):
             forecasts = forecasts.index_copy(-3, self.wind_chans, fc_wind)
             observations = observations.index_copy(-3, self.wind_chans, ob_wind)
 
+        # flatten the spatial weights like the score below. The single member path needs them as well, only the
+        # ensemble path splits them further
+        if spatial_weights is not None:
+            spatial_weights_split = spatial_weights.flatten(start_dim=-2, end_dim=-1)
+        else:
+            spatial_weights_split = None
+
         # if ensemble dim is one dimensional then computing the score is quick:
         if (not self.ensemble_distributed) and (E == 1):
             # in this case, CRPS is straightforward
@@ -913,8 +929,7 @@ class VortDivCRPSLoss(VortDivBaseLoss):
             observations = observations.reshape(B, C, H * W)
             if self.ensemble_distributed:
                 observations = scatter_to_parallel_region(observations, -1, "ensemble")
-            if spatial_weights is not None:
-                spatial_weights_split = spatial_weights.flatten(start_dim=-2, end_dim=-1)
+            if (spatial_weights_split is not None) and self.ensemble_distributed:
                 spatial_weights_split = scatter_to_parallel_region(spatial_weights_split, -1, "ensemble")
 
             # run appropriate crps kernel to compute it pointwise
@@ -1110,6 +1125,13 @@ class KernelScoreLoss(GeometricBaseLoss):
         forecasts = forecasts.reshape(B, E, -1, H, W)
         C = forecasts.shape[2]
 
+        # flatten the spatial weights like the score below. The single member path needs them as well, only the
+        # ensemble path splits them further
+        if spatial_weights is not None:
+            spatial_weights_split = spatial_weights.flatten(start_dim=-2, end_dim=-1)
+        else:
+            spatial_weights_split = None
+
         # if ensemble dim is one dimensional then computing the score is quick:
         if (not self.ensemble_distributed) and (E == 1):
             # in this case, CRPS is straightforward
@@ -1128,8 +1150,7 @@ class KernelScoreLoss(GeometricBaseLoss):
             observations = observations.reshape(B, C, H * W)
             if self.ensemble_distributed:
                 observations = scatter_to_parallel_region(observations, -1, "ensemble")
-            if spatial_weights is not None:
-                spatial_weights_split = spatial_weights.flatten(start_dim=-2, end_dim=-1)
+            if (spatial_weights_split is not None) and self.ensemble_distributed:
                 spatial_weights_split = scatter_to_parallel_region(spatial_weights_split, -1, "ensemble")
 
             # run appropriate crps kernel to compute it pointwise
