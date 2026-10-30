@@ -39,6 +39,7 @@ from .distributed_helpers import (
     get_default_parameters,
     set_image_shape,
     reduce_success,
+    skip_unless_ensemble_splits_evenly,
     sync_and_barrier,
     teardown_comms,
 )
@@ -165,6 +166,8 @@ class TestDistributedMetricHandler(unittest.TestCase):
     def test_metric_handler_aggregation(
         self, grid_type, batch_size, ensemble_size, num_rollout_steps, bred, verbose=False
     ):
+        skip_unless_ensemble_splits_evenly(self, ensemble_size)
+
         # create dummy climatology
         num_steps = 4
         num_channels = len(self.params.channel_names)

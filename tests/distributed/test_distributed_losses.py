@@ -39,7 +39,14 @@ from makani.utils.training.training_helpers import NonFiniteLossCheck
 
 # Add parent directory to path for testutils import
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-from .distributed_helpers import _init_grid, _split_helper, _gather_helper, reduce_success, teardown_comms
+from .distributed_helpers import (
+    _init_grid,
+    _split_helper,
+    _gather_helper,
+    reduce_success,
+    skip_unless_ensemble_splits_evenly,
+    teardown_comms,
+)
 from ..testutils import disable_tf32, compare_tensors
 
 
@@ -214,6 +221,8 @@ class TestDistributedLoss(unittest.TestCase):
         # disable tf32 for deterministic comparison# disable tf32
         disable_tf32()
 
+        skip_unless_ensemble_splits_evenly(self, ens_size)
+
         B, E, C, H, W = batch_size, ens_size, num_chan, nlat, nlon
 
         # generate gauss random distributed around 1, with sigma=2
@@ -361,6 +370,8 @@ class TestDistributedLoss(unittest.TestCase):
     def test_distributed_spectral_crps(
         self, nlat, nlon, batch_size, num_chan, ens_size, loss_type, absolute, tol, verbose=False
     ):
+        skip_unless_ensemble_splits_evenly(self, ens_size)
+
         B, E, C, H, W = batch_size, ens_size, num_chan, nlat, nlon
 
         # generate gauss random distributed around 1, with sigma=2
@@ -480,6 +491,8 @@ class TestDistributedLoss(unittest.TestCase):
         # disable tf32 for deterministic comparison# disable tf32
         disable_tf32()
 
+        skip_unless_ensemble_splits_evenly(self, ens_size)
+
         B, E, C, H, W = batch_size, ens_size, num_chan, nlat, nlon
 
         # inputs
@@ -592,6 +605,8 @@ class TestDistributedLoss(unittest.TestCase):
         # disable tf32 for deterministic comparison
         disable_tf32()
 
+        skip_unless_ensemble_splits_evenly(self, ens_size)
+
         # shapes
         B, E, C, H, W = batch_size, ens_size, num_chan, nlat, nlon
 
@@ -700,6 +715,8 @@ class TestDistributedLoss(unittest.TestCase):
     ):
 
         disable_tf32()
+
+        skip_unless_ensemble_splits_evenly(self, ens_size)
 
         B, E, C, H, W = batch_size, ens_size, num_chan, nlat, nlon
 
@@ -826,6 +843,8 @@ class TestDistributedLoss(unittest.TestCase):
         # disable tf32 for deterministic comparison
         disable_tf32()
 
+        skip_unless_ensemble_splits_evenly(self, ens_size)
+
         # shapes
         B, E, C, H, W = batch_size, ens_size, num_chan, nlat, nlon
 
@@ -948,6 +967,8 @@ class TestDistributedLoss(unittest.TestCase):
 
         # disable tf32 for deterministic comparison
         disable_tf32()
+
+        skip_unless_ensemble_splits_evenly(self, ens_size)
 
         # shapes
         B, E, C, H, W = batch_size, ens_size, num_chan, nlat, nlon
