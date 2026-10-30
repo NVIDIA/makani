@@ -213,6 +213,9 @@ class TestDistributedLoss(unittest.TestCase):
             [65, 128, 1, 10, 4, "gauss", 1e-5],
             [64, 128, 32, 8, 4, "nll", 1e-5],
             [65, 128, 1, 10, 4, "nll", 1e-5],
+            # a single member takes the E=1 path, which ignores crps_type. It only runs without ensemble parallelism
+            [64, 128, 32, 8, 1, "cdf", 1e-5],
+            [65, 128, 1, 10, 1, "skillspread", 1e-5],
         ],
         skip_on_empty=True,
     )
@@ -364,6 +367,9 @@ class TestDistributedLoss(unittest.TestCase):
             [65, 128, 1, 10, 4, "skillspread", False, 1e-4],
             [64, 128, 32, 8, 4, "skillspread", True, 1e-4],
             [65, 128, 1, 10, 4, "skillspread", True, 5e-4],
+            # a single member takes the E=1 path. It only runs without ensemble parallelism
+            [64, 128, 32, 8, 1, "cdf", True, 1e-4],
+            [65, 128, 1, 10, 1, "skillspread", False, 1e-4],
         ],
         skip_on_empty=True,
     )
