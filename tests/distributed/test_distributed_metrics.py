@@ -39,6 +39,7 @@ from .distributed_helpers import (
     get_default_parameters,
     set_image_shape,
     reduce_success,
+    skip_unless_ensemble_splits_evenly,
     sync_and_barrier,
     teardown_comms,
 )
@@ -243,6 +244,9 @@ class TestDistributedMetricHandler(unittest.TestCase):
 
         # init comms
         self._init_comms()
+
+        # the ensemble group only exists from here on, the serial reference above does not need it
+        skip_unless_ensemble_splits_evenly(self, ensemble_size)
 
         # distributed
         # set up shapes
