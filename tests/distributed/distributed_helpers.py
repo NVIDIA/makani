@@ -220,6 +220,20 @@ def reduce_success(success, device, group=None):
     return bool(flag.item())
 
 
+def skip_unless_ensemble_splits_evenly(testcase, ensemble_size):
+    """Skip the test unless the ensemble group splits ``ensemble_size`` members evenly.
+
+    The ensemble losses and metrics take the global ensemble size to be the local one times the size of the
+    ensemble group, so every rank has to hold the same number of members. With fewer members than ranks, a single
+    member on two ranks say, the split itself fails, and with an uneven split the score is silently wrong. The
+    condition only depends on the test parameters and the grid, so all ranks skip together and none is left
+    waiting in a collective.
+    """
+    group_size = comm.get_size("ensemble")
+    if ensemble_size % group_size != 0:
+        testcase.skipTest(f"ensemble size {ensemble_size} does not split evenly over {group_size} ensemble ranks")
+
+
 def sync_and_barrier():
     """Synchronize the device and barrier across all ranks.
 
