@@ -3922,9 +3922,31 @@ class TestEnsembleLossE1FastPath(unittest.TestCase):
         )
 
         ones = torch.ones(_BATCH, n_wgt_ch, _IMG_H, _IMG_W)
+        out_none = fn(fc1, obs)
         self.assertTrue(
-            compare_tensors(f"{name} E=1 unit weights", fn(fc1, obs, ones), fn(fc1, obs), atol=1e-5, verbose=verbose)
+            compare_tensors(f"{name} E=1 unit weights", fn(fc1, obs, ones), out_none, atol=1e-5, verbose=verbose)
         )
+
+        # the checks above also pass if the E=1 path ignores the weights. The score is linear in the weights, so the
+        # scores for two weights that add up to one must add up to the unweighted score; ignoring the weights would
+        # give twice the unweighted score instead
+        out_complement = fn(fc1, obs, ones - wgt)
+        self.assertTrue(
+            compare_tensors(
+                f"{name} E=1 complementary weights", out_e1 + out_complement, out_none, atol=1e-5, verbose=verbose
+            )
+        )
+
+        # CRPSLoss scores every point on its own, so observations in the zero weight region must not matter. The
+        # other losses transform the fields first, which spreads a change across the sphere
+        if name == "CRPSLoss":
+            obs_changed = obs.clone()
+            obs_changed[..., : _IMG_W // 3] += 10.0
+            self.assertTrue(
+                compare_tensors(
+                    f"{name} E=1 masked region", fn(fc1, obs_changed, wgt), out_e1, atol=1e-5, verbose=verbose
+                )
+            )
 
     @parameterized.expand(
         [
