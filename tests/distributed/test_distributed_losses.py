@@ -27,6 +27,7 @@ from makani.utils import comm
 from makani.utils.grids import GridQuadrature
 from makani.utils.losses import (
     CRPSLoss,
+    GradientCRPSLoss,
     EnsembleNLLLoss,
     SpectralCRPSLoss,
     LpEnergyScoreLoss,
@@ -344,6 +345,111 @@ class TestDistributedLoss(unittest.TestCase):
             )
 
         # observation grads
+        with self.subTest(desc="observation gradients"):
+            obsgrad_gather_full = self._gather_helper_bwd(obsgrad_local, False)
+            self.assertTrue(
+                reduce_success(
+                    compare_tensors(
+                        "observation gradients", obsgrad_gather_full, obsgrad_full, tol, tol, verbose=verbose
+                    ),
+                    self.device,
+                )
+            )
+
+    @parameterized.expand(
+        [
+            ["CRPSLoss", 64, 128, 4, 8, 4, "cdf", 1e-5],
+            ["CRPSLoss", 65, 128, 1, 10, 4, "skillspread", 1e-5],
+            ["GradientCRPSLoss", 64, 128, 4, 8, 4, "cdf", 1e-4],
+            ["GradientCRPSLoss", 65, 128, 1, 10, 4, "skillspread", 1e-4],
+            # a single member takes the E=1 path. It only runs without ensemble parallelism
+            ["CRPSLoss", 64, 128, 4, 8, 1, "cdf", 1e-5],
+            ["GradientCRPSLoss", 65, 128, 1, 10, 1, "skillspread", 1e-4],
+        ],
+        skip_on_empty=True,
+    )
+    def test_distributed_weighted_crps(
+        self, loss_name, nlat, nlon, batch_size, num_chan, ens_size, loss_type, tol, verbose=False
+    ):
+        """The CRPS losses with spatial weights, as the metrics pass them for missing targets.
+
+        The weights are split in ensemble direction only when the loss is ensemble distributed. The reference
+        instance is not, yet runs on every rank, so with an ensemble group of two or more it fails with a shape
+        mismatch if the weights are split whenever the ensemble group has more than one rank.
+        """
+        disable_tf32()
+
+        skip_unless_ensemble_splits_evenly(self, ens_size)
+
+        B, E, C, H, W = batch_size, ens_size, num_chan, nlat, nlon
+
+        mean, sigma = (1.0, 2.0)
+        inp_full = torch.randn((B, E, C, H, W), dtype=torch.float32, device=self.device) * sigma + mean
+        obs_full = torch.randn((B, C, H, W), dtype=torch.float32, device=self.device) * sigma * 0.001 + mean
+
+        # weights per channel with a missing region that crosses the split in longitude
+        wgt_full = torch.rand((B, C, H, W), dtype=torch.float32, device=self.device)
+        wgt_full[..., W // 4 : W // 2 + W // 8] = 0.0
+
+        loss_cls = {"CRPSLoss": CRPSLoss, "GradientCRPSLoss": GradientCRPSLoss}[loss_name]
+        loss_args = {
+            "img_shape": (H, W),
+            "crop_shape": None,
+            "crop_offset": (0, 0),
+            "channel_names": (),
+            "grid_type": "equiangular",
+            "crps_type": loss_type,
+            "eps": 1.0e-5,
+            "ensemble_weights": None,
+        }
+        loss_fn_local = loss_cls(**loss_args, spatial_distributed=False, ensemble_distributed=False).to(self.device)
+        loss_fn_dist = loss_cls(
+            **loss_args,
+            spatial_distributed=(comm.is_distributed("spatial") and (comm.get_size("spatial") > 1)),
+            ensemble_distributed=(comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1)),
+        ).to(self.device)
+
+        # local loss
+        inp_full.requires_grad = True
+        obs_full.requires_grad = True
+        loss_full = loss_fn_local(inp_full, obs_full, wgt_full)
+
+        with torch.no_grad():
+            ograd_full = torch.randn_like(loss_full)
+            ograd_local = ograd_full.clone()
+
+        loss_full.backward(ograd_full)
+        igrad_full = inp_full.grad.clone()
+        obsgrad_full = obs_full.grad.clone()
+
+        # distributed loss, the weights are split like the observations
+        inp_local = self._split_helper(inp_full)
+        obs_local = self._split_helper(obs_full)
+        wgt_local = self._split_helper(wgt_full)
+        inp_local.requires_grad = True
+        obs_local.requires_grad = True
+
+        loss_local = loss_fn_dist(inp_local, obs_local, wgt_local)
+        loss_local.backward(ograd_local)
+        igrad_local = inp_local.grad.clone()
+        obsgrad_local = obs_local.grad.clone()
+
+        with self.subTest(desc="outputs"):
+            self.assertTrue(
+                reduce_success(
+                    compare_tensors("outputs", loss_local, loss_full, tol, tol, verbose=verbose), self.device
+                )
+            )
+
+        with self.subTest(desc="forecast gradients"):
+            igrad_gather_full = self._gather_helper_bwd(igrad_local, True)
+            self.assertTrue(
+                reduce_success(
+                    compare_tensors("forecast gradients", igrad_gather_full, igrad_full, tol, tol, verbose=verbose),
+                    self.device,
+                )
+            )
+
         with self.subTest(desc="observation gradients"):
             obsgrad_gather_full = self._gather_helper_bwd(obsgrad_local, False)
             self.assertTrue(
