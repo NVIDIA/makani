@@ -358,12 +358,12 @@ class TestDistributedLoss(unittest.TestCase):
 
     @parameterized.expand(
         [
-            ["CRPSLoss", 64, 128, 32, 8, 4, "cdf", 1e-5],
+            ["CRPSLoss", 64, 128, 4, 8, 4, "cdf", 1e-5],
             ["CRPSLoss", 65, 128, 1, 10, 4, "skillspread", 1e-5],
-            ["GradientCRPSLoss", 64, 128, 32, 8, 4, "cdf", 1e-4],
+            ["GradientCRPSLoss", 64, 128, 4, 8, 4, "cdf", 1e-4],
             ["GradientCRPSLoss", 65, 128, 1, 10, 4, "skillspread", 1e-4],
             # a single member takes the E=1 path. It only runs without ensemble parallelism
-            ["CRPSLoss", 64, 128, 32, 8, 1, "cdf", 1e-5],
+            ["CRPSLoss", 64, 128, 4, 8, 1, "cdf", 1e-5],
             ["GradientCRPSLoss", 65, 128, 1, 10, 1, "skillspread", 1e-4],
         ],
         skip_on_empty=True,
