@@ -49,7 +49,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
-from moviepy.video.io.ImageSequenceClip import ImageSequenceClip  # noqa: E402
+import imageio.v3 as iio  # noqa: E402
+import imageio_ffmpeg  # noqa: E402
 
 from makani.utils.dataloaders.backends import get_backend  # noqa: E402
 from makani.utils.visualize import PLOT_OPS, _check_plot_item  # noqa: E402
@@ -145,6 +146,35 @@ def _to_frame(fig):
     # video codecs need even frame sizes
     h, w = frame.shape[0] - frame.shape[0] % 2, frame.shape[1] - frame.shape[1] % 2
     return frame[:h, :w].copy()
+
+
+def write_video(frames, output, fps):
+    """
+    Write RGB frames of even size to output, as a GIF or, for any other extension, as H.264 with ffmpeg.
+
+    The settings are those moviepy used: Pillow through imageio for GIF, and libx264 with the medium preset in
+    yuv420p, with the ffmpeg binary of imageio-ffmpeg, for video.
+    """
+    if output.lower().endswith(".gif"):
+        iio.imwrite(output, frames, plugin="pillow", duration=1000 / fps, loop=0)
+        return
+
+    height, width = frames[0].shape[:2]
+    writer = imageio_ffmpeg.write_frames(
+        output,
+        (width, height),
+        fps=fps,
+        codec="libx264",
+        pix_fmt_out="yuv420p",
+        quality=None,
+        macro_block_size=1,
+        output_params=["-preset", "medium"],
+        ffmpeg_log_level="error",
+    )
+    writer.send(None)
+    for frame in frames:
+        writer.send(np.ascontiguousarray(frame))
+    writer.close()
 
 
 def write_plot_data(path, preds, observations, lead_times, valid_times, members, lat, lon, attrs):
@@ -348,11 +378,7 @@ def make_video(
         frames.append(_to_frame(fig))
     plt.close(fig)
 
-    clip = ImageSequenceClip(frames, fps=fps)
-    if output.lower().endswith(".gif"):
-        clip.write_gif(output, fps=fps, logger=None)
-    else:
-        clip.write_videofile(output, fps=fps, codec="libx264", logger=None)
+    write_video(frames, output, fps)
 
     return output
 

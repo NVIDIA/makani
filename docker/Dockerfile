@@ -58,8 +58,8 @@ RUN pip install cdsapi>=0.7.2
 # reader (v2 has no zarr.core.buffer, so importing dali_es_helper_2d fails outright).
 RUN pip install more_itertools "zarr>=3" "xarray>=2025.1.0" gcsfs s3fs boto3
 
-# moviepy for wandb video logging
-RUN pip install "moviepy>=1.0.3"
+# imageio and its ffmpeg binary for scripts/make_rollout_video.py
+RUN pip install "imageio>=2.28.1" "imageio-ffmpeg>=0.4.9"
 
 # other python stuff
 RUN pip install --upgrade "wandb>=0.13.7" ruamel.yaml "tqdm>=4.60.0"
