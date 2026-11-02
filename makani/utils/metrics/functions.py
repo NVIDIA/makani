@@ -199,6 +199,9 @@ class GeometricACC(GeometricBaseMetric):
         # compute ratio
         if self.method == "macro":
             acc = cov_xy / (torch.sqrt(var_x * var_y) + self.eps)
+            if weight is not None:
+                # weight the ACC of every sample by its valid area, compute_counts counts it with that area
+                acc = acc * self.quadrature(weight.to(dtype=acc.dtype))
         else:
             # stack along dim -1:
             # we form the ratio in the finalization step
@@ -292,16 +295,23 @@ class GeometricSpread(GeometricBaseMetric):
         # compute the local portion of skill and spread
         spread = torch.sum(torch.square(predictions.unsqueeze(1) - forecasts), dim=1)
 
-        # compute quadrature
+        # compute quadrature, the spread over the valid area of every sample
         if weight is not None:
-            spread = self.quadrature(spread * weight)
+            weight = weight.to(dtype=spread.dtype)
+            area = self.quadrature(weight)
+            spread = self.quadrature(spread * weight) / torch.clamp(area, min=torch.finfo(spread.dtype).tiny)
         else:
             spread = self.quadrature(spread)
+            area = None
 
         # average spread over ensemble
         if comm.get_size("ensemble") > 1:
             spread = reduce_from_parallel_region(spread, "ensemble")
         spread = torch.sqrt(spread / float(ens_size - 1))
+
+        # weight the spread of every sample by its valid area, compute_counts counts it with that area
+        if area is not None:
+            spread = spread * area
 
         # final reduction
         if self.channel_reduction == "mean":
@@ -415,6 +425,9 @@ class GeometricSSR(GeometricBaseMetric):
 
         # compute the SSR including weighting factor
         ssr = torch.sqrt(spread / torch.clamp(skill - spread / float(ens_size), min=self.eps))
+        if weight is not None:
+            # weight the SSR of every sample by its valid area, compute_counts counts it with that area
+            ssr = ssr * self.quadrature(weight.to(dtype=ssr.dtype))
 
         # reduce
         if self.channel_reduction == "mean":

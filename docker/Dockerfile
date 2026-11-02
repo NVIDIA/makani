@@ -87,7 +87,7 @@ RUN pip install setuptools_scm
 # to torch.cuda.is_available(), which is False inside docker build (no GPU on the builder),
 # and TH silently compiles CPU-only kernels. The old name FORCE_CUDA_EXTENSION is dead.
 ENV TORCH_HARMONICS_BUILD_CUDA_EXTENSION=1
-ENV TORCH_CUDA_ARCH_LIST="8.0 8.6 8.7 9.0a 10.0a+PTX"
+ENV TORCH_CUDA_ARCH_LIST="8.0 8.6 8.7 9.0a 10.0a 10.3a+PTX"
 RUN cd /opt && git clone https://github.com/NVIDIA/torch-harmonics.git && \
     cd torch-harmonics && \
     git checkout 0e370d6865c4955cbca9aff9f5a947df7f3cf4f5 && \
