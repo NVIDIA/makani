@@ -21,7 +21,6 @@ import multiprocessing as mp
 import numpy as np
 import concurrent.futures as cf
 from PIL import Image, ImageDraw
-from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
 import wandb
 
 import torch
@@ -432,6 +431,9 @@ class VisualizationWrapper(object):
                 # draw stuff that goes on every frame here
                 for prefix, image in sorted(results.items()):
                     video.append(np.asarray(image))
+
+                # moviepy is an optional dependency (the vis extra) and only needed here
+                from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
 
                 video = ImageSequenceClip(video, fps=3)
                 video.write_gif("video_output.gif", logger=None)
