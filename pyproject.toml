@@ -70,6 +70,8 @@ dependencies = [
     "tqdm>=4.60.0",
     "more-itertools",
     "Pillow",
+    # every trainer renders its validation samples with matplotlib (log_video)
+    "matplotlib>=3.8.1",
     "ruamel.yaml",
 ]
 
@@ -109,7 +111,7 @@ legacy_data_process = [
 ]
 
 vis = [
-    "matplotlib>=3.8.1",
+    # scripts/make_rollout_video.py, for video formats such as mp4
     "moviepy>=1.0.3",
 ]
 

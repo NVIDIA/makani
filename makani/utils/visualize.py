@@ -264,6 +264,20 @@ def _draw_progress_bar(image, progress: float, y_pos: float = 0.5, margin: int =
     return image
 
 
+def encode_gif(images, fps: float = 3) -> io.BytesIO:
+    """
+    Encode a sequence of PIL images as a looping GIF, in memory.
+
+    The frames are converted to RGB first, since the rendered figures are RGBA with an opaque alpha channel. This
+    matches the files moviepy and wandb wrote for these frames, as both encode through imageio and Pillow.
+    """
+    frames = [image.convert("RGB") for image in images]
+    gif = io.BytesIO()
+    frames[0].save(gif, format="GIF", save_all=True, append_images=frames[1:], duration=round(1000 / fps), loop=0)
+    gif.seek(0)
+    return gif
+
+
 def visualize_field(
     tag, op, channels, prediction, target, lat, lon, scale, bias, diverging, progress: Optional[float] = None
 ):
@@ -416,27 +430,13 @@ class VisualizationWrapper(object):
             results[prefix] = image
 
         if self.generate_video:
+            gif = encode_gif([image for _, image in sorted(results.items())], fps=3)
             if self.log_to_wandb:
-                video = []
-
-                # draw stuff that goes on every frame here
-                for prefix, image in sorted(results.items()):
-                    video.append(np.transpose(np.asarray(image), (2, 0, 1)))
-
-                video = np.stack(video)
-                results = [wandb.Video(video, fps=3, format="gif")]
+                # wandb takes the encoded GIF as is, the frame duration is stored in it
+                results = [wandb.Video(gif, format="gif")]
             else:
-                video = []
-
-                # draw stuff that goes on every frame here
-                for prefix, image in sorted(results.items()):
-                    video.append(np.asarray(image))
-
-                # moviepy is an optional dependency (the vis extra) and only needed here
-                from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
-
-                video = ImageSequenceClip(video, fps=3)
-                video.write_gif("video_output.gif", logger=None)
+                with open("video_output.gif", "wb") as f:
+                    f.write(gif.getvalue())
 
         else:
             results = [wandb.Image(image, caption=prefix) for prefix, image in results.items()]
