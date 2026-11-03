@@ -914,7 +914,6 @@ class TestDistributedLayers(unittest.TestCase):
                         )
                     )
 
-    @unittest.skipUnless(_TE_AVAILABLE and torch.cuda.is_available(), "transformer_engine (with CUDA) is not available")
     @parameterized.expand(
         [
             # nlat, nlon, batch, channels, hidden, input_format, bias, amp_mode, atol, rtol
@@ -926,6 +925,8 @@ class TestDistributedLayers(unittest.TestCase):
         ],
         skip_on_empty=True,
     )
+    # below the expansion, so that every generated case carries the skip, not only the original function
+    @unittest.skipUnless(_TE_AVAILABLE and torch.cuda.is_available(), "transformer_engine (with CUDA) is not available")
     def test_distributed_mlp_te(
         self, nlat, nlon, batch_size, num_chan, hidden_dim, input_format, bias, amp_mode, atol, rtol, verbose=False
     ):
