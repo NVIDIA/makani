@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.3.0
+
+Changes since 0.3.0rc1.
+
+**Behavior changes**
+- Bias, spectrum and zonal-spectrum files give lead times in hours, like the rollout and metrics files, and the zonal spectrum's Nyquist bin is half its previous value (#198).
+- Pangu checkpoints trained before the shifted-window roll fix do not reproduce exactly (#198).
+- An unknown `scheduler` name raises instead of silently training without one (#198).
+- The ACC, SSR and spread of data with missing values come out lower than before, now that each sample counts once; they were too large by the inverse of the valid-area fraction (its square root for the spread) (#202).
+- moviepy is no longer needed: the visualizer writes its GIFs with Pillow, `make_rollout_video.py` writes with imageio/imageio-ffmpeg, and the `vis` extra installs those. matplotlib is a core dependency (#207, #208).
+
+**Fixes**
+- Metrics: ACC, SSR and spread of masked data divided by the valid area twice (#202). Climatology and mask lookup with history or across leap years, with a clear error for times out of range (#201).
+- Losses: `UnboundLocalError` in `CRPSLoss`, `GradientCRPSLoss`, `VortDivCRPSLoss` and `KernelScoreLoss` for single-member forecasts with spatial weights (#204). Gauss CRPS with `ensemble_weights`, and `GradientCRPSLoss(absolute=False)` channel weights (#198).
+- Spectrum buffers counted the Nyquist order twice; `load_time_loop` used `dt` instead of `dt * dhours` hours; `BandLimitMask` ignored its default band limit; Pangu's shifted-window roll was displaced in longitude; remaining CUDA-only calls are guarded for CPU runs (#198).
+- Constraint handling for water channels cleaned up in FCN3 and the constraints wrapper (#200).
+
+**Tooling and CI**
+- Rollout plotting script, and a sync after inference (#203). Docker images build for B300/GB300 (`10.3a`) (#206).
+- CI runs DALI tests (#197), and broad new coverage of inference, model packages, training resume, schedulers and configs (#198).
+- Distributed tests skip ensemble cases whose ensemble does not split evenly (#205), print from rank 0 only under srun/mpirun (#209), and skip the transformer-engine cases without CUDA (#210).
+
 ## 0.3.0rc1
 
 **Breaking**
