@@ -47,6 +47,7 @@ recompute, after the rollout has advanced them; rollout checkpointing is
 refused for such networks, see :class:`~makani.models.stepper.StepWrapper`.
 """
 
+import itertools
 from dataclasses import dataclass
 from typing import Dict, Iterator, Mapping, Optional, Tuple
 
@@ -58,6 +59,9 @@ from makani.utils import comm
 # the offset between the seeds of the processes of one model in set_rng, a prime well above the
 # range of the per-rank offsets, so that re-seeded processes do not share a stream
 _SEED_STRIDE = 104729
+
+# the versions of all controllers come from one counter, so that no two states, of any controllers, share one
+_VERSIONS = itertools.count(1)
 
 
 @torch.compiler.disable
@@ -178,7 +182,7 @@ class NoiseController:
 
     def __init__(self, processes: Optional[Mapping[str, nn.Module]] = None):
         self._processes: Dict[str, nn.Module] = dict(processes or {})
-        # counts the changes of the state, by any caller, see version
+        # identifies the state, changed by any caller, see version; 0 until the first change
         self._version = 0
 
     def __repr__(self) -> str:
@@ -200,7 +204,12 @@ class NoiseController:
 
     @property
     def version(self) -> int:
-        """Counts the changes of the state, so that a caller can tell whether someone else advanced it since."""
+        """Identifies the current state, so that a caller can tell whether someone else changed it since.
+
+        Every change (:meth:`advance`, :meth:`restore`, :meth:`set_rng`) gives the state a new version, taken
+        from a counter shared by all controllers, so that the version of one controller never matches a state
+        of another one.
+        """
         return self._version
 
     @property
@@ -257,7 +266,7 @@ class NoiseController:
         for process in self._processes.values():
             process.update(replace_state=replace_state, batch_size=batch_size)
         if self._processes:
-            self._version += 1
+            self._version = next(_VERSIONS)
 
     def sample(self, name: str) -> torch.Tensor:
         r"""
@@ -329,7 +338,7 @@ class NoiseController:
             process.set_tensor_state(state.tensor)
             process.set_rng_state(state.rng_cpu, state.rng_gpu)
         if self._processes:
-            self._version += 1
+            self._version = next(_VERSIONS)
 
     def set_rng(self, seed: int = 333, reset: bool = True):
         r"""
@@ -353,4 +362,4 @@ class NoiseController:
             if reset:
                 process.reset()
         if self._processes:
-            self._version += 1
+            self._version = next(_VERSIONS)

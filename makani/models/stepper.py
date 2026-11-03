@@ -279,9 +279,13 @@ class StepWrapper(nn.Module):
         RuntimeError
             If the model is stochastic and its noise is not at the state the
             rollout advanced it to for this step, e.g. because the rollout does
-            not drive the noise of this model.
+            not drive the noise of this model, or if ``use_checkpoint`` is set
+            for a model that is not safe to checkpoint, see
+            :func:`_assert_checkpoint_safe` and :func:`_assert_checkpoint_noise_safe`.
         """
         self._check_step_noise(step)
+        if use_checkpoint:
+            self._check_checkpoint_safe()
         # the noise is sampled here rather than inside the compiled window: it is complex-valued and runs eagerly
         return self._predict_window(step.input, step.input_dynamic_features, self._input_noise(), use_checkpoint)
 
@@ -389,12 +393,17 @@ class StepWrapper(nn.Module):
             and not push_forward
             and rollout.n_steps > 1
         )
-        if use_checkpoint and not self._checkpoint_checked:
+        if use_checkpoint:
+            self._check_checkpoint_safe()
+
+        return self._steps(rollout, push_forward, use_checkpoint)
+
+    def _check_checkpoint_safe(self):
+        # once, on the first checkpointed step, so that loading a model for evaluation never fails on it
+        if not self._checkpoint_checked:
             _assert_checkpoint_noise_safe(self.noise)
             _assert_checkpoint_safe(self.model)
             self._checkpoint_checked = True
-
-        return self._steps(rollout, push_forward, use_checkpoint)
 
     def _steps(self, rollout, push_forward, use_checkpoint):
         for step in rollout:

@@ -23,6 +23,7 @@ import torch.nn as nn
 
 from makani.models.noise import DiffusionNoiseS2, IsotropicGaussianRandomFieldS2
 from makani.models.noise_controller import NoiseController, NoiseSnapshot, run_eager
+from makani.models.parametrizations import ConstraintsWrapper
 from makani.models.preprocessor import INPUT_NOISE
 from makani.models.stepper import StepWrapper
 from makani.utils.dataloaders.batch import (
@@ -84,10 +85,11 @@ class TestNoiseController(unittest.TestCase):
 
         noise.advance(replace_state=True)
         first = _samples(noise)
+        first_version = noise.version
         noise.advance()
         second = _samples(noise)
 
-        self.assertEqual(noise.version, 2)
+        self.assertNotIn(noise.version, (0, first_version))
         for name in noise:
             with self.subTest(process=name):
                 self.assertEqual(tuple(first[name].shape), (_B, _T, _C, _H, _W))
@@ -97,8 +99,9 @@ class TestNoiseController(unittest.TestCase):
         # the prediction may read the sample more than once, e.g. in a recompute under activation checkpointing
         noise = NoiseController({"diffusion": _diffusion()})
         noise.advance(replace_state=True)
+        version = noise.version
         self.assertTrue(torch.equal(noise.sample("diffusion"), noise.sample("diffusion")))
-        self.assertEqual(noise.version, 1)
+        self.assertEqual(noise.version, version)
 
     def test_resizing_stateful_noise_needs_a_fresh_state(self):
         noise = NoiseController({"white": _white(), "diffusion": _diffusion()})
@@ -200,13 +203,21 @@ class _LatentNoiseNet(nn.Module):
         return self.net.fc2(torch.tanh(self.net.fc1(x) + eta))
 
 
-def _latent_wrapper(input_noise=None):
+def _latent_wrapper(input_noise=None, constrained=False):
     params = _params(0, False, input_noise)
     params.img_shape_x = params.img_shape_x_resampled = _H
     params.img_shape_y = params.img_shape_y_resampled = _W
     n_noise = input_noise["n_channels"] if input_noise is not None else 0
     set_seed(333)
-    return StepWrapper(params, lambda: _LatentNoiseNet(3 + 1 + n_noise, 3))
+
+    def net():
+        return _LatentNoiseNet(3 + 1 + n_noise, 3)
+
+    def constrained_net():
+        # as the model registry wraps a network for params.constraints
+        return ConstraintsWrapper([], ["u", "v", "t"], None, None, model_handle=net)
+
+    return StepWrapper(params, constrained_net if constrained else net)
 
 
 class TestModelNoise(unittest.TestCase):
@@ -243,6 +254,34 @@ class TestModelNoise(unittest.TestCase):
         self.assertEqual(list(wrapper.noise), [INPUT_NOISE, "model.latent"])
         self.assertIs(wrapper.noise.process("model.latent"), wrapper.model.latent_noise)
 
+    def test_a_constrained_network_lists_its_own_noise(self):
+        wrapper = _latent_wrapper(constrained=True)
+        self.assertEqual(list(wrapper.noise), ["model.latent"])
+        self.assertIs(wrapper.noise.process("model.latent"), wrapper.model.model.latent_noise)
+
+        # the rollout drives it, as for the network alone
+        wrapper.eval()
+        batch = _batch(n_history=0, n_future=2, grid=(_H, _W))
+        with torch.no_grad():
+            wrapper.noise.set_rng(seed=5)
+            first = wrapper(Rollout(batch, noise=wrapper.noise))
+            wrapper.noise.set_rng(seed=5)
+            again = wrapper(Rollout(batch, noise=wrapper.noise))
+        self.assertTrue(torch.equal(first, again))
+
+    def test_a_step_of_another_model_is_refused(self):
+        # two models whose noise was changed equally often: the step of one is no step of the other
+        wrapper, other = _latent_wrapper(), _latent_wrapper()
+        wrapper.eval()
+        other.eval()
+        batch = _batch(n_history=0, n_future=1, grid=(_H, _W))
+        wrapper.noise.set_rng(seed=5)
+        other.noise.set_rng(seed=5)
+        step = next(iter(Rollout(batch, noise=other.noise)))
+        wrapper.noise.advance(replace_state=True)
+        with torch.no_grad(), self.assertRaisesRegex(RuntimeError, "does not drive the noise of this model"):
+            wrapper.predict_step(step)
+
     def test_a_rollout_drives_latent_noise_and_trains_it(self):
         wrapper = _latent_wrapper()
         wrapper.train()
@@ -250,8 +289,10 @@ class TestModelNoise(unittest.TestCase):
 
         rollout = Rollout(batch, noise=wrapper.noise)
         seen = []
+        versions = []
         preds = []
         for step in rollout:
+            versions.append(step.noise_version)
             seen.append(wrapper.noise.sample("model.latent").detach().clone())
             pred = wrapper.predict_step(step)
             preds.append(pred)
@@ -260,7 +301,7 @@ class TestModelNoise(unittest.TestCase):
         loss.backward()
 
         # every step its own noise, and the gradient reaches the parameters of the latent noise
-        self.assertEqual(wrapper.noise.version, 3)
+        self.assertEqual(len(set(versions)), 3)
         self.assertFalse(torch.equal(seen[0], seen[1]))
         grads = {name: p.grad for name, p in wrapper.named_parameters() if p.grad is not None}
         self.assertTrue(any(name.startswith("model.latent_noise.") for name in grads))
@@ -273,6 +314,11 @@ class TestModelNoise(unittest.TestCase):
         batch = _batch(n_history=0, n_future=2, grid=(_H, _W))
         with self.assertRaisesRegex(RuntimeError, "noise processes of their own"):
             wrapper(Rollout(batch, noise=wrapper.noise))
+
+        # nor when the caller steps the rollout itself
+        rollout = Rollout(batch, noise=wrapper.noise)
+        with self.assertRaisesRegex(RuntimeError, "noise processes of their own"):
+            wrapper.predict_step(next(iter(rollout)), use_checkpoint=True)
 
         # without checkpointing, or for a single step, it runs
         wrapper.multistep_checkpoint = False
