@@ -19,12 +19,12 @@ import io
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 import numpy as np
 
 _have_matplotlib = importlib.util.find_spec("matplotlib") is not None
 _have_pil = importlib.util.find_spec("PIL") is not None
-_have_moviepy = importlib.util.find_spec("moviepy") is not None
 _have_visualize_deps = _have_matplotlib and _have_pil
 
 if _have_visualize_deps:
@@ -32,6 +32,7 @@ if _have_visualize_deps:
 
     matplotlib.use("Agg")
 
+    import wandb
     from PIL import Image
 
     from makani.utils.visualize import (
@@ -233,18 +234,18 @@ class TestResolvePlotList(unittest.TestCase):
         self.assertEqual(original, ["z500"])
 
 
-@unittest.skipUnless(_have_visualize_deps and _have_moviepy, "matplotlib, PIL, or moviepy is not installed")
+@unittest.skipUnless(_have_visualize_deps, "matplotlib and/or PIL are not installed")
 class TestVisualizationWrapper(unittest.TestCase):
     """End-to-end smoke test for the multiprocess visualization pipeline."""
 
-    def _make_wrapper(self, num_workers=1):
+    def _make_wrapper(self, num_workers=1, log_to_wandb=False):
         # no channel_names => channels are direct indices into the incoming tensors
         plot_list = [
             {"name": "u10m", "op": "select", "channels": [0], "diverging": False},
             {"name": "t2m", "op": "select", "channels": [1], "diverging": True},
         ]
         return VisualizationWrapper(
-            log_to_wandb=False,
+            log_to_wandb=log_to_wandb,
             path=".",
             prefix="test",
             plot_list=plot_list,
@@ -272,12 +273,34 @@ class TestVisualizationWrapper(unittest.TestCase):
                 buf = io.StringIO()
                 with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
                     wrapper.finalize()
-                self.assertTrue(os.path.exists("video_output.gif"))
-                self.assertGreater(os.path.getsize("video_output.gif"), 0)
-                # logger=None should keep moviepy's "Building file ..." chatter out of stdout/stderr
-                output = buf.getvalue()
-                self.assertNotIn("MoviePy", output)
-                self.assertNotIn("Building file", output)
+                # one frame per field and tag, at 3 frames per second, looping
+                with Image.open("video_output.gif") as gif:
+                    self.assertEqual(gif.format, "GIF")
+                    self.assertEqual(gif.n_frames, 2 * 3)
+                    # GIF stores the duration in hundredths of a second
+                    self.assertAlmostEqual(gif.info["duration"], 1000 / 3, delta=10)
+                    self.assertEqual(gif.info["loop"], 0)
+            finally:
+                wrapper.executor.shutdown(wait=True)
+                os.chdir(cwd)
+
+    def test_finalize_logs_gif_to_wandb(self):
+        """With wandb, the frames are logged as one encoded GIF, without writing a file."""
+        with tempfile.TemporaryDirectory() as tmp:
+            cwd = os.getcwd()
+            os.chdir(tmp)
+            wrapper = self._make_wrapper(log_to_wandb=True)
+            try:
+                self._add_frames(wrapper)
+                with mock.patch("makani.utils.visualize.wandb.log") as log:
+                    wrapper.finalize()
+                log.assert_called_once()
+                (video,) = log.call_args.args[0]["Inference samples"]
+                self.assertIsInstance(video, wandb.Video)
+                with Image.open(video._path) as gif:
+                    self.assertEqual(gif.format, "GIF")
+                    self.assertEqual(gif.n_frames, 2 * 3)
+                self.assertFalse(os.path.exists("video_output.gif"))
             finally:
                 wrapper.executor.shutdown(wait=True)
                 os.chdir(cwd)
