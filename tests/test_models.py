@@ -294,6 +294,84 @@ class TestModelOptions(unittest.TestCase):
         self._forward_backward()
 
 
+
+@parameterized_class(("device",), _devices)
+class TestFCN32PoleBlend(unittest.TestCase):
+    """FCN3.2: FCN3 with optional isotropization of the DISCO filters near the poles (pole blend)."""
+
+    def setUp(self):
+        # the same small grid and parameters as TestModels
+        TestModels.setUp(self)
+
+    def _model(self, nettype, **options):
+        for key, value in options.items():
+            setattr(self.params, key, value)
+        self.params.nettype = nettype
+        set_seed(333)
+        return model_registry.get_model(self.params).to(self.device)
+
+    def _input(self):
+        torch.manual_seed(0)
+        return torch.randn(
+            self.params.batch_size, self.params.N_in_channels, self.params.img_shape_x, self.params.img_shape_y, dtype=torch.float32, device=self.device
+        )
+
+    def test_off_matches_fcn3(self):
+        """Without the pole blend, FCN3.2 is FCN3: same parameters, bit-identical output."""
+        fcn3 = self._model("FCN3").eval()
+        fcn32 = self._model("FCN3.2", pole_blend=None).eval()
+        fcn32.load_state_dict(fcn3.state_dict(), strict=True)
+        inp = self._input()
+        with torch.no_grad():
+            out3 = fcn3(single_step_rollout(inp.unsqueeze(1)))
+            out32 = fcn32(single_step_rollout(inp.unsqueeze(1)))
+        self.assertTrue(torch.equal(out3, out32))
+
+    def test_on_loads_fcn3_weights(self):
+        """With the pole blend, FCN3 weights load unchanged (for fine-tuning) and the output changes."""
+        import torch_harmonics as th
+
+        if not hasattr(th, "PoleBlend"):
+            self.skipTest("torch-harmonics without PoleBlend support")
+        fcn3 = self._model("FCN3").eval()
+        fcn32 = self._model("FCN3.2", pole_blend=True).eval()
+        fcn32.load_state_dict(fcn3.state_dict(), strict=True)
+        inp = self._input().requires_grad_(True)
+        out32 = fcn32(single_step_rollout(inp.unsqueeze(1)))
+        self.assertTrue(torch.isfinite(out32).all())
+        out32.sum().backward()
+        self.assertTrue(torch.isfinite(inp.grad).all())
+        with torch.no_grad():
+            out3 = fcn3(single_step_rollout(inp.detach().unsqueeze(1)))
+        self.assertFalse(torch.equal(out3, out32.detach()))
+
+    def test_per_part_overrides(self):
+        import torch_harmonics as th
+
+        if not hasattr(th, "PoleBlend"):
+            self.skipTest("torch-harmonics without PoleBlend support")
+        model = self._model("FCN3.2", pole_blend=True, pole_blend_processor=False, pole_blend_decoder={"d1_factor": 4.0})
+        net = model.model if hasattr(model, "model") else model
+        self.assertIsInstance(net.atmo_encoder.conv.pole_blend, th.PoleBlend)
+        self.assertAlmostEqual(net.atmo_decoder.conv.pole_blend.d1, 4.0 * net.atmo_decoder.conv.theta_cutoff)
+        local_blocks = [blk for blk in net.blocks if hasattr(blk, "local_conv")]
+        self.assertGreater(len(local_blocks), 0)
+        for blk in local_blocks:
+            self.assertIsNone(blk.local_conv.pole_blend)
+
+    def test_requires_pole_blend_support(self):
+        import types
+        from unittest import mock
+        from makani.models.networks import fourcastnet3p2
+
+        self.assertEqual(fourcastnet3p2._pole_blend_kwargs(None), {})
+        self.assertEqual(fourcastnet3p2._pole_blend_kwargs(False), {})
+        with self.assertRaises(TypeError):
+            fourcastnet3p2._pole_blend_kwargs("exp")
+        with mock.patch.object(fourcastnet3p2, "th", types.SimpleNamespace()):
+            with self.assertRaises(RuntimeError):
+                fourcastnet3p2._pole_blend_kwargs(True)
+
 def _soft_clamp_reference(x):
     # 0 below zero, x^2 on [0, 0.5) and x - 0.25 above: continuous with a continuous first derivative
     return torch.where(x >= 0.5, x - 0.25, torch.where(x > 0.0, x**2, torch.zeros_like(x)))

@@ -362,7 +362,7 @@ fcn3_sc2_edim45_layers10_pretrain2:
 # FourCastNet 3 model - finetuning
 ###########################################################################################################################
 
-fcn3_sc2_edim45_layers10_finetune:
+fcn3_sc2_edim45_layers10_finetune: &FCN3_SC2_FINETUNE
     <<: *ENSEMBLE_FINETUNE
     wandb_group: "fcn3_sc2_edim45_layers10_finetune"
 
@@ -393,6 +393,22 @@ fcn3_sc2_edim45_layers10_finetune:
     scheduler_T_max: 24
     scheduler_gamma: 0.5
     scheduler_step_size: 4
+
+# FCN3.2: FCN3 with the DISCO filters isotropized near the poles (pole blend), fine-tuned from the FCN3
+# weights. Module and parameter names are those of FCN3, so the FCN3 checkpoint loads as is.
+# Requires a torch-harmonics build with PoleBlend support.
+fcn3p2_sc2_edim45_layers10_poleblend_finetune:
+    <<: *FCN3_SC2_FINETUNE
+    nettype: "FCN3.2"
+    wandb_group: "fcn3p2_sc2_edim45_layers10_poleblend_finetune"
+
+    # True = recommended setting (shared exp ramp from theta_cutoff to 7 theta_cutoff); a dict of
+    # torch_harmonics.PoleBlend.from_cutoff options (distances in units of theta_cutoff) is also accepted.
+    # pole_blend_encoder / pole_blend_decoder / pole_blend_processor override it per part (None = inherit).
+    pole_blend: !!bool True
+
+    # warm start from the fine-tuned FCN3
+    pretrained_checkpoint_path: "/runs/fcn3_sc2_edim45_layers10_finetune/flexible/training_checkpoints/ckpt_mp0_v0.tar"
 
 ###########################################################################################################################
 # Smaller FCN3 and Spherical Neural Operator Probabilistic models used for experimentation
