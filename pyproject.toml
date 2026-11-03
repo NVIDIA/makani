@@ -111,8 +111,9 @@ legacy_data_process = [
 ]
 
 vis = [
-    # scripts/make_rollout_video.py, for video formats such as mp4
-    "moviepy>=1.0.3",
+    # scripts/make_rollout_video.py
+    "imageio>=2.28.1",
+    "imageio-ffmpeg>=0.4.9",
 ]
 
 sirfshampoo = [
