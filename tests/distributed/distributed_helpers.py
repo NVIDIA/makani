@@ -231,13 +231,22 @@ def make_shared_tmpdir(prefix, device):
     ``MAKANI_TEST_TMPDIR`` if set, else where :func:`tempfile.mkdtemp` puts it (``TMPDIR``, then ``/tmp``), and
     every rank checks that it sees it, so that the test class fails right away, on all ranks, if not.
     """
-    base = os.environ.get("MAKANI_TEST_TMPDIR") or None
-    if base is not None:
-        os.makedirs(base, exist_ok=True)
-    tmpdir = [tempfile.mkdtemp(prefix=prefix, dir=base) if comm.get_world_rank() == 0 else None]
+    # rank 0 alone creates the directory; an error there is broadcast with the path, so that no rank raises while
+    # the others wait in the broadcast
+    shared = [None, None]
+    if comm.get_world_rank() == 0:
+        base = os.environ.get("MAKANI_TEST_TMPDIR") or None
+        try:
+            if base is not None:
+                os.makedirs(base, exist_ok=True)
+            shared[0] = tempfile.mkdtemp(prefix=prefix, dir=base)
+        except OSError as e:
+            shared[1] = f"{type(e).__name__}: {e}"
     if dist.is_initialized():
-        dist.broadcast_object_list(tmpdir, src=0)
-    tmpdir = tmpdir[0]
+        dist.broadcast_object_list(shared, src=0)
+    tmpdir, error = shared
+    if error is not None:
+        raise RuntimeError(f"Rank 0 could not create the scratch directory of the test: {error}")
 
     if not reduce_success(os.path.isdir(tmpdir), device):
         if comm.get_world_rank() == 0:
