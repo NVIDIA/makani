@@ -15,8 +15,6 @@
 
 import importlib.util
 import os
-import shutil
-import tempfile
 import unittest
 
 import numpy as np
@@ -31,7 +29,15 @@ from makani.utils.dataloaders.batch import INPUT
 
 from ..testutils import init_hdf5_dataset, compare_arrays
 from ..test_dataloader import init_dataset_params, get_sample
-from .distributed_helpers import _init_grid, _gather_helper, reduce_success, sync_and_barrier, teardown_comms
+from .distributed_helpers import (
+    _init_grid,
+    _gather_helper,
+    make_shared_tmpdir,
+    reduce_success,
+    remove_shared_tmpdir,
+    sync_and_barrier,
+    teardown_comms,
+)
 
 
 # find_spec of a submodule imports its parent, and raises rather than return None when the parent
@@ -85,15 +91,9 @@ class TestDistributedDataloaderCheckpoint(unittest.TestCase):
 
         # shared scratch directory: rank 0 creates the dataset and broadcasts the
         # path, so all ranks read the same files
+        cls.tmpdir = make_shared_tmpdir("makani_dl_ckpt_test_", cls.device)
         if cls.world_rank == 0:
-            tmpdir = tempfile.mkdtemp(prefix="makani_dl_ckpt_test_")
-            init_hdf5_dataset(tmpdir)
-        else:
-            tmpdir = None
-        bcast_list = [tmpdir]
-        if dist.is_initialized():
-            dist.broadcast_object_list(bcast_list, src=0)
-        cls.tmpdir = bcast_list[0]
+            init_hdf5_dataset(cls.tmpdir)
 
         cls.train_path = os.path.join(cls.tmpdir, "train")
         cls.valid_path = os.path.join(cls.tmpdir, "test")
@@ -106,10 +106,8 @@ class TestDistributedDataloaderCheckpoint(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        # only rank 0 cleans up; sync + barrier first to ensure no in-flight reads
-        sync_and_barrier()
-        if cls.world_rank == 0 and cls.tmpdir is not None and os.path.isdir(cls.tmpdir):
-            shutil.rmtree(cls.tmpdir, ignore_errors=True)
+        # only rank 0 cleans up, after a barrier, so no read is in flight
+        remove_shared_tmpdir(cls.tmpdir)
         # barrier again (every rank waits for rank 0's cleanup above) then
         # explicitly destroy the process group -- see teardown_comms's docstring
         teardown_comms()
