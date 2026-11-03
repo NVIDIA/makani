@@ -536,11 +536,11 @@ class TestTrainerRollouts(_TrainerTestCase):
 
         pp = trainer.preprocessor
         trainer.metrics = _RecordingMetrics()
-        pp.set_rng(reset=True, seed=self._SEED)
+        trainer.noise.set_rng(reset=True, seed=self._SEED)
         trainer.validate_one_epoch(trainer.epoch)
         updates = trainer.metrics.updates
 
-        pp.set_rng(reset=True, seed=self._SEED)
+        trainer.noise.set_rng(reset=True, seed=self._SEED)
         trainer.model.eval()
         n_steps = self._VALID_STEPS + 1
         n_batches = 0

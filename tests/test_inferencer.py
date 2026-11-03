@@ -175,16 +175,14 @@ class TestInferencerRollout(_InferencerTestCase):
 
         model = inferencer.model
         model.eval()
-        pp = model.preprocessor
-        pp.set_rng(reset=True, seed=_NOISE_SEED)
+        model.noise.set_rng(reset=True, seed=_NOISE_SEED)
 
         references = []
         with torch.no_grad():
             for start in range(0, len(_INDICES), _BATCH_SIZE):
                 samples = [dataset.get_sample_at_index(idx) for idx in _INDICES[start : start + _BATCH_SIZE]]
                 batch = default_collate(samples)
-                noise_source = pp.noise_source(batch_size=batch[INPUT].shape[0] * ensemble_size)
-                rollout = Rollout(batch, noise_source=noise_source, ensemble_size=ensemble_size)
+                rollout = Rollout(batch, noise=model.noise, ensemble_size=ensemble_size)
                 # (B, E, n_steps, C, H, W)
                 preds = rollout.unfold(model(rollout))
                 references.append((batch, preds))
@@ -195,10 +193,9 @@ class TestInferencerRollout(_InferencerTestCase):
     def test_predictions_match_a_rollout_with_targets(self, name, ensemble_size, n_history, noise, zenith):
         params = self._params(ensemble_size, n_history, noise, zenith)
         inferencer = Inferencer(params, world_rank=0, device="cpu")
-        pp = inferencer.preprocessor
 
         buffer, metrics = _RecordingBuffer(), _RecordingMetrics()
-        pp.set_rng(reset=True, seed=_NOISE_SEED)
+        inferencer.model.noise.set_rng(reset=True, seed=_NOISE_SEED)
         inferencer._inference_indexlist(_INDICES, _ROLLOUT_STEPS, _BATCH_SIZE, metrics=metrics, rollout_buffer=buffer)
 
         references = self._reference(inferencer, ensemble_size)

@@ -132,6 +132,7 @@ class Trainer(Driver):
         with Timer() as timer:
             self.model = model_registry.get_model(self.params).to(self.device)
             self.preprocessor = self.model.preprocessor
+            self.noise = self.model.noise
         self.timers["model init"] = timer.time
 
         # print aux channel names:
@@ -335,10 +336,8 @@ class Trainer(Driver):
         return self.loss_obj(pred, flatten(tar), inp=flatten(inp))
 
     def _rollout(self, batch, ensemble_size=1):
-        # the rollout over all target steps of the batch, with the input noise of the model at the
-        # batch the model sees, the ensemble members folded in
-        noise_source = self.preprocessor.noise_source(batch_size=batch[INPUT].shape[0] * ensemble_size)
-        return Rollout(batch, noise_source=noise_source, ensemble_size=ensemble_size)
+        # the rollout over all target steps of the batch, driving the noise of the model
+        return Rollout(batch, noise=self.noise, ensemble_size=ensemble_size)
 
     def _eval_steps(self, rollout):
         # the predictions of a validation rollout one step at a time, so that each can be released

@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+**Breaking**
+- The noise of a model is driven through `model.noise`, a `NoiseController` that advances, snapshots, restores and re-seeds it; the model package exposes it as `ModelWrapper.noise`. `Rollout(batch, noise=model.noise)` replaces `Rollout(batch, noise_source=...)`, `RolloutStep.noise` is replaced by `noise_version`, and `predict`/`encode` no longer take a noise sample. The preprocessor's `noise_source`, `update_internal_state`, `get_internal_state`, `set_internal_state`, `set_rng`, `get_base_seed` and `get_internal_rng` are removed, and `NoiseState` moved to `makani.models.noise_controller`. Checkpoints and results are unchanged.
+
+**Models**
+- Networks can own noise processes, e.g. in latent space, listed through `noise_processes()`; rollouts drive them like the input noise.
+
 ## 0.3.0
 
 **Breaking**

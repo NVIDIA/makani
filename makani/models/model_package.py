@@ -216,6 +216,22 @@ class ModelWrapper(torch.nn.Module):
         """
         return self.params.dt * self.params.dhours
 
+    @property
+    def noise(self):
+        r"""
+        The stochastic state of the model.
+
+        Snapshot it to rewind a forecast, restore it to continue one, or
+        re-seed it for another ensemble member; a model without noise has a
+        controller without processes.
+
+        Returns
+        -------
+        NoiseController
+            See :class:`~makani.models.noise_controller.NoiseController`.
+        """
+        return self.model.noise
+
     def update_state(self, replace_state=True, batch_size=None):
         """Advance the stochastic state without running a forward pass.
 
@@ -232,7 +248,7 @@ class ModelWrapper(torch.nn.Module):
             Size the noise state to this batch. ``None`` keeps the current size,
             which for a freshly loaded package is ``params.batch_size`` (usually 1).
         """
-        self.model.preprocessor.update_internal_state(replace_state=replace_state, batch_size=batch_size)
+        self.noise.advance(replace_state=replace_state, batch_size=batch_size)
         return
 
     def set_rng(self, reset=True, seed=333):
@@ -240,7 +256,8 @@ class ModelWrapper(torch.nn.Module):
         Re-seed the model's stochastic noise, optionally clearing its state.
 
         Use this to make an ensemble member reproducible, or to decorrelate
-        members by giving each a distinct seed.
+        members by giving each a distinct seed. Shorthand for
+        ``noise.set_rng(seed, reset)``, see :attr:`noise`.
 
         Parameters
         ----------
@@ -249,7 +266,7 @@ class ModelWrapper(torch.nn.Module):
         seed : int, optional
             New seed, by default ``333``.
         """
-        self.model.preprocessor.set_rng(reset=reset, seed=seed)
+        self.noise.set_rng(seed=seed, reset=reset)
         return
 
     def _zenith_features(self, x, time):
@@ -305,7 +322,7 @@ class ModelWrapper(torch.nn.Module):
         return x
 
     def _step_inputs(self, x, time, normalized_data, replace_state):
-        """Everything :class:`StepWrapper` takes for one step: the window, its dynamic features and its noise.
+        """Everything :class:`StepWrapper` takes for one step: the window and its dynamic features.
 
         The noise state is advanced here, replaced if ``replace_state`` is set, at the batch of ``x``;
         see :meth:`forward` for the batching contract on ``time`` and the noise.
@@ -313,13 +330,9 @@ class ModelWrapper(torch.nn.Module):
         x = self._prepare_input(x, time, normalized_data)
         features = {ZENITH: self._zenith_features(x, time)} if self.add_zenith else {}
 
-        noise = None
-        noise_source = self.model.preprocessor.noise_source(batch_size=x.shape[0])
-        if noise_source is not None:
-            noise_source.update(replace_state=replace_state)
-            noise = noise_source()
+        self.noise.advance(replace_state=replace_state, batch_size=x.shape[0])
 
-        return x, features, noise
+        return x, features
 
     def encode_process(self, x, time, normalized_data=True, replace_state=None):
         """Return the backbone's processed latent state without running its decoder.
@@ -352,8 +365,8 @@ class ModelWrapper(torch.nn.Module):
             If the backbone does not implement ``encode_process`` (currently only
             FCN3 does).
         """
-        x, features, noise = self._step_inputs(x, time, normalized_data, replace_state)
-        return self.model.encode(x, features, noise)
+        x, features = self._step_inputs(x, time, normalized_data, replace_state)
+        return self.model.encode(x, features)
 
     def forward(self, x, time, normalized_data=True, replace_state=None):
         """Advance the model state by one timestep.
@@ -390,13 +403,13 @@ class ModelWrapper(torch.nn.Module):
         ``B``. Note this is independent of ``params.batch_size``, which is a
         *training* setting and is typically 1 in a packaged model.
 
-        For a model with input noise, the first call at a new ``B`` must draw a
+        For a model with noise, the first call at a new ``B`` must draw a
         fresh state: pass ``replace_state=True``, or prime once up front with
         ``update_state(replace_state=True, batch_size=B)``. Resizing the noise
         state mid-sequence is refused rather than silently restarting the
         autoregressive noise from zero -- see
-        :meth:`Preprocessor2D.update_internal_state`. Models without input noise
-        are unaffected.
+        :meth:`~makani.models.noise_controller.NoiseController.advance`. Models
+        without noise are unaffected.
 
         ``time`` must supply either one time per member per history step
         (``B * (n_history + 1)`` entries, ordered member-major), or exactly
@@ -416,10 +429,10 @@ class ModelWrapper(torch.nn.Module):
             If stateful noise would have to be resized while continuing its
             sequence, see above.
         """
-        x, features, noise = self._step_inputs(x, time, normalized_data, replace_state)
+        x, features = self._step_inputs(x, time, normalized_data, replace_state)
 
         # one step, (B, 1, C_out, H, W)
-        out = self.model.predict(x, features, noise).squeeze(1)
+        out = self.model.predict(x, features).squeeze(1)
 
         if not normalized_data:
             out = out * self.out_scale + self.out_bias

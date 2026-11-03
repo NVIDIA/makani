@@ -130,6 +130,7 @@ class EnsembleTrainer(Trainer):
         with Timer() as timer:
             self.model = model_registry.get_model(self.params).to(self.device)
             self.preprocessor = self.model.preprocessor
+            self.noise = self.model.noise
         self.timers["model init"] = timer.time
 
         # print aux channel names:

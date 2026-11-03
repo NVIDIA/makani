@@ -28,6 +28,8 @@ makani
 │   ├── helpers.py                  # helper functions
 │   ├── model_package.py            # model package implementation
 │   ├── model_registry.py           # model registry with get_model routine that takes care of wrapping the model
+│   ├── noise.py                    # noise processes on the sphere: white, diffusion and dummy noise
+│   ├── noise_controller.py         # NoiseController: advances, snapshots, restores and re-seeds the noise of a model
 │   ├── preprocessor.py             # stateless preprocessor: dynamic and static features, input noise, history normalization
 │   ├── stepper.py                  # StepWrapper: binds a model to its preprocessor, runs a Rollout
 │   └── Readme.md                   # this file
@@ -54,6 +56,23 @@ nettype: "path/to/model_file.py:ModelName"
 ```
 
 using the path to the model file and the class name `ModelName`.
+
+### Stochastic models
+
+The noise of a model lives in noise processes, modules the model owns, so that their learnable parameters are trained and checkpointed with it: the input noise of the preprocessor, and any process a network lists through a `noise_processes()` method, e.g. for noise in its latent space. They are driven through `model.noise`, a `NoiseController`, and never sampled by the caller:
+
+```python
+from makani.utils.dataloaders.rollout import Rollout
+
+rollout = Rollout(batch, noise=model.noise)  # advances the noise before each step
+preds = model(rollout)
+
+model.noise.set_rng(seed=333)                 # reproduce, or decorrelate ensemble members
+snapshot = model.noise.snapshot()            # rewind point
+model.noise.restore(snapshot)                # rewind
+```
+
+A model package exposes the same controller as `ModelWrapper.noise`.
 
 ### Model packages
 
