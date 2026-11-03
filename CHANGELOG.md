@@ -10,7 +10,7 @@
 - Old DALI helpers (`data_loader_dali_2d`, `dali_es_helper_*`) were replaced by `dali_dataloader` + `sample_source`. Removed `img_utils`, `factorizations`, `drift_regularization`, `DistributedAFNO2Dv2`, and the fin/fout matmul split, which is now plain fork-join.
 - SFNO: no MLP output bias before instance norms (dropped on load); the frequency `pos_embed` has a full `m = 0` column. Old checkpoints of the latter need conversion, and runs from before cannot resume their optimizer state.
 - Bias, spectrum and zonal-spectrum files give lead times in hours, and the zonal spectrum's Nyquist bin is half its previous value. An unknown `scheduler` name raises. Pangu checkpoints trained before the shifted-window roll fix do not reproduce exactly.
-- The ACC, SSR and spread of data with missing values come out lower: each sample counts once, where they were too large by the inverse of the valid-area fraction (its square root for the spread).
+- The ACC, SSR and spread of data with missing values come out lower: each sample's value is taken over its valid area, and the samples are averaged weighted by that area. They were too large by the inverse of the valid-area fraction (its square root for the spread).
 - Invariants are stored in a single file; the model package renamed `land_sea_mask.nc` to `land_mask.nc` and normalizes its file names. Cosine zenith calculation uses an optimized vectorized routine.
 
 **Data**
@@ -32,6 +32,6 @@
 
 **Inference and tooling**
 - Streaming rollout buffer (GDS, O_DIRECT), WB2-compliant output, and an inferencer built on `Rollout`. With `n_history > 0`, the buffer records the latest step of the window, at its time, as the initial condition, not the oldest.
-- Metrics: ACC, SSR and spread of masked data count each sample once; spectrum buffers count the Nyquist order once; climatology and mask lookup work with history and across leap years. `load_time_loop` steps by `dt * dhours` hours.
+- Metrics: ACC, SSR and spread of masked data are valid-area-weighted averages of the per-sample values; spectrum buffers count the Nyquist order once; climatology and mask lookup work with history and across leap years. `load_time_loop` steps by `dt * dhours` hours.
 - Visualization rewrite: op registry instead of eval, rank 0 only, progress bars on videos; GIFs and rollout videos without moviepy, and a rollout plotting script.
 - Benchmark tool, profiling/NVTX fixes, pre-commit and a style CI, CI on pull requests, API docs, SECURITY.md, and broad test coverage, including distributed tests with DALI, on CPU and under srun/mpirun. CUDA-only calls are guarded, so runs work on CPU. Docker images build for B300/GB300.
