@@ -3890,6 +3890,66 @@ class TestEnsembleLossE1FastPath(unittest.TestCase):
 
     @parameterized.expand(
         [
+            ("CRPSLoss",),
+            ("GradientCRPSLoss",),
+            ("VortDivCRPSLoss",),
+            ("KernelScoreLoss",),
+        ]
+    )
+    def test_e1_spatial_weights(self, name, verbose=False):
+        """At E=1 the spatial weights apply as they do for an ensemble.
+
+        The E=1 path used to raise UnboundLocalError with spatial weights, since only the ensemble path set up the
+        flattened weights. Two identical members have zero spread, so their weighted score must agree with that of
+        the single member, and weights of one must leave the score unchanged.
+        """
+        builder, n_ch = self._make(name)
+        fn = builder()
+        obs = torch.randn(_BATCH, n_ch, _IMG_H, _IMG_W)
+        fc1 = torch.randn(_BATCH, 1, n_ch, _IMG_H, _IMG_W)
+
+        # weights per channel with a missing region, as the metrics pass them for missing targets. KernelScoreLoss
+        # expands every channel into its kernel basis, so its weights broadcast over the channels instead
+        n_wgt_ch = 1 if name == "KernelScoreLoss" else n_ch
+        wgt = torch.rand(_BATCH, n_wgt_ch, _IMG_H, _IMG_W)
+        wgt[..., : _IMG_W // 3] = 0.0
+
+        out_e1 = fn(fc1, obs, wgt)
+        out_e2 = fn(fc1.repeat(1, 2, 1, 1, 1), obs, wgt)
+        self.assertTrue(torch.isfinite(out_e1).all(), f"{name}: non-finite weighted E=1 output")
+        self.assertTrue(
+            compare_tensors(f"{name} weighted E=1 vs E=2-identical", out_e1, out_e2, atol=1e-5, verbose=verbose)
+        )
+
+        ones = torch.ones(_BATCH, n_wgt_ch, _IMG_H, _IMG_W)
+        out_none = fn(fc1, obs)
+        self.assertTrue(
+            compare_tensors(f"{name} E=1 unit weights", fn(fc1, obs, ones), out_none, atol=1e-5, verbose=verbose)
+        )
+
+        # the checks above also pass if the E=1 path ignores the weights. The score is linear in the weights, so the
+        # scores for two weights that add up to one must add up to the unweighted score; ignoring the weights would
+        # give twice the unweighted score instead
+        out_complement = fn(fc1, obs, ones - wgt)
+        self.assertTrue(
+            compare_tensors(
+                f"{name} E=1 complementary weights", out_e1 + out_complement, out_none, atol=1e-5, verbose=verbose
+            )
+        )
+
+        # CRPSLoss scores every point on its own, so observations in the zero weight region must not matter. The
+        # other losses transform the fields first, which spreads a change across the sphere
+        if name == "CRPSLoss":
+            obs_changed = obs.clone()
+            obs_changed[..., : _IMG_W // 3] += 10.0
+            self.assertTrue(
+                compare_tensors(
+                    f"{name} E=1 masked region", fn(fc1, obs_changed, wgt), out_e1, atol=1e-5, verbose=verbose
+                )
+            )
+
+    @parameterized.expand(
+        [
             ("LpEnergyScoreLoss",),
             ("SobolevEnergyScoreLoss",),
             ("SpectralL2EnergyScoreLoss",),

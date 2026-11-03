@@ -40,16 +40,19 @@ import torch.distributed as dist
 
 
 def _get_world_rank():
-    """Return the world rank from the env: ``WORLD_RANK`` if set, else ``RANK``.
+    """Return the world rank from the env, as the launcher sets it.
 
     Read directly from the env, not via ``comm``: ``pytest_configure`` runs before
     ``comm.init()`` (which happens in ``setUpClass`` / ``setUpModule``), and
     ``comm.get_world_rank()`` returns 0 until then -- so trusting comm here would make
     every rank look like rank 0 and nothing would get silenced. ``WORLD_RANK`` is
-    checked first as the explicit convention; ``RANK`` is the torch.distributed /
-    torchrun (and mpirun) variable that is actually set in our launches.
+    checked first as the explicit convention, then ``RANK`` (torchrun, or exported by
+    the launch script), then the launchers' own variables, which physicsnemo also
+    initializes from: Slurm (``SLURM_PROCID``) for a plain ``srun``, OpenMPI
+    (``OMPI_COMM_WORLD_RANK``) and MPICH/PMI (``PMI_RANK``) for ``mpirun``. Without
+    them every rank of an ``srun`` launch would see rank 0 and print.
     """
-    for key in ("WORLD_RANK", "RANK"):
+    for key in ("WORLD_RANK", "RANK", "SLURM_PROCID", "OMPI_COMM_WORLD_RANK", "PMI_RANK"):
         val = os.environ.get(key)
         if val is not None:
             return int(val)
