@@ -52,8 +52,8 @@ def _batch(with_target=True, with_zenith=True, grid=()):
         inp_timestamp=_times(2),
         tar=_field(1, 2, *grid) if with_target else None,
         tar_timestamp=_times(1) if with_target else None,
-        inp_zenith=_field(2, 1, *grid) if with_zenith else None,
-        tar_zenith=_field(1, 1, *grid) if (with_zenith and with_target) else None,
+        inp_dynamic_features={ZENITH: _field(2, 1, *grid)} if with_zenith else None,
+        tar_dynamic_features={ZENITH: _field(1, 1, *grid)} if (with_zenith and with_target) else None,
     )
 
 
@@ -87,8 +87,8 @@ class TestMakeBatch(unittest.TestCase):
                 inp_timestamp=torch.zeros(1, dtype=torch.float64),
                 tar=torch.ones(2, 3, _H, _W),
                 tar_timestamp=torch.ones(2, dtype=torch.float64),
-                inp_zenith=torch.zeros(1, 1, _H, _W),
-                tar_zenith=torch.ones(2, 1, _H, _W),
+                inp_dynamic_features={ZENITH: torch.zeros(1, 1, _H, _W)},
+                tar_dynamic_features={ZENITH: torch.ones(2, 1, _H, _W)},
             )
             for _ in range(_B)
         ]

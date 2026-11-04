@@ -67,12 +67,12 @@ from makani.utils.dataloaders.rollout import Rollout
 rollout = Rollout(batch, noise=model.noise)  # advances the noise before each step
 preds = model(rollout)
 
-model.noise.set_rng(seed=333)                 # reproduce, or decorrelate ensemble members
+model.noise.set_rng(seed=333)                # reproduce, or decorrelate ensemble members
 snapshot = model.noise.snapshot()            # rewind point
 model.noise.restore(snapshot)                # rewind
 ```
 
-A model package exposes the same controller as `ModelWrapper.noise`.
+A model package exposes the same controller as `ModelWrapper.noise`. A rollout of a stochastic model has to drive the noise of that model, and rollout checkpointing (`multistep_checkpoint`) is refused for a network with noise processes of its own, since the recompute in the backward pass would read the noise after the rollout has advanced it.
 
 ### Model packages
 

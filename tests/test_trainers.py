@@ -23,6 +23,7 @@ from typing import Optional
 import unittest
 from parameterized import parameterized
 
+from makani.utils.functions import flatten_history
 import torch
 
 from makani import Trainer, EnsembleTrainer, StochasticTrainer, AutoencoderTrainer
@@ -554,11 +555,11 @@ class TestTrainerRollouts(_TrainerTestCase):
                     pred, targ, idt = updates[n_batches * n_steps + k]
                     with self.subTest(batch=n_batches, step=k):
                         self.assertEqual(idt, k)
-                        expected = pp.flatten_history(preds[:, k : k + 1])
+                        expected = flatten_history(preds[:, k : k + 1])
                         if trainer_handle is EnsembleTrainer:
                             expected = rollout.unfold(expected)
                         self.assertTrue(torch.equal(pred, expected), "predictions")
-                        self.assertTrue(torch.equal(targ, pp.flatten_history(batch[TARGET][:, k : k + 1])), "targets")
+                        self.assertTrue(torch.equal(targ, flatten_history(batch[TARGET][:, k : k + 1])), "targets")
                 n_batches += 1
 
         self.assertGreater(n_batches, 0)

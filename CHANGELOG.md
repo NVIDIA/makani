@@ -4,6 +4,14 @@
 
 **Breaking**
 - The noise of a model is driven through `model.noise`, a `NoiseController` that advances, snapshots, restores and re-seeds it; the model package exposes it as `ModelWrapper.noise`. `Rollout(batch, noise=model.noise)` replaces `Rollout(batch, noise_source=...)`, `RolloutStep.noise` is replaced by `noise_version`, and `predict`/`encode` no longer take a noise sample. The preprocessor's `noise_source`, `update_internal_state`, `get_internal_state`, `set_internal_state`, `set_rng`, `get_base_seed` and `get_internal_rng` are removed, and `NoiseState` moved to `makani.models.noise_controller`. Checkpoints and results are unchanged.
+- A stochastic model refuses a `Rollout` that does not drive its own noise, and a step handed out by a rollout of another model. Noise versions come from one counter shared by all controllers.
+- `multistep_checkpoint` is refused for networks with noise processes of their own.
+- `NoiseController.set_rng` and `ModelWrapper.set_rng` take keyword arguments only (`seed=`, `reset=`), and the input noise is named `"input_noise"` in the controller. `noise_seed_reflect` is now `makani.models.noise.noise_base_seed`, and `run_eager` lives in `makani.models.noise`.
+- `make_batch` takes the dynamic features as dicts, `inp_dynamic_features` and `tar_dynamic_features`, instead of `inp_zenith` and `tar_zenith`. `Preprocessor2D.flatten_history` and `expand_history` are now the functions `makani.utils.functions.flatten_history` and `expand_history`, which work on any grid and refuse a tensor of the wrong rank instead of passing it through.
+
+**Data**
+- The DALI loader takes the order, the names and the layouts of its outputs from one list, `SampleSource.outputs()`, and passes on any dynamic feature it names. New `batch_nbytes` and `without_target` helpers; the trainers and the inferencer move batches with `non_blocking=True`, and the autoencoder trainer no longer moves the targets it does not use.
+- `Rollout` folds the ensemble into the dynamic features and timestamps of a target step once.
 
 **Models**
 - Networks can own noise processes, e.g. in latent space, listed through `noise_processes()`; rollouts drive them like the input noise.

@@ -1270,6 +1270,15 @@ class TestDummyLoader(unittest.TestCase):
         self.assertEqual(inp_time.device, batch[INPUT].device)
         self.assertEqual(batch[TARGET_TIMESTAMP].device, batch[INPUT].device)
 
+    def test_timestamps_advance_as_on_real_data(self):
+        # the window steps are dt * dhours apart, and the targets continue after the latest input step
+        loader = self._make_loader(n_history=2, n_future=1, dt=2, dhours=6)
+        batch = next(iter(loader))
+        times = torch.cat([batch[INPUT_TIMESTAMP], batch[TARGET_TIMESTAMP]], dim=1)
+        self.assertEqual(tuple(times.shape), (self.batch_size, 5))
+        steps = torch.diff(times, dim=1)
+        self.assertTrue(torch.all(steps == 2 * 6 * 3600.0), steps)
+
     def test_return_target_false_yields_input_only(self):
         loader = self._make_loader(return_target=False)
         batch = next(iter(loader))

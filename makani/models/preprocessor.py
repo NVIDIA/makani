@@ -22,11 +22,12 @@ from makani.utils.grids import GridQuadrature, grid_to_quadrature_rule
 from makani.mpu.mappings import copy_to_parallel_region
 
 from makani.models.preprocessor_helpers import get_bias_correction, get_static_features
-from makani.models.noise_controller import noise_base_seed
+from makani.models.noise import build_noise, noise_base_seed
 from makani.utils.dataloaders.batch import ZENITH
+from makani.utils.functions import flatten_history
 
 # the name of the input noise among the noise processes of a model
-INPUT_NOISE = "input"
+INPUT_NOISE = "input_noise"
 
 
 class HistoryStats(NamedTuple):
@@ -153,14 +154,7 @@ class Preprocessor2D(nn.Module):
         if params.get("input_noise", None) is not None:
             noise_params = params.input_noise
 
-            # the seed of this rank, passed down as-is
-            self.noise_base_seed, reflect = noise_base_seed(centered=noise_params.get("centered", False))
-
-            if "type" not in noise_params:
-                raise ValueError("Error, please specify an input noise type")
-
             self.input_noise_mode = noise_params.get("mode", "concatenate")
-
             if self.input_noise_mode == "concatenate":
                 noise_channels = noise_params.get("n_channels", 1)
             elif self.input_noise_mode == "perturb":
@@ -170,119 +164,21 @@ class Preprocessor2D(nn.Module):
             else:
                 raise NotImplementedError(f"Error, input noise mode {self.input_noise_mode} not supported.")
 
-            noise_lmax = noise_params.get("lmax", None)
-
-            if noise_params["type"] == "diffusion":
-                from makani.models.noise import DiffusionNoiseS2
-
-                # set the spatio-temporal correlation length
-                kT = noise_params.get("kT", 0.5 * (100 / 6370) ** 2)
-                lambd = noise_params.get("lambd", params.dt * params.dhours / 6.0)
-
-                self.input_noise = DiffusionNoiseS2(
-                    img_shape=self.img_shape_resampled,
-                    batch_size=params.batch_size,
-                    num_channels=noise_channels,
-                    num_time_steps=self.n_history + 1,
-                    sigma=noise_params.get("sigma", 1.0),
-                    kT=kT,  # use various scales
-                    lambd=lambd,  # use suggestion here: tau=6h
-                    grid_type=params.model_grid_type,
-                    lmax=noise_lmax,
-                    seed=self.noise_base_seed,
-                    reflect=reflect,
-                    learnable=noise_params.get("learnable", False),
-                )
-            elif noise_params["type"] == "white":
-                from makani.models.noise import IsotropicGaussianRandomFieldS2
-
-                self.input_noise = IsotropicGaussianRandomFieldS2(
-                    img_shape=self.img_shape_resampled,
-                    batch_size=params.batch_size,
-                    num_channels=noise_channels,
-                    num_time_steps=self.n_history + 1,
-                    sigma=noise_params.get("sigma", 1.0),
-                    alpha=noise_params.get("alpha", 0.0),
-                    grid_type=params.model_grid_type,
-                    lmax=noise_lmax,
-                    seed=self.noise_base_seed,
-                    reflect=reflect,
-                    learnable=noise_params.get("learnable", False),
-                )
-            elif noise_params["type"] == "dummy":
-                from makani.models.noise import DummyNoiseS2
-
-                self.input_noise = DummyNoiseS2(
-                    img_shape=self.img_shape_resampled,
-                    batch_size=params.batch_size,
-                    num_channels=noise_channels,
-                    num_time_steps=self.n_history + 1,
-                )
-            else:
-                raise NotImplementedError(f'Error, input noise type {noise_params["type"]} not supported.')
-
-    def flatten_history(self, x):
-        r"""
-        Fold the time dimension into the channel dimension.
-
-        Only for the boundary to code that still takes a flat channel stack, the
-        network and the losses; everything in between keeps the time axis.
-
-        Parameters
-        ----------
-        x : torch.Tensor
-            Tensor of shape ``(B, T, C, H, W)``. Tensors that are already 4D
-            are returned unchanged, so this is safe to call unconditionally.
-
-        Returns
-        -------
-        torch.Tensor
-            Tensor of shape ``(B, T * C, H, W)``.
-        """
-        # flatten input
-        if x.dim() == 5:
-            b_, t_, c_, h_, w_ = x.shape
-            x = torch.reshape(x, (b_, t_ * c_, h_, w_))
-
-        return x
-
-    def expand_history(self, x, nhist):
-        r"""
-        Split a flattened channel stack back into time and channel dimensions.
-
-        Inverse of :meth:`flatten_history`.
-
-        Parameters
-        ----------
-        x : torch.Tensor
-            Tensor of shape ``(B, T * C, H, W)``. Tensors that are already 5D
-            are returned unchanged.
-        nhist : int
-            Number of time steps ``T`` to split off. The channel dimension must
-            be divisible by this; the check is a ``torch._check`` so it survives
-            as a runtime assertion under ``torch.compile`` rather than becoming
-            a graph-breaking data-dependent branch.
-
-        Returns
-        -------
-        torch.Tensor
-            Tensor of shape ``(B, nhist, C, H, W)``.
-        """
-        if x.dim() == 4:
-            b_, ct_, h_, w_ = x.shape
-            # torch._check (rather than `if ...: raise`) so this stays a runtime
-            # assertion under torch.compile instead of becoming a data-dependent
-            # branch that breaks the graph.
-            torch._check(
-                ct_ % nhist == 0,
-                lambda: (
-                    f"expand_history: channel dim {ct_} is not divisible by nhist={nhist}. "
-                    f"The flattened-history input may not match the preprocessor's expected "
-                    f"n_history={self.n_history} (so ct_ should be a multiple of n_history+1={nhist})."
-                ),
+            # the seed of this rank; the temporal correlation of the diffusion noise defaults to tau = 6h, read from
+            # the time step of the data only for it, since the other types have no temporal correlation
+            seed, reflect = noise_base_seed(centered=noise_params.get("centered", False))
+            default_lambd = params.dt * params.dhours / 6.0 if noise_params.get("type") == "diffusion" else 1.0
+            self.input_noise = build_noise(
+                noise_params,
+                img_shape=self.img_shape_resampled,
+                batch_size=params.batch_size,
+                num_channels=noise_channels,
+                num_time_steps=self.n_history + 1,
+                grid_type=params.model_grid_type,
+                seed=seed,
+                reflect=reflect,
+                default_lambd=default_lambd,
             )
-            x = torch.reshape(x, (b_, nhist, ct_ // nhist, h_, w_))
-        return x
 
     def _check_time_axis(self, x, caller):
         torch._check(
@@ -311,7 +207,7 @@ class Preprocessor2D(nn.Module):
         """
         self._check_time_axis(x, "pack_model_input")
 
-        x = self.flatten_history(x)
+        x = flatten_history(x)
 
         if self.do_add_static_features:
             # the same fields for every sample
@@ -324,8 +220,10 @@ class Preprocessor2D(nn.Module):
         r"""
         Append the dynamic features and the noise to the input.
 
-        The features and the noise sample are passed in, as a
-        :class:`~makani.utils.dataloaders.rollout.RolloutStep` carries them.
+        The features come with the window, e.g. from a
+        :class:`~makani.utils.dataloaders.rollout.RolloutStep`, and the noise
+        sample from the noise of the model, see
+        :class:`~makani.models.noise_controller.NoiseController`.
         The channels are appended in a fixed order,
         ``[x | dynamic features, in the order of dynamic_features | noise]``;
         in ``perturb`` mode the noise is added to the selected channels instead.
@@ -338,8 +236,11 @@ class Preprocessor2D(nn.Module):
             The features of the window by name, each ``(B, n_history + 1, C_f, H, W)``.
             Has to hold exactly the features the model takes, :attr:`dynamic_features`.
         noise : torch.Tensor, optional
-            The noise sample for this window. Required if, and only if, the
-            preprocessor has input noise.
+            The sample of the input noise for this window,
+            ``(B, n_history + 1, C_noise, H, W)``, with ``C_noise`` the
+            ``n_channels`` of the noise in ``concatenate`` mode and the number
+            of perturbed channels in ``perturb`` mode. Required if, and only
+            if, the preprocessor has input noise.
 
         Returns
         -------
@@ -410,7 +311,7 @@ class Preprocessor2D(nn.Module):
         Returns
         -------
         dict
-            ``{"input": the input noise}``, or empty without input noise.
+            ``{"input_noise": the input noise}``, or empty without input noise.
         """
         if not hasattr(self, "input_noise"):
             return {}

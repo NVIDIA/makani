@@ -43,6 +43,66 @@ def expand_ensemble(x: torch.Tensor, ensemble_size: int) -> torch.Tensor:
     return x.unsqueeze(1).repeat_interleave(ensemble_size, dim=1).reshape(x.shape[0] * ensemble_size, *x.shape[1:])
 
 
+def flatten_history(x: torch.Tensor) -> torch.Tensor:
+    r"""
+    Fold the time axis into the channels, ``(B, T, C, *grid) -> (B, T * C, *grid)``.
+
+    The time steps are stacked oldest first, as the networks and the losses take
+    a window. The inverse of :func:`expand_history`.
+
+    Parameters
+    ----------
+    x : torch.Tensor
+        A window with its time axis, ``(B, T, C, *grid)``, on any grid.
+
+    Returns
+    -------
+    torch.Tensor
+        ``(B, T * C, *grid)``, a view of ``x`` where possible.
+
+    Raises
+    ------
+    RuntimeError
+        If ``x`` has no time axis, i.e. fewer than four dimensions.
+    """
+    torch._check(x.dim() >= 4, lambda: f"flatten_history: expected (B, T, C, *grid), got shape {tuple(x.shape)}")
+    return x.flatten(1, 2)
+
+
+def expand_history(x: torch.Tensor, nhist: int) -> torch.Tensor:
+    r"""
+    Split the time axis out of the channels, ``(B, T * C, *grid) -> (B, T, C, *grid)``.
+
+    The inverse of :func:`flatten_history`.
+
+    Parameters
+    ----------
+    x : torch.Tensor
+        A window with the time steps stacked in its channels, oldest first,
+        ``(B, T * C, *grid)``.
+    nhist : int
+        The number of time steps ``T``. The check that the channels divide
+        into it is a ``torch._check``, so that it stays a runtime assertion
+        under ``torch.compile`` rather than breaking the graph.
+
+    Returns
+    -------
+    torch.Tensor
+        ``(B, nhist, C, *grid)``, a view of ``x`` where possible.
+
+    Raises
+    ------
+    RuntimeError
+        If the channels of ``x`` are not a multiple of ``nhist``.
+    """
+    channels = x.shape[1]
+    torch._check(
+        channels % nhist == 0,
+        lambda: f"expand_history: channel dim {channels} is not divisible by nhist={nhist}",
+    )
+    return x.reshape(x.shape[0], nhist, channels // nhist, *x.shape[2:])
+
+
 def contiguous_complex_safe(x: torch.Tensor) -> torch.Tensor:
     """``contiguous()``, taken on the real view when the tensor is complex.
 

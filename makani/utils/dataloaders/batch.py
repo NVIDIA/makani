@@ -46,9 +46,11 @@ angle included. Where that part sits in the global grid is described by
 
 Every key is present, except that a loader built without targets, as for
 inference, omits the three target keys. The dynamic features are a dict even
-when empty. ``static_features`` (``(C_static, *grid)``) is reserved: the static
-fields are the same for every sample, so the preprocessor holds them on the
-device rather than every batch carrying a copy.
+when empty. ``static_features`` (``(C_static, *grid)``) is reserved and not emitted
+yet: the static fields are the same for every sample, so the preprocessor
+builds them from the configuration and holds them on the device rather than
+every batch carrying a copy. The key is kept for a structured model input that
+takes the state window, the dynamic and the static features apart.
 
 A :class:`~makani.utils.dataloaders.rollout.Rollout` consumes the dict.
 """
@@ -61,6 +63,9 @@ INPUT = "input"
 TARGET = "target"
 INPUT_DYNAMIC_FEATURES = "input_dynamic_features"
 TARGET_DYNAMIC_FEATURES = "target_dynamic_features"
+# reserved, no loader emits it and nothing reads it yet: the static fields (orography, land mask, ...) are the same
+# for every sample, so the preprocessor builds them from params (get_static_features) and holds them on the device.
+# Kept for the structured model input, which takes the state window, the dynamic and the static features apart.
 STATIC_FEATURES = "static_features"
 INPUT_TIMESTAMP = "input_timestamp"
 TARGET_TIMESTAMP = "target_timestamp"
@@ -76,8 +81,8 @@ def make_batch(
     inp_timestamp: torch.Tensor,
     tar: Optional[torch.Tensor] = None,
     tar_timestamp: Optional[torch.Tensor] = None,
-    inp_zenith: Optional[torch.Tensor] = None,
-    tar_zenith: Optional[torch.Tensor] = None,
+    inp_dynamic_features: Optional[Dict[str, torch.Tensor]] = None,
+    tar_dynamic_features: Optional[Dict[str, torch.Tensor]] = None,
 ) -> Batch:
     """
     Assemble a batch, or a single sample, from its parts.
@@ -92,8 +97,10 @@ def make_batch(
         Target state. Without it, the batch has no target keys.
     tar_timestamp : torch.Tensor, optional
         Time of each target step, required with ``tar``.
-    inp_zenith, tar_zenith : torch.Tensor, optional
-        Cosine of the solar zenith angle at the input and target steps.
+    inp_dynamic_features, tar_dynamic_features : dict of str to torch.Tensor, optional
+        The dynamic features at the input and target steps by name, e.g.
+        :data:`ZENITH`, each with the time axis of its state. None without
+        features; the target features need a target.
 
     Returns
     -------
@@ -103,19 +110,60 @@ def make_batch(
 
     if (tar is None) != (tar_timestamp is None):
         raise ValueError("A target and its timestamps go together")
+    if (tar is None) and tar_dynamic_features:
+        raise ValueError("Target dynamic features need a target")
 
-    batch = {INPUT: inp, INPUT_DYNAMIC_FEATURES: {}, INPUT_TIMESTAMP: inp_timestamp}
-    if inp_zenith is not None:
-        batch[INPUT_DYNAMIC_FEATURES][ZENITH] = inp_zenith
-
+    batch = {INPUT: inp, INPUT_DYNAMIC_FEATURES: dict(inp_dynamic_features or {}), INPUT_TIMESTAMP: inp_timestamp}
     if tar is not None:
         batch[TARGET] = tar
-        batch[TARGET_DYNAMIC_FEATURES] = {}
+        batch[TARGET_DYNAMIC_FEATURES] = dict(tar_dynamic_features or {})
         batch[TARGET_TIMESTAMP] = tar_timestamp
-        if tar_zenith is not None:
-            batch[TARGET_DYNAMIC_FEATURES][ZENITH] = tar_zenith
 
     return batch
+
+
+def without_target(batch: Batch) -> Batch:
+    """
+    The batch without its target keys, e.g. so that they are not moved to the device.
+
+    Parameters
+    ----------
+    batch : dict
+        The batch.
+
+    Returns
+    -------
+    dict
+        A new batch with the input keys only; the one passed in is left as it is.
+    """
+    return {
+        key: value for key, value in batch.items() if key not in (TARGET, TARGET_DYNAMIC_FEATURES, TARGET_TIMESTAMP)
+    }
+
+
+def batch_nbytes(batch: Batch) -> int:
+    """
+    The bytes of every tensor of a batch, including those of nested dicts.
+
+    Parameters
+    ----------
+    batch : dict
+        The batch.
+
+    Returns
+    -------
+    int
+        The sum of ``Tensor.nbytes`` over the batch.
+    """
+
+    def _nbytes(value):
+        if isinstance(value, torch.Tensor):
+            return value.nbytes
+        if isinstance(value, dict):
+            return sum(_nbytes(item) for item in value.values())
+        return 0
+
+    return _nbytes(batch)
 
 
 def batch_to_device(batch: Batch, device: torch.device, non_blocking: bool = False) -> Batch:

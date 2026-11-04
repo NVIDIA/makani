@@ -20,6 +20,7 @@ import numpy as np
 from tqdm import tqdm
 
 # torch
+from makani.utils.functions import flatten_history
 import torch
 import torch.amp as amp
 import torch.distributed as dist
@@ -31,7 +32,7 @@ from makani.utils import LossHandler, MetricsHandler
 from makani.utils.driver import Driver
 from makani.utils.dataloader import get_dataloader
 from makani.utils.dataloaders.data_helpers import get_climatology
-from makani.utils.dataloaders.batch import batch_to_device, INPUT, TARGET
+from makani.utils.dataloaders.batch import batch_nbytes, batch_to_device, without_target, INPUT
 from makani.utils.YParams import YParams
 
 # model registry
@@ -493,14 +494,13 @@ class AutoencoderTrainer(Driver):
             self.iters += 1
 
             # map to device
-            batch = batch_to_device(data, self.device)
-            tar = batch[TARGET]
+            # the autoencoder reconstructs its input, so the target window is never moved
+            batch = batch_to_device(without_target(data), self.device, non_blocking=True)
 
             # the autoencoder takes the time steps folded into the channels
-            inp = self.preprocessor.flatten_history(batch[INPUT])
+            inp = flatten_history(batch[INPUT])
 
-            # assuming float32
-            total_data_bytes += inp.nbytes + tar.nbytes
+            total_data_bytes += batch_nbytes(batch)
 
             # decide if we need to do an update
             do_update = train_steps % self.params["gradient_accumulation_steps"] == 0
@@ -641,12 +641,12 @@ class AutoencoderTrainer(Driver):
                 for data in progress_bar:
                     eval_steps += 1
 
-                    # map to gpu
-                    batch = batch_to_device(data, self.device)
+                    # map to gpu; the autoencoder reconstructs its input, so the target window is never moved
+                    batch = batch_to_device(without_target(data), self.device, non_blocking=True)
 
                     # the autoencoder reconstructs its input, with the time steps folded into
                     # the channels
-                    inpt = self.preprocessor.flatten_history(batch[INPUT])
+                    inpt = flatten_history(batch[INPUT])
 
                     # FW pass
                     with self.autocast():

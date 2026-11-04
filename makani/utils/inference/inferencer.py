@@ -26,7 +26,7 @@ import torch.utils.data as tud
 
 from makani.utils.driver import Driver
 from makani.utils import LossHandler, MetricsHandler
-from makani.utils.functions import expand_ensemble
+from makani.utils.functions import expand_ensemble, flatten_history
 from makani.utils.dataloader import get_dataloader
 from makani.utils.dataloaders.data_loader_multifiles import MultifilesDataset
 from makani.utils.dataloaders.batch import (
@@ -621,139 +621,126 @@ class Inferencer(Driver):
         idt = 0
         E = self.params.local_ensemble_size
         with torch.inference_mode():
-            with torch.no_grad():
-                for token in tqdm(subset_dataloader, desc="Inference progress", disable=not self.log_to_screen):
+            for token in tqdm(subset_dataloader, desc="Inference progress", disable=not self.log_to_screen):
 
-                    # the step within the rollout of the current initial condition
-                    idte = idt % (rollout_steps + 1)
+                # the step within the rollout of the current initial condition
+                idte = idt % (rollout_steps + 1)
 
-                    if torch.cuda.is_available():
-                        torch.cuda.nvtx.range_push(f"inference step {idt}, rollout step {idte}")
-                    self.step_timer.begin_step()
+                if torch.cuda.is_available():
+                    torch.cuda.nvtx.range_push(f"inference step {idt}, rollout step {idte}")
+                self.step_timer.begin_step()
 
-                    # move input to GPU; the loader runs without targets, so every step is
-                    # read as an input: the initial condition first, then the verification
-                    gbatch = batch_to_device(token, self.device)
-                    gfield = gbatch[INPUT]
-                    gtime = gbatch[INPUT_TIMESTAMP]
+                # move input to GPU; the loader runs without targets, so every step is
+                # read as an input: the initial condition first, then the verification
+                gbatch = batch_to_device(token, self.device, non_blocking=True)
+                gfield = gbatch[INPUT]
+                gtime = gbatch[INPUT_TIMESTAMP]
 
-                    # get mask
-                    if self.mask_dataset is not None:
-                        # we need target mask
-                        masks = next(mask_iterator)[INPUT]
-                        # send to device and remove time dim
-                        masks = masks.to(self.device).squeeze(1)
+                # get mask
+                if self.mask_dataset is not None:
+                    # we need target mask
+                    masks = next(mask_iterator)[INPUT]
+                    # send to device and remove time dim
+                    masks = masks.to(self.device).squeeze(1)
 
-                        # we should normalize the masks just in case:
-                        masks_norm = self.quadrature(masks).unsqueeze(-1).unsqueeze(-1)
-                        masks = masks / masks_norm
-                    else:
-                        masks = None
+                    # we should normalize the masks just in case:
+                    masks_norm = self.quadrature(masks).unsqueeze(-1).unsqueeze(-1)
+                    masks = masks / masks_norm
+                else:
+                    masks = None
 
-                    # get climatology
-                    if self.climatology_dataset is not None:
-                        # we need the target clims
-                        clims = next(climatology_iterator)[INPUT]
-                        # send to device and remove time dim
-                        clims = clims.to(self.device).squeeze(1)
-                    else:
-                        clims = None
+                # get climatology
+                if self.climatology_dataset is not None:
+                    # we need the target clims
+                    clims = next(climatology_iterator)[INPUT]
+                    # send to device and remove time dim
+                    clims = clims.to(self.device).squeeze(1)
+                else:
+                    clims = None
 
-                    if idte == 0:
-                        # episode start: a new initial condition. The rollout folds the ensemble
-                        # dim into the batch dim, (B*E, ...) going into the model, and replaces
-                        # the noise state at its first step; it evolves via AR updates after that.
-                        # the initial condition is the latest step of the window, the steps before it are history
-                        tinp = gtime[:, -1]
+                if idte == 0:
+                    # episode start: a new initial condition. The rollout folds the ensemble
+                    # dim into the batch dim, (B*E, ...) going into the model, and replaces
+                    # the noise state at its first step; it evolves via AR updates after that.
+                    # the initial condition is the latest step of the window, the steps before it are history
+                    tinp = gtime[:, -1]
 
-                        if self.log_to_screen:
-                            dates = date_fn(tinp.detach().cpu()).tolist()
-                            datestring = ", ".join([d.strftime("%Y-%m-%dT%H:%M:%S") for d in dates])
-                            print(f"inferencing dates: {datestring}")
+                    if self.log_to_screen:
+                        dates = date_fn(tinp.detach().cpu()).tolist()
+                        datestring = ", ".join([d.strftime("%Y-%m-%dT%H:%M:%S") for d in dates])
+                        print(f"inferencing dates: {datestring}")
 
-                        rollout = Rollout(gbatch, n_steps=rollout_steps, noise=self.model.noise, ensemble_size=E)
+                    rollout = Rollout(gbatch, n_steps=rollout_steps, noise=self.model.noise, ensemble_size=E)
+
+                    if rollout_buffer is not None:
+                        # every member starts from the same initial condition, (B, E, C, H, W)
+                        ic = rollout.unfold(expand_ensemble(gfield[:, -1], E))
+                        rollout_buffer.update(ic, tinp, idt=idte)
+
+                else:
+                    # rollout step: the sample is the verification, its latest step is the
+                    # predicted time
+                    tar, ttar = gfield[:, -1:], gtime[:, -1:]
+                    tar_features = {name: feature[:, -1:] for name, feature in gbatch[INPUT_DYNAMIC_FEATURES].items()}
+
+                    # the losses, metrics and buffers take the channels flat
+                    targ = flatten_history(tar)
+
+                    with self.autocast():
+                        # single forward on the folded batch
+                        step = next(rollout)
+                        pred_step = self.model.predict_step(step)
+
+                        # the batch has no targets: the verification sample supplies the
+                        # dynamic features and the time the window moves on to
+                        rollout.advance(pred_step, dynamic_features=tar_features, timestamp=ttar)
+
+                        # split the ensemble back out, (B, E, ...), for metrics / loss / buffers
+                        pred = rollout.unfold(flatten_history(pred_step))
+
+                        # no weight here, since it is not clear what it would be for the spectral
+                        # components in spectral CRPS
+                        loss = self.loss_obj(pred, targ)
 
                         if rollout_buffer is not None:
-                            # every member starts from the same initial condition, (B, E, C, H, W)
-                            ic = rollout.unfold(expand_ensemble(gfield[:, -1], E))
-                            rollout_buffer.update(ic, tinp, idt=idte)
+                            rollout_buffer.update(pred, ttar[:, 0], idt=idte)
 
-                    else:
-                        # rollout step: the sample is the verification, its latest step is the
-                        # predicted time
-                        tar, ttar = gfield[:, -1:], gtime[:, -1:]
-                        tar_features = {
-                            name: feature[:, -1:] for name, feature in gbatch[INPUT_DYNAMIC_FEATURES].items()
-                        }
+                    # update the metrics starting from the first actual prediction
+                    if metrics is not None:
 
-                        # the losses, metrics and buffers take the channels flat
-                        targ = self.preprocessor.flatten_history(tar)
+                        # subtract clim
+                        if clims is not None:
+                            predc = pred - clims.unsqueeze(1)
+                            targc = targ - clims
+                        else:
+                            predc = pred
+                            targc = targ
 
-                        with self.autocast():
-                            # single forward on the folded batch
-                            step = next(rollout)
-                            pred_step = self.model.predict_step(step)
+                        # update metrics
+                        metrics.update(predc, targc, loss, idte - 1, masks)
 
-                            # the batch has no targets: the verification sample supplies the
-                            # dynamic features and the time the window moves on to
-                            rollout.advance(pred_step, dynamic_features=tar_features, timestamp=ttar)
+                    # update the bias computation
+                    if bias_buffer is not None:
+                        diff = pred - targ.unsqueeze(dim=1)
+                        B, E, C, H, W = diff.shape
+                        diff = diff.reshape(B * E, C, H, W).contiguous()
+                        bias_buffer.update(diff, idte - 1)
 
-                            # split the ensemble back out, (B, E, ...), for metrics / loss / buffers
-                            pred = rollout.unfold(self.preprocessor.flatten_history(pred_step))
+                    if spectrum_buffer is not None:
+                        spectrum_buffer.update(pred, targ.unsqueeze(1), idte - 1)
 
-                            # no weight here, since it is not clear what it would be for the spectral
-                            # components in spectral CRPS
-                            loss = self.loss_obj(pred, targ)
+                    if zonal_spectrum_buffer is not None:
+                        zonal_spectrum_buffer.update(pred, targ.unsqueeze(1), idte - 1)
 
-                            if rollout_buffer is not None:
-                                rollout_buffer.update(pred, ttar[:, 0], idt=idte)
+                self.step_timer.end_step()
+                if torch.cuda.is_available():
+                    torch.cuda.nvtx.range_pop()
 
-                        # update the metrics starting from the first actual prediction
-                        if metrics is not None:
+                # increment counter
+                idt += 1
 
-                            # subtract clim
-                            if clims is not None:
-                                predc = pred - clims.unsqueeze(1)
-                                targc = targ - clims
-                            else:
-                                predc = pred
-                                targc = targ
-
-                            # update metrics
-                            metrics.update(predc, targc, loss, idte - 1, masks)
-
-                        # update the bias computation
-                        if bias_buffer is not None:
-                            diff = pred - targ.unsqueeze(dim=1)
-                            B, E, C, H, W = diff.shape
-                            diff = diff.reshape(B * E, C, H, W).contiguous()
-                            bias_buffer.update(diff, idte - 1)
-
-                        if spectrum_buffer is not None:
-                            if pred.dim() == 4:
-                                prede = pred.unsqueeze(1)
-                            else:
-                                prede = pred
-
-                            spectrum_buffer.update(prede, targ.unsqueeze(1), idte - 1)
-
-                        if zonal_spectrum_buffer is not None:
-                            if pred.dim() == 4:
-                                prede = pred.unsqueeze(1)
-                            else:
-                                prede = pred
-
-                            zonal_spectrum_buffer.update(prede, targ.unsqueeze(1), idte - 1)
-
-                    self.step_timer.end_step()
-                    if torch.cuda.is_available():
-                        torch.cuda.nvtx.range_pop()
-
-                    # increment counter
-                    idt += 1
-
-                    if profiler is not None:
-                        profiler.step()
+                if profiler is not None:
+                    profiler.step()
 
         # barrier to ensure everyone is here before calling finalize
         if dist.is_initialized():

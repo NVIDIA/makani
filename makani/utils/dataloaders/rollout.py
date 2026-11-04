@@ -207,6 +207,10 @@ class Rollout:
 
         self._index = 0
         self._pending = False
+        # the dynamic features and the timestamp of the predicted step, folded, from the targets of the batch:
+        # handed out with the step and slid into the window by advance()
+        self._target_features = {}
+        self._target_timestamp = None
 
     @property
     def n_steps(self) -> int:
@@ -281,15 +285,13 @@ class Rollout:
             self._noise_version = self._noise.version
 
         target = None
-        target_features = {}
-        target_timestamp = None
         if self._has_target:
             target = self._batch[TARGET][:, k : k + 1]
-            target_features = {
+            self._target_features = {
                 name: self._fold(feature[:, k : k + 1])
                 for name, feature in self._batch[TARGET_DYNAMIC_FEATURES].items()
             }
-            target_timestamp = self._fold(self._batch[TARGET_TIMESTAMP][:, k : k + 1])
+            self._target_timestamp = self._fold(self._batch[TARGET_TIMESTAMP][:, k : k + 1])
 
         self._pending = True
 
@@ -299,12 +301,12 @@ class Rollout:
             input_dynamic_features=dict(self._input_features),
             input_timestamp=self._input_timestamp,
             target=target,
-            target_dynamic_features=target_features,
-            target_timestamp=target_timestamp,
+            target_dynamic_features=dict(self._target_features),
+            target_timestamp=self._target_timestamp,
             noise_version=self._noise_version,
         )
 
-    def noise_state(self):
+    def noise_state(self) -> "NoiseSnapshot":
         """
         Snapshot the noise state of the finished rollout.
 
@@ -402,20 +404,21 @@ class Rollout:
                 raise ValueError(
                     "The batch has targets, the dynamic features and timestamps of the predicted steps come from them"
                 )
-            dynamic_features = {
-                name: feature[:, k : k + 1] for name, feature in self._batch[TARGET_DYNAMIC_FEATURES].items()
-            }
-            timestamp = self._batch[TARGET_TIMESTAMP][:, k : k + 1]
+            # already folded, when the step was handed out
+            dynamic_features, timestamp = self._target_features, self._target_timestamp
         elif (not last) or (dynamic_features is not None) or (timestamp is not None):
             self._check_next_step(dynamic_features, timestamp)
+            if not last:
+                dynamic_features = {name: self._fold(feature) for name, feature in dynamic_features.items()}
+                timestamp = self._fold(timestamp)
 
         if not last:
             self._input = torch.cat([self._input[:, 1:], pred], dim=1)
             self._input_features = {
-                name: torch.cat([window[:, 1:], self._fold(dynamic_features[name])], dim=1)
+                name: torch.cat([window[:, 1:], dynamic_features[name]], dim=1)
                 for name, window in self._input_features.items()
             }
-            self._input_timestamp = torch.cat([self._input_timestamp[:, 1:], self._fold(timestamp)], dim=1)
+            self._input_timestamp = torch.cat([self._input_timestamp[:, 1:], timestamp], dim=1)
 
         self._index += 1
         self._pending = False

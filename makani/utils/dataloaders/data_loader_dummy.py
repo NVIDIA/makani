@@ -31,11 +31,15 @@ from torch_harmonics.distributed import compute_split_shapes
 
 # for grid conversion
 from makani.utils.dataloaders.data_shapes import DataShapes
-from makani.utils.dataloaders.batch import make_batch
+from makani.utils.dataloaders.batch import ZENITH, make_batch
 from makani.utils.grids import GridConverter
 
 # data helpers
 from .data_helpers import get_lat_lon_grid, get_date_from_string, get_date_from_timestamp
+
+
+# the first time of the dummy data
+_DUMMY_START_DATE = "2020-01-01T00:00:00Z"
 
 
 class DummyLoader(object):
@@ -271,9 +275,15 @@ class DummyLoader(object):
         self.inp.uniform_()
         self.tar.uniform_()
 
-        # the values are as meaningless as the payload; they are there because every batch has them
-        self.inp_time = torch.zeros((self.batch_size, self.n_history + 1), dtype=torch.float64, device=self.device)
-        self.tar_time = torch.ones((self.batch_size, self.n_future + 1), dtype=torch.float64, device=self.device)
+        # the times of a real window, in seconds since the epoch: dt * dhours apart, from the oldest input step
+        # through the targets, which continue after the latest one, so that anything reading the times of a
+        # window sees them advance as on real data. Every batch has the same window, as it has the same payload.
+        # The dummy zenith angle stays zero, it is not computed from these times.
+        step = 3600.0 * self.dt * self.dhours
+        start = get_date_from_string(_DUMMY_START_DATE).timestamp()
+        times = start + step * torch.arange(self.n_history + self.n_future + 2, dtype=torch.float64, device=self.device)
+        self.inp_time = times[: self.n_history + 1].expand(self.batch_size, -1).contiguous()
+        self.tar_time = times[self.n_history + 1 :].expand(self.batch_size, -1).contiguous()
 
         self.in_bias = np.zeros((1, self.n_in_channels, 1, 1)).astype(np.float32)
         self.in_scale = np.ones((1, self.n_in_channels, 1, 1)).astype(np.float32)
@@ -302,8 +312,8 @@ class DummyLoader(object):
                 inp_timestamp=self.inp_time,
                 tar=self.tar if self.return_target else None,
                 tar_timestamp=self.tar_time if self.return_target else None,
-                inp_zenith=self.zen_inp_dummy if self.add_zenith else None,
-                tar_zenith=self.zen_tar_dummy if (self.add_zenith and self.return_target) else None,
+                inp_dynamic_features={ZENITH: self.zen_inp_dummy} if self.add_zenith else None,
+                tar_dynamic_features={ZENITH: self.zen_tar_dummy} if (self.add_zenith and self.return_target) else None,
             )
         else:
             raise StopIteration()
@@ -335,7 +345,7 @@ class DummyInferenceDataset(DummyLoader, torch.utils.data.Dataset):
     on a real dataset.
     """
 
-    def __init__(self, *args, start_date: Optional[str] = "2020-01-01T00:00:00Z", **kwargs):
+    def __init__(self, *args, start_date: Optional[str] = _DUMMY_START_DATE, **kwargs):
         # the parent allocates its batch on this device; force the host, and keep the batch
         # dimension minimal since indexed access never uses the parent's buffers
         kwargs["device"] = torch.device("cpu")
@@ -384,8 +394,8 @@ class DummyInferenceDataset(DummyLoader, torch.utils.data.Dataset):
             inp_timestamp=torch.as_tensor(inp_time, dtype=torch.float64),
             tar=self.sample_tar if return_target else None,
             tar_timestamp=torch.as_tensor(tar_time, dtype=torch.float64) if return_target else None,
-            inp_zenith=self.sample_zen if self.add_zenith else None,
-            tar_zenith=self.sample_zen_tar if (self.add_zenith and return_target) else None,
+            inp_dynamic_features={ZENITH: self.sample_zen} if self.add_zenith else None,
+            tar_dynamic_features={ZENITH: self.sample_zen_tar} if (self.add_zenith and return_target) else None,
         )
 
     def __getitem__(self, global_idx):

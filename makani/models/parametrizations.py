@@ -352,8 +352,9 @@ class ConstraintsWrapper(nn.Module):
 
     def noise_processes(self):
         r"""
-        The noise processes of the wrapped model, so that its noise is driven
-        as if it were not wrapped, see
+        The noise processes of the wrapped model.
+
+        Its noise is driven as if it were not wrapped, see
         :class:`~makani.models.noise_controller.NoiseController`.
 
         Returns
