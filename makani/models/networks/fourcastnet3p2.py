@@ -71,6 +71,38 @@ def _pole_blend_kwargs(pole_blend):
     return {"pole_blend": dict(pole_blend) if isinstance(pole_blend, dict) else pole_blend}
 
 
+class Softplus(nn.Module):
+    r"""
+    Softplus activation :math:`\log(1 + e^{\beta x}) / \beta` with an optional shift by :math:`\log(2) / \beta`.
+
+    Unlike GELU, whose response switches on over an O(1) range of its input, the knee of the softplus has a
+    width of about :math:`1 / \beta`. A smaller ``beta`` therefore makes hidden units respond gradually instead
+    of firing in rare spikes when their pre-activation crosses a threshold.
+
+    Parameters
+    ----------
+    beta : float, optional
+        Sharpness of the knee, by default ``1.0``. ``beta -> infinity`` recovers the ReLU.
+    shift : bool, optional
+        Subtract :math:`\log(2) / \beta` so that the activation is zero at zero like GELU, by default ``False``.
+    """
+
+    def __init__(self, beta=1.0, shift=False):
+        super().__init__()
+        if beta <= 0.0:
+            raise ValueError(f"softplus beta has to be positive, got {beta}")
+        self.beta = float(beta)
+        self.shift = bool(shift)
+        self.offset = math.log(2.0) / self.beta if self.shift else 0.0
+
+    def forward(self, x):
+        out = nn.functional.softplus(x, beta=self.beta)
+        return out - self.offset if self.shift else out
+
+    def extra_repr(self):
+        return f"beta={self.beta}, shift={self.shift}"
+
+
 # heuristic for finding theta_cutoff
 def _compute_cutoff_radius(nlat, kernel_shape, basis_type):
     theta_cutoff_factor = {"piecewise linear": 0.5, "morlet": 0.5, "harmonic": 0.5, "zernike": math.sqrt(2.0)}
@@ -713,6 +745,19 @@ class AtmoSphericNeuralOperatorNet32(nn.Module):
 
     Enabling the pole blend requires a torch-harmonics build with PoleBlend support.
 
+    Activation options: in addition to ``"relu"``, ``"gelu"`` (default) and ``"silu"``, ``activation_function``
+    accepts ``"softplus"`` (:class:`Softplus`), configured by
+
+    softplus_beta
+        Sharpness of the softplus knee, by default ``1.0``; its width is about ``1 / softplus_beta``.
+    softplus_shift
+        Subtract ``log(2) / softplus_beta`` so that the activation vanishes at zero, by default ``False``.
+
+    The activation is used in the processor MLPs (and in the encoder/decoder MLPs if ``encoder_mlp`` is set).
+    Rarely firing GELU units in the processor MLPs were found to produce fine-scale artifacts near the poles;
+    a smoother activation is an option to experiment with. Changing the activation alters the function the
+    trained weights represent, so warm starts from GELU checkpoints need more retraining than the pole blend.
+
     References:
     [1] Bonev et al., Spherical Fourier Neural Operators: Learning Stable Dynamics on the Sphere
     [2] Ocampo et al., Scalable and Equivariant Spherical CNNs by Discrete-Continuous (DISCO) Convolutions
@@ -761,6 +806,8 @@ class AtmoSphericNeuralOperatorNet32(nn.Module):
         pole_blend_encoder=None,
         pole_blend_decoder=None,
         pole_blend_processor=None,
+        softplus_beta=1.0,
+        softplus_shift=False,
         **kwargs,
     ):
         super().__init__()
@@ -809,6 +856,8 @@ class AtmoSphericNeuralOperatorNet32(nn.Module):
             activation_function = nn.GELU
         elif activation_function == "silu":
             activation_function = nn.SiLU
+        elif activation_function == "softplus":
+            activation_function = partial(Softplus, beta=softplus_beta, shift=softplus_shift)
         else:
             raise ValueError(f"Unknown activation function {activation_function}")
 

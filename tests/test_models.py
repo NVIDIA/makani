@@ -372,6 +372,33 @@ class TestFCN32PoleBlend(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 fourcastnet3p2._pole_blend_kwargs(True)
 
+    @parameterized.expand([(0.5, False), (0.5, True), (1.0, False)])
+    def test_softplus_activation(self, beta, shift):
+        """activation_function="softplus" builds the processor MLPs with the configured Softplus."""
+        from makani.models.networks.fourcastnet3p2 import Softplus
+
+        model = self._model("FCN3.2", activation_function="softplus", softplus_beta=beta, softplus_shift=shift)
+        net = model.model if hasattr(model, "model") else model
+        acts = [m for m in net.modules() if isinstance(m, Softplus)]
+        self.assertGreater(len(acts), 0)
+        self.assertFalse(any(isinstance(m, nn.GELU) for m in net.modules()))
+        for act in acts:
+            self.assertEqual((act.beta, act.shift), (beta, shift))
+        inp = self._input().requires_grad_(True)
+        out = model(single_step_rollout(inp.unsqueeze(1)))
+        self.assertTrue(torch.isfinite(out).all())
+        out.sum().backward()
+        self.assertTrue(torch.isfinite(inp.grad).all())
+
+    def test_softplus_module(self):
+        from makani.models.networks.fourcastnet3p2 import Softplus
+
+        x = torch.linspace(-20.0, 20.0, 401, dtype=torch.float64)
+        self.assertTrue(torch.allclose(Softplus(beta=0.5)(x), nn.functional.softplus(x, beta=0.5)))
+        self.assertAlmostEqual(Softplus(beta=0.5, shift=True)(torch.zeros(1, dtype=torch.float64)).item(), 0.0, places=12)
+        with self.assertRaises(ValueError):
+            Softplus(beta=0.0)
+
 def _soft_clamp_reference(x):
     # 0 below zero, x^2 on [0, 0.5) and x - 0.25 above: continuous with a continuous first derivative
     return torch.where(x >= 0.5, x - 0.25, torch.where(x > 0.0, x**2, torch.zeros_like(x)))

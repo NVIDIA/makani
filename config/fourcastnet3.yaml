@@ -397,7 +397,7 @@ fcn3_sc2_edim45_layers10_finetune: &FCN3_SC2_FINETUNE
 # FCN3.2: FCN3 with the DISCO filters isotropized near the poles (pole blend), fine-tuned from the FCN3
 # weights. Module and parameter names are those of FCN3, so the FCN3 checkpoint loads as is.
 # Requires a torch-harmonics build with PoleBlend support.
-fcn3p2_sc2_edim45_layers10_poleblend_finetune:
+fcn3p2_sc2_edim45_layers10_poleblend_finetune: &FCN3P2_POLEBLEND_FINETUNE
     <<: *FCN3_SC2_FINETUNE
     nettype: "FCN3.2"
     wandb_group: "fcn3p2_sc2_edim45_layers10_poleblend_finetune"
@@ -409,6 +409,18 @@ fcn3p2_sc2_edim45_layers10_poleblend_finetune:
 
     # warm start from the fine-tuned FCN3
     pretrained_checkpoint_path: "/runs/fcn3_sc2_edim45_layers10_finetune/flexible/training_checkpoints/ckpt_mp0_v0.tar"
+
+# FCN3.2 with pole blend and a softplus activation instead of GELU. Rarely firing GELU units in the processor
+# MLPs produced fine-scale artifacts near the poles; the softplus knee has a width of ~1/softplus_beta, so units
+# respond gradually. Changing the activation alters what the FCN3 weights represent, so this needs more
+# retraining than the pole blend alone.
+fcn3p2_sc2_edim45_layers10_poleblend_softplus_finetune:
+    <<: *FCN3P2_POLEBLEND_FINETUNE
+    wandb_group: "fcn3p2_sc2_edim45_layers10_poleblend_softplus_finetune"
+    activation_function: "softplus"
+    softplus_beta: 0.5
+    # subtract log(2)/beta so that the activation vanishes at zero like GELU (smaller shock when warm-starting)
+    softplus_shift: !!bool True
 
 ###########################################################################################################################
 # Smaller FCN3 and Spherical Neural Operator Probabilistic models used for experimentation
