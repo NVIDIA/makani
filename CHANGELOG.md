@@ -16,6 +16,9 @@
 **Models**
 - Networks can own noise processes, e.g. in latent space, listed through `noise_processes()`; rollouts drive them like the input noise.
 
+**Fixed**
+- Learnable white noise (`IsotropicGaussianRandomFieldS2`) under spatial model parallelism: its `sigma_l` is sharded over `h` and `w` but was not annotated as shared over `matmul` only, so the gradient reduction summed the shards of other ranks (or failed on shards of different sizes) and `sync_params` overwrote them with those of rank 0.
+
 ## 0.3.0
 
 **Breaking**

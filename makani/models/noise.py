@@ -516,6 +516,9 @@ class IsotropicGaussianRandomFieldS2(BaseNoiseS2):
         # register buffer
         if learnable:
             self.register_parameter("sigma_l", nn.Parameter(sigma_l))
+            # sharded over h and w, the degrees and orders, so only shared over matmul: unannotated, it would count
+            # as shared over the whole model group, and the gradient reduction would sum the shards of other ranks
+            self.sigma_l.is_shared_mp = ["matmul"]
             self.sigma_l.sharded_dims_mp = [None, None, None, "h", "w"]
         else:
             self.register_buffer("sigma_l", sigma_l, persistent=False)
@@ -798,7 +801,7 @@ class DiffusionNoiseS2(BaseNoiseS2):
         if learnable:
             self.phi = nn.Parameter(phi)
             self.phi.is_shared_mp = ["matmul", "h", "w"]
-            self.phi.sharded_dims_mp = [None, None, None]
+            self.phi.sharded_dims_mp = [None, None, None, None]
             self.sigma_l = nn.Parameter(sigma_l)
             self.sigma_l.is_shared_mp = ["matmul", "w"]
             self.sigma_l.sharded_dims_mp = [None, None, None, "h", None, None]

@@ -967,6 +967,40 @@ class TestDiffusionNoiseS2(unittest.TestCase):
 
 
 # ===========================================================================
+class TestLearnableNoiseAnnotations(unittest.TestCase):
+    """
+    The model-parallel annotations of the learnable noise parameters.
+
+    The gradient reduction sums the gradient of a parameter over every group in its ``is_shared_mp``, and one
+    without the attribute counts as shared over the whole model group. A parameter sharded over a group must
+    therefore not be shared over it, or the shards of other ranks would be added to its gradient; and one not
+    sharded over a group is the same on every rank of it, so it has to be shared over it, or its gradient would miss
+    the contributions of the other ranks. The distributed test checks the gradients themselves.
+    """
+
+    _GROUPS = {"h", "w", "matmul"}
+    _EXPAND = {"model": {"h", "w", "matmul"}, "spatial": {"h", "w"}}
+
+    @parameterized.expand(
+        [
+            ("isotropic", IsotropicGaussianRandomFieldS2, {}),
+            ("diffusion", DiffusionNoiseS2, {}),
+        ]
+    )
+    def test_shared_and_sharded_groups_cover_the_model(self, _, cls, kwargs):
+        noise = cls(IMG_SHAPE, BATCH_SIZE, NUM_CHANNELS, learnable=True, **kwargs)
+        for name, param in noise.named_parameters():
+            with self.subTest(param=name):
+                self.assertEqual(len(param.sharded_dims_mp), param.dim())
+                sharded = {group for group in param.sharded_dims_mp if group is not None}
+                shared = set()
+                for group in getattr(param, "is_shared_mp", ["model"]):
+                    shared |= self._EXPAND.get(group, {group})
+                self.assertEqual(shared & sharded, set(), "sharded over a group it is also shared over")
+                self.assertEqual(shared | sharded, self._GROUPS, "neither sharded nor shared over some group")
+
+
+# ===========================================================================
 class TestBuildNoise(unittest.TestCase):
     """build_noise dispatches on the type and forwards the configuration."""
 
