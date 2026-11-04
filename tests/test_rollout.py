@@ -23,6 +23,8 @@ import torch.nn as nn
 from parameterized import parameterized
 
 from makani.models.stepper import StepWrapper
+from makani.models.noise_controller import NoiseController
+from makani.models.preprocessor import INPUT_NOISE
 from makani.utils.dataloaders.batch import (
     INPUT,
     TARGET,
@@ -57,25 +59,26 @@ def _batch(n_history=1, n_future=2, with_target=True, channels=_C, grid=(_H, _W)
 
 
 class _RecordingNoise:
-    """A noise source that records how it is driven and returns a distinct sample per step."""
+    """The noise of a stochastic model, as a rollout drives it, recording how it is driven."""
+
+    is_stochastic = True
 
     def __init__(self):
         self.updates = []
+        self.batch_sizes = []
         self.restored = []
         self.version = 0
 
-    def update(self, replace_state=False):
+    def advance(self, replace_state=False, batch_size=None):
         self.updates.append(replace_state)
+        self.batch_sizes.append(batch_size)
         self.version += 1
 
-    def __call__(self):
-        return torch.full((_B, 1, 1, _H, _W), float(len(self.updates)))
-
-    def get_state(self):
+    def snapshot(self):
         return ("state", self.version)
 
-    def set_state(self, state):
-        self.restored.append(state)
+    def restore(self, snapshot, batch_size=None):
+        self.restored.append((snapshot, batch_size))
         self.version += 1
 
 
@@ -106,7 +109,7 @@ class TestRollout(unittest.TestCase):
                     )
                 )
                 self.assertTrue(torch.equal(step.target_timestamp, batch[TARGET_TIMESTAMP][:, k : k + 1]))
-                self.assertIsNone(step.noise)
+                self.assertIsNone(step.noise_version)
 
             rollout.advance(preds[k])
 
@@ -246,34 +249,53 @@ class TestRollout(unittest.TestCase):
 
     def test_noise_is_replaced_first_and_continued_after(self):
         noise = _RecordingNoise()
-        rollout = Rollout(_batch(n_future=2), noise_source=noise)
-        samples = []
+        rollout = Rollout(_batch(n_future=2), noise=noise)
+        versions = []
         for step in rollout:
-            samples.append(step.noise[0, 0, 0, 0, 0].item())
+            versions.append(step.noise_version)
             rollout.advance(torch.zeros(_B, 1, _C, _H, _W))
 
-        # one update per step, the first one replacing the state, and the sample drawn after it
+        # one update per step at the batch of the model, the first one replacing the state, and each
+        # step handed out with the version of the noise it is predicted from
         self.assertEqual(noise.updates, [True, False, False])
-        self.assertEqual(samples, [1.0, 2.0, 3.0])
+        self.assertEqual(noise.batch_sizes, [_B, _B, _B])
+        self.assertEqual(versions, [1, 2, 3])
+
+    def test_noise_is_advanced_at_the_batch_of_the_ensemble(self):
+        noise = _RecordingNoise()
+        rollout = Rollout(_batch(n_future=0), noise=noise, ensemble_size=3)
+        next(rollout)
+        self.assertEqual(noise.batch_sizes, [_B * 3])
+
+    def test_deterministic_noise_is_left_alone(self):
+        # the controller of a deterministic model has no processes: the rollout neither drives it nor stamps the steps
+        noise = NoiseController()
+        rollout = Rollout(_batch(n_future=0), noise=noise)
+        step = next(rollout)
+        self.assertIsNone(step.noise_version)
+        self.assertEqual(noise.version, 0)
+        self.assertIs(rollout.noise, noise)
 
     def test_noise_continues_from_a_saved_state(self):
         noise = _RecordingNoise()
-        rollout = Rollout(_batch(n_future=1), noise_source=noise)
+        rollout = Rollout(_batch(n_future=1), noise=noise)
         for step in rollout:
             rollout.advance(torch.zeros(_B, 1, _C, _H, _W))
         state = rollout.noise_state()
 
-        rollout = Rollout(_batch(n_future=1), noise_source=noise, noise_state=state)
+        rollout = Rollout(_batch(n_future=1), noise=noise, noise_state=state)
         for step in rollout:
             rollout.advance(torch.zeros(_B, 1, _C, _H, _W))
 
-        # the second rollout restores the state and continues it from its first step on
-        self.assertEqual(noise.restored, [state])
+        # the second rollout restores the state at its batch and continues it from its first step on
+        self.assertEqual(noise.restored, [(state, _B)])
         self.assertEqual(noise.updates, [True, False, False, False])
 
-    def test_noise_state_needs_a_noise_source(self):
+    def test_noise_state_needs_stochastic_noise(self):
         with self.assertRaises(ValueError):
             Rollout(_batch(), noise_state=("state", 0))
+        with self.assertRaises(ValueError):
+            Rollout(_batch(), noise=NoiseController(), noise_state=("state", 0))
         rollout = Rollout(_batch(n_future=0))
         next(rollout)
         rollout.advance(torch.zeros(_B, 1, _C, _H, _W))
@@ -282,7 +304,7 @@ class TestRollout(unittest.TestCase):
 
     def test_noise_state_only_of_a_finished_rollout(self):
         noise = _RecordingNoise()
-        rollout = Rollout(_batch(n_future=1), noise_source=noise)
+        rollout = Rollout(_batch(n_future=1), noise=noise)
         with self.assertRaisesRegex(RuntimeError, "finished"):
             rollout.noise_state()
         next(rollout)
@@ -294,12 +316,12 @@ class TestRollout(unittest.TestCase):
 
     def test_noise_state_refuses_a_noise_advanced_since(self):
         noise = _RecordingNoise()
-        rollout = Rollout(_batch(n_future=0), noise_source=noise)
+        rollout = Rollout(_batch(n_future=0), noise=noise)
         for step in rollout:
             rollout.advance(torch.zeros(_B, 1, _C, _H, _W))
 
         # another rollout draws from the same noise in between
-        other = Rollout(_batch(n_future=0), noise_source=noise)
+        other = Rollout(_batch(n_future=0), noise=noise)
         next(other)
         with self.assertRaisesRegex(RuntimeError, "changed"):
             rollout.noise_state()
@@ -436,9 +458,8 @@ def _make_wrapper(params, noise):
 
 
 def _rollout(wrapper, batch, **kwargs):
-    """A rollout of the batch, with the input noise of the wrapper at the batch of the model."""
-    batch_size = batch[INPUT].shape[0] * kwargs.get("ensemble_size", 1)
-    return Rollout(batch, noise_source=wrapper.preprocessor.noise_source(batch_size=batch_size), **kwargs)
+    """A rollout of the batch, driving the noise of the wrapper."""
+    return Rollout(batch, noise=wrapper.noise, **kwargs)
 
 
 def _expand_batch(batch, ensemble_size):
@@ -460,7 +481,8 @@ def _stepwise(wrapper, batch, push_forward=False):
     for k in range(batch[TARGET].shape[1]):
         sample = None
         if hasattr(pp, "input_noise"):
-            pp.update_internal_state(replace_state=(k == 0), batch_size=inp.shape[0])
+            # the noise module driven directly, without the controller, which is what is checked
+            pp.input_noise.update(replace_state=(k == 0), batch_size=inp.shape[0])
             sample = pp.input_noise()
 
         x = pp.assemble_input(inp, {ZENITH: zenith}, sample)
@@ -597,9 +619,8 @@ class TestWrapperRollout(unittest.TestCase):
         batch = self._batch(n_future=0)
 
         ref_wrapper = _make_wrapper(params, noise)
-        ref_pp = ref_wrapper.preprocessor
-        ref_pp.update_internal_state(replace_state=True, batch_size=_B)
-        ref = ref_wrapper.predict(batch[INPUT], batch[INPUT_DYNAMIC_FEATURES], ref_pp.input_noise())
+        ref_wrapper.noise.advance(replace_state=True, batch_size=_B)
+        ref = ref_wrapper.predict(batch[INPUT], batch[INPUT_DYNAMIC_FEATURES])
         torch.square(ref - batch[TARGET]).mean().backward()
 
         wrapper = _make_wrapper(params, noise)
@@ -613,15 +634,21 @@ class TestWrapperRollout(unittest.TestCase):
             with self.subTest(gradient=name):
                 self.assertTrue(_scaled_rtol_match(name, grads[name], ref_grads[name]))
 
-    def test_checkpointing_keeps_the_gradients(self):
-        batch = self._batch()
+    @parameterized.expand([("none", 1), ("white_learnable", 1), ("diffusion_learnable", 0)])
+    def test_checkpointing_keeps_the_gradients(self, noise_name, n_history):
+        # the input noise is sampled outside the checkpointed network, so the recompute in the backward pass
+        # sees the noise of its step, although the rollout has advanced the noise since
+        noise = _NOISE[noise_name]
+        batch = self._batch(n_history=n_history)
         grads = {}
         for multistep_checkpoint in (False, True):
-            params = _params(1, False, None)
+            params = _params(n_history, False, noise)
             params.multistep_checkpoint = multistep_checkpoint
-            wrapper = _make_wrapper(params, None)
+            wrapper = _make_wrapper(params, noise)
             _loss(wrapper(_rollout(wrapper, batch)), batch[TARGET]).backward()
             grads[multistep_checkpoint] = _gradients(wrapper)
+        if noise is not None:
+            self.assertTrue(any(".input_noise." in name for name in grads[False]), "the noise should be trainable")
 
         self.assertEqual(set(grads[True]), set(grads[False]))
         for name in grads[False]:
@@ -659,7 +686,7 @@ class TestWrapperRollout(unittest.TestCase):
                 wrapper = _make_wrapper(params, noise)
                 if compiled:
                     wrapper.compile_step()
-                wrapper.preprocessor.set_rng(reset=True, seed=333)
+                wrapper.noise.set_rng(reset=True, seed=333)
                 pred = wrapper(_rollout(wrapper, batch))
                 _loss(pred, batch[TARGET]).backward()
                 results[compiled] = (pred.detach(), _gradients(wrapper))
@@ -732,15 +759,14 @@ class TestWrapperRollout(unittest.TestCase):
         noise = _NOISE[noise_name]
         wrapper = _make_wrapper(_params(1, False, noise), noise)
         wrapper.eval()
-        pp = wrapper.preprocessor
         batch = self._batch()
 
         with torch.no_grad():
-            pp.set_rng(reset=True, seed=333)
+            wrapper.noise.set_rng(reset=True, seed=333)
             rollout = _rollout(wrapper, batch, ensemble_size=E)
             pred = rollout.unfold(wrapper(rollout))
 
-            pp.set_rng(reset=True, seed=333)
+            wrapper.noise.set_rng(reset=True, seed=333)
             ref = wrapper(_rollout(wrapper, _expand_batch(batch, E)))
 
         self.assertEqual(tuple(pred.shape), (_B, E, *batch[TARGET].shape[1:]))
@@ -766,6 +792,33 @@ class TestWrapperRollout(unittest.TestCase):
         with self.assertRaises(ValueError):
             wrapper(_rollout(wrapper, _take(batch, 1), noise_state=rollout.noise_state()))
 
+    def test_a_stochastic_model_needs_its_own_noise_driven(self):
+        noise = _NOISE["diffusion"]
+        wrapper = _make_wrapper(_params(1, False, noise), noise)
+        other = _make_wrapper(_params(1, False, noise), noise)
+        batch = self._batch()
+
+        with self.subTest("rollout without noise"), self.assertRaisesRegex(ValueError, "stochastic"):
+            wrapper(Rollout(batch))
+        with self.subTest("noise of another model"), self.assertRaisesRegex(ValueError, "another model"):
+            wrapper(_rollout(other, batch))
+
+        # a step predicted after its noise has been advanced by someone else is refused
+        rollout = _rollout(wrapper, batch)
+        step = next(rollout)
+        wrapper.noise.advance()
+        with self.subTest("noise advanced since"), self.assertRaisesRegex(RuntimeError, "advanced since"):
+            wrapper.predict_step(step)
+
+    def test_a_deterministic_model_takes_a_rollout_without_noise(self):
+        wrapper = _make_wrapper(_params(1, False, None), None)
+        batch = self._batch()
+        self.assertFalse(wrapper.noise.is_stochastic)
+        with torch.no_grad():
+            ref = wrapper(Rollout(batch))
+            pred = wrapper(_rollout(wrapper, batch))
+        self.assertTrue(torch.equal(pred, ref))
+
     @parameterized.expand([("white", 1, 1), ("diffusion", 1, 1), ("diffusion_learnable", 0, 1), ("diffusion", 1, 3)])
     def test_split_rollout_draws_the_noise_of_one_rollout(self, noise_name, n_history, E):
         # two rollouts, the second continuing the noise state of the first, draw the noise of one rollout
@@ -773,21 +826,21 @@ class TestWrapperRollout(unittest.TestCase):
         # ensemble, the state is that of all members
         noise = _NOISE[noise_name]
         wrapper = _make_wrapper(_params(n_history, False, noise), noise)
-        pp = wrapper.preprocessor
         batch = self._batch(n_history=n_history, n_future=3)
 
         def draw(rollout):
+            # the sample of the input noise each step is predicted from
             samples = []
             for step in rollout:
-                samples.append(step.noise)
+                samples.append(wrapper.noise.sample(INPUT_NOISE))
                 rollout.advance(torch.zeros_like(step.input[:, -1:]))
             return samples
 
         with torch.no_grad():
-            pp.set_rng(reset=True, seed=333)
+            wrapper.noise.set_rng(reset=True, seed=333)
             ref = draw(_rollout(wrapper, batch, ensemble_size=E))
 
-            pp.set_rng(reset=True, seed=333)
+            wrapper.noise.set_rng(reset=True, seed=333)
             first = _rollout(wrapper, batch, n_steps=2, ensemble_size=E)
             samples = draw(first)
             state = first.noise_state()
@@ -810,7 +863,7 @@ class TestWrapperRollout(unittest.TestCase):
         first = _rollout(wrapper, batch)
         _loss(wrapper(first), batch[TARGET]).backward()
         state = first.noise_state()
-        self.assertFalse(state.tensor.requires_grad)
+        self.assertFalse(state.states[INPUT_NOISE].tensor.requires_grad)
 
         wrapper.zero_grad()
         _loss(wrapper(_rollout(wrapper, batch, noise_state=state)), batch[TARGET]).backward()

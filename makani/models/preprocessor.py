@@ -13,32 +13,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from dataclasses import dataclass
-from typing import Dict, NamedTuple, Optional, Tuple, Union
-
+from typing import Dict, NamedTuple, Optional
 
 import torch
 import torch.nn as nn
 
-from makani.utils import comm
 from makani.utils.grids import GridQuadrature, grid_to_quadrature_rule
 from makani.mpu.mappings import copy_to_parallel_region
 
 from makani.models.preprocessor_helpers import get_bias_correction, get_static_features
+from makani.models.noise_controller import noise_base_seed
 from makani.utils.dataloaders.batch import ZENITH
 
-
-@torch.compiler.disable
-def _run_eager(fn, *args, **kwargs):
-    """Run a callable outside torch.compile (forces a graph break).
-
-    The noise field is complex-valued (torch.complex + inverse SHT) and inductor's Triton
-    backend cannot codegen complex dtypes (KeyError: 'complex64'). A method-level
-    @torch.compiler.disable on the noise module's forward is NOT honored when dynamo inlines
-    the nn.Module call (it traces straight into it), whereas a disable on a plain function call
-    like this one is respected — so we break at the call site instead.
-    """
-    return fn(*args, **kwargs)
+# the name of the input noise among the noise processes of a model
+INPUT_NOISE = "input"
 
 
 class HistoryStats(NamedTuple):
@@ -57,73 +45,6 @@ class HistoryStats(NamedTuple):
     diff_var: Optional[torch.Tensor] = None
 
 
-@dataclass(frozen=True)
-class NoiseState:
-    r"""
-    A snapshot of the input noise, to continue its sequence in another rollout.
-
-    Holds the state tensor of the noise module, detached, and the states of its
-    generators, so that the continued sequence is the one an uninterrupted
-    rollout would have drawn. See
-    :meth:`~makani.utils.dataloaders.rollout.Rollout.noise_state`.
-    """
-
-    tensor: torch.Tensor
-    rng_cpu: Optional[torch.Tensor]
-    rng_gpu: Optional[torch.Tensor]
-
-    @property
-    def batch_size(self) -> int:
-        """The batch the state was taken at."""
-        return self.tensor.shape[0]
-
-
-class _NoiseSource:
-    """
-    The input noise of a preprocessor, as :class:`~makani.utils.dataloaders.rollout.Rollout` drives it.
-
-    Sizes the noise state to the batch of the rollout, with the guard of
-    :meth:`Preprocessor2D.update_internal_state` against resizing stateful
-    noise in the middle of a sequence. ``version`` counts the changes of the
-    noise state, so a rollout can tell whether the shared noise module has been
-    advanced by someone else since its last step.
-    """
-
-    def __init__(self, preprocessor, batch_size=None):
-        self.preprocessor = preprocessor
-        self.batch_size = batch_size
-
-    @property
-    def version(self) -> int:
-        """Counts the changes of the noise state, by any caller."""
-        return self.preprocessor._noise_version
-
-    def update(self, replace_state=False):
-        """Replace the state at the batch of the rollout, or take one autoregressive step."""
-        self.preprocessor.update_internal_state(replace_state=replace_state, batch_size=self.batch_size)
-
-    def __call__(self):
-        """The noise sample of the current state."""
-        # eagerly: the noise is complex-valued and cannot be inductor-compiled, see _run_eager
-        return _run_eager(self.preprocessor.input_noise)
-
-    def get_state(self) -> NoiseState:
-        """A detached snapshot of the state and the generators."""
-        pp = self.preprocessor
-        rng_cpu, rng_gpu = pp.get_internal_state(tensor=False)
-        return NoiseState(tensor=pp.get_internal_state(tensor=True), rng_cpu=rng_cpu, rng_gpu=rng_gpu)
-
-    def set_state(self, state: NoiseState):
-        """Restore a snapshot; raises ``ValueError`` if it was taken at another batch than the rollout's."""
-        if (self.batch_size is not None) and (state.batch_size != self.batch_size):
-            raise ValueError(
-                f"The noise state was taken at batch {state.batch_size}, the rollout runs at batch {self.batch_size}"
-            )
-        pp = self.preprocessor
-        pp.set_internal_state(state.tensor)
-        pp.set_internal_state((state.rng_cpu, state.rng_gpu))
-
-
 class Preprocessor2D(nn.Module):
     r"""
     Input/output plumbing that surrounds the model in one step of a rollout.
@@ -137,12 +58,15 @@ class Preprocessor2D(nn.Module):
     one place, :meth:`pack_model_input`, right before the network, which still
     takes a single flat channel stack.
 
-    The preprocessor keeps no state between steps: the input window, its
-    dynamic features and the noise sample of a step come from a
+    The preprocessor keeps no state between steps: the input window and its
+    dynamic features come from a
     :class:`~makani.utils.dataloaders.rollout.Rollout`, which also slides the
     window forward, and the history statistics of a step are returned to the
-    caller rather than stored. The one stateful part is the noise module, which
-    the rollout drives through :meth:`noise_source`.
+    caller rather than stored. The one stateful part is the input noise, which
+    the preprocessor owns but does not drive: the
+    :class:`~makani.models.noise_controller.NoiseController` of the model
+    advances it, see :meth:`noise_processes`, and the model passes its sample
+    to :meth:`assemble_input`.
 
     The main responsibilities are:
 
@@ -170,9 +94,6 @@ class Preprocessor2D(nn.Module):
 
     def __init__(self, params):
         super().__init__()
-
-        # counts the changes of the noise state, see _NoiseSource.version
-        self._noise_version = 0
 
         # image shape — must be set first; used by quadrature and noise constructors below
         self.img_shape = [params.img_shape_x, params.img_shape_y]
@@ -231,23 +152,9 @@ class Preprocessor2D(nn.Module):
 
         if params.get("input_noise", None) is not None:
             noise_params = params.input_noise
-            centered_noise = noise_params.get("centered", False)
 
-            # noise seed: important, this will be passed down as-is
-            if not centered_noise:
-                self.noise_base_seed = 333 + comm.get_rank("model") + comm.get_size("model") * comm.get_rank("data")
-                reflect = False
-            else:
-                # here, ranks (0,1), (2,3), ... should map to the same eff rank, since they only differ by reflection but should otherwise get the
-                # same seed
-                ensemble_eff_rank = comm.get_rank("ensemble") // 2
-                reflect = comm.get_rank("ensemble") % 2 == 0
-                self.noise_base_seed = (
-                    333
-                    + comm.get_rank("model")
-                    + comm.get_size("model") * ensemble_eff_rank
-                    + comm.get_size("model") * comm.get_size("ensemble") * comm.get_rank("batch")
-                )
+            # the seed of this rank, passed down as-is
+            self.noise_base_seed, reflect = noise_base_seed(centered=noise_params.get("centered", False))
 
             if "type" not in noise_params:
                 raise ValueError("Error, please specify an input noise type")
@@ -491,31 +398,24 @@ class Preprocessor2D(nn.Module):
 
         return torch.cat([x] + appended, dim=2)
 
-    def noise_source(self, batch_size=None):
+    def noise_processes(self):
         r"""
-        The input noise as a noise source for a :class:`~makani.utils.dataloaders.rollout.Rollout`.
+        The noise processes of the preprocessor, for the :class:`~makani.models.noise_controller.NoiseController` of the model.
 
-        Parameters
-        ----------
-        batch_size : int, optional
-            The batch of the rollout. The noise state is resized to it when the
-            rollout replaces the state at its first step; continuing a sequence
-            at another batch raises, see :meth:`update_internal_state`, and so
-            does restoring a :class:`NoiseState` taken at another batch.
-            ``None`` leaves the state at its current size.
+        The preprocessor owns the input noise, so that its learnable parameters
+        are trained and checkpointed with the model, but does not drive it: the
+        controller advances, snapshots and re-seeds it, and the caller of
+        :meth:`assemble_input` passes in its sample.
 
         Returns
         -------
-        object or None
-            The source, with ``update(replace_state)``, a call for the sample,
-            ``get_state()`` and ``set_state(state)`` for a :class:`NoiseState`,
-            and the ``version`` of the noise state. ``None`` if no input noise
-            is configured.
+        dict
+            ``{"input": the input noise}``, or empty without input noise.
         """
         if not hasattr(self, "input_noise"):
-            return None
+            return {}
 
-        return _NoiseSource(self, batch_size=batch_size)
+        return {INPUT_NOISE: self.input_noise}
 
     def compute_history_stats(self, x) -> HistoryStats:
         r"""
@@ -671,192 +571,6 @@ class Preprocessor2D(nn.Module):
             num_channels = x.shape[2]
             return mean[:, :, :num_channels], std[:, :, :num_channels]
         return mean, std
-
-    def get_base_seed(self, default=333):
-        r"""
-        Return the per-rank base seed of the noise module.
-
-        Parameters
-        ----------
-        default : int, optional
-            Value returned when no input noise is configured, by default ``333``.
-
-        Returns
-        -------
-        int
-            The noise base seed, which encodes the rank's position in the
-            ensemble and model-parallel grid.
-        """
-        if hasattr(self, "input_noise"):
-            return self.noise_base_seed
-        else:
-            return default
-
-    def get_internal_rng(self, gpu=True):
-        r"""
-        Return the noise module's private generator.
-
-        Exposed so callers can draw additional randomness from the same stream
-        as the input noise, keeping everything reproducible under one seed
-        instead of mixing in the global RNG.
-
-        Parameters
-        ----------
-        gpu : bool, optional
-            Return the CUDA generator if ``True`` (the default), otherwise the
-            CPU generator.
-
-        Returns
-        -------
-        torch.Generator or None
-            ``None`` if no input noise is configured.
-        """
-        if hasattr(self, "input_noise"):
-            if gpu:
-                return self.input_noise.rng_gpu
-            else:
-                return self.input_noise.rng_cpu
-        else:
-            return None
-
-    def set_rng(self, reset=True, seed=333):
-        r"""
-        Re-seed the noise module, optionally clearing its state.
-
-        A no-op if no input noise is configured.
-
-        Parameters
-        ----------
-        reset : bool, optional
-            Also zero the noise state, by default ``True``. Leave the state in
-            place only if you intend to continue an existing trajectory under a
-            new seed.
-        seed : int, optional
-            New seed, by default ``333``.
-        """
-        if hasattr(self, "input_noise"):
-            self.input_noise.set_rng(seed)
-            if reset:
-                self.input_noise.reset()
-            self._noise_version += 1
-        return
-
-    def get_internal_state(self, tensor=False):
-        r"""
-        Capture the noise module's state for checkpointing.
-
-        Parameters
-        ----------
-        tensor : bool, optional
-            If ``True``, return the spectral state tensor. If ``False`` (the
-            default), return the RNG state instead. A full resume generally
-            needs both.
-
-        Returns
-        -------
-        torch.Tensor or tuple or None
-            The state tensor, or a ``(cpu_state, gpu_state)`` RNG tuple. Yields
-            ``None`` / ``(None, None)`` when no input noise is configured.
-
-        See Also
-        --------
-        set_internal_state : restores what this returns.
-        """
-        if hasattr(self, "input_noise"):
-            if tensor:
-                state = self.input_noise.get_tensor_state()
-            else:
-                state = self.input_noise.get_rng_state()
-        else:
-            if tensor:
-                state = None
-            else:
-                state = (None, None)
-
-        return state
-
-    def set_internal_state(self, state: Union[Tuple, torch.Tensor]):
-        r"""
-        Restore the noise module's state.
-
-        A no-op if no input noise is configured or if ``state`` is ``None``.
-
-        Parameters
-        ----------
-        state : tuple or torch.Tensor
-            A tensor is treated as the spectral state; a tuple is treated as an
-            ``(cpu_state, gpu_state)`` RNG pair. Which one it is is inferred
-            from the type, so the two forms returned by
-            :meth:`get_internal_state` can both be passed back here.
-        """
-        if hasattr(self, "input_noise") and (state is not None):
-            if isinstance(state, torch.Tensor):
-                self.input_noise.set_tensor_state(state)
-            else:
-                self.input_noise.set_rng_state(*state)
-            self._noise_version += 1
-
-        return
-
-    def update_internal_state(self, replace_state=False, batch_size=None):
-        r"""Advance the stochastic noise state by one step.
-
-        A no-op if no input noise is configured.
-
-        Parameters
-        ----------
-        replace_state : bool, optional
-            If ``True``, draw a fresh state from the stationary distribution
-            rather than taking one autoregressive step. Required when changing
-            the batch size of stateful noise. By default ``False``.
-        batch_size : int, optional
-            Resize the noise state to this batch size. ``None`` (the default)
-            leaves it unchanged.
-
-        Raises
-        ------
-        RuntimeError
-            If a resize of stateful noise is requested while continuing an
-            autoregressive sequence; see below.
-
-        Notes
-        -----
-        ``batch_size`` resizes the state to the given batch; None leaves it at its
-        current size. Resizing is guarded: the state carries an ``n_history + 1``
-        time axis holding the autoregressive noise history, and reallocating it
-        zeroes that history. Doing so while continuing an AR sequence
-        (``replace_state`` falsy) would silently restart the noise from zero and
-        yield a spin-up transient instead of the intended stationary distribution,
-        so it is rejected.
-
-        Only stateful noise (``DiffusionNoiseS2``) is guarded: white and dummy
-        noise redraw from scratch every step, so for them a resize destroys
-        nothing.
-
-        This matches how a :class:`~makani.utils.dataloaders.rollout.Rollout`
-        drives the noise through :meth:`noise_source`: the state is resized only
-        when it is replaced at the first step, and then rolled forward at a
-        fixed batch.
-        """
-        if hasattr(self, "input_noise"):
-            current_batch = self.input_noise.state.shape[0]
-            if (
-                (batch_size is not None)
-                and (not replace_state)
-                and (current_batch != batch_size)
-                and self.input_noise.is_stateful()
-            ):
-                raise RuntimeError(
-                    f"update_internal_state: refusing to resize the stochastic noise state from "
-                    f"batch {current_batch} to {batch_size} while continuing an autoregressive "
-                    f"noise sequence (replace_state={replace_state}). The state carries an "
-                    f"n_history+1 time history which resizing would zero, silently restarting "
-                    f"the noise from zero. Pass replace_state=True to draw a fresh state at the "
-                    f"new batch size, or keep the batch size fixed for the whole rollout."
-                )
-            self.input_noise.update(replace_state=replace_state, batch_size=batch_size)
-            self._noise_version += 1
-        return
 
     def get_static_features(self):
         r"""

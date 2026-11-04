@@ -43,6 +43,7 @@ from makani.models.model_package import (
     load_time_loop,
     save_model_package,
 )
+from makani.models.preprocessor import INPUT_NOISE
 from makani.models.stepper import StepWrapper
 from makani.utils.driver import Driver
 from makani.utils.dataloaders.batch import make_batch
@@ -312,14 +313,14 @@ class TestNoiseBatchGuard(_ModelPackageTestBase):
         self.assertEqual(pp.input_noise.state.shape[0], 1)
 
         with self.assertRaises(RuntimeError) as cm:
-            pp.update_internal_state(replace_state=False, batch_size=4)
+            wrapper.noise.advance(replace_state=False, batch_size=4)
         self.assertIn("replace_state=True", str(cm.exception))
 
     def test_resize_with_replace_state_is_allowed(self):
         wrapper = self._make_wrapper(input_noise=self.DIFFUSION)
         pp = wrapper.model.preprocessor
 
-        pp.update_internal_state(replace_state=True, batch_size=4)
+        wrapper.noise.advance(replace_state=True, batch_size=4)
 
         self.assertEqual(pp.input_noise.state.shape[0], 4)
         # the history axis is config-derived and must be untouched by the resize
@@ -330,8 +331,8 @@ class TestNoiseBatchGuard(_ModelPackageTestBase):
         wrapper = self._make_wrapper(input_noise=self.DIFFUSION)
         pp = wrapper.model.preprocessor
 
-        pp.update_internal_state(replace_state=True, batch_size=4)
-        pp.update_internal_state(replace_state=False, batch_size=4)
+        wrapper.noise.advance(replace_state=True, batch_size=4)
+        wrapper.noise.advance(replace_state=False, batch_size=4)
 
         self.assertEqual(pp.input_noise.state.shape[0], 4)
 
@@ -341,7 +342,7 @@ class TestNoiseBatchGuard(_ModelPackageTestBase):
         pp = wrapper.model.preprocessor
         self.assertFalse(pp.input_noise.is_stateful())
 
-        pp.update_internal_state(replace_state=False, batch_size=4)
+        wrapper.noise.advance(replace_state=False, batch_size=4)
 
         self.assertEqual(pp.input_noise.state.shape[0], 4)
 
@@ -364,6 +365,53 @@ class TestNoiseBatchGuard(_ModelPackageTestBase):
 
         with self.assertRaises(RuntimeError):
             wrapper(x, self._times(4))
+
+
+class TestModelPackageNoise(_ModelPackageTestBase):
+    """The stochastic state of a package is driven through ``ModelWrapper.noise``."""
+
+    DIFFUSION = {"type": "diffusion", "mode": "concatenate", "n_channels": 1}
+
+    def _steps(self, wrapper, x, n, replace_first=False):
+        # the noise sample each forward predicts from
+        samples = []
+        for k in range(n):
+            wrapper(x, self._times(1), replace_state=replace_first and (k == 0))
+            samples.append(wrapper.noise.sample(INPUT_NOISE).clone())
+        return samples
+
+    def test_noise_is_the_controller_of_the_model(self):
+        wrapper = self._make_wrapper(input_noise=self.DIFFUSION)
+        self.assertIs(wrapper.noise, wrapper.model.noise)
+        self.assertTrue(wrapper.noise.is_stochastic)
+        self.assertFalse(self._make_wrapper().noise.is_stochastic)
+
+    def test_snapshot_and_restore_rewind_a_forecast(self):
+        wrapper = self._make_wrapper(input_noise=self.DIFFUSION)
+        x = torch.randn(1, self.C, self.H, self.W)
+        with torch.no_grad():
+            self._steps(wrapper, x, 1, replace_first=True)
+            snapshot = wrapper.noise.snapshot()
+            first = self._steps(wrapper, x, 3)
+            wrapper.noise.restore(snapshot)
+            second = self._steps(wrapper, x, 3)
+
+        for k, (a, b) in enumerate(zip(first, second)):
+            with self.subTest(step=k):
+                self.assertTrue(torch.equal(a, b))
+        self.assertFalse(torch.equal(first[0], first[1]))
+
+    def test_set_rng_reproduces_a_forecast(self):
+        wrapper = self._make_wrapper(input_noise=self.DIFFUSION)
+        x = torch.randn(1, self.C, self.H, self.W)
+        runs = []
+        with torch.no_grad():
+            for _ in range(2):
+                wrapper.set_rng(seed=11)
+                runs.append(self._steps(wrapper, x, 2, replace_first=True))
+        for k, (a, b) in enumerate(zip(*runs)):
+            with self.subTest(step=k):
+                self.assertTrue(torch.equal(a, b))
 
 
 class TestSaveModelPackage(unittest.TestCase):

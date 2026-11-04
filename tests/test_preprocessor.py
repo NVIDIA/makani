@@ -21,7 +21,8 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 import unittest
 import torch
 
-from makani.models.preprocessor import Preprocessor2D
+from makani.models.preprocessor import INPUT_NOISE, Preprocessor2D
+from makani.models.noise_controller import NoiseController
 from makani.utils.dataloaders.batch import ZENITH
 
 from .testutils import set_seed, get_default_parameters, compare_tensors, IMG_SIZE_H, IMG_SIZE_W
@@ -37,9 +38,10 @@ def _make_pp(n_history=0, add_zenith=False, **overrides):
 
 
 def _noise(pp, batch_size):
-    """A fresh sample of the input noise of the preprocessor, as a rollout draws it at its first step."""
-    pp.update_internal_state(replace_state=True, batch_size=batch_size)
-    return pp.input_noise()
+    """A fresh sample of the input noise of the preprocessor, as a model draws it at the first step of a rollout."""
+    noise = NoiseController(pp.noise_processes())
+    noise.advance(replace_state=True, batch_size=batch_size)
+    return noise.sample(INPUT_NOISE)
 
 
 class TestPreprocessor2DBasic(unittest.TestCase):
@@ -213,7 +215,7 @@ class TestPreprocessor2DBasic(unittest.TestCase):
         pp.input_noise = DummyNoiseS2(
             img_shape=[self.H, self.W], batch_size=self.B, num_channels=1, num_time_steps=1, mode="constant_random"
         )
-        pp.update_internal_state()
+        pp.input_noise.update()
         x, xz, noise = self._field(1), self._zenith(1), pp.input_noise()
         out = pp.assemble_input(x, {ZENITH: xz}, noise)
         self.assertTrue(compare_tensors("x", out[:, :, : self.C], x, verbose=verbose))
@@ -294,38 +296,13 @@ class TestPreprocessor2DBasic(unittest.TestCase):
         self.assertTrue(compare_tensors("correct_bias broadcast", out, expected, verbose=verbose))
 
     # -----------------------------------------------------------------------
-    # Internal state accessors — no noise
+    # Noise processes: the preprocessor owns the input noise, the controller of the model drives it,
+    # see test_noise_controller.py
     # -----------------------------------------------------------------------
 
-    def test_get_base_seed_default_no_noise(self):
-        """Without noise, get_base_seed returns the supplied default value."""
-        self.assertEqual(self.pp.get_base_seed(default=42), 42)
-
-    def test_get_internal_rng_no_noise_returns_none(self):
-        """Without noise, both get_internal_rng(gpu=True/False) return None."""
-        self.assertIsNone(self.pp.get_internal_rng(gpu=True))
-        self.assertIsNone(self.pp.get_internal_rng(gpu=False))
-
-    def test_get_internal_state_no_noise_rng(self):
-        """Without noise, get_internal_state(tensor=False) returns (None, None)."""
-        state = self.pp.get_internal_state(tensor=False)
-        self.assertEqual(state, (None, None))
-
-    def test_get_internal_state_no_noise_tensor(self):
-        """Without noise, get_internal_state(tensor=True) returns None."""
-        self.assertIsNone(self.pp.get_internal_state(tensor=True))
-
-    def test_set_internal_state_no_noise_noop(self):
-        """Without noise, set_internal_state(None) does not raise."""
-        self.pp.set_internal_state(None)
-
-    def test_update_internal_state_no_noise_noop(self):
-        """Without noise, update_internal_state() does not raise."""
-        self.pp.update_internal_state()
-
-    # -----------------------------------------------------------------------
-    # Internal state accessors — with DummyNoiseS2
-    # -----------------------------------------------------------------------
+    def test_noise_processes_without_noise_is_empty(self):
+        """Without input noise, the preprocessor has no noise process."""
+        self.assertEqual(self.pp.noise_processes(), {})
 
     def _make_pp_with_noise(self, input_noise_mode="concatenate", n_channels=1):
         return _make_pp(input_noise={"type": "dummy", "mode": input_noise_mode, "n_channels": n_channels})
@@ -335,53 +312,17 @@ class TestPreprocessor2DBasic(unittest.TestCase):
         pp = self._make_pp_with_noise()
         self.assertTrue(hasattr(pp, "input_noise"))
 
-    def test_get_base_seed_with_noise_is_int(self):
-        """With noise, get_base_seed returns an int (the noise_base_seed)."""
+    def test_noise_processes_with_noise_is_the_input_noise(self):
+        """The input noise is the one noise process of the preprocessor, and stays its submodule."""
         pp = self._make_pp_with_noise()
-        self.assertIsInstance(pp.get_base_seed(), int)
+        self.assertEqual(list(pp.noise_processes()), [INPUT_NOISE])
+        self.assertIs(pp.noise_processes()[INPUT_NOISE], pp.input_noise)
+        self.assertIn("input_noise", dict(pp.named_children()))
 
-    def test_get_internal_rng_with_noise_cpu(self):
-        """With noise, get_internal_rng(gpu=False) returns a CPU Generator."""
+    def test_noise_base_seed_is_an_int(self):
+        """The noise is seeded with the seed of this rank."""
         pp = self._make_pp_with_noise()
-        rng = pp.get_internal_rng(gpu=False)
-        self.assertIsNotNone(rng)
-        self.assertIsInstance(rng, torch.Generator)
-
-    def test_get_internal_state_with_noise_rng_is_tuple(self):
-        """With noise, get_internal_state(tensor=False) returns a 2-tuple."""
-        pp = self._make_pp_with_noise()
-        state = pp.get_internal_state(tensor=False)
-        self.assertIsInstance(state, tuple)
-        self.assertEqual(len(state), 2)
-
-    def test_get_internal_state_with_noise_tensor_is_tensor(self):
-        """With noise, get_internal_state(tensor=True) returns a Tensor."""
-        pp = self._make_pp_with_noise()
-        state = pp.get_internal_state(tensor=True)
-        self.assertIsInstance(state, torch.Tensor)
-
-    def test_set_rng_with_noise_does_not_raise(self):
-        """set_rng resets the noise RNG without raising."""
-        pp = self._make_pp_with_noise()
-        pp.set_rng(reset=True, seed=42)
-
-    def test_set_internal_state_tensor_roundtrip(self, verbose=False):
-        """Saving and restoring tensor state restores the stored noise field."""
-        pp = self._make_pp_with_noise()
-        pp.update_internal_state()
-        tensor_state = pp.get_internal_state(tensor=True)
-        # replace the state by another one, never writing into it, then restore; the dummy noise of the
-        # preprocessor is all zeros, so the replacement is random, or the restore would not show
-        pp.input_noise.set_tensor_state(torch.randn_like(tensor_state))
-        self.assertFalse(torch.equal(pp.get_internal_state(tensor=True), tensor_state))
-        pp.set_internal_state(tensor_state)
-        restored = pp.get_internal_state(tensor=True)
-        self.assertTrue(compare_tensors("tensor state roundtrip", restored, tensor_state, verbose=verbose))
-
-    def test_update_internal_state_with_noise_does_not_raise(self):
-        """update_internal_state() with noise does not raise."""
-        pp = self._make_pp_with_noise()
-        pp.update_internal_state()
+        self.assertIsInstance(pp.noise_base_seed, int)
 
     # -----------------------------------------------------------------------
     # compute_history_stats / history_normalize / history_denormalize
@@ -657,13 +598,15 @@ class TestPreprocessor2DBasic(unittest.TestCase):
         pp = self._make_pp_with_constant_random_noise()
         x, xz = self._field(1), self._zenith(1)
 
-        pp.set_rng(reset=True, seed=42)
-        pp.update_internal_state()
-        out1 = pp.assemble_input(x, {ZENITH: xz}, pp.input_noise())
+        noise = NoiseController(pp.noise_processes())
 
-        pp.set_rng(reset=True, seed=42)
-        pp.update_internal_state()
-        out2 = pp.assemble_input(x, {ZENITH: xz}, pp.input_noise())
+        noise.set_rng(reset=True, seed=42)
+        noise.advance()
+        out1 = pp.assemble_input(x, {ZENITH: xz}, noise.sample(INPUT_NOISE))
+
+        noise.set_rng(reset=True, seed=42)
+        noise.advance()
+        out2 = pp.assemble_input(x, {ZENITH: xz}, noise.sample(INPUT_NOISE))
 
         self.assertTrue(compare_tensors("noise same seed", out1, out2, verbose=verbose))
 
@@ -672,13 +615,15 @@ class TestPreprocessor2DBasic(unittest.TestCase):
         pp = self._make_pp_with_constant_random_noise()
         x, xz = self._field(1), self._zenith(1)
 
-        pp.set_rng(reset=True, seed=42)
-        pp.update_internal_state()
-        out1 = pp.assemble_input(x, {ZENITH: xz}, pp.input_noise())
+        noise = NoiseController(pp.noise_processes())
 
-        pp.set_rng(reset=True, seed=999)
-        pp.update_internal_state()
-        out2 = pp.assemble_input(x, {ZENITH: xz}, pp.input_noise())
+        noise.set_rng(reset=True, seed=42)
+        noise.advance()
+        out1 = pp.assemble_input(x, {ZENITH: xz}, noise.sample(INPUT_NOISE))
+
+        noise.set_rng(reset=True, seed=999)
+        noise.advance()
+        out2 = pp.assemble_input(x, {ZENITH: xz}, noise.sample(INPUT_NOISE))
 
         self.assertFalse(compare_tensors("noise different seeds", out1, out2, verbose=verbose))
 

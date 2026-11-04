@@ -350,6 +350,22 @@ class ConstraintsWrapper(nn.Module):
             else:
                 raise NotImplementedError(f"Error, constraint type {constraint['type']} is not implemented.")
 
+    def noise_processes(self):
+        r"""
+        The noise processes of the wrapped model, so that its noise is driven
+        as if it were not wrapped, see
+        :class:`~makani.models.noise_controller.NoiseController`.
+
+        Returns
+        -------
+        dict of str to nn.Module
+            The processes by name; empty without a wrapped model or if it has
+            no noise of its own.
+        """
+        if (self.model is not None) and hasattr(self.model, "noise_processes"):
+            return self.model.noise_processes()
+        return {}
+
     def forward(self, inp: torch.Tensor) -> torch.Tensor:
         r"""
         Run the wrapped model, if any, and apply the constraints to the result.

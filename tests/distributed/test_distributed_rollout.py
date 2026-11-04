@@ -28,7 +28,7 @@ The model is serial and replicated on every rank, and every rank rolls out the
 same batch with the same noise, so averaging the gradients over the ranks has to
 reproduce the gradients of the rollout without DDP exactly. What could break is
 DDP's bookkeeping -- the parameters are used once per step, the noise parameters
-outside the network, and makani configures ``static_graph`` -- and two iterations
+outside the network but inside the forward, and makani configures ``static_graph`` -- and two iterations
 are run, since ``static_graph`` records the graph in the first and relies on it in
 the second.
 """
@@ -70,6 +70,8 @@ class _StepModule(nn.Module):
         super().__init__()
         self.preprocessor = wrapper.preprocessor
         self.model = wrapper.model
+        # the noise the rollout drives, that of the wrapper
+        self.noise = wrapper.noise
         self._wrapper = [wrapper]
 
     def forward(self, step):

@@ -20,6 +20,7 @@ import torch.nn as nn
 from makani.utils import comm
 
 from makani.models import Preprocessor2D
+from makani.models.noise_controller import NoiseController
 from makani.models.noise import IsotropicGaussianRandomFieldS2 as IGRF
 
 
@@ -188,6 +189,10 @@ class StochasticInterpolantWrapper(nn.Module):
 
         # get the preprocessor
         self.preprocessor = Preprocessor2D(params)
+
+        # the interpolant draws the noise of its SDE itself, within a step, see noise_module; nothing
+        # outside the model drives it, so the model has no noise for a rollout to advance
+        self.noise = NoiseController()
 
         # compute the new number of input/output channels
         n_pred_chans = params.N_in_predicted_channels

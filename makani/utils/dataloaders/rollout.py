@@ -18,12 +18,12 @@ The steps of an autoregressive rollout over one batch.
 
 A batch holds the input window and the targets of several steps. A rollout
 hands out one step at a time: the window the model predicts from, the dynamic
-features that go with it, the target of that step and, if a noise source is
-given, the noise for it. Since the next window depends on the prediction, the
-caller hands each prediction back with :meth:`Rollout.advance`, which slides
-the window, the features and the timestamps by one step::
+features that go with it and the target of that step. Since the next window
+depends on the prediction, the caller hands each prediction back with
+:meth:`Rollout.advance`, which slides the window, the features and the
+timestamps by one step::
 
-    rollout = Rollout(batch, noise_source=noise)
+    rollout = Rollout(batch, noise=model.noise)
     for step in rollout:
         pred = model_step(step)
         rollout.advance(pred)
@@ -33,13 +33,20 @@ All of this is bookkeeping over the keys of the batch, see
 normalization or packing. The time axis stays explicit, and the grid trails,
 so a rollout works for lat/lon and mesh batches alike.
 
+The noise of a stochastic model is the one thing the rollout drives rather
+than hands out. Given the
+:class:`~makani.models.noise_controller.NoiseController` of the model, it
+advances the noise before each step, replacing the state at the first one, so
+that every step predicts from its own state of the noise; the model draws the
+sample itself, see :class:`~makani.models.stepper.StepWrapper`.
+
 An ensemble is rolled out as one batch: with ``ensemble_size=E`` the members
 are folded into the batch dimension of everything the model sees, ``(B, ...)``
 to ``(B * E, ...)``, batch-major: the members of each sample are adjacent, see
 :func:`makani.utils.functions.expand_ensemble`. The targets stay at ``B``, and
 :meth:`Rollout.unfold` brings the predictions to ``(B, E, ...)`` for the losses::
 
-    rollout = Rollout(batch, ensemble_size=E, noise_source=noise)
+    rollout = Rollout(batch, ensemble_size=E, noise=model.noise)
     preds = model(rollout)            # (B * E, n_steps, C, *grid)
     loss = loss_fn(rollout.unfold(preds), batch[TARGET])
 
@@ -55,11 +62,15 @@ an inference run reads one step at a time. They are handed to
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Dict, Optional
 
 import torch
 
 from makani.utils.functions import expand_ensemble
+
+if TYPE_CHECKING:
+    # only for the annotations: makani.models imports this module
+    from makani.models.noise_controller import NoiseController, NoiseSnapshot
 from makani.utils.dataloaders.batch import (
     INPUT,
     TARGET,
@@ -98,8 +109,11 @@ class RolloutStep:
         The dynamic features at the predicted time, name to ``(B, 1, C_f, *grid)``.
     target_timestamp : torch.Tensor or None
         Time of the predicted step, ``(B, 1)``.
-    noise : torch.Tensor or None
-        The sample of the noise source for this step, ``None`` without one.
+    noise_version : int or None
+        The version of the noise state the step is predicted from, see
+        :attr:`~makani.models.noise_controller.NoiseController.version`, so
+        that the model can tell that its noise has not been advanced since;
+        ``None`` without noise.
     """
 
     index: int
@@ -109,7 +123,7 @@ class RolloutStep:
     target: Optional[torch.Tensor] = None
     target_dynamic_features: Dict[str, torch.Tensor] = field(default_factory=dict)
     target_timestamp: Optional[torch.Tensor] = None
-    noise: Optional[torch.Tensor] = None
+    noise_version: Optional[int] = None
 
 
 class Rollout:
@@ -128,51 +142,46 @@ class Rollout:
     n_steps : int, optional
         Number of steps. Defaults to the number of target steps, and is
         required for a batch without targets.
-    noise_source : optional
-        Source of the noise of each step, an external input like a forcing.
-        Called as ``noise_source.update(replace_state=...)`` before each step,
-        replacing the state at the first step and continuing it after that,
-        and then as ``noise_source()`` for the sample of the step. For
-        :meth:`noise_state` and the ``noise_state`` argument it also provides
-        ``get_state()``, ``set_state(state)`` and a ``version`` that counts the
-        changes of its state, see
-        :meth:`~makani.models.preprocessor.Preprocessor2D.noise_source`. The
-        rollout does not own the source, the model does, since it may be
-        trainable.
-    noise_state : optional
+    noise : NoiseController, optional
+        The noise of the model, ``model.noise``, see
+        :class:`~makani.models.noise_controller.NoiseController`. Advanced
+        before each step at the batch the model sees, ``B * ensemble_size``,
+        replacing the state at the first step and continuing it after that.
+        The rollout does not own the noise, the model does, since it may be
+        trainable. A controller without processes, that of a deterministic
+        model, is accepted and left alone.
+    noise_state : NoiseSnapshot, optional
         Continue the noise sequence of a previous rollout, from what its
         :meth:`noise_state` returned, instead of drawing a fresh state at the
         first step. The two rollouts then draw the noise of one rollout over
         all their steps, e.g. for an inference run split into several
-        rollouts. Gradients do not flow from one rollout into the other. The
-        noise source refuses, at the first step, a state taken at another
-        batch.
+        rollouts. Gradients do not flow from one rollout into the other. A
+        state taken at another batch is refused at the first step.
     ensemble_size : int, optional
         Number of ensemble members, folded into the batch dimension of the
         input window, the dynamic features, the timestamps and the predictions,
-        but not of the targets. The noise source has to produce samples at that
-        batch, ``B * ensemble_size``. By default ``1``.
+        but not of the targets. By default ``1``.
 
     Raises
     ------
     ValueError
         If the batch has fewer target steps than ``n_steps``, no targets and
         no ``n_steps``, ``ensemble_size`` is smaller than 1, or a
-        ``noise_state`` is given without a ``noise_source``.
+        ``noise_state`` is given without stochastic ``noise``.
     """
 
     def __init__(
         self,
         batch: Batch,
         n_steps: Optional[int] = None,
-        noise_source: Optional[Any] = None,
-        noise_state: Optional[Any] = None,
+        noise: Optional["NoiseController"] = None,
+        noise_state: Optional["NoiseSnapshot"] = None,
         ensemble_size: int = 1,
     ):
         if ensemble_size < 1:
             raise ValueError(f"ensemble_size has to be at least 1, got {ensemble_size}")
-        if (noise_state is not None) and (noise_source is None):
-            raise ValueError("A noise state can be continued only with a noise source")
+        if (noise_state is not None) and ((noise is None) or not noise.is_stochastic):
+            raise ValueError("A noise state can be continued only with the noise of a stochastic model")
         self._has_target = TARGET in batch
         if n_steps is None:
             if not self._has_target:
@@ -183,7 +192,9 @@ class Rollout:
 
         self._batch = batch
         self._n_steps = n_steps
-        self._noise_source = noise_source
+        self._noise = noise
+        # only a stochastic model has noise to drive
+        self._drives_noise = (noise is not None) and noise.is_stochastic
         self._noise_state = noise_state
         # the version of the noise state after the last update of this rollout, see noise_state()
         self._noise_version = None
@@ -201,6 +212,11 @@ class Rollout:
     def n_steps(self) -> int:
         """Number of steps of the rollout."""
         return self._n_steps
+
+    @property
+    def noise(self) -> Optional["NoiseController"]:
+        """The noise the rollout was made with, ``None`` without."""
+        return self._noise
 
     @property
     def ensemble_size(self) -> int:
@@ -256,13 +272,13 @@ class Rollout:
 
         k = self._index
 
-        noise = None
-        if self._noise_source is not None:
+        if self._drives_noise:
+            # the batch the model sees, with the ensemble members folded in
+            batch_size = self._input.shape[0]
             if (k == 0) and (self._noise_state is not None):
-                self._noise_source.set_state(self._noise_state)
-            self._noise_source.update(replace_state=(k == 0) and (self._noise_state is None))
-            self._noise_version = self._noise_source.version
-            noise = self._noise_source()
+                self._noise.restore(self._noise_state, batch_size=batch_size)
+            self._noise.advance(replace_state=(k == 0) and (self._noise_state is None), batch_size=batch_size)
+            self._noise_version = self._noise.version
 
         target = None
         target_features = {}
@@ -285,7 +301,7 @@ class Rollout:
             target=target,
             target_dynamic_features=target_features,
             target_timestamp=target_timestamp,
-            noise=noise,
+            noise_version=self._noise_version,
         )
 
     def noise_state(self):
@@ -294,35 +310,35 @@ class Rollout:
 
         Pass it as ``noise_state`` to the next rollout to continue the noise
         sequence there: the two rollouts then draw the same noise as one
-        rollout over all their steps. The noise module is shared, so take the
-        snapshot before anything else draws from it.
+        rollout over all their steps. The noise belongs to the model, so take
+        the snapshot before anything else advances it.
 
         Returns
         -------
-        object
-            The state, detached from the autograd graph; for the input noise of
-            a preprocessor a :class:`~makani.models.preprocessor.NoiseState`.
+        NoiseSnapshot
+            The state of the noise, detached from the autograd graph, see
+            :meth:`~makani.models.noise_controller.NoiseController.snapshot`.
 
         Raises
         ------
         ValueError
-            If the rollout has no noise source.
+            If the rollout drives no noise.
         RuntimeError
             If the rollout has not finished, or if the noise state has changed
             since its last step, e.g. because another rollout drew from the
-            same noise module in between.
+            same noise in between.
         """
-        if self._noise_source is None:
-            raise ValueError("The rollout has no noise source")
+        if not self._drives_noise:
+            raise ValueError("The rollout drives no noise")
         if self._pending or (self._index < self._n_steps) or (self._noise_version is None):
             raise RuntimeError("The noise state can be taken only from a finished rollout")
-        if self._noise_source.version != self._noise_version:
+        if self._noise.version != self._noise_version:
             raise RuntimeError(
                 "The noise state has changed since the last step of the rollout, e.g. in another rollout: "
                 "take the snapshot right after the rollout"
             )
 
-        return self._noise_source.get_state()
+        return self._noise.snapshot()
 
     def advance(
         self,

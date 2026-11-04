@@ -671,8 +671,7 @@ class Inferencer(Driver):
                             datestring = ", ".join([d.strftime("%Y-%m-%dT%H:%M:%S") for d in dates])
                             print(f"inferencing dates: {datestring}")
 
-                        noise_source = self.preprocessor.noise_source(batch_size=gfield.shape[0] * E)
-                        rollout = Rollout(gbatch, n_steps=rollout_steps, noise_source=noise_source, ensemble_size=E)
+                        rollout = Rollout(gbatch, n_steps=rollout_steps, noise=self.model.noise, ensemble_size=E)
 
                         if rollout_buffer is not None:
                             # every member starts from the same initial condition, (B, E, C, H, W)
