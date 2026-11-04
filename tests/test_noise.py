@@ -27,7 +27,7 @@ from makani.models.noise import (
     DiffusionNoiseS2,
     DummyNoiseS2,
     build_noise,
-    noise_seed_reflect,
+    noise_base_seed,
 )
 
 import sys
@@ -1026,8 +1026,8 @@ class TestBuildNoise(unittest.TestCase):
 
 
 # ===========================================================================
-class TestNoiseSeedReflect(unittest.TestCase):
-    """noise_seed_reflect over simulated process grids: comm is mocked with the ranks of each grid point."""
+class TestNoiseBaseSeed(unittest.TestCase):
+    """noise_base_seed over simulated process grids: comm is mocked with the ranks of each grid point."""
 
     def _seeds(self, centered, model_size, ensemble_size, batch_size, seed_offset=0):
         result = {}
@@ -1041,12 +1041,12 @@ class TestNoiseSeedReflect(unittest.TestCase):
                         mock.patch("makani.models.noise.comm.get_rank", side_effect=ranks.get),
                         mock.patch("makani.models.noise.comm.get_size", side_effect=sizes.get),
                     ):
-                        result[(m, e, b)] = noise_seed_reflect(centered, seed_offset=seed_offset)
+                        result[(m, e, b)] = noise_base_seed(centered, seed_offset=seed_offset)
         return result
 
     def test_serial(self):
-        self.assertEqual(noise_seed_reflect(False), (333, False))
-        self.assertEqual(noise_seed_reflect(False, seed_offset=7), (340, False))
+        self.assertEqual(noise_base_seed(False), (333, False))
+        self.assertEqual(noise_base_seed(False, seed_offset=7), (340, False))
 
     def test_uncentered_members_are_independent(self):
         seeds = self._seeds(False, model_size=2, ensemble_size=4, batch_size=2)

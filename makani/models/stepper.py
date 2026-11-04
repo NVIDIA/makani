@@ -125,6 +125,19 @@ class StepWrapper(nn.Module):
         :class:`~makani.models.preprocessor.Preprocessor2D`.
     model_handle : callable
         Zero-argument factory returning the network to wrap.
+
+    Attributes
+    ----------
+    preprocessor : Preprocessor2D
+        Assembles and normalizes the input of the network, and owns the input
+        noise.
+    model : torch.nn.Module
+        The network.
+    noise : NoiseController
+        Drives the noise processes of the model, the input noise and those the
+        network lists through an optional ``noise_processes()``; a rollout of a
+        stochastic model is made with ``Rollout(..., noise=model.noise)``. See
+        :mod:`~makani.models.noise_controller`.
     """
 
     def __init__(self, params, model_handle):
@@ -227,6 +240,18 @@ class StepWrapper(nn.Module):
         """
         return self._predict_window(inp, dynamic_features, self._input_noise())
 
+    def check_encodable(self):
+        r"""
+        Check that the network can return its latent state, see :meth:`encode`.
+
+        Raises
+        ------
+        NotImplementedError
+            If the network does not expose ``encode_process``.
+        """
+        if not hasattr(self.model, "encode_process"):
+            raise NotImplementedError(f"{type(self.model).__name__} does not expose encode_process().")
+
     def encode(self, inp, dynamic_features):
         r"""
         The latent state of the network for one window, before decoding.
@@ -249,8 +274,7 @@ class StepWrapper(nn.Module):
         NotImplementedError
             If the network does not expose ``encode_process``.
         """
-        if not hasattr(self.model, "encode_process"):
-            raise NotImplementedError(f"{type(self.model).__name__} does not expose encode_process().")
+        self.check_encodable()
 
         inpans, _ = self._prepare_window(inp, dynamic_features, self._input_noise())
 

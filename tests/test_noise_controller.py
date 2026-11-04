@@ -155,6 +155,35 @@ class TestNoiseController(unittest.TestCase):
         with self.subTest("other batch"), self.assertRaisesRegex(ValueError, "batch"):
             noise.restore(snapshot, batch_size=_B + 1)
 
+    def test_a_failed_restore_leaves_the_noise_as_it_was(self):
+        noise = NoiseController({"white": _white(), "diffusion": _diffusion()})
+        noise.advance(replace_state=True)
+        # same names and batch, but the diffusion state has another layout; white is written before it fails
+        other = NoiseController(
+            {
+                "white": _white(seed=7),
+                "diffusion": DiffusionNoiseS2(
+                    img_shape=(_H, _W), batch_size=_B, num_channels=_C + 1, num_time_steps=_T
+                ),
+            }
+        )
+        other.advance(replace_state=True)
+        reference = noise.snapshot()
+        version = noise.version
+
+        with self.assertRaisesRegex(ValueError, "shape mismatch"):
+            noise.restore(other.snapshot(), batch_size=_B)
+
+        # the state, the generators and the version are those before the restore
+        self.assertEqual(noise.version, version)
+        noise.advance()
+        after_failure = _samples(noise)
+        noise.restore(reference)
+        noise.advance()
+        for name, sample in _samples(noise).items():
+            with self.subTest(process=name):
+                self.assertTrue(torch.equal(sample, after_failure[name]))
+
     def test_set_rng_reproduces_a_sequence(self):
         noise = NoiseController({"white": _white(), "diffusion": _diffusion()})
         runs = []
@@ -176,6 +205,24 @@ class TestNoiseController(unittest.TestCase):
         process.update(replace_state=True)
         reference.update(replace_state=True)
         self.assertTrue(torch.equal(process(), reference()))
+
+    def test_set_rng_without_reset_keeps_the_state(self):
+        # continue a sequence under a new seed: the state stays, only the generators are re-seeded
+        noise = NoiseController({"diffusion": _diffusion()})
+        noise.advance(replace_state=True)
+        noise.advance()
+        state = noise.snapshot().states["diffusion"].tensor
+        self.assertTrue(state.abs().sum() > 0)
+
+        noise.set_rng(seed=7, reset=False)
+        self.assertTrue(torch.equal(noise.snapshot().states["diffusion"].tensor, state))
+        noise.set_rng(seed=7)
+        self.assertEqual(noise.snapshot().states["diffusion"].tensor.abs().sum(), 0)
+
+    def test_set_rng_takes_keywords_only(self):
+        # the package and the controller once took (seed, reset) in different orders
+        with self.assertRaises(TypeError):
+            NoiseController({"white": _white()}).set_rng(7)
 
     def test_set_rng_gives_the_processes_their_own_streams(self):
         noise = NoiseController({"a": _white(), "b": _white()})
@@ -253,6 +300,12 @@ class TestModelNoise(unittest.TestCase):
         wrapper = _latent_wrapper(_NOISE["white"])
         self.assertEqual(list(wrapper.noise), [INPUT_NOISE, "model.latent"])
         self.assertIs(wrapper.noise.process("model.latent"), wrapper.model.latent_noise)
+
+    def test_a_constraints_wrapper_without_network_noise_has_none(self):
+        bare = ConstraintsWrapper([], ["u", "v", "t"], None, None)
+        self.assertEqual(bare.noise_processes(), {})
+        around = ConstraintsWrapper([], ["u", "v", "t"], None, None, model_handle=lambda: _TinyNet(3, 3))
+        self.assertEqual(around.noise_processes(), {})
 
     def test_a_constrained_network_lists_its_own_noise(self):
         wrapper = _latent_wrapper(constrained=True)

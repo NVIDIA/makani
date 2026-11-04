@@ -49,7 +49,21 @@ import torch
 
 from ..grid_types import DEFAULT_GRID_TYPE
 from .backends import get_backend
+from .batch import (
+    INPUT,
+    INPUT_DYNAMIC_FEATURES,
+    INPUT_TIMESTAMP,
+    TARGET,
+    TARGET_DYNAMIC_FEATURES,
+    TARGET_TIMESTAMP,
+    ZENITH,
+)
 from .data_helpers import get_date_from_string, get_date_from_timestamp, get_date_ranges, get_seconds_from_times
+
+
+def feature_output_name(side: str, feature: str) -> str:
+    """The flat name DALI gives a dynamic feature, ``"<side>/<feature>"``, which the batch nests as ``batch[side][feature]``."""
+    return f"{side}/{feature}"
 
 
 class SampleSource(object):
@@ -402,17 +416,29 @@ class SampleSource(object):
 
         return self._reorder_channels(self.inp_buff, self.tar_buff)
 
-    def output_layout(self):
-        """DALI layout of each output of :meth:`__call__`, in the order they are returned.
+    def outputs(self):
+        """The outputs of :meth:`__call__`, in the order they are returned, as ``(name, DALI layout)``.
 
-        The pipeline takes the number of outputs from this as well, so that the two
-        cannot drift apart: fields are ``FCHW``, timestamps ``F``.
+        The one place that orders them: the pipeline and the loader take the number, the names and the
+        layouts of the outputs from this, so that they cannot drift apart. The names are the keys of a
+        batch, and :func:`feature_output_name` for the dynamic features; fields are ``FCHW``, timestamps ``F``.
         """
-        layout = ["FCHW", "FCHW"]
+        outputs = [(INPUT, "FCHW"), (TARGET, "FCHW")]
         if self.zenith_angle:
-            layout += ["FCHW", "FCHW"]
-        layout += ["F", "F"]
-        return layout
+            outputs += [
+                (feature_output_name(INPUT_DYNAMIC_FEATURES, ZENITH), "FCHW"),
+                (feature_output_name(TARGET_DYNAMIC_FEATURES, ZENITH), "FCHW"),
+            ]
+        outputs += [(INPUT_TIMESTAMP, "F"), (TARGET_TIMESTAMP, "F")]
+        return outputs
+
+    def output_names(self):
+        """The names of the outputs of :meth:`__call__`, in their order, see :meth:`outputs`."""
+        return [name for name, _ in self.outputs()]
+
+    def output_layout(self):
+        """The DALI layouts of the outputs of :meth:`__call__`, in their order, see :meth:`outputs`."""
+        return [layout for _, layout in self.outputs()]
 
     def _compute_timestamps(self, local_idx, file_idx):
         # the times the backend discovered, not ones derived from the year label:
@@ -476,7 +502,7 @@ class SampleSource(object):
         -------
         tuple of numpy.ndarray
             The outputs of one sample, positional because DALI takes them so, in
-            the order of :meth:`output_layout`: the input window
+            the order of :meth:`outputs`: the input window
             ``(n_history + 1, C, H, W)`` and the target window
             ``(n_future + 1, C, H, W)``; with ``zenith_angle``, the cosine of the
             solar zenith angle over each window, ``(T, 1, H, W)``; and the
@@ -527,10 +553,12 @@ class SampleSource(object):
 
         inp_time, tar_time = self._compute_timestamps(local_idx, file_idx)
 
-        result = (inp, tar)
+        result = {INPUT: inp, TARGET: tar, INPUT_TIMESTAMP: inp_time, TARGET_TIMESTAMP: tar_time}
         if self.zenith_angle:
-            result = result + self._compute_zenith_angle(inp_time, tar_time)
-        result = result + (inp_time, tar_time)
+            inp_zenith, tar_zenith = self._compute_zenith_angle(inp_time, tar_time)
+            result[feature_output_name(INPUT_DYNAMIC_FEATURES, ZENITH)] = inp_zenith
+            result[feature_output_name(TARGET_DYNAMIC_FEATURES, ZENITH)] = tar_zenith
+        result = tuple(result[name] for name in self.output_names())
 
         if torch.cuda.is_available():
             torch.cuda.nvtx.range_pop()

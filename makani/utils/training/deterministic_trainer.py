@@ -21,6 +21,7 @@ import numpy as np
 from tqdm import tqdm
 
 # torch
+from makani.utils.functions import flatten_history
 import torch
 from torch import amp, nn
 import torch.distributed as dist
@@ -35,7 +36,7 @@ from makani.utils import LossHandler, MetricsHandler
 from makani.utils.driver import Driver
 from makani.utils.dataloader import get_dataloader
 from makani.utils.dataloaders.data_helpers import get_climatology
-from makani.utils.dataloaders.batch import batch_to_device, INPUT, TARGET
+from makani.utils.dataloaders.batch import batch_nbytes, batch_to_device, INPUT, TARGET
 from makani.utils.dataloaders.rollout import Rollout
 from makani.utils.YParams import YParams
 
@@ -329,7 +330,7 @@ class Trainer(Driver):
     def _loss(self, pred, tar, inp, rollout=None):
         # the losses take the time steps folded into the channels; given the rollout of an ensemble,
         # the members are split out of the batch of the predictions, (B, E, ...), the targets stay at B
-        flatten = self.preprocessor.flatten_history
+        flatten = flatten_history
         pred = flatten(pred)
         if rollout is not None:
             pred = rollout.unfold(pred)
@@ -539,11 +540,10 @@ class Trainer(Driver):
             self.step_timer.begin_step()
 
             # map to device
-            batch = batch_to_device(data, self.device)
+            batch = batch_to_device(data, self.device, non_blocking=True)
             inp, tar = batch[INPUT], batch[TARGET]
 
-            # assuming float32
-            total_data_bytes += inp.nbytes + tar.nbytes
+            total_data_bytes += batch_nbytes(batch)
 
             # check if we need to perform an update
             do_update = train_steps % self.params["gradient_accumulation_steps"] == 0
@@ -692,7 +692,7 @@ class Trainer(Driver):
                     self.step_timer.begin_step()
 
                     # map to gpu
-                    batch = batch_to_device(data, self.device)
+                    batch = batch_to_device(data, self.device, non_blocking=True)
                     tar = batch[TARGET]
 
                     # the autoregressive rollout over all target steps, one prediction at a time
@@ -705,8 +705,8 @@ class Trainer(Driver):
 
                         with self.autocast():
                             # the losses and metrics take the channels of a single step
-                            pred = self.preprocessor.flatten_history(next(steps))
-                            targ = self.preprocessor.flatten_history(tar[:, idt : idt + 1])
+                            pred = flatten_history(next(steps))
+                            targ = flatten_history(tar[:, idt : idt + 1])
                             loss = self.loss_obj(pred, targ)
 
                             # TODO: move all of this into the visualization handler

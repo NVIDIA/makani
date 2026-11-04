@@ -48,7 +48,7 @@ from makani.utils.dataloaders.data_helpers import (
 # storage backends
 from makani.utils.dataloaders.backends import get_backend
 from makani.utils.dataloaders.data_shapes import DataShapes
-from makani.utils.dataloaders.batch import make_batch
+from makani.utils.dataloaders.batch import ZENITH, make_batch
 
 # for grid conversion
 from makani.utils.grid_types import DEFAULT_GRID_TYPE
@@ -380,8 +380,8 @@ class MultifilesDataset(Dataset):
             inp_timestamp=as_time(inp_time),
             tar=None if tar is None else as_field(tar),
             tar_timestamp=None if tar_time is None else as_time(tar_time),
-            inp_zenith=None if inp_zen is None else as_field(inp_zen),
-            tar_zenith=None if tar_zen is None else as_field(tar_zen),
+            inp_dynamic_features=None if inp_zen is None else {ZENITH: as_field(inp_zen)},
+            tar_dynamic_features=None if tar_zen is None else {ZENITH: as_field(tar_zen)},
         )
 
     # this is just for the torch dataloader

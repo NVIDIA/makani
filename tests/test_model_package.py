@@ -220,13 +220,13 @@ class TestZenithFeatureShapes(_ModelPackageTestBase):
             with self.subTest(add_zenith=add_zenith):
                 wrapper = self._make_wrapper(n_history=1, add_zenith=add_zenith)
                 x = torch.randn(2, 2, self.C, self.H, self.W)
-                out = wrapper._prepare_input(x, self._times(4), normalized_data=True)
+                out = wrapper._prepare_input(x, normalized_data=True)
                 self.assertTrue(compare_tensors("time axis kept", out, x, verbose=False))
 
     def test_flat_input_gets_its_time_axis(self):
         wrapper = self._make_wrapper(n_history=1)
         x = torch.randn(2, 2 * self.C, self.H, self.W)
-        out = wrapper._prepare_input(x, self._times(4), normalized_data=True)
+        out = wrapper._prepare_input(x, normalized_data=True)
         self.assertEqual(tuple(out.shape), (2, 2, self.C, self.H, self.W))
         self.assertTrue(compare_tensors("unfolded", out[:, 1], x[:, self.C :], verbose=False))
 
@@ -277,7 +277,7 @@ class TestModelPackageForward(_ModelPackageTestBase):
         wrapper.in_scale.copy_(stds)
 
         x = torch.randn(2, 2 * self.C, self.H, self.W)
-        out = wrapper._prepare_input(x, self._times(4), normalized_data=False)
+        out = wrapper._prepare_input(x, normalized_data=False)
 
         expected = torch.stack([(x[:, : self.C] - means) / stds, (x[:, self.C :] - means) / stds], dim=1)
         self.assertTrue(compare_tensors("normalization_with_history", out, expected, verbose=False))
@@ -297,7 +297,8 @@ class TestModelPackageForward(_ModelPackageTestBase):
 
 class TestNoiseBatchGuard(_ModelPackageTestBase):
     """
-    Resizing a stateful noise state mid-sequence must fail loudly.
+    Resizing a stateful noise state mid-sequence must fail loudly, also through
+    the package; the guard itself is tested in test_noise_controller.py.
 
     The state carries an n_history+1 AR history; reallocating zeroes it, so
     continuing the sequence would silently restart the noise from zero instead of
@@ -305,46 +306,6 @@ class TestNoiseBatchGuard(_ModelPackageTestBase):
     """
 
     DIFFUSION = {"type": "diffusion", "mode": "concatenate", "n_channels": 1}
-    WHITE = {"type": "white", "mode": "concatenate", "n_channels": 1}
-
-    def test_resize_during_ar_sequence_raises(self):
-        wrapper = self._make_wrapper(input_noise=self.DIFFUSION)
-        pp = wrapper.model.preprocessor
-        self.assertEqual(pp.input_noise.state.shape[0], 1)
-
-        with self.assertRaises(RuntimeError) as cm:
-            wrapper.noise.advance(replace_state=False, batch_size=4)
-        self.assertIn("replace_state=True", str(cm.exception))
-
-    def test_resize_with_replace_state_is_allowed(self):
-        wrapper = self._make_wrapper(input_noise=self.DIFFUSION)
-        pp = wrapper.model.preprocessor
-
-        wrapper.noise.advance(replace_state=True, batch_size=4)
-
-        self.assertEqual(pp.input_noise.state.shape[0], 4)
-        # the history axis is config-derived and must be untouched by the resize
-        self.assertEqual(pp.input_noise.state.shape[1], pp.n_history + 1)
-
-    def test_ar_step_at_fixed_batch_is_allowed(self):
-        # this is the ensemble/inference pattern: prime once, then roll forward
-        wrapper = self._make_wrapper(input_noise=self.DIFFUSION)
-        pp = wrapper.model.preprocessor
-
-        wrapper.noise.advance(replace_state=True, batch_size=4)
-        wrapper.noise.advance(replace_state=False, batch_size=4)
-
-        self.assertEqual(pp.input_noise.state.shape[0], 4)
-
-    def test_stateless_noise_is_not_guarded(self):
-        # white noise redraws every step, so a resize destroys nothing
-        wrapper = self._make_wrapper(input_noise=self.WHITE)
-        pp = wrapper.model.preprocessor
-        self.assertFalse(pp.input_noise.is_stateful())
-
-        wrapper.noise.advance(replace_state=False, batch_size=4)
-
-        self.assertEqual(pp.input_noise.state.shape[0], 4)
 
     def test_batched_forward_after_priming(self):
         # the documented recipe: prime at the target batch, then run batched
@@ -400,6 +361,32 @@ class TestModelPackageNoise(_ModelPackageTestBase):
             with self.subTest(step=k):
                 self.assertTrue(torch.equal(a, b))
         self.assertFalse(torch.equal(first[0], first[1]))
+
+    def test_encode_process_advances_the_noise_as_forward_does(self):
+        wrapper = self._make_wrapper(input_noise=self.DIFFUSION)
+        x = torch.randn(1, self.C, self.H, self.W)
+        samples = []
+        with torch.no_grad():
+            for step in (wrapper.encode_process, wrapper):
+                wrapper.set_rng(seed=11)
+                version = wrapper.noise.version
+                step(x, self._times(1), replace_state=True)
+                self.assertNotEqual(wrapper.noise.version, version)
+                samples.append(wrapper.noise.sample(INPUT_NOISE).clone())
+            # without replace_state, it continues the sequence
+            wrapper.encode_process(x, self._times(1))
+        self.assertTrue(torch.equal(*samples))
+        self.assertFalse(torch.equal(wrapper.noise.sample(INPUT_NOISE), samples[0]))
+
+    def test_encode_process_without_encoder_leaves_the_noise_alone(self):
+        params = self._make_params(input_noise=self.DIFFUSION)
+        stepper = StepWrapper(params, lambda: _ScaleModel(n_out_chans=NUM_CHANNELS, scale=2.0))
+        wrapper = ModelWrapper(stepper, params).eval()
+        x = torch.randn(1, self.C, self.H, self.W)
+        version = wrapper.noise.version
+        with torch.no_grad(), self.assertRaises(NotImplementedError):
+            wrapper.encode_process(x, self._times(1))
+        self.assertEqual(wrapper.noise.version, version)
 
     def test_set_rng_reproduces_a_forecast(self):
         wrapper = self._make_wrapper(input_noise=self.DIFFUSION)

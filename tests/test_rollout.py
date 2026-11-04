@@ -53,8 +53,8 @@ def _batch(n_history=1, n_future=2, with_target=True, channels=_C, grid=(_H, _W)
         inp_timestamp=times_in,
         tar=torch.randn(_B, t_out, channels, *grid, dtype=dtype) if with_target else None,
         tar_timestamp=times_out if with_target else None,
-        inp_zenith=torch.randn(_B, t_in, 1, *grid, dtype=dtype),
-        tar_zenith=torch.randn(_B, t_out, 1, *grid, dtype=dtype) if with_target else None,
+        inp_dynamic_features={ZENITH: torch.randn(_B, t_in, 1, *grid, dtype=dtype)},
+        tar_dynamic_features={ZENITH: torch.randn(_B, t_out, 1, *grid, dtype=dtype)} if with_target else None,
     )
 
 
@@ -338,8 +338,8 @@ class TestRollout(unittest.TestCase):
                 inp_timestamp=expand_ensemble(batch[INPUT_TIMESTAMP], E),
                 tar=expand_ensemble(batch[TARGET], E),
                 tar_timestamp=expand_ensemble(batch[TARGET_TIMESTAMP], E),
-                inp_zenith=expand_ensemble(batch[INPUT_DYNAMIC_FEATURES][ZENITH], E),
-                tar_zenith=expand_ensemble(batch[TARGET_DYNAMIC_FEATURES][ZENITH], E),
+                inp_dynamic_features={ZENITH: expand_ensemble(batch[INPUT_DYNAMIC_FEATURES][ZENITH], E)},
+                tar_dynamic_features={ZENITH: expand_ensemble(batch[TARGET_DYNAMIC_FEATURES][ZENITH], E)},
             )
         )
 
@@ -869,34 +869,6 @@ class TestWrapperRollout(unittest.TestCase):
         _loss(wrapper(_rollout(wrapper, batch, noise_state=state)), batch[TARGET]).backward()
         grads = _gradients(wrapper)
         self.assertTrue(any(name.startswith("preprocessor.") for name in grads))
-
-
-class TestStatelessPreprocessor(unittest.TestCase):
-
-    def setUp(self):
-        disable_tf32()
-        set_seed(1)
-
-    def test_assemble_input_checks_its_inputs(self):
-        batch = self._batch()
-        inp, features = batch[INPUT], batch[INPUT_DYNAMIC_FEATURES]
-
-        noise = _NOISE["white"]
-        pp = _make_wrapper(_params(1, False, noise), noise).preprocessor
-        sample = torch.zeros(_B, 2, 1, _H * 4, _W * 4)
-        with self.subTest("missing feature"), self.assertRaises(ValueError):
-            pp.assemble_input(inp, {}, sample)
-        with self.subTest("extra feature"), self.assertRaises(ValueError):
-            pp.assemble_input(inp, {**features, "other": features[ZENITH]}, sample)
-        with self.subTest("missing noise"), self.assertRaises(ValueError):
-            pp.assemble_input(inp, features, None)
-
-        pp = _make_wrapper(_params(1, False, None), None).preprocessor
-        with self.subTest("unexpected noise"), self.assertRaises(ValueError):
-            pp.assemble_input(inp, features, sample)
-
-    def _batch(self):
-        return _batch(n_history=1, n_future=_N_FUTURE, grid=(_H * 4, _W * 4))
 
 
 if __name__ == "__main__":

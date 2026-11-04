@@ -22,6 +22,7 @@ import shutil
 import json
 import numpy as np
 import torch
+from makani.utils.functions import expand_history
 from makani.utils.YParams import ParamsBase, ensure_resampled_shapes
 from makani.utils.driver import Driver
 from makani.third_party.climt.zenith_angle_v2 import cos_zenith_angle
@@ -131,11 +132,9 @@ class ModelWrapper(torch.nn.Module):
     lons : numpy.ndarray
         Longitudes of the model grid, taken from ``params`` if present and
         otherwise assumed equiangular from 0 to 360.
-
-    Methods
-    -------
-    forward(x, time):
-        performs a single prediction steps
+    noise : NoiseController
+        The noise of the model, see :attr:`StepWrapper.noise`; every call of
+        :meth:`forward` or :meth:`encode_process` advances it by one step.
     """
 
     def __init__(self, model, params):
@@ -233,11 +232,13 @@ class ModelWrapper(torch.nn.Module):
         return self.model.noise
 
     def update_state(self, replace_state=True, batch_size=None):
-        """Advance the stochastic state without running a forward pass.
+        r"""
+        Advance the noise state without running a forward pass.
 
         :meth:`forward` sizes the state itself when called with
         ``replace_state=True``; prime it here only to continue a sequence from
-        the first call on, at the batch you intend to run.
+        the first call on, at the batch you intend to run. Shorthand for
+        ``noise.advance(replace_state, batch_size)``, see :attr:`noise`.
 
         Parameters
         ----------
@@ -247,27 +248,31 @@ class ModelWrapper(torch.nn.Module):
         batch_size : int, optional
             Size the noise state to this batch. ``None`` keeps the current size,
             which for a freshly loaded package is ``params.batch_size`` (usually 1).
+
+        Raises
+        ------
+        RuntimeError
+            If ``batch_size`` resizes stateful noise without ``replace_state``,
+            which would restart its sequence from zero.
         """
         self.noise.advance(replace_state=replace_state, batch_size=batch_size)
-        return
 
-    def set_rng(self, reset=True, seed=333):
+    def set_rng(self, *, seed=333, reset=True):
         r"""
-        Re-seed the model's stochastic noise, optionally clearing its state.
+        Re-seed the noise of the model, optionally clearing its state.
 
         Use this to make an ensemble member reproducible, or to decorrelate
         members by giving each a distinct seed. Shorthand for
-        ``noise.set_rng(seed, reset)``, see :attr:`noise`.
+        ``noise.set_rng(seed=seed, reset=reset)``, see :attr:`noise`.
 
         Parameters
         ----------
-        reset : bool, optional
-            Also zero the noise state, by default ``True``.
         seed : int, optional
             New seed, by default ``333``.
+        reset : bool, optional
+            Also zero the noise state, by default ``True``.
         """
         self.noise.set_rng(seed=seed, reset=reset)
-        return
 
     def _zenith_features(self, x, time):
         """Build the cosine-zenith feature for ``x`` at valid time(s) ``time``.
@@ -304,7 +309,7 @@ class ModelWrapper(torch.nn.Module):
 
         return z.unsqueeze(2)
 
-    def _prepare_input(self, x, time, normalized_data):
+    def _prepare_input(self, x, normalized_data):
         """Normalize the input.
 
         ``x`` is ``(B, (n_history + 1) * C, H, W)``, history in the flattened
@@ -313,7 +318,7 @@ class ModelWrapper(torch.nn.Module):
         """
         preprocessor = self.model.preprocessor
         if x.dim() == 4:
-            x = preprocessor.expand_history(x, preprocessor.n_history + 1)
+            x = expand_history(x, preprocessor.n_history + 1)
 
         if not normalized_data:
             # the statistics are per channel, (1, C, 1, 1); broadcast them over the time steps
@@ -327,14 +332,14 @@ class ModelWrapper(torch.nn.Module):
         The noise state is advanced here, replaced if ``replace_state`` is set, at the batch of ``x``;
         see :meth:`forward` for the batching contract on ``time`` and the noise.
         """
-        x = self._prepare_input(x, time, normalized_data)
+        x = self._prepare_input(x, normalized_data)
         features = {ZENITH: self._zenith_features(x, time)} if self.add_zenith else {}
 
         self.noise.advance(replace_state=replace_state, batch_size=x.shape[0])
 
         return x, features
 
-    def encode_process(self, x, time, normalized_data=True, replace_state=None):
+    def encode_process(self, x, time, normalized_data=True, replace_state=False):
         """Return the backbone's processed latent state without running its decoder.
 
         Input normalization, zenith-angle generation, history handling, and
@@ -363,12 +368,14 @@ class ModelWrapper(torch.nn.Module):
         ------
         NotImplementedError
             If the backbone does not implement ``encode_process`` (currently only
-            FCN3 does).
+            FCN3 does). The noise is not advanced then.
         """
+        # checked before the noise is advanced, so that a network that cannot encode leaves the noise untouched
+        self.model.check_encodable()
         x, features = self._step_inputs(x, time, normalized_data, replace_state)
         return self.model.encode(x, features)
 
-    def forward(self, x, time, normalized_data=True, replace_state=None):
+    def forward(self, x, time, normalized_data=True, replace_state=False):
         """Advance the model state by one timestep.
 
         Parameters
@@ -383,16 +390,25 @@ class ModelWrapper(torch.nn.Module):
             If False, ``x`` is normalized on the way in and the prediction is
             denormalized on the way out. If True (default), both are assumed to
             already be in normalized space.
-        replace_state : bool or None, optional
+        replace_state : bool, optional
             If true, draw a fresh noise state at the batch of ``x`` before the
             step; otherwise continue the noise sequence by one step. Ignored for
-            a model without input noise.
+            a deterministic model, one without noise. By default ``False``.
 
         Returns
         -------
         torch.Tensor
             Prediction for the next timestep, shape ``(B, C_out, H, W)``,
             denormalized unless ``normalized_data`` is ``True``.
+
+        Raises
+        ------
+        ValueError
+            If ``add_zenith`` is set and ``time`` has neither ``B * (n_history + 1)``
+            nor ``n_history + 1`` entries, see the notes.
+        RuntimeError
+            If stateful noise would have to be resized while continuing its
+            sequence, see the notes.
 
         Notes
         -----
@@ -423,11 +439,6 @@ class ModelWrapper(torch.nn.Module):
         stateful noise unless ``replace_state=True``, which starts a fresh noise
         sequence.
 
-        Raises
-        ------
-        RuntimeError
-            If stateful noise would have to be resized while continuing its
-            sequence, see above.
         """
         x, features = self._step_inputs(x, time, normalized_data, replace_state)
 

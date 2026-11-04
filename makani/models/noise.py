@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import math
+from typing import Tuple
 import numpy as np
 import sys
 
@@ -180,9 +181,11 @@ class BaseNoiseS2(nn.Module):
         r"""
         Whether the noise carries state across calls.
 
-        Callers use this to decide whether the noise module must be
-        checkpointed, may be resized mid-sequence, or kept in sync across
-        ensemble members. Must be overridden by subclasses.
+        A stateful process continues an autoregressive sequence: its state is
+        replaced or restored at the start of a rollout and may not be resized
+        in the middle of one, see
+        :class:`~makani.models.noise_controller.NoiseController`. The state is
+        not part of the checkpoint either way. Must be overridden by subclasses.
 
         Returns
         -------
@@ -557,6 +560,10 @@ class IsotropicGaussianRandomFieldS2(BaseNoiseS2):
             output, so the next call returns an independent realization. By
             default ``False``, which returns the same field until ``update`` is
             called explicitly.
+            Leave it ``False`` for a process driven by a
+            :class:`~makani.models.noise_controller.NoiseController`: the
+            update would change the state behind the version the controller
+            checks it by.
 
         Returns
         -------
@@ -829,8 +836,7 @@ class DiffusionNoiseS2(BaseNoiseS2):
         -------
         bool
             Always ``True``: each step is correlated with the previous one, so
-            the state must be checkpointed, and replaced or restored at the
-            start of a rollout.
+            the state is replaced or restored at the start of a rollout.
         """
         return True
 
@@ -944,6 +950,10 @@ class DiffusionNoiseS2(BaseNoiseS2):
             output, so the next call returns the following step of the
             trajectory. By default ``False``, leaving the caller to drive the
             process via :meth:`update`.
+            Leave it ``False`` for a process driven by a
+            :class:`~makani.models.noise_controller.NoiseController`: the
+            update would change the state behind the version the controller
+            checks it by.
 
         Returns
         -------
@@ -1122,6 +1132,10 @@ class DummyNoiseS2(BaseNoiseS2):
         update_internal_state : bool, optional
             If ``True``, refresh the stored tensor *after* returning the current
             one, by default ``False``.
+            Leave it ``False`` for a process driven by a
+            :class:`~makani.models.noise_controller.NoiseController`: the
+            update would change the state behind the version the controller
+            checks it by.
 
         Returns
         -------
@@ -1154,44 +1168,87 @@ def run_eager(fn, *args, **kwargs):
     return fn(*args, **kwargs)
 
 
-def noise_seed_reflect(centered: bool, seed_offset: int = 0):
-    """Derive the per-rank base seed and reflection flag for a noise source.
+def noise_base_seed(centered: bool = False, seed_offset: int = 0) -> Tuple[int, bool]:
+    r"""
+    The seed of a noise process on this rank, and whether it is reflected.
 
-    Mirrors the seeding used for the input noise so that every ensemble member gets an
-    independent realization while model-parallel ranks stay consistent. ``seed_offset``
-    lets independent noise sources (e.g. input noise vs. stochastic physics) draw from
-    decorrelated streams while keeping the same per-member structure.
+    Every rank of the model-parallel group draws its own part of the field,
+    and every data-parallel rank its own samples. With ``centered`` noise, the
+    ensemble ranks come in pairs, ``(0, 1), (2, 3), ...``, that draw the same
+    field with opposite signs, so that the ensemble mean of the noise is zero.
 
-    centered=False: each ensemble member is fully independent.
-    centered=True: antithetic pairing -- ranks (0,1), (2,3), ... share a seed and differ
-    only by a sign flip (variance reduction for the ensemble estimator).
+    Parameters
+    ----------
+    centered : bool, optional
+        Pair up the ensemble ranks as described above. By default ``False``.
+    seed_offset : int, optional
+        Added to the seed, so that independent processes of one model draw
+        decorrelated streams with the same structure over the ranks. By
+        default ``0``, the seed of the input noise.
+
+    Returns
+    -------
+    seed : int
+        The seed of the process on this rank.
+    reflect : bool
+        Whether this rank draws the reflected field of its pair.
     """
     if not centered:
         seed = 333 + seed_offset + comm.get_rank("model") + comm.get_size("model") * comm.get_rank("data")
-        reflect = False
-    else:
-        ensemble_eff_rank = comm.get_rank("ensemble") // 2
-        reflect = comm.get_rank("ensemble") % 2 == 0
-        seed = (
-            333
-            + seed_offset
-            + comm.get_rank("model")
-            + comm.get_size("model") * ensemble_eff_rank
-            + comm.get_size("model") * comm.get_size("ensemble") * comm.get_rank("batch")
-        )
+        return seed, False
+
+    # ranks (0,1), (2,3), ... map to the same effective rank, since they differ only by the reflection
+    ensemble_eff_rank = comm.get_rank("ensemble") // 2
+    reflect = comm.get_rank("ensemble") % 2 == 0
+    seed = (
+        333
+        + seed_offset
+        + comm.get_rank("model")
+        + comm.get_size("model") * ensemble_eff_rank
+        + comm.get_size("model") * comm.get_size("ensemble") * comm.get_rank("batch")
+    )
     return seed, reflect
 
 
 def build_noise(
     noise_params, *, img_shape, batch_size, num_channels, num_time_steps, grid_type, seed, reflect, default_lambd=1.0
 ):
-    """Factory that constructs a noise module from a config dict.
+    r"""
+    Build a noise process from its configuration.
 
-    Centralizes the type dispatch so both the input-noise path and the stochastic-physics
-    module share a single construction routine. ``num_channels`` is passed explicitly (the
-    input-noise "perturb" mode resolves it from the perturbed channel list, so it is not read
-    from ``noise_params`` here). ``default_lambd`` supplies the temporal correlation default
-    (typically dt*dhours/6h) since it depends on the dataset cadence.
+    Parameters
+    ----------
+    noise_params : dict
+        The configuration, e.g. ``params.input_noise``: ``type`` (``"diffusion"``,
+        ``"white"`` or ``"dummy"``) and the optional ``sigma``, ``kT``, ``lambd``,
+        ``alpha``, ``lmax`` and ``learnable``.
+    img_shape : tuple of int
+        The grid the process draws its field on.
+    batch_size, num_channels, num_time_steps : int
+        The layout of the field. ``num_channels`` is passed rather than read from
+        ``noise_params``, since the input noise derives it from its mode.
+    grid_type : str
+        The grid type of ``img_shape``.
+    seed : int
+        The seed, see :func:`noise_base_seed`.
+    reflect : bool
+        Whether to draw the reflected field, see :func:`noise_base_seed`.
+    default_lambd : float, optional
+        The temporal correlation of the diffusion noise when ``noise_params``
+        sets none; it depends on the time step of the data, typically
+        ``dt * dhours / 6``. By default ``1.0``.
+
+    Returns
+    -------
+    BaseNoiseS2
+        The noise process.
+
+    Raises
+    ------
+    ValueError
+        If ``noise_params`` has no ``type``.
+    NotImplementedError
+        If the type is not supported.
     """
     ntype = noise_params.get("type", None)
     if ntype is None:

@@ -21,6 +21,7 @@ import numpy as np
 from tqdm import tqdm
 
 # torch
+from makani.utils.functions import flatten_history
 import torch
 import torch.amp as amp
 import torch.distributed as dist
@@ -490,8 +491,8 @@ class StochasticTrainer(Driver):
             dynamic_features = batch[INPUT_DYNAMIC_FEATURES]
 
             # the interpolant takes the time steps folded into the channels
-            inp = self.preprocessor.flatten_history(batch[INPUT])
-            tar = self.preprocessor.flatten_history(batch[TARGET])
+            inp = flatten_history(batch[INPUT])
+            tar = flatten_history(batch[TARGET])
 
             # assuming float32
             total_data_bytes += inp.nbytes + tar.nbytes
@@ -653,7 +654,7 @@ class StochasticTrainer(Driver):
 
                     # the interpolant, the losses and the metrics take the time steps
                     # folded into the channels
-                    flatten = self.preprocessor.flatten_history
+                    flatten = flatten_history
 
                     for step in rollout:
                         idt = step.index

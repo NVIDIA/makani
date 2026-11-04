@@ -55,16 +55,9 @@ from makani.utils.dataloaders.batch import (
     TARGET_DYNAMIC_FEATURES,
     INPUT_TIMESTAMP,
     TARGET_TIMESTAMP,
-    ZENITH,
 )
-from makani.utils.dataloaders.sample_source import SampleSource
+from makani.utils.dataloaders.sample_source import SampleSource, feature_output_name
 from makani.utils.grids import GridConverter
-
-# DALI names its outputs with flat strings: the batch keys where the batch is flat, and
-# "<side>/<feature>" for the dynamic features, which the batch nests
-_INPUT_ZENITH = f"{INPUT_DYNAMIC_FEATURES}/{ZENITH}"
-_TARGET_ZENITH = f"{TARGET_DYNAMIC_FEATURES}/{ZENITH}"
-
 
 # bump whenever the layout of the dict returned by DaliDataloader.state_dict changes, or the pipeline
 # whose checkpoint it carries does. 2: the pipeline always outputs the timestamps, as GPU tensors
@@ -116,27 +109,12 @@ class DaliDataloader(object):
                 prefetch_queue_depth=self.num_data_workers,
             )
 
-            inp = data[0]
-            tar = data[1]
-            off = 2
-            if self.add_zenith:
-                izen = data[2]
-                tzen = data[3]
-                off += 2
+            data = dict(zip(self.extsource.output_names(), data))
 
-            itime = data[0 + off]
-            ttime = data[1 + off]
-
-            # upload to GPU
+            # upload to GPU, the timestamps too, so that the whole batch is on one device
             if self.dali_device == "gpu":
-                inp = inp.gpu()
-                tar = tar.gpu()
-                if self.add_zenith:
-                    izen = izen.gpu()
-                    tzen = tzen.gpu()
-                # the timestamps too, so that the whole batch is on one device
-                itime = itime.gpu()
-                ttime = ttime.gpu()
+                data = {name: output.gpu() for name, output in data.items()}
+            inp, tar = data[INPUT], data[TARGET]
 
             # normalize if requested
             if self.normalize:
@@ -158,15 +136,8 @@ class DaliDataloader(object):
                     stddev=self.out_scale,
                 )
 
-            # add zenith angle if requested
-            pout = (inp, tar)
-
-            if self.add_zenith:
-                pout = pout + (izen, tzen)
-
-            pout = pout + (itime, ttime)
-
-            pipeline.set_outputs(*pout)
+            data[INPUT], data[TARGET] = inp, tar
+            pipeline.set_outputs(*(data[name] for name in self.extsource.output_names()))
 
         return pipeline
 
@@ -370,14 +341,9 @@ class DaliDataloader(object):
         self.pipeline.start_py_workers()
 
         # create iterator; the names follow the order of the pipeline outputs
-        outnames = [INPUT, TARGET]
-        if self.add_zenith:
-            outnames += [_INPUT_ZENITH, _TARGET_ZENITH]
-        outnames += [INPUT_TIMESTAMP, TARGET_TIMESTAMP]
-
         self.iterator = DALIGenericIterator(
             [self.pipeline],
-            outnames,
+            self.extsource.output_names(),
             auto_reset=True,
             size=-1,
             last_batch_policy=LastBatchPolicy.DROP,
@@ -515,18 +481,22 @@ class DaliDataloader(object):
         for token in self.iterator:
             outputs = token[0]
 
-            # the grid is converted after DALI, which has no op for it
+            # the grid is converted after DALI, which has no op for it; the dynamic features come
+            # flat, as "<side>/<feature>"
+            features = {INPUT_DYNAMIC_FEATURES: {}, TARGET_DYNAMIC_FEATURES: {}}
             with torch.no_grad():
                 inp = self.grid_converter(outputs[INPUT])
                 tar = self.grid_converter(outputs[TARGET])
-                inp_zenith = self.grid_converter(outputs[_INPUT_ZENITH]) if self.add_zenith else None
-                tar_zenith = self.grid_converter(outputs[_TARGET_ZENITH]) if self.add_zenith else None
+                for side, side_features in features.items():
+                    for name, output in outputs.items():
+                        if name.startswith(feature_output_name(side, "")):
+                            side_features[name[len(side) + 1 :]] = self.grid_converter(output)
 
             yield make_batch(
                 inp=inp,
                 inp_timestamp=outputs[INPUT_TIMESTAMP],
                 tar=tar,
                 tar_timestamp=outputs[TARGET_TIMESTAMP],
-                inp_zenith=inp_zenith,
-                tar_zenith=tar_zenith,
+                inp_dynamic_features=features[INPUT_DYNAMIC_FEATURES],
+                tar_dynamic_features=features[TARGET_DYNAMIC_FEATURES],
             )

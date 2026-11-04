@@ -24,6 +24,7 @@ import torch
 from makani.models.preprocessor import INPUT_NOISE, Preprocessor2D
 from makani.models.noise_controller import NoiseController
 from makani.utils.dataloaders.batch import ZENITH
+from makani.utils.functions import expand_history, flatten_history
 
 from .testutils import set_seed, get_default_parameters, compare_tensors, IMG_SIZE_H, IMG_SIZE_W
 
@@ -82,38 +83,34 @@ class TestPreprocessor2DBasic(unittest.TestCase):
     # flatten_history / expand_history, the boundary to flat channel stacks
     # -----------------------------------------------------------------------
 
-    def test_flatten_history_4d_noop(self, verbose=False):
-        """flatten_history on a 4-D tensor returns it unchanged."""
-        x = self._rand(self.B, self.C, self.H, self.W)
-        out = self.pp.flatten_history(x)
-        self.assertEqual(out.shape, x.shape)
-        self.assertTrue(compare_tensors("flatten_history 4D noop", out, x, verbose=verbose))
-
-    def test_flatten_history_5d_collapses_time(self):
+    def test_flatten_history_collapses_time(self):
         """flatten_history on (B,T,C,H,W) gives (B, T*C, H, W)."""
         T = 3
-        out = self.pp.flatten_history(self._field(T))
+        out = flatten_history(self._field(T))
         self.assertEqual(tuple(out.shape), (self.B, T * self.C, self.H, self.W))
 
-    def test_expand_history_5d_noop(self):
-        """expand_history on a 5-D tensor returns it unchanged."""
-        T = 2
-        x = self._field(T)
-        out = self.pp.expand_history(x, nhist=T)
-        self.assertEqual(out.shape, x.shape)
+    def test_flatten_history_works_on_any_grid(self):
+        """A mesh has a single spatial axis, (B, T, C, N)."""
+        x = self._rand(self.B, 2, self.C, 7)
+        self.assertEqual(tuple(flatten_history(x).shape), (self.B, 2 * self.C, 7))
 
-    def test_expand_history_4d_adds_time(self):
+    def test_flatten_history_needs_the_time_axis(self):
+        """A tensor without a time axis is refused rather than passed through."""
+        with self.assertRaises(RuntimeError):
+            flatten_history(self._rand(self.B, self.C, self.H))
+
+    def test_expand_history_adds_time(self):
         """expand_history on (B, T*C, H, W) gives (B, T, C, H, W)."""
         T = 3
         x = self._rand(self.B, T * self.C, self.H, self.W)
-        out = self.pp.expand_history(x, nhist=T)
+        out = expand_history(x, nhist=T)
         self.assertEqual(tuple(out.shape), (self.B, T, self.C, self.H, self.W))
 
     def test_flatten_expand_roundtrip(self, verbose=False):
         """flatten_history(expand_history(x, T)) is bit-identical to x."""
         T = 2
         x = self._rand(self.B, T * self.C, self.H, self.W)
-        out = self.pp.flatten_history(self.pp.expand_history(x, nhist=T))
+        out = flatten_history(expand_history(x, nhist=T))
         self.assertTrue(compare_tensors("flatten/expand roundtrip", out, x, verbose=verbose))
 
     # -----------------------------------------------------------------------
@@ -125,7 +122,7 @@ class TestPreprocessor2DBasic(unittest.TestCase):
         pp = _make_pp(n_history=1)
         x = self._field(2)
         out = pp.pack_model_input(x)
-        self.assertTrue(compare_tensors("pack without static", out, pp.flatten_history(x), verbose=verbose))
+        self.assertTrue(compare_tensors("pack without static", out, flatten_history(x), verbose=verbose))
 
     def test_pack_model_input_appends_static_features_after_all_steps(self, verbose=False):
         """The static channels, which have no time axis, follow the stacked time steps."""
@@ -133,7 +130,7 @@ class TestPreprocessor2DBasic(unittest.TestCase):
         x = self._field(2)
         out = pp.pack_model_input(x)
         self.assertEqual(tuple(out.shape), (self.B, 2 * self.C + 2, self.H, self.W))
-        self.assertTrue(compare_tensors("steps first", out[:, : 2 * self.C], pp.flatten_history(x), verbose=verbose))
+        self.assertTrue(compare_tensors("steps first", out[:, : 2 * self.C], flatten_history(x), verbose=verbose))
         static = pp.get_static_features().expand(self.B, -1, -1, -1)
         self.assertTrue(compare_tensors("static last", out[:, 2 * self.C :], static, verbose=verbose))
 
@@ -307,11 +304,6 @@ class TestPreprocessor2DBasic(unittest.TestCase):
     def _make_pp_with_noise(self, input_noise_mode="concatenate", n_channels=1):
         return _make_pp(input_noise={"type": "dummy", "mode": input_noise_mode, "n_channels": n_channels})
 
-    def test_construction_with_dummy_noise(self):
-        """Preprocessor2D with dummy noise constructs without error."""
-        pp = self._make_pp_with_noise()
-        self.assertTrue(hasattr(pp, "input_noise"))
-
     def test_noise_processes_with_noise_is_the_input_noise(self):
         """The input noise is the one noise process of the preprocessor, and stays its submodule."""
         pp = self._make_pp_with_noise()
@@ -319,10 +311,36 @@ class TestPreprocessor2DBasic(unittest.TestCase):
         self.assertIs(pp.noise_processes()[INPUT_NOISE], pp.input_noise)
         self.assertIn("input_noise", dict(pp.named_children()))
 
-    def test_noise_base_seed_is_an_int(self):
-        """The noise is seeded with the seed of this rank."""
+    def test_input_noise_is_seeded_with_the_seed_of_this_rank(self):
+        """The input noise draws the stream of noise_base_seed, as a process built with it does."""
+        from makani.models.noise import IsotropicGaussianRandomFieldS2, noise_base_seed
+
+        pp = _make_pp(input_noise={"type": "white", "mode": "concatenate", "n_channels": 1})
+        seed, reflect = noise_base_seed()
+        reference = IsotropicGaussianRandomFieldS2(
+            img_shape=(self.H, self.W), batch_size=1, num_channels=1, num_time_steps=1, seed=seed, reflect=reflect
+        )
+        samples = []
+        for process in (pp.input_noise, reference):
+            noise = NoiseController({INPUT_NOISE: process})
+            noise.advance(replace_state=True)
+            samples.append(noise.sample(INPUT_NOISE))
+        self.assertTrue(torch.equal(*samples))
+
+    def test_assemble_input_checks_the_noise(self):
+        """A model with input noise refuses to run without a sample, and a model without it refuses one."""
         pp = self._make_pp_with_noise()
-        self.assertIsInstance(pp.noise_base_seed, int)
+        x = self._field(1)
+        with self.assertRaises(ValueError):
+            pp.assemble_input(x, {}, None)
+        with self.assertRaises(ValueError):
+            self.pp.assemble_input(x, {}, _noise(pp, self.B))
+
+    def test_assemble_input_refuses_an_unknown_feature(self):
+        """A dynamic feature the model was not built with is refused."""
+        pp = _make_pp(add_zenith=True)
+        with self.assertRaises(ValueError):
+            pp.assemble_input(self._field(1), {ZENITH: self._zenith(1), "other": self._zenith(1)})
 
     # -----------------------------------------------------------------------
     # compute_history_stats / history_normalize / history_denormalize
@@ -573,61 +591,6 @@ class TestPreprocessor2DBasic(unittest.TestCase):
         self._check_post_condition(pp, pp.history_normalization_weights.reshape(1, T, 1), verbose=verbose)
 
     # -----------------------------------------------------------------------
-    # Noise determinism end-to-end
-    # -----------------------------------------------------------------------
-
-    def _make_pp_with_constant_random_noise(self):
-        """Build a preprocessor whose input_noise is a seeded DummyNoiseS2 in constant_random mode."""
-        from makani.models.noise import DummyNoiseS2
-
-        # construct with dummy-concatenate so the preprocessor is wired for noise
-        pp = _make_pp(add_zenith=True, input_noise={"type": "dummy", "mode": "concatenate", "n_channels": 1})
-        pp.train()
-        # replace with a constant_random DummyNoise so set_rng actually matters
-        pp.input_noise = DummyNoiseS2(
-            img_shape=[self.H, self.W],
-            batch_size=self.B,
-            num_channels=1,
-            num_time_steps=pp.n_history + 1,
-            mode="constant_random",
-        )
-        return pp
-
-    def test_noise_determinism_same_seed_produces_equal_outputs(self, verbose=False):
-        """set_rng(seed=42) twice, each followed by a forward pass, yields identical outputs."""
-        pp = self._make_pp_with_constant_random_noise()
-        x, xz = self._field(1), self._zenith(1)
-
-        noise = NoiseController(pp.noise_processes())
-
-        noise.set_rng(reset=True, seed=42)
-        noise.advance()
-        out1 = pp.assemble_input(x, {ZENITH: xz}, noise.sample(INPUT_NOISE))
-
-        noise.set_rng(reset=True, seed=42)
-        noise.advance()
-        out2 = pp.assemble_input(x, {ZENITH: xz}, noise.sample(INPUT_NOISE))
-
-        self.assertTrue(compare_tensors("noise same seed", out1, out2, verbose=verbose))
-
-    def test_noise_determinism_different_seed_produces_different_outputs(self, verbose=False):
-        """Two different seeds give different outputs (the noise channels differ)."""
-        pp = self._make_pp_with_constant_random_noise()
-        x, xz = self._field(1), self._zenith(1)
-
-        noise = NoiseController(pp.noise_processes())
-
-        noise.set_rng(reset=True, seed=42)
-        noise.advance()
-        out1 = pp.assemble_input(x, {ZENITH: xz}, noise.sample(INPUT_NOISE))
-
-        noise.set_rng(reset=True, seed=999)
-        noise.advance()
-        out2 = pp.assemble_input(x, {ZENITH: xz}, noise.sample(INPUT_NOISE))
-
-        self.assertFalse(compare_tensors("noise different seeds", out1, out2, verbose=verbose))
-
-    # -----------------------------------------------------------------------
     # Gradient flow through train-path ops
     # -----------------------------------------------------------------------
 
@@ -724,11 +687,10 @@ class TestPreprocessor2DBasic(unittest.TestCase):
 
         The check is a torch._check (compile-safe), so it surfaces as RuntimeError.
         """
-        pp = _make_pp(n_history=2)  # nhist = 3
-        # channels = 5, not divisible by 3
+        # channels = 5, not divisible by nhist = 3
         x_bad = torch.randn(self.B, 5, self.H, self.W)
         with self.assertRaises(RuntimeError) as cm:
-            pp.expand_history(x_bad, nhist=pp.n_history + 1)
+            expand_history(x_bad, nhist=3)
         self.assertIn("not divisible", str(cm.exception))
 
     def test_assemble_input_raises_on_feature_batch_mismatch(self):

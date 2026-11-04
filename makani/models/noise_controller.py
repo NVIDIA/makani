@@ -26,7 +26,7 @@ parameters are trained, checkpointed and moved with the model.
 What drives the processes is the :class:`NoiseController` of the model. A
 :class:`~makani.utils.dataloaders.rollout.Rollout` advances it before each
 step, replacing the state at the first one, and snapshots or restores it to
-continue a noise sequence in another rollout; the model package does the same
+continue a noise sequence in another rollout; the model package advances it
 for single steps. Nothing outside the model draws the samples: the model reads
 them from its current state while it predicts, so that they stay in the
 autograd graph of its learnable parameters::
@@ -49,12 +49,12 @@ refused for such networks, see :class:`~makani.models.stepper.StepWrapper`.
 
 import itertools
 from dataclasses import dataclass
-from typing import Dict, Iterator, Mapping, Optional, Tuple
+from typing import Dict, Iterator, Mapping, Optional
 
 import torch
 import torch.nn as nn
 
-from makani.utils import comm
+from makani.models.noise import run_eager
 
 # the offset between the seeds of the processes of one model in set_rng, a prime well above the
 # range of the per-rank offsets, so that re-seeded processes do not share a stream
@@ -62,56 +62,6 @@ _SEED_STRIDE = 104729
 
 # the versions of all controllers come from one counter, so that no two states, of any controllers, share one
 _VERSIONS = itertools.count(1)
-
-
-@torch.compiler.disable
-def run_eager(fn, *args, **kwargs):
-    """Run a callable outside torch.compile (forces a graph break).
-
-    The noise field is complex-valued (torch.complex + inverse SHT) and inductor's Triton
-    backend cannot codegen complex dtypes (KeyError: 'complex64'). A method-level
-    @torch.compiler.disable on the noise module's forward is NOT honored when dynamo inlines
-    the nn.Module call (it traces straight into it), whereas a disable on a plain function call
-    like this one is respected — so we break at the call site instead.
-    """
-    return fn(*args, **kwargs)
-
-
-def noise_base_seed(centered: bool = False) -> Tuple[int, bool]:
-    r"""
-    The seed of a noise process on this rank, and whether it is reflected.
-
-    Every rank of the model-parallel group draws its own part of the field,
-    and every data-parallel rank its own samples. With ``centered`` noise, the
-    ensemble ranks come in pairs, ``(0, 1), (2, 3), ...``, that draw the same
-    field with opposite signs, so that the ensemble mean of the noise is zero.
-
-    Parameters
-    ----------
-    centered : bool, optional
-        Pair up the ensemble ranks as described above. By default ``False``.
-
-    Returns
-    -------
-    seed : int
-        The seed of the process on this rank.
-    reflect : bool
-        Whether this rank draws the reflected field of its pair.
-    """
-    if not centered:
-        seed = 333 + comm.get_rank("model") + comm.get_size("model") * comm.get_rank("data")
-        return seed, False
-
-    # ranks (0,1), (2,3), ... map to the same effective rank, since they differ only by the reflection
-    ensemble_eff_rank = comm.get_rank("ensemble") // 2
-    reflect = comm.get_rank("ensemble") % 2 == 0
-    seed = (
-        333
-        + comm.get_rank("model")
-        + comm.get_size("model") * ensemble_eff_rank
-        + comm.get_size("model") * comm.get_size("ensemble") * comm.get_rank("batch")
-    )
-    return seed, reflect
 
 
 @dataclass(frozen=True)
@@ -122,6 +72,15 @@ class NoiseState:
     Holds the state tensor of the process, detached, and the states of its
     generators, so that a restored process continues the sequence an
     uninterrupted one would have drawn.
+
+    Attributes
+    ----------
+    tensor : torch.Tensor
+        The state of the process, a detached copy, with the batch first.
+    rng_cpu : torch.Tensor or None
+        The state of its CPU generator.
+    rng_gpu : torch.Tensor or None
+        The state of its GPU generator, ``None`` without one.
     """
 
     tensor: torch.Tensor
@@ -220,7 +179,24 @@ class NoiseController:
         return None
 
     def process(self, name: str) -> nn.Module:
-        """The noise process of that name."""
+        r"""
+        The noise process of that name, the module the model owns.
+
+        Parameters
+        ----------
+        name : str
+            The process, e.g. ``"input_noise"`` or ``"model.<name>"``.
+
+        Returns
+        -------
+        nn.Module
+            The process.
+
+        Raises
+        ------
+        KeyError
+            If the model has no process of that name.
+        """
         return self._processes[name]
 
     def advance(self, replace_state: bool = False, batch_size: Optional[int] = None):
@@ -272,7 +248,7 @@ class NoiseController:
         r"""
         The sample of a process at its current state.
 
-        Computed eagerly, outside ``torch.compile``, see :func:`run_eager`. The
+        Computed eagerly, outside ``torch.compile``, see :func:`~makani.models.noise.run_eager`. The
         sample is a deterministic function of the state and of the parameters
         of the process, so it stays in their autograd graph: draw it where it
         is used, inside the prediction.
@@ -286,6 +262,11 @@ class NoiseController:
         -------
         torch.Tensor
             The sample, ``(B, T, C, *grid)`` for the input noise.
+
+        Raises
+        ------
+        KeyError
+            If the model has no process of that name.
         """
         return run_eager(self._processes[name])
 
@@ -320,8 +301,10 @@ class NoiseController:
         Raises
         ------
         ValueError
-            If the snapshot holds other processes than this controller, or was
-            taken at another batch than ``batch_size``.
+            If the snapshot holds other processes than this controller, was
+            taken at another batch than ``batch_size``, or a process refuses
+            its state, e.g. one of another layout. The processes are left as
+            they were then.
         """
         if set(snapshot.states) != set(self._processes):
             raise ValueError(
@@ -333,14 +316,24 @@ class NoiseController:
                 f"The noise state was taken at batch {snapshot.batch_size}, the caller runs at batch {batch_size}"
             )
 
+        # all or nothing: a process that refuses its state, e.g. one of another layout, would otherwise leave the
+        # processes before it rewound and the others not, at the version of the state before
+        previous = self.snapshot()
+        try:
+            self._write(snapshot)
+        except Exception:
+            self._write(previous)
+            raise
+        if self._processes:
+            self._version = next(_VERSIONS)
+
+    def _write(self, snapshot: NoiseSnapshot):
         for name, process in self._processes.items():
             state = snapshot.states[name]
             process.set_tensor_state(state.tensor)
             process.set_rng_state(state.rng_cpu, state.rng_gpu)
-        if self._processes:
-            self._version = next(_VERSIONS)
 
-    def set_rng(self, seed: int = 333, reset: bool = True):
+    def set_rng(self, *, seed: int = 333, reset: bool = True):
         r"""
         Re-seed every process, optionally zeroing its state.
 

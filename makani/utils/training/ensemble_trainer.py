@@ -21,6 +21,7 @@ import numpy as np
 from tqdm import tqdm
 
 # torch
+from makani.utils.functions import flatten_history
 import torch
 from torch import amp
 import torch.distributed as dist
@@ -36,7 +37,7 @@ from makani.utils.driver import Driver
 from makani.utils.training import Trainer
 from makani.utils.dataloader import get_dataloader
 from makani.utils.dataloaders.data_helpers import get_climatology
-from makani.utils.dataloaders.batch import batch_to_device, INPUT, TARGET
+from makani.utils.dataloaders.batch import batch_nbytes, batch_to_device, INPUT, TARGET
 from makani.utils.YParams import YParams
 
 # model registry
@@ -513,11 +514,10 @@ class EnsembleTrainer(Trainer):
             self.step_timer.begin_step()
 
             # map to device
-            batch = batch_to_device(data, self.device)
+            batch = batch_to_device(data, self.device, non_blocking=True)
             inp, tar = batch[INPUT], batch[TARGET]
 
-            # assuming float32
-            total_data_bytes += inp.nbytes + tar.nbytes
+            total_data_bytes += batch_nbytes(batch)
 
             # check if we need to perform an gacc update
             do_update = train_steps % self.params["gradient_accumulation_steps"] == 0
@@ -666,7 +666,7 @@ class EnsembleTrainer(Trainer):
                     self.step_timer.begin_step()
 
                     # map to gpu
-                    batch = batch_to_device(data, self.device)
+                    batch = batch_to_device(data, self.device, non_blocking=True)
 
                     # the rollout folds the ensemble into the batch dim for a single forward
                     # per step, (B*E, ...); the target stays at the original batch -- the loss
@@ -676,7 +676,7 @@ class EnsembleTrainer(Trainer):
                     rollout = self._rollout(batch, ensemble_size=self.params.local_ensemble_size)
 
                     # the losses and metrics take the channels of a single step
-                    flatten = self.preprocessor.flatten_history
+                    flatten = flatten_history
 
                     # one prediction at a time, so that each lead time is released after its metrics
                     steps = self._eval_steps(rollout)
