@@ -14,6 +14,8 @@
 # limitations under the License.
 
 import os
+import shutil
+import tempfile
 
 import torch
 import torch.distributed as dist
@@ -218,6 +220,50 @@ def reduce_success(success, device, group=None):
     flag = torch.tensor([1 if success else 0], dtype=torch.int32, device=device)
     dist.all_reduce(flag, op=dist.ReduceOp.MIN, group=group)
     return bool(flag.item())
+
+
+def make_shared_tmpdir(prefix, device):
+    """Create a scratch directory that every rank reads and writes, and return its path.
+
+    Rank 0 creates the directory and broadcasts its path. Under a multi-node launch, the default temporary
+    directory (``/tmp``) is local to each node, so the other nodes would not see it, and a rank failing to open a
+    file there would leave the others waiting in a collective. The directory is therefore created under
+    ``MAKANI_TEST_TMPDIR`` if set, else where :func:`tempfile.mkdtemp` puts it (``TMPDIR``, then ``/tmp``), and
+    every rank checks that it sees it, so that the test class fails right away, on all ranks, if not.
+    """
+    # rank 0 alone creates the directory; an error there is broadcast with the path, so that no rank raises while
+    # the others wait in the broadcast
+    shared = [None, None]
+    if comm.get_world_rank() == 0:
+        base = os.environ.get("MAKANI_TEST_TMPDIR") or None
+        try:
+            if base is not None:
+                os.makedirs(base, exist_ok=True)
+            shared[0] = tempfile.mkdtemp(prefix=prefix, dir=base)
+        except OSError as e:
+            shared[1] = f"{type(e).__name__}: {e}"
+    if dist.is_initialized():
+        dist.broadcast_object_list(shared, src=0)
+    tmpdir, error = shared
+    if error is not None:
+        raise RuntimeError(f"Rank 0 could not create the scratch directory of the test: {error}")
+
+    if not reduce_success(os.path.isdir(tmpdir), device):
+        if comm.get_world_rank() == 0:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        raise RuntimeError(
+            f"The scratch directory {tmpdir} of rank 0 is not visible on every rank, e.g. because the ranks run on "
+            f"more than one node: set MAKANI_TEST_TMPDIR (or TMPDIR) to a directory on a filesystem all nodes share"
+        )
+
+    return tmpdir
+
+
+def remove_shared_tmpdir(tmpdir):
+    """Remove a directory made by :func:`make_shared_tmpdir`, once no rank reads from it anymore."""
+    sync_and_barrier()
+    if (comm.get_world_rank() == 0) and (tmpdir is not None):
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 def skip_unless_ensemble_splits_evenly(testcase, ensemble_size):

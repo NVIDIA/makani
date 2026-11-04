@@ -14,8 +14,6 @@
 # limitations under the License.
 
 import os
-import shutil
-import tempfile
 import unittest
 from parameterized import parameterized
 
@@ -33,6 +31,8 @@ from .distributed_helpers import (
     get_default_parameters,
     set_image_shape,
     _init_grid,
+    make_shared_tmpdir,
+    remove_shared_tmpdir,
     _split_helper,
     _gather_helper,
     reduce_success,
@@ -78,19 +78,14 @@ class TestDistributedTrainingStep(unittest.TestCase):
         _init_grid(cls)
 
         # shared scratch directory: rank 0 picks the path, every rank reads and writes there
-        tmpdir = [tempfile.mkdtemp(prefix="makani_training_step_test_", dir="/tmp") if cls.world_rank == 0 else None]
-        if dist.is_initialized():
-            dist.broadcast_object_list(tmpdir, src=0)
-        cls.tmpdir = tmpdir[0]
+        cls.tmpdir = make_shared_tmpdir("makani_training_step_test_", cls.device)
 
         sync_and_barrier()
 
     @classmethod
     def tearDownClass(cls):
         # no rank may still be reading when rank 0 removes the directory
-        sync_and_barrier()
-        if cls.world_rank == 0:
-            shutil.rmtree(cls.tmpdir, ignore_errors=True)
+        remove_shared_tmpdir(cls.tmpdir)
         teardown_comms()
 
     def setUp(self):

@@ -27,7 +27,7 @@ ensemble e and the auto-filled batch remainder b): ``pytest_report_header`` prin
 it once at the top of the session and ``pytest_collection_modifyitems`` appends
 ``[h=H,w=W,...]`` to each distributed test's node id (m/e/b shown only when > 1).
 
-Escape hatch: setting ``MAKANI_TEST_NO_SILENCE=1`` in the environment disables the
+Escape hatch: setting ``MAKANI_TEST_NO_SILENCE=1`` (and only ``1``) in the environment disables the
 silencing on every rank -- useful when debugging a per-rank failure (e.g. a
 distributed-bootstrap error in ``setUpClass``) that rank 0 doesn't reproduce.
 """
@@ -73,8 +73,9 @@ def pytest_configure(config):
     suppresses the session header, the collected-items line and the summary on non-zero
     ranks: a per-test hook fires too late, after those have already been printed.
     """
-    # Honor an env-var escape hatch: forces full output on every rank.
-    if os.environ.get("MAKANI_TEST_NO_SILENCE"):
+    # Honor an env-var escape hatch: forces full output on every rank. Only "1" counts, as for
+    # MAKANI_TEST_REMOTE_DATA, so that MAKANI_TEST_NO_SILENCE=0 keeps the silencing.
+    if os.environ.get("MAKANI_TEST_NO_SILENCE") == "1":
         return
 
     # rank comes from the env (comm isn't initialized at configure time)

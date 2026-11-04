@@ -14,8 +14,6 @@
 # limitations under the License.
 
 import os
-import shutil
-import tempfile
 import unittest
 
 import torch
@@ -26,7 +24,13 @@ from makani.utils import comm
 from makani.utils.driver import Driver
 from makani.utils.checkpoint_helpers import gather_model_state_dict
 
-from .distributed_helpers import _init_grid, reduce_success, sync_and_barrier, teardown_comms
+from .distributed_helpers import (
+    _init_grid,
+    make_shared_tmpdir,
+    reduce_success,
+    remove_shared_tmpdir,
+    teardown_comms,
+)
 
 
 class _ShardedTestModel(nn.Module):
@@ -115,24 +119,14 @@ class TestDistributedCheckpoint(unittest.TestCase):
         cls.global_w = 8 * cls.grid_size_w
         cls.num_features = 4
 
-        # Shared scratch directory: rank 0 picks a path under /tmp, broadcasts
-        # to everyone so all ranks read/write the same checkpoint files.
-        if cls.world_rank == 0:
-            tmpdir = tempfile.mkdtemp(prefix="makani_ckpt_test_")
-        else:
-            tmpdir = None
-        # broadcast a list of 1 string from rank 0 to everyone
-        bcast_list = [tmpdir]
-        if dist.is_initialized():
-            dist.broadcast_object_list(bcast_list, src=0)
-        cls.tmpdir = bcast_list[0]
+        # Shared scratch directory: rank 0 picks the path, all ranks read/write
+        # the same checkpoint files there (see make_shared_tmpdir for multi-node).
+        cls.tmpdir = make_shared_tmpdir("makani_ckpt_test_", cls.device)
 
     @classmethod
     def tearDownClass(cls):
-        # Only rank 0 cleans up; sync + barrier first to ensure no in-flight reads.
-        sync_and_barrier()
-        if cls.world_rank == 0 and cls.tmpdir is not None and os.path.isdir(cls.tmpdir):
-            shutil.rmtree(cls.tmpdir, ignore_errors=True)
+        # Only rank 0 cleans up, after a barrier, so no read is in flight.
+        remove_shared_tmpdir(cls.tmpdir)
         # barrier again (every rank waits for rank 0's cleanup above) then
         # explicitly destroy the process group -- see teardown_comms's docstring
         teardown_comms()
