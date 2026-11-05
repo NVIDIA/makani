@@ -205,8 +205,12 @@ class TestTrainer(_TrainerTestCase):
 
     @staticmethod
     def _forward(trainer, inp):
-        """The trained model on a flat input, over a one-step rollout, with a flat output for the comparisons."""
-        return trainer.model(single_step_rollout(inp.unsqueeze(1))).flatten(1, 2)
+        """The trained model on a flat input, over a one-step rollout, with a flat output for the comparisons.
+
+        The rollout drives the noise of the model, which the stochastic interpolant always has.
+        """
+        noise = getattr(trainer.model, "noise", None)
+        return trainer.model(single_step_rollout(inp.unsqueeze(1), noise=noise)).flatten(1, 2)
 
     @parameterized.expand(test_parameters, skip_on_empty=True)
     def test_trainer(self, trainer_handle, test_train, test_eval, devstring, verbose=False):
