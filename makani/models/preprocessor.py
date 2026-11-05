@@ -166,7 +166,8 @@ class Preprocessor2D(nn.Module):
 
             # the seed of this rank; the temporal correlation of the diffusion noise defaults to tau = 6h, read from
             # the time step of the data only for it, since the other types have no temporal correlation
-            seed, reflect = noise_base_seed(centered=noise_params.get("centered", False))
+            centered = noise_params.get("centered", False)
+            seed, reflect = noise_base_seed(centered=centered)
             default_lambd = params.dt * params.dhours / 6.0 if noise_params.get("type") == "diffusion" else 1.0
             self.input_noise = build_noise(
                 noise_params,
@@ -177,6 +178,7 @@ class Preprocessor2D(nn.Module):
                 grid_type=params.model_grid_type,
                 seed=seed,
                 reflect=reflect,
+                centered=centered,
                 default_lambd=default_lambd,
             )
 

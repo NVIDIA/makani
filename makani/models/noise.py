@@ -79,6 +79,10 @@ class BaseNoiseS2(nn.Module):
         two members sharing a seed but differing in this flag produce exactly
         opposite perturbations, which cancels first-order sampling error in the
         ensemble mean. By default ``False``.
+    centered : bool, optional
+        Whether the ensemble ranks draw in antithetic pairs, as the seed and
+        ``reflect`` were chosen by :func:`noise_base_seed`; :meth:`rank_seed`
+        keeps the pairing when the process is re-seeded. By default ``False``.
     **kwargs
         Ignored; present so noise configs can pass extra keys.
 
@@ -97,6 +101,7 @@ class BaseNoiseS2(nn.Module):
         lmax=None,
         seed=333,
         reflect=False,
+        centered=False,
         **kwargs,
     ):
         super().__init__()
@@ -106,6 +111,8 @@ class BaseNoiseS2(nn.Module):
         self.num_channels = num_channels
         self.num_time_steps = num_time_steps
         self.reflect = reflect
+        # whether the ensemble ranks draw in antithetic pairs, see noise_base_seed and rank_seed
+        self.centered = centered
 
         # Inverse SHT
         if comm.get_size("spatial") > 1:
@@ -214,6 +221,28 @@ class BaseNoiseS2(nn.Module):
             f"num_channels={self.num_channels}, num_time_steps={self.num_time_steps}, "
             f"lmax={self.lmax}, reflect={self.reflect}"
         )
+
+    def rank_seed(self, seed=333):
+        r"""
+        The seed of this rank for the base seed ``seed``.
+
+        Every spatial shard and data-parallel rank draws its own stream, laid out
+        as :func:`noise_base_seed` lays out the seeds a process is built with, and
+        with ``centered`` the ensemble ranks in antithetic pairs; serially, it is
+        ``seed`` itself. :meth:`~makani.models.noise_controller.NoiseController.set_rng`
+        re-seeds the process with it, so that the ranks do not draw the same noise.
+
+        Parameters
+        ----------
+        seed : int, optional
+            The base seed, by default ``333``.
+
+        Returns
+        -------
+        int
+            The seed for :meth:`set_rng` on this rank.
+        """
+        return noise_base_seed(centered=self.centered, seed_offset=seed - 333)[0]
 
     def set_rng(self, seed=333):
         r"""
@@ -441,6 +470,9 @@ class IsotropicGaussianRandomFieldS2(BaseNoiseS2):
         Seed for the private generators, by default ``333``.
     reflect : bool, optional
         Negate every draw, for antithetic ensemble pairing. By default ``False``.
+    centered : bool, optional
+        Whether the ensemble ranks draw in antithetic pairs, see
+        :class:`BaseNoiseS2`. By default ``False``.
     learnable : bool, default is False
         Parameter which enables learnable Gaussian noise: the per-degree
         standard deviations become trainable instead of fixed, letting the
@@ -472,6 +504,7 @@ class IsotropicGaussianRandomFieldS2(BaseNoiseS2):
         lmax=None,
         seed=333,
         reflect=False,
+        centered=False,
         learnable=False,
         **kwargs,
     ):
@@ -484,6 +517,7 @@ class IsotropicGaussianRandomFieldS2(BaseNoiseS2):
             lmax=lmax,
             seed=seed,
             reflect=reflect,
+            centered=centered,
         )
 
         # stash config for extra_repr
@@ -697,6 +731,9 @@ class DiffusionNoiseS2(BaseNoiseS2):
         Seed for the private generators, by default ``333``.
     reflect : bool, optional
         Negate every draw, for antithetic ensemble pairing. By default ``False``.
+    centered : bool, optional
+        Whether the ensemble ranks draw in antithetic pairs, see
+        :class:`BaseNoiseS2`. By default ``False``.
     learnable : bool, default is False
         Parameter which enables learnable Diffusion noise: the per-degree
         standard deviations become trainable.
@@ -727,6 +764,7 @@ class DiffusionNoiseS2(BaseNoiseS2):
         lmax=None,
         seed=333,
         reflect=False,
+        centered=False,
         learnable=False,
         **kwargs,
     ):
@@ -739,6 +777,7 @@ class DiffusionNoiseS2(BaseNoiseS2):
             lmax=lmax,
             seed=seed,
             reflect=reflect,
+            centered=centered,
         )
 
         # stash config for extra_repr (store originals before processing into tensors below)
@@ -1216,7 +1255,17 @@ def noise_base_seed(centered: bool = False, seed_offset: int = 0) -> Tuple[int, 
 
 
 def build_noise(
-    noise_params, *, img_shape, batch_size, num_channels, num_time_steps, grid_type, seed, reflect, default_lambd=1.0
+    noise_params,
+    *,
+    img_shape,
+    batch_size,
+    num_channels,
+    num_time_steps,
+    grid_type,
+    seed,
+    reflect,
+    centered=False,
+    default_lambd=1.0,
 ):
     r"""
     Build a noise process from its configuration.
@@ -1238,6 +1287,10 @@ def build_noise(
         The seed, see :func:`noise_base_seed`.
     reflect : bool
         Whether to draw the reflected field, see :func:`noise_base_seed`.
+    centered : bool, optional
+        Whether ``seed`` and ``reflect`` pair up the ensemble ranks, see
+        :func:`noise_base_seed`, so that a re-seeded process keeps the pairing.
+        By default ``False``.
     default_lambd : float, optional
         The temporal correlation of the diffusion noise when ``noise_params``
         sets none; it depends on the time step of the data, typically
@@ -1274,6 +1327,7 @@ def build_noise(
             lmax=lmax,
             seed=seed,
             reflect=reflect,
+            centered=centered,
             learnable=noise_params.get("learnable", False),
         )
     elif ntype == "white":
@@ -1288,6 +1342,7 @@ def build_noise(
             lmax=lmax,
             seed=seed,
             reflect=reflect,
+            centered=centered,
             learnable=noise_params.get("learnable", False),
         )
     elif ntype == "dummy":

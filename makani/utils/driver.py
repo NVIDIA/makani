@@ -55,6 +55,10 @@ from makani.utils.checkpoint_helpers import (
     supports_dataloader_state,
     gather_dataloader_state_dict,
     scatter_dataloader_state_dict,
+    gather_noise_rng_state,
+    scatter_noise_rng_state,
+    checkpoint_format_tag,
+    check_checkpoint_format,
 )
 
 
@@ -456,6 +460,15 @@ class Driver(metaclass=abc.ABCMeta):
         """
         return gather_dataloader_state_dict(dataloader)
 
+    def get_noise_rng_state(self) -> Optional[Dict[str, Any]]:
+        """
+        The generator states of the noise of all ranks, for :meth:`save_checkpoint`.
+
+        Like :meth:`gather_dataloader_state`, a collective, to be called by every rank before
+        the checkpoint is written. None for a model without noise.
+        """
+        return gather_noise_rng_state(getattr(self, "noise", None))
+
     @staticmethod
     def restore_from_checkpoint(
         checkpoint_path: str,
@@ -468,9 +481,13 @@ class Driver(metaclass=abc.ABCMeta):
         checkpoint_mode: str = "legacy",
         strict: bool = True,
         log_to_screen: bool = False,
+        noise: Optional[Any] = None,
     ):
         """
         Routine for restoring a checkpoint from a path.
+
+        With ``noise``, the :class:`~makani.models.noise_controller.NoiseController` of the model,
+        its generators continue where the checkpoint was written, see :meth:`_restore_noise_rng_state`.
         """
         with torch.no_grad():
             if checkpoint_mode == "legacy":
@@ -485,6 +502,7 @@ class Driver(metaclass=abc.ABCMeta):
                     dataloader,
                     strict=strict,
                     log_to_screen=log_to_screen,
+                    noise=noise,
                 )
             elif checkpoint_mode == "flexible":
                 # new flexible mode allows to load models in arbitrary model-parallel configurations
@@ -498,6 +516,7 @@ class Driver(metaclass=abc.ABCMeta):
                     dataloader,
                     strict=strict,
                     log_to_screen=log_to_screen,
+                    noise=noise,
                 )
             else:
                 raise ValueError(f"Unknown checkoint mode {checkpoint_mode}.")
@@ -548,6 +567,44 @@ class Driver(metaclass=abc.ABCMeta):
         return
 
     @staticmethod
+    def _check_checkpoint_format(checkpoint: Dict[str, Any], checkpoint_mode: str, strict: bool, log_to_screen: bool):
+        """Refuse a checkpoint of the other mode or of a newer format, see :func:`check_checkpoint_format`."""
+        warning = check_checkpoint_format(checkpoint, checkpoint_mode, strict=strict)
+        if (warning is not None) and log_to_screen:
+            logging.getLogger().warning(warning)
+
+    @staticmethod
+    def _restore_noise_rng_state(checkpoint: Dict[str, Any], noise: Any, log_to_screen: bool = False):
+        """
+        Continue the noise generators of this rank from an already loaded checkpoint.
+
+        Without them, a resumed run rebuilds its noise from the seeds it was built with, and
+        replays the noise of the start of the run. A checkpoint without them, or one written
+        with another decomposition over the ranks, is not an error, as the run can go on with
+        fresh streams; a warning says so.
+        """
+        if not noise.is_stochastic:
+            return
+
+        def _warn(reason):
+            if log_to_screen:
+                logging.getLogger().warning(
+                    f"The noise generators are not restored, {reason}: the noise is drawn from the seeds the model "
+                    "was built with, and repeats the noise of the start of the run."
+                )
+
+        if "noise_rng_state" not in checkpoint:
+            _warn("the checkpoint does not contain them")
+            return
+
+        try:
+            noise.set_rng_state(scatter_noise_rng_state(checkpoint["noise_rng_state"]))
+        except (KeyError, ValueError) as err:
+            _warn(err)
+
+        return
+
+    @staticmethod
     def _restore_checkpoint_legacy(
         checkpoint_path: str,
         model: nn.Module,
@@ -559,9 +616,16 @@ class Driver(metaclass=abc.ABCMeta):
         strict: bool = True,
         log_to_screen: bool = False,
         validate_comms: bool = True,
+        noise: Optional[Any] = None,
     ):
         checkpoint_fname = checkpoint_path.format(mp_rank=comm.get_rank("model"))
+        if not os.path.isfile(checkpoint_fname):
+            # a flexible checkpoint has a single file, of mp_rank 0: say so rather than that the file is missing
+            first_fname = checkpoint_path.format(mp_rank=0)
+            if os.path.isfile(first_fname):
+                check_checkpoint_format(load_checkpoint(first_fname, map_location="cpu"), "legacy", strict=strict)
         checkpoint = load_checkpoint(checkpoint_fname, map_location="cpu")
+        Driver._check_checkpoint_format(checkpoint, "legacy", strict, log_to_screen)
 
         # check compatibility of the comm grid stored inside the file
         if validate_comms:
@@ -621,6 +685,9 @@ class Driver(metaclass=abc.ABCMeta):
         if dataloader is not None:
             Driver._restore_dataloader_state(checkpoint, dataloader, strict=strict, log_to_screen=log_to_screen)
 
+        if noise is not None:
+            Driver._restore_noise_rng_state(checkpoint, noise, log_to_screen=log_to_screen)
+
         return
 
     @staticmethod
@@ -634,10 +701,12 @@ class Driver(metaclass=abc.ABCMeta):
         dataloader: Optional[Any] = None,
         strict: bool = True,
         log_to_screen: bool = False,
+        noise: Optional[Any] = None,
     ):
         # when loading the weights in flexble mode we exclusively use mp_rank=0 and load them onto the cpu
         checkpoint_fname = checkpoint_path.format(mp_rank=0)
         checkpoint = load_checkpoint(checkpoint_fname, map_location="cpu")
+        Driver._check_checkpoint_format(checkpoint, "flexible", strict, log_to_screen)
 
         # this is reworked to avoid loading modules related to the SHT
         state_dict = checkpoint["model_state"]
@@ -674,6 +743,9 @@ class Driver(metaclass=abc.ABCMeta):
         if dataloader is not None:
             Driver._restore_dataloader_state(checkpoint, dataloader, strict=strict, log_to_screen=log_to_screen)
 
+        if noise is not None:
+            Driver._restore_noise_rng_state(checkpoint, noise, log_to_screen=log_to_screen)
+
         return
 
     @staticmethod
@@ -686,23 +758,25 @@ class Driver(metaclass=abc.ABCMeta):
         counters: Optional[Dict[str, int]] = None,
         dataloader_state: Optional[List[Dict[str, Any]]] = None,
         checkpoint_mode: str = "legacy",
+        noise_rng_state: Optional[Dict[str, Any]] = None,
     ):
         """
         Save out checkpoint
 
         ``dataloader_state`` is the list of per-data-parallel-rank states returned by
         :meth:`gather_dataloader_state`, which has to be collected by all ranks before this
-        routine is entered by the checkpoint-writing rank.
+        routine is entered by the checkpoint-writing rank. ``noise_rng_state``, the noise
+        generators of all ranks from :meth:`get_noise_rng_state`, is collected the same way.
         """
         with torch.no_grad():
             # legacy mode
             if checkpoint_mode == "legacy":
                 Driver._save_checkpoint_legacy(
-                    checkpoint_path, model, loss, optimizer, scheduler, counters, dataloader_state
+                    checkpoint_path, model, loss, optimizer, scheduler, counters, dataloader_state, noise_rng_state
                 )
             elif checkpoint_mode == "flexible":
                 Driver._save_checkpoint_flexible(
-                    checkpoint_path, model, loss, optimizer, scheduler, counters, dataloader_state
+                    checkpoint_path, model, loss, optimizer, scheduler, counters, dataloader_state, noise_rng_state
                 )
             else:
                 raise ValueError(f"Unknown checkoint mode {checkpoint_mode}.")
@@ -721,6 +795,7 @@ class Driver(metaclass=abc.ABCMeta):
         scheduler: Optional[lr_scheduler.LRScheduler] = None,
         counters: Optional[Dict[str, int]] = None,
         dataloader_state: Optional[List[Dict[str, Any]]] = None,
+        noise_rng_state: Optional[Dict[str, Any]] = None,
     ):
         # maybe the logic regarding the mp rank should be moved to somewhere else?
         checkpoint_fname = checkpoint_path.format(mp_rank=comm.get_rank("model"))
@@ -745,7 +820,7 @@ class Driver(metaclass=abc.ABCMeta):
                 tensor.sharded_dims_mp = param.sharded_dims_mp
 
         # add model state dict to store dict
-        store_dict = {"model_state": state_dict}
+        store_dict = {"model_state": state_dict, "checkpoint_format": checkpoint_format_tag("legacy")}
 
         # comm infrastructure:
         comm_names = comm.get_model_comm_names()
@@ -773,6 +848,10 @@ class Driver(metaclass=abc.ABCMeta):
         if dataloader_state is not None:
             store_dict["dataloader_state"] = dataloader_state
 
+        # the noise generators of all ranks, under their model and data-parallel ranks
+        if noise_rng_state is not None:
+            store_dict["noise_rng_state"] = noise_rng_state
+
         torch.save(store_dict, checkpoint_fname)
 
         return
@@ -786,6 +865,7 @@ class Driver(metaclass=abc.ABCMeta):
         scheduler: Optional[lr_scheduler.LRScheduler] = None,
         counters: Optional[Dict[str, int]] = None,
         dataloader_state: Optional[List[Dict[str, Any]]] = None,
+        noise_rng_state: Optional[Dict[str, Any]] = None,
     ):
         # checkpoint name
         checkpoint_fname = checkpoint_path.format(mp_rank=0)
@@ -810,7 +890,7 @@ class Driver(metaclass=abc.ABCMeta):
             if name in state_dict and hasattr(buf, "sharded_dims_mp"):
                 state_dict[name].sharded_dims_mp = buf.sharded_dims_mp
 
-        store_dict = {"model_state": state_dict}
+        store_dict = {"model_state": state_dict, "checkpoint_format": checkpoint_format_tag("flexible")}
 
         if loss is not None:
             store_dict["loss_state_dict"] = loss.state_dict()
@@ -831,6 +911,10 @@ class Driver(metaclass=abc.ABCMeta):
         # state of the training data pipeline, one entry per data-parallel rank
         if dataloader_state is not None:
             store_dict["dataloader_state"] = dataloader_state
+
+        # the noise generators of all ranks, under their model and data-parallel ranks
+        if noise_rng_state is not None:
+            store_dict["noise_rng_state"] = noise_rng_state
 
         # in flexible mode only rank 0 needs to save the data to disk
         if comm.get_world_rank() == 0:

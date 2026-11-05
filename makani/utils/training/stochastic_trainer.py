@@ -255,6 +255,7 @@ class StochasticTrainer(Driver):
                 scheduler=self.scheduler if self.params.get("load_scheduler", True) else None,
                 counters=counters if self.params.get("load_counters", True) else None,
                 dataloader=self.get_train_dataloader_for_restore(),
+                noise=getattr(self, "noise", None),
                 checkpoint_mode=self.params.load_checkpoint,
                 strict=self.params.get("strict_restore", True),
                 log_to_screen=self.log_to_screen,
@@ -364,8 +365,11 @@ class StochasticTrainer(Driver):
             # to be gathered by all ranks before entering the rank-0-only block below
             if (self.params.save_checkpoint != "none") and not self.params.get("skip_training", False):
                 dataloader_state = self.get_train_dataloader_state()
+                # the noise generators of all ranks, so that a resumed run continues its noise
+                noise_rng_state = self.get_noise_rng_state()
             else:
                 dataloader_state = None
+                noise_rng_state = None
 
             # save out checkpoints
             if (
@@ -394,6 +398,7 @@ class StochasticTrainer(Driver):
                     self.scheduler,
                     counters,
                     dataloader_state=dataloader_state,
+                    noise_rng_state=noise_rng_state,
                     checkpoint_mode=checkpoint_mode,
                 )
 
@@ -411,6 +416,7 @@ class StochasticTrainer(Driver):
                         self.scheduler,
                         counters,
                         dataloader_state=dataloader_state,
+                        noise_rng_state=noise_rng_state,
                         checkpoint_mode=checkpoint_mode,
                     )
                     best_valid_loss = valid_logs["base"]["validation loss"]

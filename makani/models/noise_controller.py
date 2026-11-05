@@ -49,7 +49,7 @@ refused for such networks, see :class:`~makani.models.stepper.StepWrapper`.
 
 import itertools
 from dataclasses import dataclass
-from typing import Dict, Iterator, Mapping, Optional
+from typing import Dict, Iterator, Mapping, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -333,6 +333,51 @@ class NoiseController:
             process.set_tensor_state(state.tensor)
             process.set_rng_state(state.rng_cpu, state.rng_gpu)
 
+    def get_rng_state(self) -> Dict[str, Tuple[torch.Tensor, Optional[torch.Tensor]]]:
+        r"""
+        The states of the generators of every process, without the noise states.
+
+        What a training run needs to continue its noise after a restart: its
+        rollouts replace the noise state at their first step, drawn from the
+        generators, so the generators alone continue the sequence of draws.
+        Small, unlike the noise states, which are as large as the spectral
+        coefficients.
+
+        Returns
+        -------
+        dict
+            Process name to the ``(cpu, gpu)`` generator states, see
+            :meth:`set_rng_state`.
+        """
+        return {name: process.get_rng_state() for name, process in self._processes.items()}
+
+    def set_rng_state(self, states: Mapping[str, Tuple[torch.Tensor, Optional[torch.Tensor]]]):
+        r"""
+        Restore the generators of every process from :meth:`get_rng_state`.
+
+        The noise states are left as they are; a rollout that replaces them at
+        its first step then draws what the run would have drawn.
+
+        Parameters
+        ----------
+        states : Mapping
+            Process name to the ``(cpu, gpu)`` generator states.
+
+        Raises
+        ------
+        ValueError
+            If the states are of other processes than this controller drives.
+        """
+        if set(states) != set(self._processes):
+            raise ValueError(
+                f"The generator states are of the noise processes {sorted(states)}, "
+                f"the model has {sorted(self._processes)}"
+            )
+        for name, process in self._processes.items():
+            process.set_rng_state(*states[name])
+        if self._processes:
+            self._version = next(_VERSIONS)
+
     def set_rng(self, *, seed: int = 333, reset: bool = True):
         r"""
         Re-seed every process, optionally zeroing its state.
@@ -340,7 +385,12 @@ class NoiseController:
         Use this to make a forecast reproducible, or to decorrelate ensemble
         members by giving each a distinct seed. The processes are seeded in
         order, ``seed``, ``seed + stride``, ..., so that they draw different
-        streams; a model with a single process is seeded with ``seed``.
+        streams; a model with a single process is seeded with ``seed``. A
+        process with a ``rank_seed`` method lays its base seed out over the
+        ranks, see :meth:`~makani.models.noise.BaseNoiseS2.rank_seed`, so that
+        the spatial shards and the data-parallel ranks still draw their own
+        streams, as when the model was built; serially, the seeds are the base
+        seeds.
 
         Parameters
         ----------
@@ -351,7 +401,8 @@ class NoiseController:
             continue a sequence under a new seed.
         """
         for idx, process in enumerate(self._processes.values()):
-            process.set_rng(seed + idx * _SEED_STRIDE)
+            base = seed + idx * _SEED_STRIDE
+            process.set_rng(process.rank_seed(base) if hasattr(process, "rank_seed") else base)
             if reset:
                 process.reset()
         if self._processes:

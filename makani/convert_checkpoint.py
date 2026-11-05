@@ -229,6 +229,9 @@ def average_checkpoints(input_path, output_path):
     # save the model
     print(f"Saving averaged checkpoint to {checkpoint_output_path}")
     store_dict = {"model_state": model_state_dict}
+    # the average has the layout of the checkpoints it averages
+    if "checkpoint_format" in base_checkpoint:
+        store_dict["checkpoint_format"] = base_checkpoint["checkpoint_format"]
     torch.save(store_dict, checkpoint_output_path)
 
 
