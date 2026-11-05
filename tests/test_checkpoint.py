@@ -47,6 +47,7 @@ from makani.utils.checkpoint_helpers import (
     CHECKPOINT_FORMAT_VERSION,
     checkpoint_format_tag,
     check_checkpoint_format,
+    run_has_checkpoint,
 )
 from makani.models.common import MLP
 from makani.utils.driver import Driver
@@ -723,6 +724,47 @@ class TestCheckpointFormat(unittest.TestCase):
         before = noise.get_rng_state()["white"][0]
         Driver._restore_noise_rng_state({"model_state": {}}, noise)
         self.assertTrue(torch.equal(noise.get_rng_state()["white"][0], before))
+
+
+class TestRunHasCheckpoint(unittest.TestCase):
+    """Whether a run resumes: its own checkpoint files, in the mode it saves in, not the one of a pretrained checkpoint."""
+
+    def setUp(self):
+        self.tmpdir_ctx = tempfile.TemporaryDirectory()
+        self.params = get_default_parameters()
+        self.params.checkpoint_path = os.path.join(self.tmpdir_ctx.name, "ckpt_mp{mp_rank}_v{checkpoint_version}.tar")
+
+    def tearDown(self):
+        self.tmpdir_ctx.cleanup()
+
+    def _touch(self, mp_rank):
+        open(self.params.checkpoint_path.format(mp_rank=mp_rank, checkpoint_version=0), "w").close()
+
+    def _resumes(self, save_mode, load_mode="legacy", model_size=2):
+        self.params.save_checkpoint = save_mode
+        self.params.load_checkpoint = load_mode
+        with mock.patch("makani.utils.checkpoint_helpers.comm.get_size", return_value=model_size):
+            return run_has_checkpoint(self.params)
+
+    def test_fresh_directory(self):
+        self.assertFalse(self._resumes("legacy"))
+        self.assertFalse(self._resumes("flexible"))
+
+    def test_flexible_needs_its_single_file(self):
+        self._touch(0)
+        # whatever the mode of the pretrained checkpoint
+        self.assertTrue(self._resumes("flexible", load_mode="legacy"))
+
+    def test_legacy_needs_every_rank(self):
+        self._touch(0)
+        self.assertFalse(self._resumes("legacy", load_mode="flexible"))
+        self._touch(1)
+        self.assertTrue(self._resumes("legacy", load_mode="flexible"))
+
+    def test_no_saving_never_resumes(self):
+        self._touch(0)
+        self._touch(1)
+        self.assertFalse(self._resumes("none"))
 
 
 if __name__ == "__main__":

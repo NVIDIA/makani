@@ -144,9 +144,11 @@ base_73ch_finetune: &BASELINE_73CH_FINETUNE
     max_epochs: 40
     scheduler_T_max: 40
 
+    # a warm start takes over the weights only; the other states on request. A resumed run restores all of them
     load_optimizer: !!bool True
-    # load_scheduler: !!bool False
-    # load_counters: !!bool False
+    # load_scheduler: !!bool True
+    # load_counters: !!bool True
+    # load_loss: !!bool True
 
 # baseline SFNO model
 sfno_sc3_layers8_edim384:

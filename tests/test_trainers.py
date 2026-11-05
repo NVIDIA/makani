@@ -434,42 +434,41 @@ class TestTrainerCheckpointing(_TrainerTestCase):
         def _model_matches(trainer):
             return _states_equal("model", trainer.model.state_dict(), source.model.state_dict(), verbose=verbose)
 
-        # by default everything is taken over from the checkpoint
+        # by default only the weights are taken over: the optimizer, the scheduler and the counters start afresh
         trainer = trainer_handle(self.params, 0, device=device)
         with self.subTest(desc="defaults: model"):
             self.assertTrue(_model_matches(trainer))
         with self.subTest(desc="defaults: counters"):
+            self.assertEqual(trainer.epoch, 0)
+            self.assertEqual(trainer.iters, 0)
+        with self.subTest(desc="defaults: optimizer"):
+            self.assertEqual(len(_optimizer(trainer).state_dict()["state"]), 0)
+            self.assertTrue(all(group["lr"] == self.params.lr for group in _optimizer(trainer).param_groups))
+        with self.subTest(desc="defaults: scheduler"):
+            self.assertEqual(_scheduler(trainer).last_epoch, 0)
+
+        # the other states are taken over on request
+        self.params.load_optimizer = True
+        self.params.load_scheduler = True
+        self.params.load_counters = True
+        trainer = trainer_handle(self.params, 0, device=device)
+        with self.subTest(desc="opt in: model"):
+            self.assertTrue(_model_matches(trainer))
+        with self.subTest(desc="opt in: counters"):
             self.assertEqual(trainer.epoch, source.epoch)
             self.assertEqual(trainer.iters, source.iters)
-        with self.subTest(desc="defaults: optimizer"):
+        with self.subTest(desc="opt in: optimizer"):
             self.assertTrue(
                 _states_equal(
                     "optimizer", _optimizer(trainer).state_dict(), _optimizer(source).state_dict(), verbose=verbose
                 )
             )
-        with self.subTest(desc="defaults: scheduler"):
+        with self.subTest(desc="opt in: scheduler"):
             self.assertTrue(
                 _states_equal(
                     "scheduler", _scheduler(trainer).state_dict(), _scheduler(source).state_dict(), verbose=verbose
                 )
             )
-
-        # finetuning: only the weights are taken over, the optimizer, the scheduler and the
-        # counters start afresh
-        self.params.load_optimizer = False
-        self.params.load_scheduler = False
-        self.params.load_counters = False
-        trainer = trainer_handle(self.params, 0, device=device)
-        with self.subTest(desc="finetune: model"):
-            self.assertTrue(_model_matches(trainer))
-        with self.subTest(desc="finetune: counters"):
-            self.assertEqual(trainer.epoch, 0)
-            self.assertEqual(trainer.iters, 0)
-        with self.subTest(desc="finetune: optimizer"):
-            self.assertEqual(len(_optimizer(trainer).state_dict()["state"]), 0)
-            self.assertTrue(all(group["lr"] == self.params.lr for group in _optimizer(trainer).param_groups))
-        with self.subTest(desc="finetune: scheduler"):
-            self.assertEqual(_scheduler(trainer).last_epoch, 0)
 
         # the optimizer is restored, with its learning rate replaced by the configured one
         self.params.load_optimizer = True
@@ -488,6 +487,48 @@ class TestTrainerCheckpointing(_TrainerTestCase):
                     _optimizer(trainer).state_dict()["state"],
                     _optimizer(source).state_dict()["state"],
                     verbose=verbose,
+                )
+            )
+
+    @parameterized.expand(
+        [(Trainer,), (EnsembleTrainer,), (StochasticTrainer,), (AutoencoderTrainer,)], skip_on_empty=True
+    )
+    def test_resume_ignores_the_warm_start_flags(self, trainer_handle, verbose=False):
+        """A finetune config resumed: everything comes back from the run's own checkpoint, whatever the flags say."""
+        device = torch.device("cpu")
+        self.params.max_epochs = 1
+        source = trainer_handle(self.params, 0, device=device)
+        source.train()
+
+        # the config of a warm start that takes over the weights only, from a checkpoint that is gone by now
+        self.params.pretrained = True
+        self.params.pretrained_checkpoint_path = os.path.join(self.tmpdir.name, "gone", "ckpt_mp{mp_rank}.tar")
+        self.params.load_loss = False
+        self.params.load_optimizer = False
+        self.params.load_scheduler = False
+        self.params.load_counters = False
+        self.params.override_lr = True
+        self.params.lr = 1e-3
+        self.params.resuming = True
+        trainer = trainer_handle(self.params, 0, device=device)
+
+        with self.subTest(desc="model"):
+            self.assertTrue(
+                _states_equal("model", trainer.model.state_dict(), source.model.state_dict(), verbose=verbose)
+            )
+        with self.subTest(desc="counters"):
+            self.assertEqual(trainer.epoch, source.epoch)
+            self.assertEqual(trainer.iters, source.iters)
+        with self.subTest(desc="optimizer"):
+            self.assertTrue(
+                _states_equal(
+                    "optimizer", _optimizer(trainer).state_dict(), _optimizer(source).state_dict(), verbose=verbose
+                )
+            )
+        with self.subTest(desc="scheduler"):
+            self.assertTrue(
+                _states_equal(
+                    "scheduler", _scheduler(trainer).state_dict(), _scheduler(source).state_dict(), verbose=verbose
                 )
             )
 

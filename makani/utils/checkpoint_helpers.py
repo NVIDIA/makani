@@ -215,6 +215,21 @@ def check_checkpoint_format(checkpoint: Dict[str, Any], checkpoint_mode: str, st
     return warning
 
 
+def run_has_checkpoint(params) -> bool:
+    """Whether the run directory holds a checkpoint of this run, so that the run resumes from it.
+
+    Looks for the files of the first checkpoint version in the mode the run saves its checkpoints
+    in, ``save_checkpoint``: every model-parallel rank's file in legacy mode, the single file in
+    flexible mode. ``load_checkpoint`` is the mode of a pretrained checkpoint to warm-start from,
+    and has nothing to say about the checkpoints of the run itself.
+    """
+    mode = params.get("save_checkpoint", "legacy")
+    if mode == "none":
+        return False
+    ranks = range(comm.get_size("model")) if mode == "legacy" else [0]
+    return all(os.path.isfile(params.checkpoint_path.format(mp_rank=r, checkpoint_version=0)) for r in ranks)
+
+
 def supports_dataloader_state(dataloader: Any) -> bool:
     """Whether the dataloader can capture and restore its state (only the DALI loaders can)."""
     return (

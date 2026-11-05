@@ -20,6 +20,7 @@ from functools import partial
 
 # utilities
 from makani.utils.profiling import Timer
+from makani.utils.checkpoint_helpers import run_has_checkpoint
 from makani.utils import profiling
 from makani.utils import logging_utils
 from makani.utils.YParams import YParams
@@ -120,14 +121,8 @@ if __name__ == "__main__":
     params["checkpoint_path"] = os.path.join(expDir, "training_checkpoints/ckpt_mp{mp_rank}_v{checkpoint_version}.tar")
     params["best_checkpoint_path"] = os.path.join(expDir, "training_checkpoints/best_ckpt_mp{mp_rank}.tar")
 
-    # check if all files are there - do not comment out.
-    resuming = True
-    for mp_rank in range(comm.get_size("model")):
-        checkpoint_fname = params.checkpoint_path.format(mp_rank=mp_rank, checkpoint_version=0)
-        if params["load_checkpoint"] == "legacy" or mp_rank < 1:
-            resuming = resuming and os.path.isfile(checkpoint_fname)
-
-    params["resuming"] = resuming
+    # the run resumes if its directory already holds a checkpoint of it, written in the save mode
+    params["resuming"] = run_has_checkpoint(params)
     params["amp_mode"] = args.amp_mode
     params["jit_mode"] = args.jit_mode
     params["skip_validation"] = args.skip_validation
