@@ -48,11 +48,11 @@ from makani.utils.checkpoint_helpers import (
     checkpoint_format_tag,
     check_checkpoint_format,
     run_has_checkpoint,
+    setup_training_run,
 )
 from makani.models.common import MLP
 from makani.utils.driver import Driver
 from .testutils import disable_tf32, set_seed, get_default_parameters, compare_arrays
-
 
 # ---------------------------------------------------------------------------
 # Checkpoint helpers: makani.utils.checkpoint_helpers
@@ -765,6 +765,29 @@ class TestRunHasCheckpoint(unittest.TestCase):
         self._touch(0)
         self._touch(1)
         self.assertFalse(self._resumes("none"))
+
+    def test_unknown_mode_raises(self):
+        with self.assertRaisesRegex(ValueError, "Unknown checkpoint mode"):
+            self._resumes("flexibel")
+
+    def test_setup_training_run(self):
+        exp_dir = os.path.join(self.tmpdir_ctx.name, "run")
+        self.params.save_checkpoint = "flexible"
+        with mock.patch("makani.utils.checkpoint_helpers.comm.get_world_rank", return_value=0):
+            setup_training_run(self.params, exp_dir)
+            self.assertTrue(os.path.isdir(os.path.join(exp_dir, "training_checkpoints")))
+            self.assertTrue(os.path.isdir(os.path.join(exp_dir, "wandb")))
+            self.assertEqual(self.params.experiment_dir, os.path.abspath(exp_dir))
+            self.assertEqual(
+                self.params.checkpoint_path,
+                os.path.join(exp_dir, "training_checkpoints", "ckpt_mp{mp_rank}_v{checkpoint_version}.tar"),
+            )
+            self.assertFalse(self.params.resuming)
+
+            # a second start of the same run finds the checkpoint it wrote
+            open(self.params.checkpoint_path.format(mp_rank=0, checkpoint_version=0), "w").close()
+            setup_training_run(self.params, exp_dir)
+            self.assertTrue(self.params.resuming)
 
 
 if __name__ == "__main__":

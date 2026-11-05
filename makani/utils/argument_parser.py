@@ -179,3 +179,60 @@ def parse_odirect_config(config_str):
                 "Expected a byte count (e.g. '4096'), a kibibyte value (e.g. '4K'), "
                 "or a mebibyte value (e.g. '1M')."
             )
+
+
+# options of the default parser copied into the parameters as they are; those of training only are
+# copied when the parser has them
+_COPIED_ARGUMENTS = (
+    "matmul_parallel_size",
+    "h_parallel_size",
+    "w_parallel_size",
+    "amp_mode",
+    "jit_mode",
+    "checkpointing_level",
+    "print_timings_frequency",
+    "enable_synthetic_data",
+    "enable_s3",
+    "split_data_channels",
+    "load_checkpoint",
+)
+_COPIED_TRAINING_ARGUMENTS = (
+    "skip_validation",
+    "skip_training",
+    "parameters_reduction_buffer_count",
+    "save_checkpoint",
+    "multistep_count",
+    "multistep_checkpoint",
+    "disable_ddp",
+    "enable_grad_anomaly_detection",
+)
+
+
+def arguments_to_params(params, args):
+    """Copies the options of :func:`get_default_argument_parser` from ``args`` into ``params``.
+
+    Besides the options themselves, sets the decomposition (``model_parallel_sizes`` and names, and
+    ``data_parallel_sizes`` and names when the parser has ``--ensemble_parallel_size``), the O_DIRECT
+    settings from ``--odirect_config``, and ``n_future`` from ``--multistep_count``. The batch size is
+    left to the caller, which splits it over the data-parallel ranks.
+    """
+    for name in _COPIED_ARGUMENTS:
+        params[name] = getattr(args, name)
+    for name in _COPIED_TRAINING_ARGUMENTS:
+        if hasattr(args, name):
+            params[name] = getattr(args, name)
+
+    params["model_parallel_sizes"] = [args.h_parallel_size, args.w_parallel_size, args.matmul_parallel_size]
+    params["model_parallel_names"] = ["h", "w", "matmul"]
+    if hasattr(args, "ensemble_parallel_size"):
+        params["ensemble_parallel_size"] = args.ensemble_parallel_size
+        params["data_parallel_sizes"] = [args.ensemble_parallel_size, -1]
+        params["data_parallel_names"] = ["ensemble", "batch"]
+
+    params["enable_odirect"], params["odirect_alignment"] = parse_odirect_config(args.odirect_config)
+
+    # n_future counts only the steps after the first
+    if hasattr(args, "multistep_count"):
+        params["n_future"] = args.multistep_count - 1
+
+    return params
