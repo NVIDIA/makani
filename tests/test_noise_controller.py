@@ -311,6 +311,56 @@ class TestGeneratorState(unittest.TestCase):
             noise.set_rng_state({"other": _white().get_rng_state()})
 
 
+@contextlib.contextmanager
+def _layout(**sizes):
+    """Mocks the comm of the checkpoint helpers with a decomposition, every rank 0."""
+    with (
+        mock.patch("makani.utils.checkpoint_helpers.comm.get_comm_names", return_value=list(sizes)),
+        mock.patch("makani.utils.checkpoint_helpers.comm.get_size", side_effect=lambda name: sizes.get(name, 1)),
+        mock.patch("makani.utils.checkpoint_helpers.comm.get_rank", return_value=0),
+    ):
+        yield
+
+
+class TestGeneratorCheckpoint(unittest.TestCase):
+    """The generators as the checkpoint stores them, restored only into the decomposition they were taken in."""
+
+    _SPATIAL = {"model": 2, "spatial": 2, "h": 2, "w": 1, "matmul": 1, "data": 1, "ensemble": 1, "batch": 1}
+    _MATMUL = {"model": 2, "spatial": 1, "h": 1, "w": 1, "matmul": 2, "data": 1, "ensemble": 1, "batch": 1}
+
+    def test_same_decomposition_restores(self):
+        from makani.utils.checkpoint_helpers import gather_noise_rng_state, scatter_noise_rng_state
+
+        noise = NoiseController({"white": _white()})
+        with _layout(**self._SPATIAL):
+            stored = gather_noise_rng_state(noise)
+            restored = scatter_noise_rng_state(stored)
+        self.assertTrue(torch.equal(restored["white"][0], noise.get_rng_state()["white"][0]))
+
+    def test_same_totals_other_split_refused(self):
+        # two spatial ranks draw different streams, two matmul ranks the same: the totals alone do not tell them apart
+        from makani.utils.checkpoint_helpers import gather_noise_rng_state, scatter_noise_rng_state
+
+        noise = NoiseController({"white": _white()})
+        with _layout(**self._SPATIAL):
+            stored = gather_noise_rng_state(noise)
+        with _layout(**self._MATMUL), self.assertRaisesRegex(ValueError, "decomposition"):
+            scatter_noise_rng_state(stored)
+
+    def test_driver_keeps_fresh_streams_on_another_decomposition(self):
+        from makani.utils.checkpoint_helpers import gather_noise_rng_state
+        from makani.utils.driver import Driver
+
+        noise = NoiseController({"white": _white()})
+        with _layout(**self._SPATIAL):
+            stored = gather_noise_rng_state(noise)
+        noise.advance(replace_state=True)
+        current = noise.get_rng_state()["white"][0]
+        with _layout(**self._MATMUL):
+            Driver._restore_noise_rng_state({"noise_rng_state": stored}, noise)
+        self.assertTrue(torch.equal(noise.get_rng_state()["white"][0], current))
+
+
 class _LatentNoiseNet(nn.Module):
     """A network that draws noise of its own: a learnable field added to its hidden features."""
 

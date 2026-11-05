@@ -212,25 +212,26 @@ def gather_noise_rng_state(noise: Any) -> Optional[Dict[str, Any]]:
     else:
         entries = [entry]
 
-    return {
-        "model_size": comm.get_size("model"),
-        "data_size": comm.get_size("data"),
-        "states": dict(entries),
-    }
+    return {"layout": _comm_layout(), "states": dict(entries)}
+
+
+def _comm_layout() -> Dict[str, int]:
+    # the size of every comm group: the totals alone do not tell how the ranks split, e.g. two spatial ranks, which
+    # draw different noise, from two matmul ranks, which draw the same, or the ensemble from the batch ranks
+    return {name: comm.get_size(name) for name in comm.get_comm_names()}
 
 
 def scatter_noise_rng_state(stored: Dict[str, Any]) -> Dict[str, Any]:
     """Pick this rank's generator states out of what ``gather_noise_rng_state`` stored.
 
-    Raises a ValueError if the checkpoint was written with another decomposition over the
-    model or the data-parallel ranks, whose streams do not map onto the ranks of this run.
+    Raises a ValueError if the checkpoint was written with another decomposition, in any comm
+    group: the streams of its ranks do not map onto the ranks of this run.
     """
-    sizes = (comm.get_size("model"), comm.get_size("data"))
-    stored_sizes = (stored["model_size"], stored["data_size"])
-    if stored_sizes != sizes:
+    layout = _comm_layout()
+    if stored["layout"] != layout:
         raise ValueError(
-            f"the checkpoint stores the noise generators of {stored_sizes[0]} model and {stored_sizes[1]} "
-            f"data-parallel ranks, the current run has {sizes[0]} and {sizes[1]}"
+            f"the checkpoint stores the noise generators of the decomposition {stored['layout']}, "
+            f"the current run has {layout}"
         )
     return stored["states"][(comm.get_rank("model"), comm.get_rank("data"))]
 
