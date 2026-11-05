@@ -340,9 +340,21 @@ class TestTrainerCheckpointing(_TrainerTestCase):
 
     _SEED = 4321
 
-    @parameterized.expand([(Trainer,), (EnsembleTrainer,)], skip_on_empty=True)
-    def test_resume_continues_training(self, trainer_handle, verbose=False):
+    @parameterized.expand(
+        [
+            (Trainer, None),
+            (EnsembleTrainer, None),
+            # the noise generators are in the checkpoint too: without them, the resumed run would draw the
+            # noise of the first epoch again
+            (Trainer, {"type": "white", "mode": "concatenate", "n_channels": 1}),
+            (EnsembleTrainer, {"type": "diffusion", "mode": "concatenate", "n_channels": 1, "centered": True}),
+        ],
+        skip_on_empty=True,
+    )
+    def test_resume_continues_training(self, trainer_handle, input_noise, verbose=False):
         device = torch.device("cpu")
+        if input_noise is not None:
+            self.params.input_noise = input_noise
 
         # the first epoch, which writes the checkpoint to resume from. The checkpoint path has no
         # version in it, so the second epoch overwrites it, and a copy is kept aside

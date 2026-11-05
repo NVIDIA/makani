@@ -40,6 +40,7 @@ from parameterized import parameterized
 from makani.utils import comm
 from makani.models.noise import DiffusionNoiseS2, IsotropicGaussianRandomFieldS2, noise_base_seed
 from makani.models.noise_controller import NoiseController
+from makani.utils.checkpoint_helpers import gather_noise_rng_state, scatter_noise_rng_state
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 from .distributed_helpers import _gather_helper, _init_grid, _split_helper, reduce_success, teardown_comms
@@ -322,6 +323,30 @@ class TestDistributedNoise(unittest.TestCase):
         samples = [torch.empty_like(sample) for _ in range(comm.get_size("matmul"))]
         dist.all_gather(samples, sample.contiguous(), group=comm.get_group("matmul"))
         self.assertTrue(reduce_success(all(torch.equal(s, samples[0]) for s in samples), self.device))
+
+    def test_set_rng_keeps_the_rank_layout(self):
+        """Re-seeded with the default seed, every rank's noise is seeded as it was built, so the ranks keep their streams."""
+        for centered in (False, True):
+            seed, reflect = noise_base_seed(centered=centered)
+            process = IsotropicGaussianRandomFieldS2(
+                _IMG_SHAPE, _BATCH, _CHANNELS, seed=seed, reflect=reflect, centered=centered
+            )
+            NoiseController({"input_noise": process}).set_rng(seed=333)
+            with self.subTest(centered=centered):
+                self.assertTrue(reduce_success(process.rng_cpu.initial_seed() == seed, self.device))
+
+    def test_generator_states_round_trip_over_the_ranks(self):
+        """The generators of all ranks, gathered as for the checkpoint, give every rank its own back."""
+        seed, _ = noise_base_seed()
+        controller = NoiseController({"input_noise": DiffusionNoiseS2(_IMG_SHAPE, _BATCH, _CHANNELS, seed=seed)})
+        controller.advance(replace_state=True)
+        stored = gather_noise_rng_state(controller)
+        mine = controller.get_rng_state()["input_noise"][0]
+        restored = scatter_noise_rng_state(stored)["input_noise"][0]
+        self.assertTrue(reduce_success(torch.equal(restored, mine), self.device))
+        # and the ranks hold different streams
+        distinct = len({bytes(state["input_noise"][0].numpy()) for state in stored["states"].values()})
+        self.assertTrue(reduce_success(distinct == comm.get_size("spatial") * comm.get_size("data"), self.device))
 
     def test_centered_pairs_draw_opposite_noise(self):
         """With centered noise, the two ranks of an ensemble pair draw the same field with opposite signs."""

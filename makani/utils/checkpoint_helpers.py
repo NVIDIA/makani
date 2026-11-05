@@ -186,6 +186,55 @@ def scatter_dataloader_state_dict(state_dicts: List[Dict[str, Any]]) -> Dict[str
     return state_dicts[comm.get_rank("data")]
 
 
+def gather_noise_rng_state(noise: Any) -> Optional[Dict[str, Any]]:
+    """Collect the generator states of the noise of every rank, for the checkpoint.
+
+    Every spatial shard and data-parallel rank draws its own noise stream, see
+    :func:`~makani.models.noise.noise_base_seed`, and the checkpoint files are written by
+    one rank per model rank, or a single one, so the states of all ranks are gathered and
+    stored under their model and data-parallel ranks; :func:`scatter_noise_rng_state` picks a
+    rank's entry on restore. Only the generators are kept, see
+    :meth:`~makani.models.noise_controller.NoiseController.get_rng_state`, which are small.
+
+    ..note::
+        This is a collective over all ranks, so it has to be called by all of them, not just
+        by those which write checkpoint files.
+
+    Returns None for a model without noise.
+    """
+    if (noise is None) or not noise.is_stochastic:
+        return None
+
+    entry = ((comm.get_rank("model"), comm.get_rank("data")), noise.get_rng_state())
+    if dist.is_initialized() and (dist.get_world_size() > 1):
+        entries = [None for _ in range(dist.get_world_size())]
+        dist.all_gather_object(entries, entry)
+    else:
+        entries = [entry]
+
+    return {
+        "model_size": comm.get_size("model"),
+        "data_size": comm.get_size("data"),
+        "states": dict(entries),
+    }
+
+
+def scatter_noise_rng_state(stored: Dict[str, Any]) -> Dict[str, Any]:
+    """Pick this rank's generator states out of what ``gather_noise_rng_state`` stored.
+
+    Raises a ValueError if the checkpoint was written with another decomposition over the
+    model or the data-parallel ranks, whose streams do not map onto the ranks of this run.
+    """
+    sizes = (comm.get_size("model"), comm.get_size("data"))
+    stored_sizes = (stored["model_size"], stored["data_size"])
+    if stored_sizes != sizes:
+        raise ValueError(
+            f"the checkpoint stores the noise generators of {stored_sizes[0]} model and {stored_sizes[1]} "
+            f"data-parallel ranks, the current run has {sizes[0]} and {sizes[1]}"
+        )
+    return stored["states"][(comm.get_rank("model"), comm.get_rank("data"))]
+
+
 def gather_model_state_dict(model: nn.Module, grads: Optional[bool] = False) -> OrderedDict:
     # precondition: every rank in the model group must issue the SAME ordered
     # sequence of gather_uneven calls, otherwise the all_gather inside
