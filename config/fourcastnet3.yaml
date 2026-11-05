@@ -52,7 +52,9 @@ base_config: &BASE_CONFIG
 
     # we make the "epochs" shorter so we have more reporting
     n_train_samples_per_epoch: 53760
-    n_eval_samples: 512
+    # size of the validation pool in dataset samples; with hourly data and dt=6 one validation rollout spans
+    # dt * (valid_autoreg_steps + 1) samples, so this has to exceed that
+    n_eval_samples: 2048
 
     # scheduler parameters
     scheduler: "ReduceLROnPlateau" # "StepLR" or "CosineAnnealingLR"
@@ -230,7 +232,6 @@ fcn3_sc2_edim45_layers10_pretrain1:
 
     # artificial epochs with reduced size
     n_train_samples_per_epoch: 26880
-    n_eval_samples: 256
 
 ###########################################################################################################################
 # benchmark configurations
@@ -314,7 +315,6 @@ fcn3_sc2_edim45_layers10_pretrain1_subsample2:
 
     # artificial epochs with reduced size
     n_train_samples_per_epoch: 26880
-    n_eval_samples: 256
 
 # second pretraining stage which switches to fair CRPS to get better calibration
 # also uses 4 step rollouts to get good autoregressive rollouts. This requires a
@@ -331,7 +331,6 @@ fcn3_sc2_edim45_layers10_pretrain2:
 
     # artificial epochs with reduced size
     n_train_samples_per_epoch: 6720
-    n_eval_samples: 128
 
     # restore from pretrained checkpoint
     pretrained: !!bool True
@@ -372,7 +371,6 @@ fcn3_sc2_edim45_layers10_finetune: &FCN3_SC2_FINETUNE
     lr: 4.0E-6
 
     n_train_samples_per_epoch: 2920
-    n_eval_samples: 32
 
     # constrain number of samples to the last 4 years
     n_train_samples: 5840
