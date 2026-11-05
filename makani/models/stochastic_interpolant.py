@@ -104,7 +104,8 @@ class PathKeys(nn.Module):
     batch_size : int
         The initial batch, resized by :meth:`update`.
     seed : int, optional
-        The seed, by default ``333``; see :meth:`set_rng`.
+        The base seed, by default ``333``, laid out over the ranks by
+        :meth:`rank_seed`.
 
     Attributes
     ----------
@@ -116,21 +117,29 @@ class PathKeys(nn.Module):
         super().__init__()
         # a plain attribute, not a buffer: the keys stay on the CPU when the model moves
         self.state = torch.zeros(batch_size, dtype=torch.int64)
-        self.set_rng(seed)
+        self.set_rng(self.rank_seed(seed))
 
     def is_stateful(self) -> bool:
         r"""``False``: each step draws keys independent of the previous ones."""
         return False
 
-    def set_rng(self, seed: int = 333):
+    def rank_seed(self, seed: int = 333) -> int:
         r"""
-        Re-seed the generator of the keys.
+        The seed of this rank for the base seed ``seed``.
 
-        The data-parallel rank is mixed in, so that the ranks, which hold
-        different samples, draw different keys from the same seed.
+        The data-parallel ranks hold different samples, so they draw different
+        keys; the model ranks of a sample draw the same, see the class.
+        :meth:`~makani.models.noise_controller.NoiseController.set_rng`
+        re-seeds the keys with it, as it does the other noise processes, see
+        :meth:`~makani.models.noise.BaseNoiseS2.rank_seed`. Serially, it is
+        ``seed`` itself.
         """
+        return seed + _DATA_SEED_STRIDE * comm.get_rank("data")
+
+    def set_rng(self, seed: int = 333):
+        r"""Re-seed the generator of the keys with the seed of this rank, see :meth:`rank_seed`."""
         self.rng = torch.Generator(device=torch.device("cpu"))
-        self.rng.manual_seed(seed + _DATA_SEED_STRIDE * comm.get_rank("data"))
+        self.rng.manual_seed(seed)
 
     def reset(self, batch_size: Optional[int] = None):
         r"""Zero the keys, resized to ``batch_size`` if given."""

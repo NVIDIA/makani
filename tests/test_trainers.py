@@ -345,6 +345,8 @@ class TestTrainerCheckpointing(_TrainerTestCase):
             # noise of the first epoch again
             (Trainer, {"type": "white", "mode": "concatenate", "n_channels": 1}),
             (EnsembleTrainer, {"type": "diffusion", "mode": "concatenate", "n_channels": 1, "centered": True}),
+            # the interpolant draws its path noise and interpolation times from keys the noise controller drives
+            (StochasticTrainer, None),
         ],
         skip_on_empty=True,
     )

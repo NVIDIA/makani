@@ -29,6 +29,7 @@ import torch
 import torch.nn as nn
 from parameterized import parameterized
 
+from makani.models.noise_controller import NoiseController
 from makani.models.stochastic_interpolant import (
     PATH_NOISE,
     PathKeys,
@@ -417,13 +418,26 @@ class TestPathNoise(unittest.TestCase):
         self.assertFalse(torch.equal(a.path_noise(0), b.path_noise(0)))
 
     def test_data_parallel_ranks_draw_other_keys(self):
-        keys = []
-        for rank in (0, 1):
-            with mock.patch("makani.models.stochastic_interpolant.comm.get_rank", return_value=rank):
-                process = PathKeys(_B, seed=7)
-            process.update()
-            keys.append(process.state)
-        self.assertFalse(torch.equal(keys[0], keys[1]))
+        # when built, and when re-seeded through the controller
+        for reseed in (False, True):
+            keys = []
+            for rank in (0, 1):
+                with mock.patch("makani.models.stochastic_interpolant.comm.get_rank", return_value=rank):
+                    process = PathKeys(_B, seed=7)
+                    if reseed:
+                        NoiseController({PATH_NOISE: process}).set_rng(seed=7)
+                process.update()
+                keys.append(process.state)
+            with self.subTest(reseed=reseed):
+                self.assertFalse(torch.equal(keys[0], keys[1]))
+
+    def test_reseeding_reproduces_the_construction(self):
+        process = PathKeys(_B, seed=7)
+        process.update()
+        built = process.state
+        NoiseController({PATH_NOISE: process}).set_rng(seed=7)
+        process.update()
+        self.assertTrue(torch.equal(process.state, built))
 
     def test_keys_refuse_another_layout(self):
         with self.assertRaises(ValueError):
