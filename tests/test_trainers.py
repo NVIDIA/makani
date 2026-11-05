@@ -615,6 +615,13 @@ class TestTrainerRollouts(_TrainerTestCase):
         self.assertGreater(n_batches, 0)
         self.assertEqual(len(updates), n_batches * n_steps)
 
+    def test_stochastic_refuses_multistep_training(self):
+        # a later step from the true state would only add a single-step pair, see drift_pairs
+        params = self.params
+        params.n_future = 1
+        with self.assertRaisesRegex(ValueError, "single steps"):
+            StochasticTrainer(params, 0, device=torch.device("cpu"))
+
     def test_stochastic_validation_rolls_out(self):
         # the interpolant trains on single steps, but validates over several, with the zenith angle
         params = self.params

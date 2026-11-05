@@ -69,6 +69,15 @@ class StochasticTrainer(Driver):
         if self.log_to_screen:
             self.logger.warning("using StochasticTrainer. This trainer is largely untested. Proceed with caution.")
 
+        # the interpolant trains its drift on single steps, see StochasticInterpolantWrapper.drift_pairs; refused up
+        # front, before the data is loaded
+        if self.params.get("n_future", 0) != 0:
+            raise ValueError(
+                f"The stochastic interpolant is trained on single steps, got n_future = {self.params.n_future}: "
+                "a later step, started from the true state again, adds a single-step pair, not a multistep "
+                "forecast. Set n_future to 0; validation rolls out over valid_autoreg_steps as usual."
+            )
+
         # init wandb
         if self.log_to_wandb:
             self._init_wandb(self.params, job_type="stochastic")

@@ -262,7 +262,8 @@ class StochasticInterpolantWrapper(StepWrapper):
 
     In training, ``forward(rollout, drift=True)`` returns the drift of the
     network and that of the path at random interpolation times, for the loss to
-    compare.
+    compare, for one step: see :meth:`drift_pairs` for why multistep training
+    is refused.
 
     Parameters
     ----------
@@ -529,31 +530,40 @@ class StochasticInterpolantWrapper(StepWrapper):
 
     def drift_pairs(self, rollout: Rollout):
         r"""
-        The drift of the network and that of the path, over the steps of a rollout.
+        The drift of the network and that of the path, for one step.
 
-        Every step predicts from the true state: the window moves on by the
-        target, not by a forecast. At each step, ``n_samples`` interpolation
-        times per sample (twice that if antithetic) are drawn, and one field of
-        the path noise per sample.
+        The path runs from the latest state of the window to the target. For
+        each sample, ``n_samples`` interpolation times (twice that if
+        antithetic) are drawn, and one field of the path noise.
+
+        Only single steps are trained: the drift regression of a later step,
+        started from the true state again, would be one more single-step pair,
+        not a multistep forecast, and the multistep weights of the loss would
+        have no lead time to weigh. Training from the model's own forecasts, the
+        push-forward analogue, is not implemented.
 
         Parameters
         ----------
         rollout : Rollout
-            The rollout, not started yet, of a batch with targets and without an
-            ensemble.
+            A rollout of one step, not started yet, of a batch with targets
+            and without an ensemble.
 
         Returns
         -------
         tuple of torch.Tensor
             The drift of the network and the drift of the path, both
-            ``(n_steps * B * S, C, H, W)``.
+            ``(B * S, C, H, W)``, batch-major.
 
         Raises
         ------
         ValueError
-            If the rollout has an ensemble or no targets, or does not drive the
-            noise of the model.
+            If the rollout has more than one step, an ensemble or no targets,
+            or does not drive the noise of the model.
         """
+        if rollout.n_steps != 1:
+            raise ValueError(
+                f"The drift is trained on single steps, got a rollout of {rollout.n_steps}: train with n_future = 0"
+            )
         if rollout.ensemble_size != 1:
             raise ValueError("The drift is trained without an ensemble")
         if (rollout.noise is not None) and (rollout.noise is not self.noise):
@@ -565,30 +575,27 @@ class StochasticInterpolantWrapper(StepWrapper):
                 "The model is stochastic, but the rollout has no noise: make it with Rollout(..., noise=model.noise)"
             )
 
+        step = next(rollout)
+        if step.target is None:
+            raise ValueError("The drift is trained on a rollout with targets")
+        self._check_step_noise(step)
+
         pp = self.preprocessor
-        predicted, expected = [], []
-        for step in rollout:
-            if step.target is None:
-                raise ValueError("The drift is trained on a rollout with targets")
-            self._check_step_noise(step)
+        inpans, stats = self._prepare_window(step.input, step.input_dynamic_features, self._input_noise())
+        with torch.no_grad():
+            x0 = self._current_state(step.input, stats)
+            x1 = pp.history_normalize(step.target, stats, target=True).squeeze(1)
+            s = self.interpolation_times(x0.device, x0.dtype)
+            z = self.path_noise(0)
+            # (B, S, C, H, W)
+            point, drift = self.path(x0.unsqueeze(1), x1.unsqueeze(1), z.unsqueeze(1), s.reshape(*s.shape, 1, 1, 1))
 
-            inpans, stats = self._prepare_window(step.input, step.input_dynamic_features, self._input_noise())
-            with torch.no_grad():
-                x0 = self._current_state(step.input, stats)
-                x1 = pp.history_normalize(step.target, stats, target=True).squeeze(1)
-                s = self.interpolation_times(x0.device, x0.dtype)
-                z = self.path_noise(0)
-                # (B, S, C, H, W)
-                point, drift = self.path(x0.unsqueeze(1), x1.unsqueeze(1), z.unsqueeze(1), s.reshape(*s.shape, 1, 1, 1))
+        n = s.shape[1]
+        predicted = self._drift_network(inpans.repeat_interleave(n, dim=0), point.flatten(0, 1), s.flatten(0, 1))
+        # the rollout is finished with its only step
+        rollout.advance(step.target)
 
-            n = s.shape[1]
-            predicted.append(
-                self._drift_network(inpans.repeat_interleave(n, dim=0), point.flatten(0, 1), s.flatten(0, 1))
-            )
-            expected.append(drift.flatten(0, 1))
-            rollout.advance(step.target)
-
-        return torch.cat(predicted, dim=0), torch.cat(expected, dim=0)
+        return predicted, drift.flatten(0, 1)
 
     def forward(self, rollout: Rollout, drift: bool = False):
         r"""

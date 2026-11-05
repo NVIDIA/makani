@@ -304,46 +304,44 @@ class TestDriftPairs(unittest.TestCase):
 
     @parameterized.expand([("plain", False), ("antithetic", True)])
     def test_pairs_match_the_path(self, _, antithetic):
-        """Over two steps, each predicted from the true state, the drifts of the network and of the path."""
+        """The drifts of the network and of the path, from the latest state of the window to the target."""
         n_samples = 2
-        wrapper = _wrapper(_params(block={"n_samples": n_samples, "antithetic": antithetic})).train()
+        wrapper = _wrapper(_params(n_future=0, block={"n_samples": n_samples, "antithetic": antithetic})).train()
         set_seed(3)
-        batch = _batch(n_history=1, n_future=1, grid=_GRID)
+        batch = _batch(n_history=1, n_future=0, grid=_GRID)
 
         draws = _Draws(wrapper)
         with draws.record():
             predicted, expected = wrapper(Rollout(batch, noise=wrapper.noise), drift=True)
 
         n = n_samples * (2 if antithetic else 1)
-        self.assertEqual(tuple(predicted.shape), (2 * _B * n, _C, *_GRID))
+        self.assertEqual(tuple(predicted.shape), (_B * n, _C, *_GRID))
         self.assertEqual(predicted.shape, expected.shape)
+        (s,), (z,) = draws.times, draws.noise
         if antithetic:
-            for s in draws.times:
-                self.assertTrue(compare_tensors("antithetic", s[:, n_samples:], 1.0 - s[:, :n_samples], 1e-6, 1e-6))
+            self.assertTrue(compare_tensors("antithetic", s[:, n_samples:], 1.0 - s[:, :n_samples], 1e-6, 1e-6))
 
-        inp = batch[INPUT]
-        zenith = batch[INPUT_DYNAMIC_FEATURES][ZENITH]
-        want_pred, want_drift = [], []
         with torch.no_grad():
-            for k in range(2):
-                inpans, stats, x0 = _window(wrapper, inp, zenith)
-                target = batch[TARGET][:, k : k + 1]
-                x1 = wrapper.preprocessor.history_normalize(target, stats, target=True).squeeze(1)
-                s, z = draws.times[k], draws.noise[k]
-                for j in range(n):
-                    sj = s[:, j].reshape(-1, 1, 1, 1)
-                    point, drift = wrapper.path(x0, x1, z, sj)
-                    want_drift.append(drift)
-                    want_pred.append(_drift(wrapper, inpans, point, s[:, j]))
-                # batch-major, as the pairs are flattened
-                want_drift[-n:] = [torch.stack(want_drift[-n:], dim=1).flatten(0, 1)]
-                want_pred[-n:] = [torch.stack(want_pred[-n:], dim=1).flatten(0, 1)]
-                # the window moves on by the target
-                inp = torch.cat([inp[:, 1:], target], dim=1)
-                zenith = torch.cat([zenith[:, 1:], batch[TARGET_DYNAMIC_FEATURES][ZENITH][:, k : k + 1]], dim=1)
+            inpans, stats, x0 = _window(wrapper, batch[INPUT], batch[INPUT_DYNAMIC_FEATURES][ZENITH])
+            x1 = wrapper.preprocessor.history_normalize(batch[TARGET], stats, target=True).squeeze(1)
+            want_pred, want_drift = [], []
+            for j in range(n):
+                point, drift = wrapper.path(x0, x1, z, s[:, j].reshape(-1, 1, 1, 1))
+                want_drift.append(drift)
+                want_pred.append(_drift(wrapper, inpans, point, s[:, j]))
+            # batch-major, as the pairs are flattened
+            want_drift = torch.stack(want_drift, dim=1).flatten(0, 1)
+            want_pred = torch.stack(want_pred, dim=1).flatten(0, 1)
 
-        self.assertTrue(compare_tensors("path drift", expected, torch.cat(want_drift), 1e-5, 1e-5))
-        self.assertTrue(compare_tensors("network drift", predicted.detach(), torch.cat(want_pred), 1e-5, 1e-5))
+        self.assertTrue(compare_tensors("path drift", expected, want_drift, 1e-5, 1e-5))
+        self.assertTrue(compare_tensors("network drift", predicted.detach(), want_pred, 1e-5, 1e-5))
+
+    def test_multistep_refused(self):
+        """A later step from the true state is one more single-step pair, not a multistep forecast."""
+        wrapper = _wrapper(_params()).train()
+        batch = _batch(n_history=1, n_future=1, grid=_GRID)
+        with self.assertRaisesRegex(ValueError, "single steps"):
+            wrapper(Rollout(batch, noise=wrapper.noise), drift=True)
 
     def test_gradients_reach_the_network(self):
         wrapper = _wrapper(_params(block={"n_samples": 2})).train()

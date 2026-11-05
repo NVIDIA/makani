@@ -137,9 +137,9 @@ class TestDistributedInterpolant(unittest.TestCase):
             reference = StochasticInterpolantWrapper(params, lambda: _TinyNet(n_in, _C)).to(self.device)
         return wrapper, reference
 
-    def _batches(self):
+    def _batches(self, n_future=1):
         set_seed(1)
-        batch = _batch(n_history=1, n_future=1, grid=_GRID)
+        batch = _batch(n_history=1, n_future=n_future, grid=_GRID)
         batch = {
             key: (
                 {n: f.to(self.device) for n, f in value.items()} if isinstance(value, dict) else value.to(self.device)
@@ -175,23 +175,21 @@ class TestDistributedInterpolant(unittest.TestCase):
         wrapper, reference = self._pair()
         wrapper.train()
         reference.train()
-        local_batch, batch = self._batches()
-        fields = self._fields(2)
-        generator = torch.Generator().manual_seed(6)
-        times = [torch.rand(_B, 2, generator=generator).to(self.device) for _ in range(2)]
+        local_batch, batch = self._batches(n_future=0)
+        (field,) = self._fields(1)
+        times = torch.rand(_B, 2, generator=torch.Generator().manual_seed(6)).to(self.device)
 
-        def replay_times(t):
-            t = list(t)
-            return lambda device=None, dtype=torch.float32: torch.cat([t[0], 1.0 - t.pop(0)], dim=1)
+        def draw_times(device=None, dtype=torch.float32):
+            return torch.cat([times, 1.0 - times], dim=1)
 
         with (
-            mock.patch.object(wrapper, "path_noise", _Replay(self._shard(f) for f in fields)),
-            mock.patch.object(wrapper, "interpolation_times", replay_times(times)),
+            mock.patch.object(wrapper, "path_noise", _Replay([self._shard(field)])),
+            mock.patch.object(wrapper, "interpolation_times", draw_times),
         ):
             predicted, drift = wrapper(Rollout(local_batch, noise=wrapper.noise), drift=True)
         with (
-            mock.patch.object(reference, "path_noise", _Replay(fields)),
-            mock.patch.object(reference, "interpolation_times", replay_times(times)),
+            mock.patch.object(reference, "path_noise", _Replay([field])),
+            mock.patch.object(reference, "interpolation_times", draw_times),
         ):
             predicted_ref, drift_ref = reference(Rollout(batch, noise=reference.noise), drift=True)
 
