@@ -182,17 +182,14 @@ class Driver(metaclass=abc.ABCMeta):
         if not hasattr(params, "save_checkpoint"):
             params["save_checkpoint"] = "legacy"
 
-        if not hasattr(params, "load_optimizer"):
-            params["load_optimizer"] = True
+        # what a warm start from a pretrained checkpoint takes over besides the weights: nothing by default, each
+        # state on request. A resumed run restores all of them regardless, see restore_run_state
+        for flag in self._WARM_START_FLAGS:
+            if not hasattr(params, flag):
+                params[flag] = False
 
-        if not hasattr(params, "load_scheduler"):
-            params["load_scheduler"] = True
-
-        if not hasattr(params, "load_counters"):
-            params["load_counters"] = True
-
-        # allows resuming a run but restarting the data pipeline at the beginning of the epoch,
-        # in the same way load_optimizer / load_scheduler / load_counters can be turned off
+        # allows resuming a run but restarting the data pipeline at the beginning of the epoch; unlike the flags
+        # above, it applies to a resume, a warm start never restores the data pipeline
         if not hasattr(params, "load_dataloader_state"):
             params["load_dataloader_state"] = True
 
