@@ -21,6 +21,7 @@ ones, so that the sampler and the drift pairs can be checked against the same co
 """
 
 import os
+import shutil
 import sys
 import unittest
 from unittest import mock
@@ -450,6 +451,63 @@ def _snapshot_of(wrapper, keys):
     state = snapshot.states[PATH_NOISE]
     snapshot.states[PATH_NOISE] = type(state)(tensor=keys, rng_cpu=state.rng_cpu, rng_gpu=state.rng_gpu)
     return snapshot
+
+
+class _ReplayDraws:
+    """Hands out recorded draws in order, so that an eager and a compiled run see the same ones."""
+
+    def __init__(self, noise, times):
+        self.noise, self.times = list(noise), list(times)
+
+    def patch(self, wrapper):
+        noise, times = iter(self.noise), iter(self.times)
+        return mock.patch.multiple(
+            wrapper,
+            path_noise=lambda substep: next(noise),
+            interpolation_times=lambda device=None, dtype=torch.float32: next(times),
+        )
+
+
+@unittest.skipUnless(shutil.which("c++") or shutil.which("g++"), "inductor needs a C++ compiler on the CPU")
+class TestCompiledStep(unittest.TestCase):
+    """compile_step compiles the drift network inside the wrapper; the module and its methods stay as they are."""
+
+    def setUp(self):
+        disable_tf32()
+
+    def tearDown(self):
+        torch._dynamo.reset()
+
+    def test_compiled_matches_eager(self):
+        params = _params(n_future=0, block={"n_steps": 3, "n_samples": 2})
+        batch = _batch(n_history=1, n_future=0, grid=_GRID)
+        set_seed(4)
+        draws = _ReplayDraws([torch.randn(_B, _C, *_GRID) for _ in range(4)], [torch.rand(_B, 2)])
+
+        results = {}
+        for compiled in (False, True):
+            wrapper = _wrapper(params)
+            if compiled:
+                wrapper.compile_step()
+            with draws.patch(wrapper):
+                wrapper.eval()
+                with torch.no_grad():
+                    forecast = wrapper(Rollout(batch, noise=wrapper.noise))
+                wrapper.train()
+                predicted, expected = wrapper(Rollout(batch, noise=wrapper.noise), drift=True)
+            torch.square(predicted - expected).mean().backward()
+            grads = {name: p.grad.clone() for name, p in wrapper.model.named_parameters()}
+            results[compiled] = (forecast, predicted.detach(), grads)
+            # the module is not wrapped: its methods and its state dict are those of the eager one
+            self.assertIsInstance(wrapper, StochasticInterpolantWrapper)
+            self.assertTrue(all(not key.startswith("_orig_mod") for key in wrapper.state_dict()))
+
+        (forecast_ref, predicted_ref, grads_ref), (forecast, predicted, grads) = results[False], results[True]
+        self.assertTrue(compare_tensors("forecast", forecast, forecast_ref, 1e-5, 1e-5))
+        self.assertTrue(compare_tensors("drift", predicted, predicted_ref, 1e-5, 1e-5))
+        for name in grads_ref:
+            with self.subTest(gradient=name):
+                self.assertTrue(compare_tensors(name, grads[name], grads_ref[name], 1e-5, 1e-5))
 
 
 class _RegisteredNet(nn.Module):

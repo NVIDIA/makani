@@ -31,6 +31,7 @@ with :math:`\alpha(s) = 1 - s`, :math:`\beta(s) = s^2`, :math:`\gamma(s) = \sqrt
 [1] Chen et al., Probabilistic forecasting with stochastic interpolants and Föllmer processes, 2024.
 """
 
+import os
 from typing import Any, Dict, Optional
 
 import torch
@@ -523,6 +524,25 @@ class StochasticInterpolantWrapper(StepWrapper):
         x0 = self._current_state(inp, stats)
         predn = pp.correct_bias(self._sample(inpans, x0, use_checkpoint)).unsqueeze(1)
         return pp.history_denormalize(predn, target=True, stats=stats)
+
+    def compile_step(self, **compile_kwargs):
+        r"""
+        ``torch.compile`` the drift network, the call the SDE sampler and the drift training share.
+
+        The Euler-Maruyama loop and the draws of the path noise and the
+        interpolation times stay in Python, as the rollout around a
+        :class:`~makani.models.stepper.StepWrapper` step does. The module itself
+        is not wrapped, so its methods, ``steps``, ``noise`` and
+        ``drift_pairs``, stay reachable, and the state dict keeps its keys.
+
+        Parameters
+        ----------
+        **compile_kwargs
+            Passed on to ``torch.compile``.
+        """
+        # see StepWrapper.compile_step for the recompile limit
+        torch._dynamo.config.recompile_limit = int(os.getenv("MAKANI_INDUCTOR_COMPILE_LIMIT", "32"))
+        self._drift_network = torch.compile(self._drift_network, **compile_kwargs)
 
     def check_encodable(self):
         r"""

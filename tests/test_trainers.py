@@ -21,6 +21,7 @@ import tempfile
 from typing import Optional
 
 import unittest
+from unittest import mock
 from parameterized import parameterized
 
 from makani.utils.functions import flatten_history
@@ -616,6 +617,22 @@ class TestTrainerRollouts(_TrainerTestCase):
 
         self.assertGreater(n_batches, 0)
         self.assertEqual(len(updates), n_batches * n_steps)
+
+    def test_stochastic_compile_keeps_the_model(self):
+        # inductor compiles the drift network inside the wrapper, and the trainer keeps the model itself, so that
+        # validation reaches the steps of the rollout; compiling the model whole hid them behind the compiled module
+        from makani.models.stochastic_interpolant import StochasticInterpolantWrapper
+
+        params = self.params
+        params.jit_mode = "inductor"
+        params.valid_autoreg_steps = self._VALID_STEPS
+        with mock.patch.object(StochasticInterpolantWrapper, "compile_step") as compile_step:
+            trainer = StochasticTrainer(params, 0, device=torch.device("cpu"))
+        compile_step.assert_called_once()
+        self.assertIsInstance(trainer.model_eval, StochasticInterpolantWrapper)
+        trainer.metrics = _RecordingMetrics()
+        trainer.validate_one_epoch(trainer.epoch)
+        self.assertGreater(len(trainer.metrics.updates), 0)
 
     def test_stochastic_refuses_multistep_training(self):
         # a later step from the true state would only add a single-step pair, see drift_pairs

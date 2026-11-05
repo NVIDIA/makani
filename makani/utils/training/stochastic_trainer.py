@@ -240,20 +240,16 @@ class StochasticTrainer(Driver):
 
     # jit stuff
     def _compile_model(self):
-
+        # the drift network is compiled inside the wrapper, see StochasticInterpolantWrapper.compile_step; the model
+        # itself is not wrapped, so that the trainer reaches steps, noise and drift_pairs through DDP alone
         if self.params.jit_mode == "inductor":
-            self.model = torch.compile(self.model)
-            # NOTE: do not torch.compile the whole LossHandler. It compiles its individual
-            # loss terms internally (skipping the spherical-harmonic/spectral losses, whose
-            # complex-valued SHT cannot be codegen'd by inductor's Triton backend —
-            # KeyError: 'complex64'). Compiling the handler on top would trace back into those
-            # spectral losses and hit that error; the handler orchestration is cheap anyway.
-            self.model_train = self.model
-            self.model_eval = self.model
+            wrapper = (
+                self.model.module if isinstance(self.model, torch.nn.parallel.DistributedDataParallel) else self.model
+            )
+            wrapper.compile_step()
 
-        else:
-            self.model_train = self.model
-            self.model_eval = self.model
+        self.model_train = self.model
+        self.model_eval = self.model
 
         return
 
