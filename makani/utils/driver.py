@@ -44,7 +44,9 @@ from makani.utils import comm
 from makani.utils.benchmark import StepTimer
 from makani.utils.dataloaders.data_helpers import get_data_normalization
 from makani.utils.training.training_helpers import get_parameter_groups
+from makani.utils.profiling import Timer
 from makani.utils.checkpoint_helpers import (
+    get_latest_checkpoint_version,
     load_checkpoint,
     gather_model_state_dict,
     scatter_model_state_dict,
@@ -180,17 +182,14 @@ class Driver(metaclass=abc.ABCMeta):
         if not hasattr(params, "save_checkpoint"):
             params["save_checkpoint"] = "legacy"
 
-        if not hasattr(params, "load_optimizer"):
-            params["load_optimizer"] = True
+        # what a warm start from a pretrained checkpoint takes over besides the weights: nothing by default, each
+        # state on request. A resumed run restores all of them regardless, see restore_run_state
+        for flag in self._WARM_START_FLAGS:
+            if not hasattr(params, flag):
+                params[flag] = False
 
-        if not hasattr(params, "load_scheduler"):
-            params["load_scheduler"] = True
-
-        if not hasattr(params, "load_counters"):
-            params["load_counters"] = True
-
-        # allows resuming a run but restarting the data pipeline at the beginning of the epoch,
-        # in the same way load_optimizer / load_scheduler / load_counters can be turned off
+        # allows resuming a run but restarting the data pipeline at the beginning of the epoch; unlike the flags
+        # above, it applies to a resume, a warm start never restores the data pipeline
         if not hasattr(params, "load_dataloader_state"):
             params["load_dataloader_state"] = True
 
@@ -459,6 +458,103 @@ class Driver(metaclass=abc.ABCMeta):
         not support checkpointing.
         """
         return gather_dataloader_state_dict(dataloader)
+
+    # the states a warm start can take over from the pretrained checkpoint besides the weights, each only if its flag
+    # is set; a resume always restores all of them
+    _WARM_START_FLAGS = ("load_loss", "load_optimizer", "load_scheduler", "load_counters")
+
+    def restore_run_state(
+        self,
+        model: nn.Module,
+        loss: Optional[nn.Module] = None,
+        optimizer: Optional[optim.Optimizer] = None,
+        scheduler: Optional[lr_scheduler.LRScheduler] = None,
+    ) -> Dict[str, int]:
+        """
+        Restore the state a run starts from, and return its counters.
+
+        One of three cases, see :func:`~makani.utils.checkpoint_helpers.run_has_checkpoint`:
+
+        * **Resume**, if the run directory holds a checkpoint of this run (``params.resuming``):
+          everything is restored from its latest checkpoint -- the weights, the loss, the
+          optimizer, the scheduler, the counters, the data pipeline and the noise generators --
+          in the mode the run saves in, ``save_checkpoint``. The ``load_*`` flags and
+          ``override_lr`` do not apply: a resumed run continues where it stopped.
+        * **Warm start**, if ``pretrained`` is set and there is nothing to resume: the weights are
+          loaded from ``pretrained_checkpoint_path``, in ``load_checkpoint`` mode. The loss, the
+          optimizer, the scheduler and the counters start fresh, unless ``load_loss``,
+          ``load_optimizer``, ``load_scheduler`` or ``load_counters`` is set. ``override_lr`` then
+          sets the learning rate of a restored optimizer.
+        * **Fresh start** otherwise.
+
+        Sets ``checkpoint_version_current`` when resuming, so that the run goes on writing the
+        versions after the one it resumed from, and records the time it took in ``timers``.
+        """
+        params = self.params
+        counters = {"iters": 0, "start_epoch": 0}
+        strict = params.get("strict_restore", True)
+
+        if params.get("resuming", False):
+            checkpoint_path = params.checkpoint_path
+            self.checkpoint_version_current = get_latest_checkpoint_version(checkpoint_path)
+            checkpoint_path = checkpoint_path.format(
+                checkpoint_version=self.checkpoint_version_current, mp_rank="{mp_rank}"
+            )
+            checkpoint_mode = params.get("save_checkpoint", "legacy")
+            if self.log_to_screen:
+                self.logger.info(f"Resuming the run from its checkpoint {checkpoint_path}, in {checkpoint_mode} mode")
+                if params.get("pretrained", False):
+                    self.logger.info("The pretrained checkpoint is not used, since the run resumes")
+            with Timer() as timer:
+                self.restore_from_checkpoint(
+                    checkpoint_path,
+                    model=model,
+                    loss=loss,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
+                    counters=counters,
+                    dataloader=self.get_train_dataloader_for_restore(),
+                    noise=getattr(self, "noise", None),
+                    checkpoint_mode=checkpoint_mode,
+                    strict=strict,
+                    log_to_screen=self.log_to_screen,
+                )
+            self.timers["loading checkpoint"] = timer.time
+
+        elif params.get("pretrained", False):
+            if not params.is_set("pretrained_checkpoint_path"):
+                raise ValueError("pretrained is set, but no pretrained_checkpoint_path to warm-start from")
+            checkpoint_path = params.pretrained_checkpoint_path
+            flags = {flag: bool(params.get(flag, False)) for flag in self._WARM_START_FLAGS}
+            if self.log_to_screen:
+                taken = ["weights"] + [flag.removeprefix("load_") for flag, on in flags.items() if on]
+                self.logger.info(
+                    f"Warm-starting from the pretrained checkpoint {checkpoint_path}, in {params.load_checkpoint} mode, "
+                    f"taking over: {', '.join(taken)}"
+                )
+            with Timer() as timer:
+                self.restore_from_checkpoint(
+                    checkpoint_path,
+                    model=model,
+                    loss=loss if flags["load_loss"] else None,
+                    optimizer=optimizer if flags["load_optimizer"] else None,
+                    scheduler=scheduler if flags["load_scheduler"] else None,
+                    counters=counters if flags["load_counters"] else None,
+                    checkpoint_mode=params.load_checkpoint,
+                    strict=strict,
+                    log_to_screen=self.log_to_screen,
+                )
+            self.timers["loading checkpoint"] = timer.time
+
+            # the learning rate of a restored optimizer, e.g. to finetune at another one
+            if params.get("override_lr", False) and (optimizer is not None):
+                for param_group in optimizer.param_groups:
+                    param_group["lr"] = params.get("lr", 1e-3)
+
+        elif self.log_to_screen:
+            self.logger.info("Starting the run from scratch")
+
+        return counters
 
     def get_noise_rng_state(self) -> Optional[Dict[str, Any]]:
         """

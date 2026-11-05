@@ -19,6 +19,7 @@ import logging
 
 # utilities
 from makani.utils.profiling import Timer
+from makani.utils.checkpoint_helpers import setup_training_run
 from makani.utils import logging_utils
 from makani.utils.YParams import YParams
 
@@ -27,7 +28,7 @@ from makani.utils import comm
 
 # import trainer
 from makani.utils import argument_parser
-from makani.utils.argument_parser import parse_odirect_config
+from makani.utils.argument_parser import arguments_to_params
 from makani.utils.parse_dataset_metada import parse_dataset_metadata
 from makani.utils import AutoencoderTrainer
 
@@ -38,18 +39,8 @@ if __name__ == "__main__":
     # parse parameters
     params = YParams(os.path.abspath(args.yaml_config), args.config)
 
-    # distributed
-    params["matmul_parallel_size"] = args.matmul_parallel_size
-    params["h_parallel_size"] = args.h_parallel_size
-    params["w_parallel_size"] = args.w_parallel_size
-
-    params["model_parallel_sizes"] = [args.h_parallel_size, args.w_parallel_size, args.matmul_parallel_size]
-    params["model_parallel_names"] = ["h", "w", "matmul"]
-    params["parameters_reduction_buffer_count"] = args.parameters_reduction_buffer_count
-
-    # checkpoint format
-    params["load_checkpoint"] = args.load_checkpoint
-    params["save_checkpoint"] = args.save_checkpoint
+    # copy the command line options into the parameters
+    arguments_to_params(params, args)
 
     # make sure to reconfigure logger after the pytorch distributed init
     with Timer() as timer:
@@ -86,42 +77,9 @@ if __name__ == "__main__":
     if args.enable_grad_anomaly_detection:
         torch.autograd.set_detect_anomaly(True)
 
-    # Set up directory
+    # set up the run directory, the checkpoint paths, and whether the run resumes
     expDir = os.path.join(params.exp_dir, args.config, str(args.run_num))
-    if world_rank == 0:
-        logging.info(f"writing output to {expDir}")
-        if not os.path.isdir(expDir):
-            os.makedirs(expDir, exist_ok=True)
-            os.makedirs(os.path.join(expDir, "training_checkpoints"), exist_ok=True)
-            os.makedirs(os.path.join(expDir, "wandb"), exist_ok=True)
-
-    params["experiment_dir"] = os.path.abspath(expDir)
-    params["checkpoint_path"] = os.path.join(expDir, "training_checkpoints/ckpt_mp{mp_rank}_v{checkpoint_version}.tar")
-    params["best_checkpoint_path"] = os.path.join(expDir, "training_checkpoints/best_ckpt_mp{mp_rank}.tar")
-
-    # check if all files are there - do not comment out.
-    resuming = True
-    for mp_rank in range(comm.get_size("model")):
-        checkpoint_fname = params.checkpoint_path.format(mp_rank=mp_rank, checkpoint_version=0)
-        if params["load_checkpoint"] == "legacy" or mp_rank < 1:
-            resuming = resuming and os.path.isfile(checkpoint_fname)
-
-    params["resuming"] = resuming
-    params["amp_mode"] = args.amp_mode
-    params["jit_mode"] = args.jit_mode
-    params["skip_validation"] = args.skip_validation
-    params["skip_training"] = args.skip_training
-    params["enable_odirect"], params["odirect_alignment"] = parse_odirect_config(args.odirect_config)
-    params["checkpointing_level"] = args.checkpointing_level
-    params["enable_synthetic_data"] = args.enable_synthetic_data
-    params["split_data_channels"] = args.split_data_channels
-    params["print_timings_frequency"] = args.print_timings_frequency
-    params["multistep_count"] = args.multistep_count
-    params["n_future"] = args.multistep_count - 1  # note that n_future counts only the additional samples
-
-    # debug:
-    params["disable_ddp"] = args.disable_ddp
-    params["enable_grad_anomaly_detection"] = args.enable_grad_anomaly_detection
+    setup_training_run(params, expDir)
 
     # set default wandb dir
     if not hasattr(params, "wandb_dir") or params["wandb_dir"] is None:

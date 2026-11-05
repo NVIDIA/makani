@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import os
+import logging
 import glob
 import re
 import zlib
@@ -32,7 +33,6 @@ from makani.utils import comm
 from makani.mpu.helpers import gather_uneven
 
 from torch_harmonics.distributed import split_tensor_along_dim
-
 
 # escape hatch for loading legacy checkpoints which contain pickled objects that are not
 # on the allowlist below. Only set this for checkpoints from a trusted source: it restores
@@ -213,6 +213,55 @@ def check_checkpoint_format(checkpoint: Dict[str, Any], checkpoint_mode: str, st
             )
 
     return warning
+
+
+def set_checkpoint_paths(params, checkpoint_dir: str) -> None:
+    """Points ``checkpoint_path`` and ``best_checkpoint_path`` at the checkpoint files in ``checkpoint_dir``."""
+    params["checkpoint_path"] = os.path.join(checkpoint_dir, "ckpt_mp{mp_rank}_v{checkpoint_version}.tar")
+    params["best_checkpoint_path"] = os.path.join(checkpoint_dir, "best_ckpt_mp{mp_rank}.tar")
+
+
+def setup_training_run(params, exp_dir: str) -> None:
+    """Sets up the directory of a training run and decides whether the run resumes.
+
+    The first rank creates ``exp_dir`` with its ``training_checkpoints`` and ``wandb`` directories.
+    Sets ``experiment_dir``, the checkpoint paths and ``resuming``, see :func:`run_has_checkpoint`.
+    """
+    if comm.get_world_rank() == 0:
+        logging.info(f"writing output to {exp_dir}")
+        os.makedirs(os.path.join(exp_dir, "training_checkpoints"), exist_ok=True)
+        os.makedirs(os.path.join(exp_dir, "wandb"), exist_ok=True)
+
+    params["experiment_dir"] = os.path.abspath(exp_dir)
+    set_checkpoint_paths(params, os.path.join(exp_dir, "training_checkpoints"))
+
+    # the run resumes if its directory already holds a checkpoint of it, written in the save mode
+    params["resuming"] = run_has_checkpoint(params)
+
+
+def run_has_checkpoint(params) -> bool:
+    """Whether the run directory holds a checkpoint of this run, so that the run resumes from it.
+
+    Looks for the files of the first checkpoint version in the mode the run saves its checkpoints
+    in, ``save_checkpoint``: every model-parallel rank's file in legacy mode, the single file in
+    flexible mode. ``load_checkpoint`` is the mode of a pretrained checkpoint to warm-start from,
+    and has nothing to say about the checkpoints of the run itself.
+    """
+    mode = params.get("save_checkpoint", "legacy")
+    if mode == "none":
+        has_checkpoint = False
+    elif mode == "legacy":
+        has_checkpoint = True
+        for rank in range(comm.get_size("model")):
+            if not os.path.isfile(params.checkpoint_path.format(mp_rank=rank, checkpoint_version=0)):
+                has_checkpoint = False
+                break
+    elif mode == "flexible":
+        has_checkpoint = os.path.isfile(params.checkpoint_path.format(mp_rank=0, checkpoint_version=0))
+    else:
+        raise ValueError(f"Unknown checkpoint mode {mode}.")
+
+    return has_checkpoint
 
 
 def supports_dataloader_state(dataloader: Any) -> bool:

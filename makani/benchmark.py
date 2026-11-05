@@ -47,6 +47,7 @@ import torch.distributed as dist
 
 from makani.utils import benchmark as benchmark_utils
 from makani.utils import comm
+from makani.utils.checkpoint_helpers import set_checkpoint_paths
 from makani.utils import argument_parser
 from makani.utils import logging_utils
 from makani.utils.YParams import YParams
@@ -187,30 +188,14 @@ def setup_params(args):
     matmul_parallel_size = _env_override(args.matmul_parallel_size, "MAKANI_MATMUL_PARALLEL_SIZE")
     ensemble_parallel_size = _env_override(args.ensemble_parallel_size, "MAKANI_ENSEMBLE_PARALLEL_SIZE")
 
+    # the command line options, then the decomposition, which the environment may override
+    argument_parser.arguments_to_params(params, args)
     params["h_parallel_size"] = h_parallel_size
     params["w_parallel_size"] = w_parallel_size
     params["matmul_parallel_size"] = matmul_parallel_size
     params["ensemble_parallel_size"] = ensemble_parallel_size
     params["model_parallel_sizes"] = [h_parallel_size, w_parallel_size, matmul_parallel_size]
-    params["model_parallel_names"] = ["h", "w", "matmul"]
     params["data_parallel_sizes"] = [ensemble_parallel_size, -1]
-    params["data_parallel_names"] = ["ensemble", "batch"]
-    params["parameters_reduction_buffer_count"] = args.parameters_reduction_buffer_count
-
-    # performance knobs, taken straight from the CLI so they show up in the record
-    params["amp_mode"] = args.amp_mode
-    params["jit_mode"] = args.jit_mode
-    params["checkpointing_level"] = args.checkpointing_level
-    params["multistep_count"] = args.multistep_count
-    params["n_future"] = args.multistep_count - 1
-    params["multistep_checkpoint"] = args.multistep_checkpoint
-    params["split_data_channels"] = args.split_data_channels
-    params["disable_ddp"] = args.disable_ddp
-    # read with hard indexing by the trainers (find_unused_parameters in the reduction hooks),
-    # so it has to be present rather than merely defaulted
-    params["enable_grad_anomaly_detection"] = args.enable_grad_anomaly_detection
-    params["enable_odirect"], params["odirect_alignment"] = argument_parser.parse_odirect_config(args.odirect_config)
-    params["enable_s3"] = args.enable_s3
 
     if args.ensemble_size > 0:
         params["ensemble_size"] = args.ensemble_size
@@ -382,8 +367,7 @@ def main():
 
     params["exp_dir"] = output_dir
     params["experiment_dir"] = exp_dir
-    params["checkpoint_path"] = os.path.join(exp_dir, "training_checkpoints/ckpt_mp{mp_rank}_v{checkpoint_version}.tar")
-    params["best_checkpoint_path"] = os.path.join(exp_dir, "training_checkpoints/best_ckpt_mp{mp_rank}.tar")
+    set_checkpoint_paths(params, os.path.join(exp_dir, "training_checkpoints"))
     params["wandb_dir"] = exp_dir
 
     # synthetic data lives nowhere, but the loader still wants paths

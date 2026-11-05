@@ -52,7 +52,6 @@ from makani.models.helpers import count_parameters
 from makani.mpu.mappings import reduce_from_parallel_region
 
 # checkpoint helpers
-from makani.utils.checkpoint_helpers import get_latest_checkpoint_version
 
 # weight normalizing helper
 from makani.utils.training.training_helpers import get_memory_usage, normalize_weights, clip_grads, NonFiniteLossCheck
@@ -205,61 +204,10 @@ class StochasticTrainer(Driver):
         out_bias, out_scale = self.train_dataloader.get_output_normalization()
         self._setup_visualizer(out_bias, out_scale)
 
-        # reload checkpoints
-        counters = {"iters": 0, "start_epoch": 0}
-        if self.params.pretrained and not self.params.resuming:
-            if not self.params.is_set("pretrained_checkpoint_path"):
-                raise ValueError("Error, please specify a valid pretrained checkpoint path")
-
-            # use specified checkpoint
-            checkpoint_path = self.params.pretrained_checkpoint_path
-
-            if self.log_to_screen:
-                self.logger.info(
-                    f"Loading pretrained checkpoint {checkpoint_path} in {self.params.load_checkpoint} mode"
-                )
-
-            self.restore_from_checkpoint(
-                checkpoint_path,
-                model=self.model,
-                loss=self.loss_obj if self.params.get("load_loss", True) else None,
-                optimizer=self.optimizer if self.params.get("load_optimizer", True) else None,
-                scheduler=self.scheduler if self.params.get("load_scheduler", True) else None,
-                counters=counters if self.params.get("load_counters", True) else None,
-                checkpoint_mode=self.params.load_checkpoint,
-                strict=self.params.get("strict_restore", True),
-            )
-
-            # override learning rate - useful when restoring optimizer but want to override the LR
-            if self.params.get("override_lr", False):
-                for param_group in self.optimizer.param_groups:
-                    param_group["lr"] = self.params.get("lr", 1e-3)
-
-        if self.params.resuming:
-
-            # find latest checkpoint
-            checkpoint_path = self.params.checkpoint_path
-            self.checkpoint_version_current = get_latest_checkpoint_version(checkpoint_path)
-            checkpoint_path = checkpoint_path.format(
-                checkpoint_version=self.checkpoint_version_current, mp_rank="{mp_rank}"
-            )
-
-            if self.log_to_screen:
-                self.logger.info(f"Resuming from checkpoint {checkpoint_path} in {self.params.load_checkpoint} mode")
-
-            self.restore_from_checkpoint(
-                checkpoint_path,
-                model=self.model,
-                loss=self.loss_obj if self.params.get("load_loss", True) else None,
-                optimizer=self.optimizer if self.params.get("load_optimizer", True) else None,
-                scheduler=self.scheduler if self.params.get("load_scheduler", True) else None,
-                counters=counters if self.params.get("load_counters", True) else None,
-                dataloader=self.get_train_dataloader_for_restore(),
-                noise=getattr(self, "noise", None),
-                checkpoint_mode=self.params.load_checkpoint,
-                strict=self.params.get("strict_restore", True),
-                log_to_screen=self.log_to_screen,
-            )
+        # resume the run, warm-start it from a pretrained checkpoint, or start it fresh
+        counters = self.restore_run_state(
+            model=self.model, loss=self.loss_obj, optimizer=self.optimizer, scheduler=self.scheduler
+        )
 
         # read out counters correctly
         self.iters = counters["iters"]

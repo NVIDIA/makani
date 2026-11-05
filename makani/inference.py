@@ -24,14 +24,14 @@ from makani.utils.YParams import YParams
 
 # distributed computing stuff
 from makani.utils import comm
+from makani.utils.checkpoint_helpers import set_checkpoint_paths
 from makani.utils.parse_dataset_metada import parse_dataset_metadata
 from makani.utils import argument_parser
-from makani.utils.argument_parser import parse_odirect_config
+from makani.utils.argument_parser import arguments_to_params
 from makani.utils import profiling
 
 # import trainer
 from makani import Inferencer
-
 
 if __name__ == "__main__":
     parser = argument_parser.get_default_argument_parser()
@@ -120,19 +120,8 @@ if __name__ == "__main__":
     # parse parameters
     params = YParams(os.path.abspath(args.yaml_config), args.config)
 
-    # distributed
-    params["ensemble_parallel_size"] = args.ensemble_parallel_size
-    params["matmul_parallel_size"] = args.matmul_parallel_size
-    params["h_parallel_size"] = args.h_parallel_size
-    params["w_parallel_size"] = args.w_parallel_size
-
-    params["data_parallel_sizes"] = [args.ensemble_parallel_size, -1]
-    params["data_parallel_names"] = ["ensemble", "batch"]
-    params["model_parallel_sizes"] = [args.h_parallel_size, args.w_parallel_size, args.matmul_parallel_size]
-    params["model_parallel_names"] = ["h", "w", "matmul"]
-
-    # checkpoint format
-    params["load_checkpoint"] = args.load_checkpoint
+    # copy the command line options into the parameters
+    arguments_to_params(params, args)
 
     # make sure to reconfigure logger after the pytorch distributed init
     comm.init(
@@ -202,30 +191,11 @@ if __name__ == "__main__":
     output_memory_buffer_size = args.output_memory_buffer_size
 
     if args.checkpoint_path is None:
-        params["checkpoint_path"] = os.path.join(
-            expDir, "training_checkpoints/ckpt_mp{mp_rank}_v{checkpoint_version}.tar"
-        )
-        params["best_checkpoint_path"] = os.path.join(expDir, "training_checkpoints/best_ckpt_mp{mp_rank}.tar")
+        set_checkpoint_paths(params, os.path.join(expDir, "training_checkpoints"))
     else:
-        params["checkpoint_path"] = os.path.join(args.checkpoint_path, "ckpt_mp{mp_rank}_v{checkpoint_version}.tar")
-        params["best_checkpoint_path"] = os.path.join(args.checkpoint_path, "best_ckpt_mp{mp_rank}.tar")
-
-    # check if all files are there - do not comment out.
-    resuming = True
-    for mp_rank in range(comm.get_size("model")):
-        checkpoint_fname = params.checkpoint_path.format(mp_rank=mp_rank, checkpoint_version=0)
-        if params["load_checkpoint"] == "legacy" or mp_rank < 1:
-            resuming = resuming and os.path.isfile(checkpoint_fname)
+        set_checkpoint_paths(params, args.checkpoint_path)
 
     params["resuming"] = False
-    params["amp_mode"] = args.amp_mode
-    params["jit_mode"] = args.jit_mode
-    params["enable_odirect"], params["odirect_alignment"] = parse_odirect_config(args.odirect_config)
-    params["enable_s3"] = args.enable_s3
-    params["disable_ddp"] = args.disable_ddp
-    params["checkpointing_level"] = args.checkpointing_level
-    params["enable_synthetic_data"] = args.enable_synthetic_data
-    params["split_data_channels"] = args.split_data_channels
     params["n_future"] = 0
     params["mask_file"] = args.mask_file
     params["climatology_file"] = args.climatology_file
