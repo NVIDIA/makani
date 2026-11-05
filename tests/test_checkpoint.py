@@ -44,6 +44,9 @@ from makani.utils.checkpoint_helpers import (
     gather_dataloader_state_dict,
     scatter_dataloader_state_dict,
     UNSAFE_LOAD_ENV_VAR,
+    CHECKPOINT_FORMAT_VERSION,
+    checkpoint_format_tag,
+    check_checkpoint_format,
 )
 from makani.models.common import MLP
 from makani.utils.driver import Driver
@@ -605,6 +608,121 @@ class TestSaveRestore(unittest.TestCase):
             hasattr(restored, "sharded_dims_mp"), f"sharding metadata lost for {sharded_name} in {checkpoint_mode} mode"
         )
         self.assertEqual(restored.sharded_dims_mp, ["matmul", None])
+
+
+def _small_model():
+    return nn.Sequential(nn.Conv2d(3, 4, 1), nn.GELU(), nn.Conv2d(4, 3, 1))
+
+
+def _weights(model):
+    return {name: param.detach().clone() for name, param in model.named_parameters()}
+
+
+class TestCheckpointFormat(unittest.TestCase):
+    """
+    The format tag of a checkpoint: the mode it was written in and its version.
+
+    A checkpoint of the other mode is refused where its tensors would not match, which is only
+    the case with model parallelism; a newer format is refused under strict restore, and an
+    untagged checkpoint, written before the tag, loads as before.
+    """
+
+    def setUp(self):
+        self.tmpdir_ctx = tempfile.TemporaryDirectory()
+        self.path = os.path.join(self.tmpdir_ctx.name, "ckpt_mp{mp_rank}.tar")
+
+    def tearDown(self):
+        self.tmpdir_ctx.cleanup()
+
+    def _save(self, mode, edit=None):
+        set_seed(1)
+        model = _small_model()
+        Driver.save_checkpoint(self.path, model=model, checkpoint_mode=mode)
+        if edit is not None:
+            fname = self.path.format(mp_rank=0)
+            checkpoint = torch.load(fname, weights_only=False)
+            edit(checkpoint)
+            torch.save(checkpoint, fname)
+        return _weights(model)
+
+    def _restore(self, mode, strict=True):
+        set_seed(2)
+        model = _small_model()
+        Driver.restore_from_checkpoint(self.path, model=model, checkpoint_mode=mode, strict=strict)
+        return _weights(model)
+
+    def _assert_restored(self, saved, restored):
+        for name in saved:
+            self.assertTrue(torch.equal(saved[name], restored[name]), name)
+
+    @parameterized.expand(["legacy", "flexible"])
+    def test_tag_is_written(self, mode):
+        self._save(mode)
+        tag = load_checkpoint(self.path.format(mp_rank=0))["checkpoint_format"]
+        self.assertEqual(tag["mode"], mode)
+        self.assertEqual(tag["version"], CHECKPOINT_FORMAT_VERSION)
+        self.assertEqual(tag["model_parallel_size"], 1)
+
+    @parameterized.expand([("legacy", "flexible"), ("flexible", "legacy")])
+    def test_other_mode_without_model_parallelism_restores(self, written, restored):
+        # without model parallelism the two modes hold the same tensors
+        self._assert_restored(self._save(written), self._restore(restored))
+
+    def test_model_parallel_legacy_refused_by_flexible_restore(self):
+        def edit(checkpoint):
+            checkpoint["checkpoint_format"]["model_parallel_size"] = 2
+
+        self._save("legacy", edit)
+        with self.assertRaisesRegex(ValueError, "load_checkpoint: legacy"):
+            self._restore("flexible")
+
+    def test_flexible_refused_by_model_parallel_legacy_restore(self):
+        checkpoint = {"checkpoint_format": checkpoint_format_tag("flexible")}
+        with mock.patch("makani.utils.checkpoint_helpers.comm.get_size", return_value=2):
+            with self.assertRaisesRegex(ValueError, "load_checkpoint: flexible"):
+                check_checkpoint_format(checkpoint, "legacy")
+
+    def test_missing_rank_file_of_a_flexible_checkpoint_explained(self):
+        # a model-parallel legacy restore of a flexible checkpoint: rank 1 finds no file of its own
+        self._save("flexible")
+        with (
+            mock.patch("makani.utils.comm.get_rank", return_value=1),
+            mock.patch("makani.utils.comm.get_size", return_value=2),
+        ):
+            with self.assertRaisesRegex(ValueError, "load_checkpoint: flexible"):
+                self._restore("legacy")
+
+    def test_newer_version_refused_under_strict_restore(self):
+        def edit(checkpoint):
+            checkpoint["checkpoint_format"]["version"] = CHECKPOINT_FORMAT_VERSION + 1
+
+        saved = self._save("legacy", edit)
+        with self.assertRaisesRegex(ValueError, "format version"):
+            self._restore("legacy")
+        self._assert_restored(saved, self._restore("legacy", strict=False))
+
+    def test_untagged_checkpoint_restores_with_a_warning(self):
+        # written before the tag, version 0: restored in either mode, strict or not, with a warning
+        saved = self._save("legacy", lambda checkpoint: checkpoint.pop("checkpoint_format"))
+        for mode in ("legacy", "flexible"):
+            with self.subTest(mode=mode):
+                self._assert_restored(saved, self._restore(mode))
+        warning = check_checkpoint_format({"model_state": {}}, "legacy", strict=True)
+        self.assertIn("no format tag", warning)
+
+    def test_tagged_checkpoint_restores_without_a_warning(self):
+        self._save("legacy")
+        self.assertIsNone(check_checkpoint_format(load_checkpoint(self.path.format(mp_rank=0)), "legacy"))
+
+    def test_checkpoint_without_noise_generators_keeps_them(self):
+        from makani.models.noise import IsotropicGaussianRandomFieldS2
+        from makani.models.noise_controller import NoiseController
+
+        noise = NoiseController({"white": IsotropicGaussianRandomFieldS2((8, 16), 1, 1)})
+        noise.advance(replace_state=True)
+        before = noise.get_rng_state()["white"][0]
+        Driver._restore_noise_rng_state({"model_state": {}}, noise)
+        self.assertTrue(torch.equal(noise.get_rng_state()["white"][0], before))
 
 
 if __name__ == "__main__":

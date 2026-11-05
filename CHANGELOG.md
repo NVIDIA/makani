@@ -21,6 +21,7 @@
 - Noise under matmul parallelism: `noise_base_seed` seeded by the model rank, so the matmul ranks, which hold the same input, drew different noise. It now seeds by the spatial rank; without matmul parallelism the seeds are unchanged.
 - `NoiseController.set_rng` (and `ModelWrapper.set_rng`) seeded every rank alike, so after it the spatial shards drew the same coefficients and the data-parallel and ensemble ranks the same noise. A process now lays the seed out over the ranks as it was built, through `rank_seed`, keeping centered pairs; serially the seeds are unchanged. Noise processes take a `centered` flag, which `build_noise` passes on.
 - A resumed training run replayed the noise of the start of the run, since the noise generators were not checkpointed. The checkpoint now stores the generators of all ranks (`noise_rng_state`), and resuming restores them; a checkpoint without them, or one of another decomposition, resumes with fresh streams and a warning. New `NoiseController.get_rng_state` and `set_rng_state`.
+- Checkpoints carry a format tag, `checkpoint_format`, with the mode they were written in, legacy or flexible, and a format version (now 1). A restore in the other mode is refused with a message naming the mode to use when the tensors would not match, i.e. with model parallelism on either side, and a checkpoint of a newer version is refused under `strict_restore`. Checkpoints without the tag still restore, with a warning.
 
 ## 0.3.0
 

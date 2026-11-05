@@ -128,6 +128,93 @@ def get_latest_checkpoint_version(checkpoint_path, verbose: bool = True):
     return latest_version
 
 
+# the version of the checkpoint layout, bumped whenever an entry changes incompatibly; a checkpoint without a
+# format tag counts as version 0. Version 1 tags the checkpoint and adds the noise generators, noise_rng_state
+CHECKPOINT_FORMAT_VERSION = 1
+
+
+def checkpoint_format_tag(checkpoint_mode: str) -> Dict[str, Any]:
+    """The format tag the driver writes into a checkpoint, see :func:`check_checkpoint_format`.
+
+    ``mode`` is the checkpoint mode it is written in, ``"legacy"`` (one file per model-parallel
+    rank, holding its shards) or ``"flexible"`` (one file, holding the gathered tensors), and
+    ``model_parallel_size`` the number of model-parallel ranks it was written from, which tells
+    whether a legacy checkpoint holds shards. ``makani_version`` is for diagnostics only.
+    """
+    from makani import __version__
+
+    return {
+        "mode": checkpoint_mode,
+        "version": CHECKPOINT_FORMAT_VERSION,
+        "model_parallel_size": comm.get_size("model"),
+        "makani_version": __version__,
+    }
+
+
+def check_checkpoint_format(checkpoint: Dict[str, Any], checkpoint_mode: str, strict: bool = True) -> Optional[str]:
+    """Check that a checkpoint can be restored in ``checkpoint_mode``, before anything is read from it.
+
+    A checkpoint written in the other mode is refused when that would load the wrong tensors: a
+    legacy checkpoint of a model-parallel run holds the shards of one rank per file, which a
+    flexible restore would take for whole tensors, and a flexible checkpoint holds whole tensors
+    in a single file, which a legacy restore into a model-parallel run would take for shards.
+    Without model parallelism on either side, the two hold the same and both restores work.
+
+    A checkpoint of a newer format version than this makani knows is refused if ``strict``;
+    otherwise a warning is returned. A checkpoint without a format tag, written before it was
+    introduced, cannot be checked: it is accepted, with a warning.
+
+    Returns
+    -------
+    str or None
+        A warning for the caller to log, or None.
+
+    Raises
+    ------
+    ValueError
+        If the checkpoint was written in the other mode and the tensors would not match, or is of
+        a newer format version and ``strict`` is set.
+    """
+    tag = checkpoint.get("checkpoint_format", None)
+    if tag is None:
+        return (
+            "The checkpoint has no format tag, so it was written before format version 1 and its mode cannot be "
+            f"checked: it is restored in {checkpoint_mode} mode as it is. Saving it again adds the tag"
+        )
+
+    version = tag.get("version", 0)
+    makani_version = tag.get("makani_version", "unknown")
+    warning = None
+    if version > CHECKPOINT_FORMAT_VERSION:
+        message = (
+            f"The checkpoint has format version {version} (written by makani {makani_version}), this makani reads "
+            f"up to version {CHECKPOINT_FORMAT_VERSION}"
+        )
+        if strict:
+            raise ValueError(message + ": update makani, or restore with strict_restore: False at your own risk")
+        warning = message + ": entries it does not know are ignored"
+
+    stored_mode = tag.get("mode", None)
+    if (stored_mode is not None) and (stored_mode != checkpoint_mode):
+        stored_split = tag.get("model_parallel_size", 1) > 1
+        current_split = comm.get_size("model") > 1
+        if (stored_mode == "legacy" and stored_split) or (stored_mode == "flexible" and current_split):
+            raise ValueError(
+                f"The checkpoint was written in {stored_mode} mode from {tag.get('model_parallel_size', 1)} "
+                f"model-parallel ranks, but is restored in {checkpoint_mode} mode into "
+                f"{comm.get_size('model')}: its tensors would be read as "
+                f"{'whole tensors' if stored_mode == 'legacy' else 'shards'}. Restore it with "
+                f"load_checkpoint: {stored_mode}"
+                + (
+                    ", or convert it to the flexible format with makani.convert_checkpoint"
+                    if stored_mode == "legacy"
+                    else ""
+                )
+            )
+
+    return warning
+
+
 def supports_dataloader_state(dataloader: Any) -> bool:
     """Whether the dataloader can capture and restore its state (only the DALI loaders can)."""
     return (

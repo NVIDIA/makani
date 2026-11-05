@@ -57,6 +57,8 @@ from makani.utils.checkpoint_helpers import (
     scatter_dataloader_state_dict,
     gather_noise_rng_state,
     scatter_noise_rng_state,
+    checkpoint_format_tag,
+    check_checkpoint_format,
 )
 
 
@@ -565,6 +567,13 @@ class Driver(metaclass=abc.ABCMeta):
         return
 
     @staticmethod
+    def _check_checkpoint_format(checkpoint: Dict[str, Any], checkpoint_mode: str, strict: bool, log_to_screen: bool):
+        """Refuse a checkpoint of the other mode or of a newer format, see :func:`check_checkpoint_format`."""
+        warning = check_checkpoint_format(checkpoint, checkpoint_mode, strict=strict)
+        if (warning is not None) and log_to_screen:
+            logging.getLogger().warning(warning)
+
+    @staticmethod
     def _restore_noise_rng_state(checkpoint: Dict[str, Any], noise: Any, log_to_screen: bool = False):
         """
         Continue the noise generators of this rank from an already loaded checkpoint.
@@ -610,7 +619,13 @@ class Driver(metaclass=abc.ABCMeta):
         noise: Optional[Any] = None,
     ):
         checkpoint_fname = checkpoint_path.format(mp_rank=comm.get_rank("model"))
+        if not os.path.isfile(checkpoint_fname):
+            # a flexible checkpoint has a single file, of mp_rank 0: say so rather than that the file is missing
+            first_fname = checkpoint_path.format(mp_rank=0)
+            if os.path.isfile(first_fname):
+                check_checkpoint_format(load_checkpoint(first_fname, map_location="cpu"), "legacy", strict=strict)
         checkpoint = load_checkpoint(checkpoint_fname, map_location="cpu")
+        Driver._check_checkpoint_format(checkpoint, "legacy", strict, log_to_screen)
 
         # check compatibility of the comm grid stored inside the file
         if validate_comms:
@@ -691,6 +706,7 @@ class Driver(metaclass=abc.ABCMeta):
         # when loading the weights in flexble mode we exclusively use mp_rank=0 and load them onto the cpu
         checkpoint_fname = checkpoint_path.format(mp_rank=0)
         checkpoint = load_checkpoint(checkpoint_fname, map_location="cpu")
+        Driver._check_checkpoint_format(checkpoint, "flexible", strict, log_to_screen)
 
         # this is reworked to avoid loading modules related to the SHT
         state_dict = checkpoint["model_state"]
@@ -804,7 +820,7 @@ class Driver(metaclass=abc.ABCMeta):
                 tensor.sharded_dims_mp = param.sharded_dims_mp
 
         # add model state dict to store dict
-        store_dict = {"model_state": state_dict}
+        store_dict = {"model_state": state_dict, "checkpoint_format": checkpoint_format_tag("legacy")}
 
         # comm infrastructure:
         comm_names = comm.get_model_comm_names()
@@ -874,7 +890,7 @@ class Driver(metaclass=abc.ABCMeta):
             if name in state_dict and hasattr(buf, "sharded_dims_mp"):
                 state_dict[name].sharded_dims_mp = buf.sharded_dims_mp
 
-        store_dict = {"model_state": state_dict}
+        store_dict = {"model_state": state_dict, "checkpoint_format": checkpoint_format_tag("flexible")}
 
         if loss is not None:
             store_dict["loss_state_dict"] = loss.state_dict()
