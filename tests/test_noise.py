@@ -1063,19 +1063,33 @@ class TestBuildNoise(unittest.TestCase):
 class TestNoiseBaseSeed(unittest.TestCase):
     """noise_base_seed over simulated process grids: comm is mocked with the ranks of each grid point."""
 
-    def _seeds(self, centered, model_size, ensemble_size, batch_size, seed_offset=0):
+    def _seeds(self, centered, spatial_size, ensemble_size, batch_size, seed_offset=0, matmul_size=1):
         result = {}
         for b in range(batch_size):
             for e in range(ensemble_size):
-                for m in range(model_size):
-                    ranks = {"model": m, "ensemble": e, "batch": b, "data": b * ensemble_size + e}
-                    sizes = {"model": model_size, "ensemble": ensemble_size, "batch": batch_size}
-                    sizes["data"] = ensemble_size * batch_size
-                    with (
-                        mock.patch("makani.models.noise.comm.get_rank", side_effect=ranks.get),
-                        mock.patch("makani.models.noise.comm.get_size", side_effect=sizes.get),
-                    ):
-                        result[(m, e, b)] = noise_base_seed(centered, seed_offset=seed_offset)
+                for s in range(spatial_size):
+                    for m in range(matmul_size):
+                        ranks = {
+                            "spatial": s,
+                            "matmul": m,
+                            "model": s * matmul_size + m,
+                            "ensemble": e,
+                            "batch": b,
+                            "data": b * ensemble_size + e,
+                        }
+                        sizes = {
+                            "spatial": spatial_size,
+                            "matmul": matmul_size,
+                            "model": spatial_size * matmul_size,
+                            "ensemble": ensemble_size,
+                            "batch": batch_size,
+                            "data": ensemble_size * batch_size,
+                        }
+                        with (
+                            mock.patch("makani.models.noise.comm.get_rank", side_effect=ranks.get),
+                            mock.patch("makani.models.noise.comm.get_size", side_effect=sizes.get),
+                        ):
+                            result[(s, m, e, b)] = noise_base_seed(centered, seed_offset=seed_offset)
         return result
 
     def test_serial(self):
@@ -1083,25 +1097,36 @@ class TestNoiseBaseSeed(unittest.TestCase):
         self.assertEqual(noise_base_seed(False, seed_offset=7), (340, False))
 
     def test_uncentered_members_are_independent(self):
-        seeds = self._seeds(False, model_size=2, ensemble_size=4, batch_size=2)
+        seeds = self._seeds(False, spatial_size=2, ensemble_size=4, batch_size=2)
         values = [seed for seed, _ in seeds.values()]
         self.assertEqual(len(set(values)), len(values), "every rank needs its own seed")
         self.assertFalse(any(reflect for _, reflect in seeds.values()))
 
     def test_centered_members_are_antithetic_pairs(self):
-        seeds = self._seeds(True, model_size=2, ensemble_size=4, batch_size=2)
-        for (m, e, b), (seed, reflect) in seeds.items():
+        seeds = self._seeds(True, spatial_size=2, ensemble_size=4, batch_size=2)
+        for (s, m, e, b), (seed, reflect) in seeds.items():
             # ensemble members 2k and 2k+1 share a seed and differ by the sign flip
-            partner_seed, partner_reflect = seeds[(m, e ^ 1, b)]
+            partner_seed, partner_reflect = seeds[(s, m, e ^ 1, b)]
             self.assertEqual(seed, partner_seed)
             self.assertNotEqual(reflect, partner_reflect)
         # apart from the pairing, the seeds are distinct
-        pairs = {(m, e // 2, b): seed for (m, e, b), (seed, _) in seeds.items()}
+        pairs = {(s, e // 2, b): seed for (s, m, e, b), (seed, _) in seeds.items()}
         self.assertEqual(len(set(pairs.values())), len(pairs))
 
+    @parameterized.expand([(False,), (True,)])
+    def test_matmul_ranks_share_the_seed(self, centered):
+        # the matmul ranks hold the same input, the network splits its features over them
+        seeds = self._seeds(centered, spatial_size=2, ensemble_size=2, batch_size=2, matmul_size=2)
+        for (s, m, e, b), entry in seeds.items():
+            self.assertEqual(entry, seeds[(s, 0, e, b)])
+        # and with matmul, the seeds of the other ranks are those without
+        without = self._seeds(centered, spatial_size=2, ensemble_size=2, batch_size=2)
+        for (s, m, e, b), entry in seeds.items():
+            self.assertEqual(entry, without[(s, 0, e, b)])
+
     def test_seed_offset_shifts_every_seed(self):
-        base = self._seeds(True, model_size=2, ensemble_size=2, batch_size=2)
-        shifted = self._seeds(True, model_size=2, ensemble_size=2, batch_size=2, seed_offset=1000)
+        base = self._seeds(True, spatial_size=2, ensemble_size=2, batch_size=2)
+        shifted = self._seeds(True, spatial_size=2, ensemble_size=2, batch_size=2, seed_offset=1000)
         for key, (seed, reflect) in base.items():
             self.assertEqual(shifted[key], (seed + 1000, reflect))
 

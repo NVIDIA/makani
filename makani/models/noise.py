@@ -1175,8 +1175,10 @@ def noise_base_seed(centered: bool = False, seed_offset: int = 0) -> Tuple[int, 
     r"""
     The seed of a noise process on this rank, and whether it is reflected.
 
-    Every rank of the model-parallel group draws its own part of the field,
-    and every data-parallel rank its own samples. With ``centered`` noise, the
+    Every rank of the spatial group draws its own part of the field, and every
+    data-parallel rank its own samples. The ranks of the matmul group draw the
+    same, since they hold the same input: the network splits its features over
+    them, not the field. With ``centered`` noise, the
     ensemble ranks come in pairs, ``(0, 1), (2, 3), ...``, that draw the same
     field with opposite signs, so that the ensemble mean of the noise is zero.
 
@@ -1197,7 +1199,7 @@ def noise_base_seed(centered: bool = False, seed_offset: int = 0) -> Tuple[int, 
         Whether this rank draws the reflected field of its pair.
     """
     if not centered:
-        seed = 333 + seed_offset + comm.get_rank("model") + comm.get_size("model") * comm.get_rank("data")
+        seed = 333 + seed_offset + comm.get_rank("spatial") + comm.get_size("spatial") * comm.get_rank("data")
         return seed, False
 
     # ranks (0,1), (2,3), ... map to the same effective rank, since they differ only by the reflection
@@ -1206,9 +1208,9 @@ def noise_base_seed(centered: bool = False, seed_offset: int = 0) -> Tuple[int, 
     seed = (
         333
         + seed_offset
-        + comm.get_rank("model")
-        + comm.get_size("model") * ensemble_eff_rank
-        + comm.get_size("model") * comm.get_size("ensemble") * comm.get_rank("batch")
+        + comm.get_rank("spatial")
+        + comm.get_size("spatial") * ensemble_eff_rank
+        + comm.get_size("spatial") * comm.get_size("ensemble") * comm.get_rank("batch")
     )
     return seed, reflect
 

@@ -17,8 +17,8 @@
 Noise processes on spatially split ranks.
 
 A noise process holds its spectral state split over the ranks, the degrees over h and the orders over w, and
-transforms it to its part of the grid with the distributed inverse SHT. Each rank draws its part of the state from
-a stream of its own, seeded by :func:`~makani.models.noise.noise_base_seed`, so a distributed process does not draw
+transforms it to its part of the grid with the distributed inverse SHT. Each spatial shard draws its part of the state
+from a stream of its own, seeded by :func:`~makani.models.noise.noise_base_seed`, so a distributed process does not draw
 what a serial one does. The tests therefore feed both the same draws: a global draw, which the serial process gets
 whole and every rank its shard of. Then the distributed process has to reproduce the serial one exactly, its state,
 its samples and, for learnable noise, the gradients of its parameters once reduced as the trainers reduce them.
@@ -278,8 +278,14 @@ class TestDistributedNoise(unittest.TestCase):
                     self.assertTrue(reduce_success(torch.equal(a[name], b[name]), self.device))
 
     def test_base_seed_over_ranks(self):
-        """The seeds of the ranks: all distinct, except that centered noise pairs neighbouring ensemble ranks."""
-        coords = (comm.get_rank("model"), comm.get_rank("ensemble"), comm.get_rank("batch"))
+        """
+        The seeds of the ranks: one per spatial shard and data-parallel rank, the same over matmul.
+
+        The matmul ranks hold the same input, the network splits its features over them, so they draw the same
+        noise. Otherwise the seeds are all distinct, except that centered noise pairs neighbouring ensemble ranks,
+        with opposite reflections.
+        """
+        coords = (comm.get_rank("spatial"), comm.get_rank("ensemble"), comm.get_rank("batch"))
         for centered in (False, True):
             entries = [None] * dist.get_world_size() if dist.is_initialized() else [None]
             mine = (coords, noise_base_seed(centered=centered))
@@ -287,13 +293,35 @@ class TestDistributedNoise(unittest.TestCase):
                 dist.all_gather_object(entries, mine)
             else:
                 entries = [mine]
-            for i, ((model_i, ens_i, batch_i), (seed_i, reflect_i)) in enumerate(entries):
-                for (model_j, ens_j, batch_j), (seed_j, reflect_j) in entries[i + 1 :]:
-                    paired = centered and (model_i, ens_i // 2, batch_i) == (model_j, ens_j // 2, batch_j)
-                    with self.subTest(centered=centered, ranks=((model_i, ens_i, batch_i), (model_j, ens_j, batch_j))):
-                        self.assertEqual(seed_i == seed_j, paired)
+            for i, ((spatial_i, ens_i, batch_i), (seed_i, reflect_i)) in enumerate(entries):
+                for (spatial_j, ens_j, batch_j), (seed_j, reflect_j) in entries[i + 1 :]:
+                    same = (spatial_i, ens_i, batch_i) == (spatial_j, ens_j, batch_j)
+                    paired = (
+                        centered and not same and (spatial_i, ens_i // 2, batch_i) == (spatial_j, ens_j // 2, batch_j)
+                    )
+                    with self.subTest(
+                        centered=centered, ranks=((spatial_i, ens_i, batch_i), (spatial_j, ens_j, batch_j))
+                    ):
+                        self.assertEqual(seed_i == seed_j, same or paired)
+                        if same:
+                            self.assertEqual(reflect_i, reflect_j)
                         if paired:
                             self.assertNotEqual(reflect_i, reflect_j)
+
+    def test_matmul_ranks_draw_the_same_noise(self):
+        """The ranks of the matmul group hold the same input, so they draw the same noise."""
+        if comm.get_size("matmul") < 2:
+            self.skipTest("needs at least two matmul ranks")
+        seed, reflect = noise_base_seed()
+        process = IsotropicGaussianRandomFieldS2(_IMG_SHAPE, _BATCH, _CHANNELS, seed=seed, reflect=reflect)
+        process = process.to(self.device)
+        process.update()
+        with torch.no_grad():
+            sample = process()
+
+        samples = [torch.empty_like(sample) for _ in range(comm.get_size("matmul"))]
+        dist.all_gather(samples, sample.contiguous(), group=comm.get_group("matmul"))
+        self.assertTrue(reduce_success(all(torch.equal(s, samples[0]) for s in samples), self.device))
 
     def test_centered_pairs_draw_opposite_noise(self):
         """With centered noise, the two ranks of an ensemble pair draw the same field with opposite signs."""
