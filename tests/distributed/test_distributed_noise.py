@@ -230,7 +230,9 @@ class TestDistributedNoise(unittest.TestCase):
         loss_ref = 0.0
         for step, replace_state in enumerate((True, False, False)):
             self._step(process, reference, draws, replace_state, seed=100 + step)
-            loss = loss + (self._shard_grid(weights[step]) * process()).sum()
+            # the matmul ranks hold the same noise and compute the same loss, and the gradients are summed over them:
+            # each counts its share. In training, the network splits the work over matmul instead
+            loss = loss + (self._shard_grid(weights[step]) * process()).sum() / comm.get_size("matmul")
             loss_ref = loss_ref + (weights[step] * reference()).sum()
         loss.backward()
         loss_ref.backward()
