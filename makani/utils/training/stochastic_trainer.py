@@ -33,12 +33,13 @@ from makani.utils import LossHandler, MetricsHandler
 from makani.utils.driver import Driver
 from makani.utils.dataloader import get_dataloader
 from makani.utils.dataloaders.data_helpers import get_climatology
-from makani.utils.dataloaders.batch import batch_to_device, INPUT, TARGET, INPUT_DYNAMIC_FEATURES
+from makani.utils.dataloaders.batch import batch_to_device, batch_nbytes, INPUT, TARGET
 from makani.utils.dataloaders.rollout import Rollout
 from makani.utils.YParams import YParams
 
 # model registry
 from makani.models import model_registry
+from makani.models.stochastic_interpolant import interpolant_config
 
 # distributed computing stuff
 from makani.utils import comm
@@ -113,6 +114,9 @@ class StochasticTrainer(Driver):
         if self.log_to_screen:
             self.logger.info("data loader initialized")
 
+        # the settings of the interpolant, in one block, so that the model package rebuilds it
+        self.params["stochastic_interpolant"] = interpolant_config(self.params)
+
         # record data required to reproduce workflow using a model package
         if self.world_rank == 0:
             from makani.models.model_package import save_model_package
@@ -122,6 +126,8 @@ class StochasticTrainer(Driver):
         # init preprocessor and model
         self.model = model_registry.get_model(self.params, use_stochastic_interpolation=True).to(self.device)
         self.preprocessor = self.model.preprocessor
+        # the noise rollouts drive, held before the model is wrapped for DDP
+        self.noise = self.model.noise
 
         # print aux channel names:
         if self.log_to_screen:
@@ -241,6 +247,17 @@ class StochasticTrainer(Driver):
             self.model_eval = self.model
 
         return
+
+    def _rollout(self, batch, ensemble_size=1):
+        # the rollout over all target steps of the batch, driving the noise of the model
+        return Rollout(batch, noise=self.noise, ensemble_size=ensemble_size)
+
+    def _eval_steps(self, rollout):
+        # the forecast of a validation rollout one step at a time; DDP adds nothing without gradients
+        model = self.model_eval
+        if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+            model = model.module
+        return model.steps(rollout)
 
     def _set_train(self):
         self.model.train()
@@ -441,15 +458,8 @@ class StochasticTrainer(Driver):
             self.iters += 1
 
             # map to device
-            batch = batch_to_device(data, self.device)
-            dynamic_features = batch[INPUT_DYNAMIC_FEATURES]
-
-            # the interpolant takes the time steps folded into the channels
-            inp = flatten_history(batch[INPUT])
-            tar = flatten_history(batch[TARGET])
-
-            # assuming float32
-            total_data_bytes += inp.nbytes + tar.nbytes
+            batch = batch_to_device(data, self.device, non_blocking=True)
+            total_data_bytes += batch_nbytes(batch)
 
             # check if we need to perform an update
             do_update = train_steps % self.params["gradient_accumulation_steps"] == 0
@@ -458,17 +468,14 @@ class StochasticTrainer(Driver):
                 loss_scaling_fact = 1.0 / np.float32(self.params["gradient_accumulation_steps"])
 
             with self.autocast():
+                # the drift of the network and that of the path, at random interpolation times
                 if do_update:
-                    pred, tar = self.model_train(
-                        inp, tar, dynamic_features=dynamic_features, n_samples=self.params.stochastic_size
-                    )
-                    loss = self.loss_obj(pred, tar, inp=inp)
+                    pred, tar = self.model_train(self._rollout(batch), drift=True)
+                    loss = self.loss_obj(pred, tar)
                 else:
                     with self.model_train.no_sync():
-                        pred, tar = self.model_train(
-                            inp, tar, dynamic_features=dynamic_features, n_samples=self.params.stochastic_size
-                        )
-                        loss = self.loss_obj(pred, tar, inp=inp)
+                        pred, tar = self.model_train(self._rollout(batch), drift=True)
+                        loss = self.loss_obj(pred, tar)
                 loss = loss * loss_scaling_fact
 
             # stop on a non-finite loss before it reaches the weights, on all ranks together
@@ -477,8 +484,9 @@ class StochasticTrainer(Driver):
             self.gscaler.scale(loss).backward()
 
             # increment accumulated loss
-            accumulated_loss[0] += loss.detach().clone() * inp.shape[0]
-            accumulated_loss[1] += inp.shape[0]
+            batch_size = batch[INPUT].shape[0]
+            accumulated_loss[0] += loss.detach().clone() * batch_size
+            accumulated_loss[1] += batch_size
 
             # log the loss
             pbar_postfix = {"loss": loss.item()}
@@ -601,34 +609,18 @@ class StochasticTrainer(Driver):
                     # map to gpu
                     batch = batch_to_device(data, self.device)
 
-                    # the rollout folds the ensemble into the batch dim for a single forward
-                    # per step, (B*E, ...); the targets stay at the original batch -- the loss
-                    # expects (B, E, ...) pred vs (B, ...) target.
-                    rollout = Rollout(batch, ensemble_size=self.params.local_ensemble_size)
+                    # the rollout folds the ensemble into the batch dim, (B*E, ...); the targets stay at the
+                    # original batch -- the loss expects (B, E, ...) pred vs (B, ...) target. The losses and the
+                    # metrics take the time steps folded into the channels
+                    rollout = self._rollout(batch, ensemble_size=self.params.local_ensemble_size)
+                    steps = self._eval_steps(rollout)
 
-                    # the interpolant, the losses and the metrics take the time steps
-                    # folded into the channels
-                    flatten = flatten_history
-
-                    for step in rollout:
-                        idt = step.index
-                        targ = flatten(step.target)
+                    for idt in range(rollout.n_steps):
+                        targ = flatten_history(batch[TARGET][:, idt : idt + 1])
 
                         with self.autocast():
-                            # single forward on the folded batch; StochasticInterpolant.forward
-                            # resizes its noise_module to the batch internally.
-                            pred_flat = self.model_eval(
-                                flatten(step.input),
-                                dynamic_features=step.input_dynamic_features,
-                                n_steps=self.params.stochastic_interpolation_steps,
-                            )
-
-                            # the interpolant predicts a single step, which the next one starts from
-                            rollout.advance(pred_flat.unsqueeze(1))
-
-                            # split the ensemble back out, (B, E, ...), for the loss and downstream buffers
-                            pred = rollout.unfold(pred_flat)
-
+                            # each step integrates the SDE of the interpolant from the previous prediction
+                            pred = rollout.unfold(flatten_history(next(steps)))
                             loss = self.loss_obj(pred, targ)
 
                         # TODO: move all of this into the visualization handler

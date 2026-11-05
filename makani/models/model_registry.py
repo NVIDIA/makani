@@ -31,6 +31,7 @@ import torch.nn as nn
 from makani.utils.YParams import ParamsBase, ensure_resampled_shapes
 from makani.models import StepWrapper
 from makani.models import StochasticInterpolantWrapper
+from makani.models.stochastic_interpolant import interpolant_input_channels
 from makani.utils.dataloaders.data_helpers import get_data_normalization
 
 
@@ -157,7 +158,8 @@ def get_model(
         parameter struct.
     use_stochastic_interpolation : bool, optional
         Wrap the network in a :class:`StochasticInterpolantWrapper` instead of a
-        :class:`~makani.models.stepper.StepWrapper`. By default ``False``.
+        :class:`~makani.models.stepper.StepWrapper`. By default ``False``; a
+        ``stochastic_interpolant`` block in ``params`` selects it as well.
     multistep : bool, optional
         Deprecated and without effect: the same wrapper serves single steps and
         rollouts, and the number of steps comes from the
@@ -196,7 +198,12 @@ def get_model(
             if hasattr(params, "out_shape_x") and hasattr(params, "out_shape_y")
             else inp_shape
         )
-        inp_chans = params.N_in_channels
+        # the interpolant is built from the flag, or from its block in params, so that a model package of one
+        # round-trips
+        use_stochastic_interpolation = use_stochastic_interpolation or (
+            params.get("stochastic_interpolant", None) is not None
+        )
+        inp_chans = interpolant_input_channels(params) if use_stochastic_interpolation else params.N_in_channels
         out_chans = params.N_out_channels
 
         if hasattr(params, "constraints"):
@@ -280,12 +287,7 @@ def get_model(
     if not use_stochastic_interpolation:
         model = StepWrapper(params, model_handle)
     else:
-        model = StochasticInterpolantWrapper(
-            params,
-            model_handle,
-            noise_epsilon=params.get("noise_epsilon", 1.0),
-            use_foellmer=params.get("use_foellmer", False),
-        )
+        model = StochasticInterpolantWrapper(params, model_handle)
 
     return model
 

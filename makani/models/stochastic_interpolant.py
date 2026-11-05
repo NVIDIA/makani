@@ -13,555 +13,601 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+r"""
+Forecasting with stochastic interpolants.
+
+A stochastic interpolant [1] connects the current state :math:`x_0` and the next one :math:`x_1` by the path
+
+.. math::
+
+    I_s = \alpha(s)\, x_0 + \beta(s)\, x_1 + \gamma(s)\, z, \qquad s \in [0, 1],
+
+with :math:`\alpha(s) = 1 - s`, :math:`\beta(s) = s^2`, :math:`\gamma(s) = \sqrt{s}\, \sigma(s)`,
+:math:`\sigma(s) = \varepsilon (1 - s)` and :math:`z` standard normal. The network learns the drift
+:math:`b(I_s, s)` of the path, conditioned on the window it predicts from, by regression on
+:math:`\partial_s I_s`. A forecast integrates the SDE :math:`dX_s = b(X_s, s)\, ds + \sigma(s)\, dW_s` from
+:math:`X_0 = x_0` to :math:`s = 1` with Euler-Maruyama.
+
+[1] Chen et al., Probabilistic forecasting with stochastic interpolants and Föllmer processes, 2024.
+"""
+
+from typing import Any, Dict, Optional
+
 import torch
 import torch.nn as nn
+from torch.utils.checkpoint import checkpoint
 
-# distributed computing stuff
-from makani.utils import comm
-
-from makani.models import Preprocessor2D
+from makani.models.noise import IsotropicGaussianRandomFieldS2
 from makani.models.noise_controller import NoiseController
-from makani.models.noise import IsotropicGaussianRandomFieldS2 as IGRF
+from makani.models.stepper import StepWrapper
+from makani.utils import comm
+from makani.utils.dataloaders.rollout import Rollout
+
+# the configuration of the interpolant and its defaults, see interpolant_config
+_DEFAULTS = {
+    "epsilon": 1.0,
+    "foellmer": False,
+    "antithetic": False,
+    "n_samples": 1,
+    "n_steps": 1,
+    "time_aware": False,
+    "seed": 333,
+}
+
+# the top-level keys the settings were read from before the stochastic_interpolant block
+_LEGACY_KEYS = {
+    "epsilon": "noise_epsilon",
+    "foellmer": "use_foellmer",
+    "n_samples": "stochastic_size",
+    "n_steps": "stochastic_interpolation_steps",
+    "time_aware": "time_aware",
+}
+
+# the name of the keys of the path in the noise controller of the model
+PATH_NOISE = "path_noise"
+
+# the seeds of the keys of the data-parallel ranks lie this far apart
+_DATA_SEED_STRIDE = 7919
+
+# the keys are drawn below this bound, so that mixing them with the sub-step and the rank stays a valid seed
+_KEY_BOUND = 2**62
+
+# the tag of the interpolation times among the draws derived from a key, which the sub-steps count up from 0
+_TIMES_TAG = -1
 
 
-def expand_time(x: torch.Tensor, n_samples: int) -> torch.Tensor:
+def _derived_seed(*values: int) -> int:
+    # a seed for one draw derived from a key; Python hashes tuples of ints the same in every process
+    return hash(values) & (_KEY_BOUND - 1)
+
+
+class PathKeys(nn.Module):
     r"""
-    Replicate a tensor along a new sample dimension after the batch.
+    The keys of the random draws of the stochastic interpolant, one per sample and step.
 
-    Used to evaluate several interpolant time samples per batch element: the
-    input is repeated so each sample can be paired with a different time.
+    A forecast step integrates the SDE of the interpolant in several sub-steps,
+    each with a field of noise of its own, and a training step draws the
+    interpolation times and the noise of the path. The interpolant derives all
+    of these from one key per sample, which this process draws at each
+    :meth:`update`. So the :class:`~makani.models.noise_controller.NoiseController`
+    advances, snapshots, restores and re-seeds them like any noise process, at
+    the cost of one integer per sample: a restored state redraws the same
+    fields and times.
+
+    The keys are the same on all model ranks of a sample: the interpolation
+    times have to be, and the noise mixes in the spatial rank, see
+    :meth:`StochasticInterpolantWrapper.path_noise`. They are drawn on the CPU,
+    so they do not depend on the device either.
 
     Parameters
     ----------
-    x : torch.Tensor
-        Input of shape ``(B, ...)``.
-    n_samples : int
-        Number of copies.
+    batch_size : int
+        The initial batch, resized by :meth:`update`.
+    seed : int, optional
+        The seed, by default ``333``; see :meth:`set_rng`.
 
-    Returns
-    -------
-    torch.Tensor
-        Tensor of shape ``(B, n_samples, ...)``.
-    """
-    shape = x.shape
-    x = x.unsqueeze(1).repeat(1, n_samples, *[1 for _ in shape[1:]])
-
-    return x
-
-
-def expand_batch(x: torch.Tensor, n_batch: int) -> torch.Tensor:
-    r"""
-    Replicate a tensor along a new leading batch dimension.
-
-    Parameters
+    Attributes
     ----------
-    x : torch.Tensor
-        Input of any shape.
-    n_batch : int
-        Number of copies.
-
-    Returns
-    -------
-    torch.Tensor
-        Tensor of shape ``(n_batch, *x.shape)``.
-    """
-    shape = x.shape
-    x = x.unsqueeze(0).repeat(n_batch, 1, *[1 for _ in shape[1:]])
-
-    return x
-
-
-def expand_batch_space(x: torch.Tensor, n_batch: int, n_lat: int, n_lon: int) -> torch.Tensor:
-    r"""
-    Broadcast a per-time, per-channel tensor over batch and space.
-
-    Turns a table of scalars indexed by time step and channel into a full field,
-    so it can be combined elementwise with gridded data.
-
-    Parameters
-    ----------
-    x : torch.Tensor
-        Input of shape ``(T, C)``.
-    n_batch : int
-        Batch size to expand to.
-    n_lat : int
-        Number of latitudes.
-    n_lon : int
-        Number of longitudes.
-
-    Returns
-    -------
-    torch.Tensor
-        Tensor of shape ``(n_batch, T, C, n_lat, n_lon)``.
-    """
-    T, C = x.shape
-    x = x.reshape(1, T, C, 1, 1).repeat(n_batch, 1, 1, n_lat, n_lon)
-
-    return x
-
-
-class InterpolationWrapper(nn.Module):
-    """
-    thin wrapper to make usage of the usual deterministic models feasible.
+    state : torch.Tensor
+        The keys, ``(B,)``, ``int64``, on the CPU.
     """
 
-    def __init__(self, model_handle, n_pred_chans, n_static_channels, n_dynamic_channels):
+    def __init__(self, batch_size: int, seed: int = 333):
         super().__init__()
+        # a plain attribute, not a buffer: the keys stay on the CPU when the model moves
+        self.state = torch.zeros(batch_size, dtype=torch.int64)
+        self.set_rng(seed)
 
-        inp_chans = n_pred_chans * 2 + n_static_channels + n_dynamic_channels + 1
-        self.model = model_handle(inp_chans=inp_chans)
+    def is_stateful(self) -> bool:
+        r"""``False``: each step draws keys independent of the previous ones."""
+        return False
 
-    def forward(self, x0, x, xu, static, s):
-        """
-        expects inputs in the shape
-        """
-        # S has shape [B*S]
-        s = s.reshape(s.shape[0], 1, 1, 1)
-        s = torch.tile(s, (1, 1, x.shape[-2], x.shape[-1]))
-
-        # concatenate the inputs
-        inputlist = [x0, x]
-        if xu is not None:
-            inputlist.append(xu)
-        if static is not None:
-            inputlist.append(static)
-        inputlist.append(s)
-        x_in = torch.cat(inputlist, dim=-3)
-
-        # fwd pass
-        x_out = self.model(x_in)
-
-        return x_out
-
-
-class TimeAwareInterpolationWrapper(nn.Module):
-    """
-    thin wrapper to make usage of the usual deterministic models feasible.
-    """
-
-    def __init__(self, model_handle, n_pred_chans, n_static_channels, n_dynamic_channels):
-        super().__init__()
-
-        inp_chans = n_pred_chans * 2 + n_static_channels + n_dynamic_channels
-        self.model = model_handle(inp_chans=inp_chans)
-
-    def forward(self, x0, x, xu, static, s):
-        """
-        expects inputs in the shape
-        """
-
-        # concatenate the inputs
-        inputlist = [x0, x]
-        if xu is not None:
-            inputlist.append(xu)
-        if static is not None:
-            inputlist.append(static)
-        x_in = torch.cat(inputlist, dim=-3)
-
-        # fwd pass
-        x_out = self.model(x_in, s.unsqueeze(1))
-
-        return x_out
-
-
-# TODO: update noise state
-class StochasticInterpolantWrapper(nn.Module):
-    r"""
-    Wrapper module to implement tthe stochastic interpolation framework for forecasting described in [1].
-    During training, the module
-
-    [1] Chen et al.; Probabilistic forecasting with stochastic interpolants and Follmer Processes
-    """
-
-    def __init__(
-        self, params, model_handle, noise_epsilon=1.0, use_foellmer=False, antithetic_sampling=False, seed=333, **kwargs
-    ):
-        super().__init__()
-
-        if params.n_history != 0:
-            raise ValueError(
-                f"this model currently does not support history, expected n_history == 0 but got {params.n_history}"
-            )
-        if params.n_future != 0:
-            raise ValueError(
-                f"this model currently does not support future steps, expected n_future == 0 but got {params.n_future}"
-            )
-
-        # get the preprocessor
-        self.preprocessor = Preprocessor2D(params)
-
-        # the interpolant draws the noise of its SDE itself, within a step, see noise_module; nothing
-        # outside the model drives it, so the model has no noise for a rollout to advance
-        self.noise = NoiseController()
-
-        # compute the new number of input/output channels
-        n_pred_chans = params.N_in_predicted_channels
-        n_static_channels = params.N_static_channels
-        n_dynamic_channels = params.N_dynamic_channels
-
-        if n_pred_chans != params.N_out_channels:
-            raise ValueError(
-                f"expected N_in_predicted_channels ({n_pred_chans}) to match N_out_channels ({params.N_out_channels})"
-            )
-
-        # TODO: check if the model is actually deterministic first before wrapping it
-        if params.get("time_aware", False):
-            self.model = TimeAwareInterpolationWrapper(
-                model_handle, n_pred_chans, n_static_channels, n_dynamic_channels
-            )
-        else:
-            self.model = InterpolationWrapper(
-                model_handle,
-                n_pred_chans,
-                n_static_channels=params.N_static_channels,
-                n_dynamic_channels=params.N_dynamic_channels,
-            )
-
-        seed_off = (
-            comm.get_rank("model")
-            + comm.get_size("model") * comm.get_rank("batch")
-            + comm.get_size("model") * comm.get_size("batch") * comm.get_rank("ensemble")
-        )
-        self.noise_module = IGRF(
-            (params.img_crop_shape_x, params.img_crop_shape_y),
-            params.batch_size,
-            params.N_in_predicted_channels,
-            num_time_steps=1,
-            sigma=1.0,
-            alpha=0.0,
-            grid_type=params.data_grid_type,
-            seed=seed + seed_off,
-        )
-
-        self.use_foellmer = use_foellmer
-        self.antithetic_sampling = antithetic_sampling
-
-        # set rng:
-        self.rng_cpu = torch.Generator(device=torch.device("cpu"))
-        self.rng_cpu.manual_seed(seed + 333 + seed_off)
-        if torch.cuda.is_available():
-            self.rng_gpu = torch.Generator(device=torch.device(f"cuda:{comm.get_local_rank()}"))
-            self.rng_gpu.manual_seed(seed + 333 + seed_off)
-
-        self.noise_epsilon = noise_epsilon
-
-        # we take the particular choice made in the paper
-        self.alpha_fn = lambda s: 1.0 - s
-        self.dalpha_fn = lambda s: -1.0
-        self.beta_fn = lambda s: torch.square(s)
-        self.dbeta_fn = lambda s: 2.0 * s
-        self.sigma_fn = lambda s: self.noise_epsilon * (1.0 - s)
-        self.dsigma_fn = lambda s: -1.0 * self.noise_epsilon
-        self.gamma_fn = lambda s: torch.sqrt(s) * self.sigma_fn(s)
-        # note that in the original paper, the sqrt(s) term was not taken a derivative of
-        self.dgamma_fn = lambda s: torch.sqrt(s) * self.dsigma_fn(s)
-
-    def get_internal_rng(self, gpu=True):
+    def set_rng(self, seed: int = 333):
         r"""
-        Return the noise module's private generator.
+        Re-seed the generator of the keys.
 
-        Parameters
-        ----------
-        gpu : bool, optional
-            Return the CUDA generator if ``True`` (the default), otherwise the
-            CPU generator.
-
-        Returns
-        -------
-        torch.Generator
-            The generator driving the interpolant's noise.
+        The data-parallel rank is mixed in, so that the ranks, which hold
+        different samples, draw different keys from the same seed.
         """
-        if gpu:
-            return self.noise_module.rng_gpu
-        else:
-            return self.noise_module.rng_cpu
+        self.rng = torch.Generator(device=torch.device("cpu"))
+        self.rng.manual_seed(seed + _DATA_SEED_STRIDE * comm.get_rank("data"))
 
-    def gsq_fn(self, s: torch.Tensor, foellmer=False) -> torch.Tensor:
+    def reset(self, batch_size: Optional[int] = None):
+        r"""Zero the keys, resized to ``batch_size`` if given."""
+        self.state = torch.zeros(self.state.shape[0] if batch_size is None else batch_size, dtype=torch.int64)
+
+    def update(self, replace_state: bool = False, batch_size: Optional[int] = None):
+        r"""Draw new keys, for ``batch_size`` samples if given; ``replace_state`` makes no difference."""
+        batch_size = self.state.shape[0] if batch_size is None else batch_size
+        self.state = torch.randint(0, _KEY_BOUND, (batch_size,), dtype=torch.int64, generator=self.rng)
+
+    def get_rng_state(self):
+        r"""The state of the generator, and ``None`` for the CUDA one it does not have."""
+        return self.rng.get_state(), None
+
+    def set_rng_state(self, cpu_state, gpu_state):
+        r"""Restore the generator from :meth:`get_rng_state`."""
+        if cpu_state is not None:
+            self.rng.set_state(cpu_state)
+
+    def get_tensor_state(self) -> torch.Tensor:
+        r"""A copy of the keys."""
+        return self.state.clone()
+
+    def set_tensor_state(self, newstate: torch.Tensor):
         r"""
-        Squared diffusion coefficient of the sampling SDE.
-
-        The interpolant admits a family of samplers that share the same marginal
-        distributions but differ in how much noise they inject; ``gsq_fn``
-        selects one. The default is :math:`g^2(s) = \sigma^2(s)`. The Föllmer
-        choice instead returns :math:`q^2(s)`, the diffusion of the Föllmer
-        process, which drives the sample toward the target with a different
-        noise schedule.
-
-        Parameters
-        ----------
-        s : torch.Tensor
-            Interpolant time in :math:`[0, 1]`.
-        foellmer : bool, optional
-            Use the Föllmer coefficient rather than :math:`\sigma^2`, by
-            default ``False``.
-
-        Returns
-        -------
-        torch.Tensor
-            Squared diffusion coefficient, same shape as ``s``.
-        """
-        if foellmer:
-            term1 = (
-                2.0 * torch.square(self.sigma_fn(s)) * torch.where(s > 0, s * self.dbeta_fn(s) / self.beta_fn(s), 2.0)
-            )
-            term2 = 2.0 * s * self.sigma_fn(s) * self.dsigma_fn(s)
-            result = torch.abs(term1 - term2 - torch.square(self.sigma_fn(s)))
-        else:
-            result = torch.square(self.sigma_fn(s))
-
-        return result
-
-    def dlog_rho(self, x: torch.Tensor, x0: torch.Tensor, b: torch.Tensor, s: torch.Tensor) -> torch.Tensor:
-        r"""
-        Score function :math:`\nabla_x \log \rho_s(x)` of the interpolant density.
-
-        Recovered algebraically from the learned drift ``b`` rather than
-        estimated separately: for a Gaussian stochastic interpolant the drift
-        and the score are related by a closed-form expression in the schedule
-        functions, so one network suffices for both. The score is what turns the
-        probability-flow ODE into an SDE sampler.
-
-        Parameters
-        ----------
-        x : torch.Tensor
-            Current state along the interpolant path.
-        x0 : torch.Tensor
-            Base sample the path starts from.
-        b : torch.Tensor
-            Drift predicted by the model at ``(x, s)``.
-        s : torch.Tensor
-            Interpolant time, strictly inside :math:`(0, 1)`. The expression is
-            singular at both endpoints, which the samplers avoid by never
-            evaluating there.
-
-        Returns
-        -------
-        torch.Tensor
-            The score, same shape as ``x``.
-        """
-        # we never call this at s=0 or s=1, so everything is fine
-        As = 1.0 / (s * self.sigma_fn(s) * (self.dbeta_fn(s) * self.sigma_fn(s) - self.beta_fn(s) * self.dsigma_fn(s)))
-        cs = x * self.dbeta_fn(s) + (self.beta_fn(s) * self.dalpha_fn(s) - self.dbeta_fn(s) * self.alpha_fn(s)) * x0
-
-        return As * (self.beta_fn(s) * b - cs)
-
-    @torch.compile
-    def _interpolant(self, x0: torch.Tensor, x1: torch.Tensor, noise: torch.Tensor, s: torch.Tensor):
-        # s has shape [B, S], expand:
-        ishape = x0.shape
-        sr = s.reshape([s.shape[0], s.shape[1]] + [1 for _ in ishape[2:]])
-        return self.alpha_fn(sr) * x0 + self.beta_fn(sr) * x1 + self.gamma_fn(sr) * noise
-
-    @torch.compile
-    def _drift(self, x0: torch.Tensor, x1: torch.Tensor, noise: torch.Tensor, s: torch.Tensor):
-        # s has shape [B, S], expand:
-        ishape = x0.shape
-        sr = s.reshape([s.shape[0], s.shape[1]] + [1 for _ in ishape[2:]])
-        return self.dalpha_fn(sr) * x0 + self.dbeta_fn(sr) * x1 + self.dgamma_fn(sr) * noise
-
-    def stochastic_path(
-        self, x0: torch.Tensor, x1: torch.Tensor, noise: torch.Tensor, s: torch.Tensor, return_derivative=True
-    ):
-        """returns I and R"""
-
-        # get interpolant
-        interp = self._interpolant(x0, x1, noise, s)
-
-        if return_derivative:
-            drift = self._drift(x0, x1, noise, s)
-            return interp, drift
-        else:
-            return interp
-
-    # @torch.compile
-    def _compute_bhat(
-        self, x: torch.Tensor, x0: torch.Tensor, xu: torch.Tensor, static: torch.Tensor, s: torch.Tensor, foellmer=False
-    ) -> torch.Tensor:
-        b = self.model(x0, x, xu, static, s)
-        if foellmer:
-            ishape = x0.shape
-            sr = s.reshape([s.shape[0]] + [1 for _ in ishape[1:]])
-            correction = (
-                0.5
-                * (self.gsq_fn(sr, foellmer=self.use_foellmer) - torch.square(self.sigma_fn(sr)))
-                * self.dlog_rho(x, x0, b, sr)
-            )
-            b = b + correction
-
-        return b
-
-    def _stack_dynamic_features(self, dynamic_features):
-        # the dynamic features of the input step, stacked to [B, C, H, W], or None without any
-        dynamic_features = {} if dynamic_features is None else dynamic_features
-        expected = set(self.preprocessor.dynamic_features)
-        if set(dynamic_features) != expected:
-            raise ValueError(f"the model takes the dynamic features {sorted(expected)}, got {sorted(dynamic_features)}")
-
-        inpu = self.preprocessor.stack_dynamic_features(dynamic_features)
-        if inpu is not None:
-            # remove the time dim, there is no history
-            inpu = inpu.squeeze(1)
-
-        return inpu
-
-    def _forward_train(self, inp, tar, inpu, n_samples=1):
-
-        # get input shape [B, C, H, W]
-        ishape = list(inp.shape)
-        samples_fact = 2 if self.antithetic_sampling else 1
-
-        # expand and flatten the dynamic and static features
-        with torch.no_grad():
-            if inpu is not None:
-                # convert to shape [B*S, C, H, W]
-                inpu = expand_time(inpu, n_samples * samples_fact).flatten(0, 1)
-
-            # get static
-            static = self.preprocessor.get_static_features()
-
-            if static is not None:
-                static = torch.tile(static, (ishape[0], 1, 1, 1))
-                # convert to shape [B*S, C, H, W]
-                static = expand_time(static, n_samples * samples_fact).flatten(0, 1)
-
-            # make sure the shape is such that we can easily broadcast ([B, S])
-            stens = torch.empty([ishape[0], n_samples], dtype=inp.dtype, device=inp.device)
-            if inp.is_cuda:
-                stens.uniform_(0.0, 1.0, generator=self.rng_gpu)
-            else:
-                stens.uniform_(0.0, 1.0, generator=self.rng_cpu)
-
-            if self.antithetic_sampling:
-                stens = torch.cat([stens, 1.0 - stens], dim=1)
-
-            # noise already has the right dims [B, 1, C, H, W]
-            noise = self.noise_module(update_internal_state=True)
-
-            # unsqueeze input and target to [B, S, C, H, W]
-            inp = expand_time(inp, n_samples * samples_fact)
-            tar = expand_time(tar, n_samples * samples_fact)
-
-            # stochstic path, separately for variants with features and ones without
-            inter, drift = self.stochastic_path(inp, tar, noise, stens, return_derivative=True)
-
-            # flatten the input ttensors to be 4d
-            inp = inp.flatten(0, 1)
-            noise = noise.flatten(0, 1)
-            stens = stens.flatten(0, 1)
-            inter = inter.flatten(0, 1)
-            drift = drift.flatten(0, 1)
-
-        # forward pass uses 4d tensors
-        drift_pred = self.model(inp, inter, inpu, static, stens)
-
-        return drift_pred, drift
-
-    def _forward_eval(self, inp, inpu, n_steps=1):
-
-        torch._check(len(inp.shape) == 4, lambda: f"expected a 4D input, got {len(inp.shape)}D")
-
-        with torch.no_grad():
-            # get static in shape [B, C, H, W]
-            static = self.preprocessor.get_static_features()
-
-            # get sampling points: shape [S]
-            stens = torch.linspace(0, 1, n_steps + 1, dtype=inp.dtype, device=inp.device)
-
-            # compute delta s, shape: [S]
-            delta_s = stens[1:] - stens[:-1]
-
-            # tile and reshape stens [B, S+1]
-            stens = expand_batch(stens, inp.shape[0])
-
-        # do the sampling
-        # initialization
-        s_0 = stens[:, 0]
-        deltas_0 = delta_s[0]
-
-        # deterministic term: the model output should be squeezed
-        x = inp + self.model(inp, inp, inpu, static, s_0) * delta_s[0]
-
-        # noise term needs to be adjusted to have dimension [B, C, H, W]
-        with torch.no_grad():
-            noise = self.noise_module(update_internal_state=True).squeeze(1)
-
-        x = x + self.sigma_fn(s_0.reshape(-1, 1, 1, 1)) * torch.sqrt(deltas_0) * noise
-
-        # trajectory: upper bound is n_steps-1, like in the paper
-        for i in range(1, n_steps):
-
-            # get s and deltas
-            s_i = stens[:, i]
-            deltas_i = delta_s[i]
-
-            # pass to bhat computation, get everything into shape: [B, C, H, W]
-            bhat = self._compute_bhat(x, inp, inpu, static, s_i, foellmer=self.use_foellmer)
-
-            # deterministic part
-            x = x + bhat * deltas_i
-
-            # noise term
-            with torch.no_grad():
-                noise = self.noise_module(update_internal_state=True).squeeze(1)
-
-            x = x + torch.sqrt(self.gsq_fn(s_i.reshape(-1, 1, 1, 1), foellmer=self.use_foellmer) * deltas_i) * noise
-
-        return x
-
-    def forward(self, inp, tar=None, dynamic_features=None, n_samples=1, n_steps=1):
-        r"""
-        Train on interpolant samples, or generate a forecast by integrating the SDE.
-
-        The two modes are genuinely different computations, selected by the
-        module's training mode. In training, interpolant times are sampled and
-        the model learns to predict the drift at those times, so ``tar`` is
-        required and ``n_samples`` controls how many times are drawn per batch
-        element. In evaluation, no target exists: the sampler integrates the
-        interpolant from the base distribution to the target distribution in
-        ``n_steps`` steps, and ``n_samples`` is unused.
-
-        The noise of the sampler is resized to the current input batch and
-        redrawn from its stationary distribution on entry, so callers that fold
-        an ensemble dimension into the batch can pass a ``(B * E, ...)`` input
-        without managing noise state themselves.
-
-        Parameters
-        ----------
-        inp : torch.Tensor
-            Input of shape ``(B, inp_chans, nlat, nlon)``.
-        tar : torch.Tensor, optional
-            Target of shape ``(B, out_chans, nlat, nlon)``. Required in
-            training mode, ignored in evaluation mode.
-        dynamic_features : dict, optional
-            The dynamic features of the input, name to ``(B, 1, C_f, nlat, nlon)``,
-            as in the batch. Required if the model takes dynamic features.
-        n_samples : int, optional
-            Number of interpolant time samples per batch element during
-            training, by default ``1``.
-        n_steps : int, optional
-            Number of integration steps during evaluation, by default ``1``.
-
-        Returns
-        -------
-        torch.Tensor or tuple of torch.Tensor
-            In training mode, a ``(drift_pred, drift)`` pair -- the model's
-            predicted drift and the analytic drift of the interpolant path --
-            for the loss to compare. In evaluation mode, the generated forecast
-            of shape ``(B, out_chans, nlat, nlon)``.
+        Replace the keys by a copy of ``newstate``.
 
         Raises
         ------
         ValueError
-            If the dynamic features do not match the ones the model takes.
+            If ``newstate`` is not one key per sample.
         """
-        # Keep the noise sized to the current input batch so callers that fold an
-        # ensemble dim into the batch (e.g. stochastic_trainer.validate_one_epoch)
-        # can hand us a (B*E, ...) input without any state-resize plumbing of their own.
-        # Drawing a fresh stationary state here also means the very first noise read
-        # inside _forward_train / _forward_eval sees a non-trivial sample.
-        self.noise_module.update(replace_state=True, batch_size=inp.shape[0])
-        inpu = self._stack_dynamic_features(dynamic_features)
-        if self.training:
-            return self._forward_train(inp, tar, inpu, n_samples=n_samples)
+        if newstate.dim() != 1:
+            raise ValueError(f"The keys are one per sample, (B,), got shape {tuple(newstate.shape)}")
+        self.state = newstate.detach().to(device="cpu", dtype=torch.int64).clone()
+
+    def forward(self) -> torch.Tensor:
+        r"""The keys, ``(B,)``."""
+        return self.state
+
+
+def interpolant_config(params) -> Dict[str, Any]:
+    r"""
+    The configuration of the stochastic interpolant.
+
+    Read from the ``stochastic_interpolant`` block of ``params``; a setting it
+    does not hold falls back to its earlier top-level key, then to its default.
+
+    Parameters
+    ----------
+    params : ParamsBase
+        The run configuration.
+
+    Returns
+    -------
+    dict
+        ``epsilon``
+            Scale of the noise of the path, :math:`\sigma(s) = \varepsilon (1 - s)`.
+        ``foellmer``
+            Sample with the diffusion of the Föllmer process instead of
+            :math:`\sigma`.
+        ``antithetic``
+            Train on each interpolation time :math:`s` and on :math:`1 - s`.
+        ``n_samples``
+            Interpolation times per sample in training.
+        ``n_steps``
+            Euler-Maruyama steps per forecast step.
+        ``time_aware``
+            Pass :math:`s` to the network as a second argument,
+            ``network(x, s)`` with ``s`` of shape ``(B,)``, instead of as an
+            input channel.
+        ``seed``
+            Seed of the interpolation times in training.
+
+    Raises
+    ------
+    ValueError
+        If the block holds an unknown setting.
+    """
+    block = dict(params.get("stochastic_interpolant", None) or {})
+    unknown = set(block) - set(_DEFAULTS)
+    if unknown:
+        raise ValueError(f"Unknown stochastic_interpolant settings {sorted(unknown)}, known are {sorted(_DEFAULTS)}")
+
+    config = {}
+    for key, default in _DEFAULTS.items():
+        if key in block:
+            config[key] = block[key]
+        elif (key in _LEGACY_KEYS) and (params.get(_LEGACY_KEYS[key], None) is not None):
+            config[key] = params.get(_LEGACY_KEYS[key])
         else:
-            return self._forward_eval(inp, inpu, n_steps=n_steps)
+            config[key] = default
+    return config
+
+
+def interpolant_input_channels(params) -> int:
+    r"""
+    The input channels of the network of a stochastic interpolant.
+
+    The packed window, as for a :class:`~makani.models.stepper.StepWrapper`, the
+    state along the path and, unless the network is time aware, the
+    interpolation time as a channel of its own.
+
+    Parameters
+    ----------
+    params : ParamsBase
+        The run configuration, with the channel counts the driver derives.
+
+    Returns
+    -------
+    int
+        The number of input channels.
+    """
+    return params.N_in_channels + params.N_out_channels + (0 if interpolant_config(params)["time_aware"] else 1)
+
+
+class StochasticInterpolantWrapper(StepWrapper):
+    r"""
+    A :class:`~makani.models.stepper.StepWrapper` that forecasts with a stochastic interpolant.
+
+    The window is prepared as for any model -- dynamic features, input noise,
+    history normalization, static features -- and the prediction of a step is
+    post-processed as for any model, so the interpolant runs over rollouts,
+    in model packages and in the inferencer like a deterministic model. What
+    differs is the step: instead of one network forward, :meth:`predict_step`
+    integrates the SDE of the interpolant over ``n_steps`` steps, each
+    evaluating the drift network. The path runs in the space the network
+    predicts in, after history normalization.
+
+    In training, ``forward(rollout, drift=True)`` returns the drift of the
+    network and that of the path at random interpolation times, for the loss to
+    compare.
+
+    Parameters
+    ----------
+    params : ParamsBase
+        Configuration, see :func:`interpolant_config` for the settings of the
+        interpolant. The input and the output channels have to be the same.
+    model_handle : callable
+        Builds the drift network, with the input channels of
+        :func:`interpolant_input_channels`.
+
+    Attributes
+    ----------
+    config : dict
+        The settings of the interpolant, see :func:`interpolant_config`.
+    path_keys : PathKeys
+        The keys of the noise of the path and of the interpolation times,
+        driven by :attr:`noise` under the name ``"path_noise"``: a rollout
+        advances them once per step, see :meth:`path_noise` and
+        :meth:`interpolation_times`.
+    path_field : IsotropicGaussianRandomFieldS2
+        Transforms the coefficients drawn from the keys to a field on the grid
+        of the model.
+
+    Raises
+    ------
+    ValueError
+        If the input and the output channels differ, or constraints are
+        configured.
+    """
+
+    def __init__(self, params, model_handle):
+        in_channels = params.get("in_channels", None)
+        out_channels = params.get("out_channels", None)
+        if (in_channels is not None) and (out_channels is not None) and (list(in_channels) != list(out_channels)):
+            raise ValueError(
+                "The stochastic interpolant starts its path from the current state, so the input and the output "
+                f"channels have to be the same, got {list(in_channels)} and {list(out_channels)}"
+            )
+        if hasattr(params, "constraints"):
+            raise ValueError("Constraints are not supported by the stochastic interpolant: it predicts a drift")
+
+        super().__init__(params, model_handle)
+
+        self.config = interpolant_config(params)
+        self.epsilon = float(self.config["epsilon"])
+        self.foellmer = bool(self.config["foellmer"])
+        self.antithetic = bool(self.config["antithetic"])
+        self.n_samples = int(self.config["n_samples"])
+        self.n_steps = int(self.config["n_steps"])
+        self.time_aware = bool(self.config["time_aware"])
+
+        # the keys of the random draws, driven by the controller with the other noise processes of the model
+        self.path_keys = PathKeys(params.batch_size, seed=self.config["seed"])
+        self.noise = NoiseController(self._noise_processes())
+
+        # transforms the coefficients drawn from the keys to white noise on the grid of the model; its own
+        # generators are not used
+        self.path_field = IsotropicGaussianRandomFieldS2(
+            tuple(self.preprocessor.img_shape_resampled),
+            params.batch_size,
+            params.N_out_channels,
+            num_time_steps=1,
+            sigma=1.0,
+            alpha=0.0,
+            grid_type=params.model_grid_type,
+        )
+        # the shard of the spectral coefficients this rank draws, as the model is laid out when it is built
+        self._spatial_rank = comm.get_rank("spatial")
+
+    def _noise_processes(self):
+        # the processes of a StepWrapper, then the keys of the path; called by StepWrapper.__init__ before they exist
+        processes = super()._noise_processes()
+        if "path_keys" in self._modules:
+            processes[PATH_NOISE] = self.path_keys
+        return processes
+
+    # ------------------------------------------------------------------ schedule
+
+    def alpha(self, s):
+        return 1.0 - s
+
+    def dalpha(self, s):
+        return -torch.ones_like(s)
+
+    def beta(self, s):
+        return torch.square(s)
+
+    def dbeta(self, s):
+        return 2.0 * s
+
+    def sigma(self, s):
+        return self.epsilon * (1.0 - s)
+
+    def dsigma(self, s):
+        return -self.epsilon * torch.ones_like(s)
+
+    def gamma(self, s):
+        return torch.sqrt(s) * self.sigma(s)
+
+    def dgamma(self, s):
+        # the path draws z once, gamma(s) z = sigma(s) W_s with W_s = sqrt(s) z: its time derivative in the
+        # sense of the paper differentiates sigma only, the increments of W are what the SDE noise supplies
+        return torch.sqrt(s) * self.dsigma(s)
+
+    def gsq(self, s):
+        r"""
+        Squared diffusion coefficient of the sampling SDE.
+
+        :math:`\sigma^2(s)` by default; with ``foellmer``, the diffusion of the
+        Föllmer process, which shares the marginals of the path.
+        """
+        if not self.foellmer:
+            return torch.square(self.sigma(s))
+        ratio = torch.where(s > 0, s * self.dbeta(s) / self.beta(s), torch.full_like(s, 2.0))
+        term1 = 2.0 * torch.square(self.sigma(s)) * ratio
+        term2 = 2.0 * s * self.sigma(s) * self.dsigma(s)
+        return torch.abs(term1 - term2 - torch.square(self.sigma(s)))
+
+    def score(self, x, x0, b, s):
+        r"""
+        The score :math:`\nabla_x \log \rho_s(x)` of the path, from its drift ``b``.
+
+        For a Gaussian interpolant, drift and score are related in closed form,
+        so one network serves both. Singular at :math:`s = 0` and :math:`s = 1`,
+        where the sampler never evaluates it.
+        """
+        a = 1.0 / (s * self.sigma(s) * (self.dbeta(s) * self.sigma(s) - self.beta(s) * self.dsigma(s)))
+        c = x * self.dbeta(s) + (self.beta(s) * self.dalpha(s) - self.dbeta(s) * self.alpha(s)) * x0
+        return a * (self.beta(s) * b - c)
+
+    def path(self, x0, x1, z, s):
+        r"""
+        The point of the path at time ``s`` and its time derivative, the drift to learn.
+
+        Parameters
+        ----------
+        x0, x1, z : torch.Tensor
+            Start, end and noise of the path, of the same shape.
+        s : torch.Tensor
+            Times, broadcastable against them.
+
+        Returns
+        -------
+        tuple of torch.Tensor
+            :math:`I_s` and :math:`\partial_s I_s`.
+        """
+        point = self.alpha(s) * x0 + self.beta(s) * x1 + self.gamma(s) * z
+        drift = self.dalpha(s) * x0 + self.dbeta(s) * x1 + self.dgamma(s) * z
+        return point, drift
+
+    # ------------------------------------------------------------------ network
+
+    def _drift_network(self, inpans, x, s, use_checkpoint=False):
+        # the drift at (x, s), conditioned on the packed window; s of shape (B,)
+        if self.time_aware:
+            args = (torch.cat([inpans, x], dim=1), s)
+        else:
+            s_channel = s.reshape(-1, 1, 1, 1).expand(-1, 1, x.shape[-2], x.shape[-1]).to(x.dtype)
+            args = (torch.cat([inpans, x, s_channel], dim=1),)
+        if use_checkpoint:
+            return checkpoint(self.model, *args, use_reentrant=False, preserve_rng_state=True)
+        return self.model(*args)
+
+    @torch.compiler.disable
+    def path_noise(self, substep: int) -> torch.Tensor:
+        r"""
+        The noise of one sub-step of the path, derived from the current keys.
+
+        Each sample draws the coefficients of its shard from a generator seeded
+        by its key, the sub-step and the spatial rank, so the shards of a sample
+        draw different coefficients, and a sample its own noise whatever the
+        batch it is in.
+
+        Parameters
+        ----------
+        substep : int
+            The sub-step of the SDE, from 0; the training draws use 0.
+
+        Returns
+        -------
+        torch.Tensor
+            White noise, ``(B, C, H, W)`` on this rank's part of the grid.
+        """
+        keys = self.noise.sample(PATH_NOISE).tolist()
+        field = self.path_field
+        device = field.sigma_l.device
+        shape = (1,) + tuple(field._state_shape_suffix)
+        coefficients = []
+        for key in keys:
+            generator = torch.Generator(device=device)
+            generator.manual_seed(_derived_seed(key, substep, self._spatial_rank))
+            coefficients.append(torch.randn(shape, generator=generator, device=device, dtype=torch.float32))
+        field.set_tensor_state(torch.cat(coefficients, dim=0))
+        return field().squeeze(1)
+
+    @torch.compiler.disable
+    def interpolation_times(self, device=None, dtype=torch.float32) -> torch.Tensor:
+        r"""
+        The interpolation times of a training step, derived from the current keys.
+
+        The same on all model ranks of a sample. With ``antithetic``, the
+        times :math:`s` are followed by :math:`1 - s`.
+
+        Returns
+        -------
+        torch.Tensor
+            ``(B, n_samples)``, or ``(B, 2 * n_samples)`` if antithetic.
+        """
+        times = []
+        for key in self.noise.sample(PATH_NOISE).tolist():
+            generator = torch.Generator(device=torch.device("cpu"))
+            generator.manual_seed(_derived_seed(key, _TIMES_TAG))
+            times.append(torch.rand(self.n_samples, generator=generator, dtype=torch.float64))
+        s = torch.stack(times).to(device=device, dtype=dtype)
+        if self.antithetic:
+            s = torch.cat([s, 1.0 - s], dim=1)
+        return s
+
+    def _current_state(self, inp, stats):
+        # the latest step of the window, in the space the network predicts in: the start of the path
+        return self.preprocessor.history_normalize(inp[:, -1:], stats, target=True).squeeze(1)
+
+    # ------------------------------------------------------------------ step
+
+    def _sample(self, inpans, x0, use_checkpoint=False):
+        # Euler-Maruyama from s = 0 to s = 1 in n_steps steps; the score correction of the Föllmer diffusion
+        # is singular at s = 0, so the first step uses sigma, as in the paper
+        batch_size = x0.shape[0]
+        times = torch.linspace(0.0, 1.0, self.n_steps + 1, dtype=x0.dtype, device=x0.device)
+        x = x0
+        for i in range(self.n_steps):
+            s = times[i].expand(batch_size)
+            ds = times[i + 1] - times[i]
+            b = self._drift_network(inpans, x, s, use_checkpoint)
+            sr = s.reshape(-1, 1, 1, 1)
+            if i == 0:
+                diffusion = self.sigma(sr) * torch.sqrt(ds)
+            else:
+                if self.foellmer:
+                    b = b + 0.5 * (self.gsq(sr) - torch.square(self.sigma(sr))) * self.score(x, x0, b, sr)
+                diffusion = torch.sqrt(self.gsq(sr) * ds)
+            x = x + b * ds + diffusion * self.path_noise(i)
+        return x
+
+    def _predict_window(self, inp, dynamic_features, noise, use_checkpoint: bool = False):
+        pp = self.preprocessor
+        inpans, stats = self._prepare_window(inp, dynamic_features, noise)
+        x0 = self._current_state(inp, stats)
+        predn = pp.correct_bias(self._sample(inpans, x0, use_checkpoint)).unsqueeze(1)
+        return pp.history_denormalize(predn, target=True, stats=stats)
+
+    def check_encodable(self):
+        r"""
+        The interpolant has no latent state of its own to return.
+
+        Raises
+        ------
+        NotImplementedError
+            Always.
+        """
+        raise NotImplementedError("The stochastic interpolant does not expose a latent state")
+
+    # ------------------------------------------------------------------ training
+
+    def drift_pairs(self, rollout: Rollout):
+        r"""
+        The drift of the network and that of the path, over the steps of a rollout.
+
+        Every step predicts from the true state: the window moves on by the
+        target, not by a forecast. At each step, ``n_samples`` interpolation
+        times per sample (twice that if antithetic) are drawn, and one field of
+        the path noise per sample.
+
+        Parameters
+        ----------
+        rollout : Rollout
+            The rollout, not started yet, of a batch with targets and without an
+            ensemble.
+
+        Returns
+        -------
+        tuple of torch.Tensor
+            The drift of the network and the drift of the path, both
+            ``(n_steps * B * S, C, H, W)``.
+
+        Raises
+        ------
+        ValueError
+            If the rollout has an ensemble or no targets, or does not drive the
+            noise of the model.
+        """
+        if rollout.ensemble_size != 1:
+            raise ValueError("The drift is trained without an ensemble")
+        if (rollout.noise is not None) and (rollout.noise is not self.noise):
+            raise ValueError(
+                "The rollout drives the noise of another model: make it with Rollout(..., noise=model.noise)"
+            )
+        if self.noise.is_stochastic and (rollout.noise is None):
+            raise ValueError(
+                "The model is stochastic, but the rollout has no noise: make it with Rollout(..., noise=model.noise)"
+            )
+
+        pp = self.preprocessor
+        predicted, expected = [], []
+        for step in rollout:
+            if step.target is None:
+                raise ValueError("The drift is trained on a rollout with targets")
+            self._check_step_noise(step)
+
+            inpans, stats = self._prepare_window(step.input, step.input_dynamic_features, self._input_noise())
+            with torch.no_grad():
+                x0 = self._current_state(step.input, stats)
+                x1 = pp.history_normalize(step.target, stats, target=True).squeeze(1)
+                s = self.interpolation_times(x0.device, x0.dtype)
+                z = self.path_noise(0)
+                # (B, S, C, H, W)
+                point, drift = self.path(x0.unsqueeze(1), x1.unsqueeze(1), z.unsqueeze(1), s.reshape(*s.shape, 1, 1, 1))
+
+            n = s.shape[1]
+            predicted.append(
+                self._drift_network(inpans.repeat_interleave(n, dim=0), point.flatten(0, 1), s.flatten(0, 1))
+            )
+            expected.append(drift.flatten(0, 1))
+            rollout.advance(step.target)
+
+        return torch.cat(predicted, dim=0), torch.cat(expected, dim=0)
+
+    def forward(self, rollout: Rollout, drift: bool = False):
+        r"""
+        Forecast over a rollout, or return the drift pairs to train on.
+
+        Parameters
+        ----------
+        rollout : Rollout
+            The rollout, not started yet.
+        drift : bool, optional
+            Return :meth:`drift_pairs` instead of the forecast. By default
+            ``False``, the forecast of
+            :meth:`~makani.models.stepper.StepWrapper.forward`.
+
+        Returns
+        -------
+        torch.Tensor or tuple of torch.Tensor
+            The forecast, ``(B * E, n_steps, C, H, W)``, or the drift pairs.
+        """
+        if drift:
+            return self.drift_pairs(rollout)
+        return super().forward(rollout)

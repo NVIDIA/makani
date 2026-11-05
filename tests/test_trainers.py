@@ -205,14 +205,7 @@ class TestTrainer(_TrainerTestCase):
 
     @staticmethod
     def _forward(trainer, inp):
-        """The trained model on a flat input, with a flat output for the comparisons.
-
-        The StepWrapper takes a one-step rollout and returns the time axis
-        explicitly; the stochastic interpolant takes the time steps folded into
-        the channels.
-        """
-        if isinstance(trainer, StochasticTrainer):
-            return trainer.model(inp)
+        """The trained model on a flat input, over a one-step rollout, with a flat output for the comparisons."""
         return trainer.model(single_step_rollout(inp.unsqueeze(1))).flatten(1, 2)
 
     @parameterized.expand(test_parameters, skip_on_empty=True)
