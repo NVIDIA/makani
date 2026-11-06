@@ -377,6 +377,36 @@ class BaseNoiseS2(nn.Module):
         """
         return self.state.detach().clone()
 
+    def get_live_state(self):
+        r"""
+        Return the current spectral state itself, not a copy.
+
+        With its graph, if the noise is learnable and the state came from :meth:`update` with gradients
+        enabled: the parameters of the process reach its draws through it. Safe to hold across further
+        updates, since the state is replaced, never written into, see :meth:`_set_state`.
+
+        Returns
+        -------
+        torch.Tensor
+            The state buffer, shape ``(batch, *self._state_shape_suffix)``.
+        """
+        return self.state
+
+    def set_live_state(self, state):
+        r"""
+        Install a state from :meth:`get_live_state` as it is, graph included.
+
+        For drawing again from a state the process had before, see
+        :meth:`~makani.models.noise_controller.NoiseController.drawing_from`. Unlike
+        :meth:`set_tensor_state`, nothing is copied or checked.
+
+        Parameters
+        ----------
+        state : torch.Tensor
+            A state of this process, from :meth:`get_live_state`.
+        """
+        self._set_state(state)
+
     def set_tensor_state(self, newstate):
         r"""
         Replace the spectral state, taking on the batch size of the new one.

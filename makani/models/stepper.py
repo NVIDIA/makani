@@ -228,10 +228,10 @@ class StepWrapper(nn.Module):
     @torch.compiler.disable
     def _checkpoint_with_noise(self, *args):
         # The noise the network draws itself is drawn again in the recompute, from the state of this step, which
-        # the rollout has advanced by then: the recompute context of the checkpoint draws from a copy of it. Dynamo
-        # cannot trace a checkpoint with a context of its own, so this runs eagerly, around the network compiled on
-        # its own, see compile_step.
-        states = self.noise.tensor_states(self._network_noise())
+        # the rollout has advanced by then: the recompute context of the checkpoint draws from that state itself,
+        # graph included. Dynamo cannot trace a checkpoint with a context of its own, so this runs eagerly, around
+        # the network compiled on its own, see compile_step.
+        states = self.noise.live_states(self._network_noise())
         network = self._compiled.get("network", self.model)
         return checkpoint(
             network,

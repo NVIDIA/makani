@@ -366,10 +366,11 @@ class TestGeneratorCheckpoint(unittest.TestCase):
 class _LatentNoiseNet(nn.Module):
     """A network that draws noise of its own: a learnable field added to its hidden features."""
 
-    def __init__(self, in_chans, out_chans, hidden=_C):
+    def __init__(self, in_chans, out_chans, hidden=_C, process=IsotropicGaussianRandomFieldS2):
         super().__init__()
         self.net = _TinyNet(in_chans, out_chans, hidden=hidden)
-        self.latent_noise = IsotropicGaussianRandomFieldS2(
+        # isotropic: the parameters enter in the draw; diffusion: they enter the state, in the update
+        self.latent_noise = process(
             img_shape=(_H, _W), batch_size=_B, num_channels=hidden, num_time_steps=1, seed=4242, learnable=True
         )
 
@@ -382,7 +383,7 @@ class _LatentNoiseNet(nn.Module):
         return self.net.fc2(torch.tanh(self.net.fc1(x) + eta))
 
 
-def _latent_wrapper(input_noise=None, constrained=False):
+def _latent_wrapper(input_noise=None, constrained=False, process=IsotropicGaussianRandomFieldS2):
     params = _params(0, False, input_noise)
     params.img_shape_x = params.img_shape_x_resampled = _H
     params.img_shape_y = params.img_shape_y_resampled = _W
@@ -390,7 +391,7 @@ def _latent_wrapper(input_noise=None, constrained=False):
     set_seed(333)
 
     def net():
-        return _LatentNoiseNet(3 + 1 + n_noise, 3)
+        return _LatentNoiseNet(3 + 1 + n_noise, 3, process=process)
 
     def constrained_net():
         # as the model registry wraps a network for params.constraints
@@ -491,8 +492,8 @@ class TestModelNoise(unittest.TestCase):
         grads = {name: p.grad for name, p in wrapper.named_parameters() if p.grad is not None}
         self.assertTrue(any(name.startswith("model.latent_noise.") for name in grads))
 
-    def _gradients_of_a_rollout(self, multistep_checkpoint, compiled=False):
-        wrapper = _latent_wrapper()
+    def _gradients_of_a_rollout(self, multistep_checkpoint, compiled=False, process=IsotropicGaussianRandomFieldS2):
+        wrapper = _latent_wrapper(process=process)
         wrapper.multistep_checkpoint = multistep_checkpoint
         if compiled:
             wrapper.compile_step()
@@ -503,16 +504,25 @@ class TestModelNoise(unittest.TestCase):
         loss.backward()
         return loss.detach(), {name: p.grad.clone() for name, p in wrapper.named_parameters() if p.grad is not None}
 
-    @parameterized.expand([("eager", False), ("compiled", True)])
-    def test_checkpointing_keeps_the_gradients_of_latent_noise(self, _, compiled):
+    @parameterized.expand(
+        [
+            ("eager", False, IsotropicGaussianRandomFieldS2),
+            ("compiled", True, IsotropicGaussianRandomFieldS2),
+            ("eager_diffusion", False, DiffusionNoiseS2),
+            ("compiled_diffusion", True, DiffusionNoiseS2),
+        ]
+    )
+    def test_checkpointing_keeps_the_gradients_of_latent_noise(self, _, compiled, process):
         # the recompute of a checkpointed step draws the latent noise of that step, which the rollout has advanced;
-        # compiled, the checkpointed network runs outside the compiled step, compiled on its own
+        # compiled, the checkpointed network runs outside the compiled step, compiled on its own. The parameters of
+        # learnable diffusion noise reach the draw through the state, so the recompute has to draw from the state
+        # with its graph, not from a copy
         if compiled and not (shutil.which("c++") or shutil.which("g++")):
             self.skipTest("inductor needs a C++ compiler on the CPU")
-        loss, grads = self._gradients_of_a_rollout(multistep_checkpoint=False)
+        loss, grads = self._gradients_of_a_rollout(multistep_checkpoint=False, process=process)
         try:
             loss_checkpointed, grads_checkpointed = self._gradients_of_a_rollout(
-                multistep_checkpoint=True, compiled=compiled
+                multistep_checkpoint=True, compiled=compiled, process=process
             )
         finally:
             torch._dynamo.reset()
@@ -532,7 +542,7 @@ class TestModelNoise(unittest.TestCase):
     def test_drawing_from_a_state_is_temporary(self):
         wrapper = _latent_wrapper()
         wrapper.noise.advance(replace_state=True, batch_size=_B)
-        states = wrapper.noise.tensor_states(["model.latent"])
+        states = wrapper.noise.live_states(["model.latent"])
         first = wrapper.noise.sample("model.latent")
         wrapper.noise.advance()
         version = wrapper.noise.version
