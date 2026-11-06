@@ -28,7 +28,7 @@ from makani.models import model_registry
 
 # distributed computing stuff
 from makani.utils.driver import Driver
-from makani.utils.checkpoint_helpers import load_checkpoint
+from makani.utils.checkpoint_helpers import load_checkpoint, upgrade_checkpoint
 from makani.utils.YParams import ParamsBase
 
 
@@ -174,6 +174,12 @@ def consolidate_checkpoints(input_path, output_path, checkpoint_version=0):
                 )
                 gathered_state_dict[pname][idx_ranges] = model_states[cfile][pname]
 
+    # checkpoints of earlier format versions
+    upgrade_checkpoint(
+        {"model_state": gathered_state_dict, **_format_tag(checkpoints[checkpoint_paths[0]])},
+        model,
+    )
+
     print("Loading model using the consolidated checkpoint")
     # finally, load the gathered state dict
     model.load_state_dict(gathered_state_dict, strict=True)
@@ -186,6 +192,11 @@ def consolidate_checkpoints(input_path, output_path, checkpoint_version=0):
         model=model,
         checkpoint_mode="flexible",
     )
+
+
+def _format_tag(checkpoint):
+    # the format tag of a checkpoint, as a dict to merge, empty for one written before it
+    return {"checkpoint_format": checkpoint["checkpoint_format"]} if "checkpoint_format" in checkpoint else {}
 
 
 def average_checkpoints(input_path, output_path):
