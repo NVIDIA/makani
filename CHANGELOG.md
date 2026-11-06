@@ -16,6 +16,7 @@
 
 **Models**
 - Networks can own noise processes, e.g. in latent space, listed through `noise_processes()`; rollouts drive them like the input noise.
+- The stochastic interpolant is brought up to speed with the rest of the codebase: a `StepWrapper` driven by rollouts and the noise controller, configured by a `stochastic_interpolant` block. Breaking: earlier interpolant checkpoints do not load, and `n_future > 0` is refused.
 
 **Fixed**
 - Learnable white noise (`IsotropicGaussianRandomFieldS2`) under spatial model parallelism: its `sigma_l` is sharded over `h` and `w` but was not annotated as shared over `matmul` only, so the gradient reduction summed the shards of other ranks (or failed on shards of different sizes) and `sync_params` overwrote them with those of rank 0.

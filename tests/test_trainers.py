@@ -21,6 +21,7 @@ import tempfile
 from typing import Optional
 
 import unittest
+from unittest import mock
 from parameterized import parameterized
 
 from makani.utils.functions import flatten_history
@@ -205,15 +206,12 @@ class TestTrainer(_TrainerTestCase):
 
     @staticmethod
     def _forward(trainer, inp):
-        """The trained model on a flat input, with a flat output for the comparisons.
+        """The trained model on a flat input, over a one-step rollout, with a flat output for the comparisons.
 
-        The StepWrapper takes a one-step rollout and returns the time axis
-        explicitly; the stochastic interpolant takes the time steps folded into
-        the channels.
+        The rollout drives the noise of the model, which the stochastic interpolant always has.
         """
-        if isinstance(trainer, StochasticTrainer):
-            return trainer.model(inp)
-        return trainer.model(single_step_rollout(inp.unsqueeze(1))).flatten(1, 2)
+        noise = getattr(trainer.model, "noise", None)
+        return trainer.model(single_step_rollout(inp.unsqueeze(1), noise=noise)).flatten(1, 2)
 
     @parameterized.expand(test_parameters, skip_on_empty=True)
     def test_trainer(self, trainer_handle, test_train, test_eval, devstring, verbose=False):
@@ -348,6 +346,8 @@ class TestTrainerCheckpointing(_TrainerTestCase):
             # noise of the first epoch again
             (Trainer, {"type": "white", "mode": "concatenate", "n_channels": 1}),
             (EnsembleTrainer, {"type": "diffusion", "mode": "concatenate", "n_channels": 1, "centered": True}),
+            # the interpolant draws its path noise and interpolation times from keys the noise controller drives
+            (StochasticTrainer, None),
         ],
         skip_on_empty=True,
     )
@@ -617,6 +617,29 @@ class TestTrainerRollouts(_TrainerTestCase):
 
         self.assertGreater(n_batches, 0)
         self.assertEqual(len(updates), n_batches * n_steps)
+
+    def test_stochastic_compile_keeps_the_model(self):
+        # inductor compiles the drift network inside the wrapper, and the trainer keeps the model itself, so that
+        # validation reaches the steps of the rollout; compiling the model whole hid them behind the compiled module
+        from makani.models.stochastic_interpolant import StochasticInterpolantWrapper
+
+        params = self.params
+        params.jit_mode = "inductor"
+        params.valid_autoreg_steps = self._VALID_STEPS
+        with mock.patch.object(StochasticInterpolantWrapper, "compile_step") as compile_step:
+            trainer = StochasticTrainer(params, 0, device=torch.device("cpu"))
+        compile_step.assert_called_once()
+        self.assertIsInstance(trainer.model_eval, StochasticInterpolantWrapper)
+        trainer.metrics = _RecordingMetrics()
+        trainer.validate_one_epoch(trainer.epoch)
+        self.assertGreater(len(trainer.metrics.updates), 0)
+
+    def test_stochastic_refuses_multistep_training(self):
+        # a later step from the true state would only add a single-step pair, see drift_pairs
+        params = self.params
+        params.n_future = 1
+        with self.assertRaisesRegex(ValueError, "single steps"):
+            StochasticTrainer(params, 0, device=torch.device("cpu"))
 
     def test_stochastic_validation_rolls_out(self):
         # the interpolant trains on single steps, but validates over several, with the zenith angle
