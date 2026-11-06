@@ -14,117 +14,13 @@
 # limitations under the License.
 
 
-import torch.nn.functional as F
 import torch
 import torch.nn as nn
 
 # mp stuff
 from makani.utils import comm
 from makani.models.common import DropPath, MLP, PatchEmbed2D
-from makani.mpu.layers import DistributedMLP, DistributedAttention
-
-
-class Attention(nn.Module):
-    r"""
-    Standard multi-head self-attention.
-
-    Projects the input to queries, keys and values, splits them into
-    ``num_heads`` independent subspaces, and applies scaled dot-product
-    attention:
-
-    .. math::
-
-        \mathrm{Attention}(Q, K, V) =
-        \mathrm{softmax}\!\left(\frac{Q K^\top}{\sqrt{d_h}}\right) V
-
-    Dispatches to :func:`torch.nn.functional.scaled_dot_product_attention`, so
-    it uses a fused kernel where one is available.
-
-    Parameters
-    ----------
-    dim : int
-        Feature dimension. Must be divisible by ``num_heads``.
-    input_format : str, optional
-        Input layout, by default ``"traditional"`` (channels last).
-    num_heads : int, optional
-        Number of attention heads, by default ``8``.
-    qkv_bias : bool, optional
-        Whether the QKV projection carries a bias, by default ``False``.
-    qk_norm : bool, optional
-        Normalize queries and keys before the attention product, by default
-        ``False``. Bounds the logits and stabilizes training at large widths.
-    attn_drop_rate : float, optional
-        Dropout probability on the attention weights, by default ``0.0``.
-    proj_drop_rate : float, optional
-        Dropout probability after the output projection, by default ``0.0``.
-    norm_layer : callable, optional
-        Normalization used for ``qk_norm``, by default :class:`torch.nn.LayerNorm`.
-
-    Raises
-    ------
-    ValueError
-        If ``dim`` is not divisible by ``num_heads``.
-
-    See Also
-    --------
-    makani.mpu.layers.DistributedAttention : head-parallel version.
-    """
-
-    def __init__(
-        self,
-        dim,
-        input_format="traditional",
-        num_heads=8,
-        qkv_bias=False,
-        qk_norm=False,
-        attn_drop_rate=0.0,
-        proj_drop_rate=0.0,
-        norm_layer=nn.LayerNorm,
-    ):
-        super().__init__()
-        if dim % num_heads != 0:
-            raise ValueError(f"dim {dim} should be divisible by num_heads {num_heads}")
-        self.num_heads = num_heads
-        self.head_dim = dim // num_heads
-        self.scale = self.head_dim**-0.5
-
-        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
-        self.q_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
-        self.k_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
-        self.attn_drop_rate = attn_drop_rate
-
-        self.proj = nn.Linear(dim, dim)
-
-        if proj_drop_rate > 0:
-            self.proj_drop = nn.Dropout(proj_drop_rate)
-        else:
-            self.proj_drop = nn.Identity()
-
-    def forward(self, x):
-        r"""
-        Apply multi-head self-attention.
-
-        Parameters
-        ----------
-        x : torch.Tensor
-            Token tensor of shape ``(B, N, dim)``.
-
-        Returns
-        -------
-        torch.Tensor
-            Tensor of shape ``(B, N, dim)``.
-        """
-        B, N, C = x.shape
-        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
-        q, k, v = qkv.unbind(0)
-        q, k = self.q_norm(q), self.k_norm(k)
-
-        x = F.scaled_dot_product_attention(q, k, v, dropout_p=self.attn_drop_rate)
-
-        x = x.transpose(1, 2).reshape(B, N, C)
-        x = self.proj(x)
-        x = self.proj_drop(x)
-        return x
+from makani.mpu.layers import DistributedMLP, MultiHeadAttention
 
 
 class Block(nn.Module):
@@ -184,27 +80,17 @@ class Block(nn.Module):
     ):
         super().__init__()
 
-        if comm.get_size(comm_name) > 1:
-            self.attn = DistributedAttention(
-                dim,
-                input_format="traditional",
-                comm_name=comm_name,
-                num_heads=num_heads,
-                qkv_bias=qkv_bias,
-                attn_drop_rate=attn_drop_rate,
-                proj_drop_rate=mlp_drop_rate,
-                norm_layer=norm_layer,
-            )
-        else:
-            self.attn = Attention(
-                dim,
-                input_format="traditional",
-                num_heads=num_heads,
-                qkv_bias=qkv_bias,
-                attn_drop_rate=attn_drop_rate,
-                proj_drop_rate=mlp_drop_rate,
-                norm_layer=norm_layer,
-            )
+        # the heads are split over the matmul ranks, if there are several
+        self.attn = MultiHeadAttention(
+            dim,
+            num_heads=num_heads,
+            qkv_bias=qkv_bias,
+            attn_drop_rate=attn_drop_rate,
+            proj_drop_rate=mlp_drop_rate,
+            norm_layer=norm_layer,
+            comm_name=comm_name,
+        )
+
         self.drop_path = DropPath(path_drop_rate) if path_drop_rate > 0.0 else nn.Identity()
 
         self.norm1 = norm_layer(dim)

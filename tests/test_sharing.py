@@ -28,11 +28,11 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from makani.mpu.helpers import AVG, DEFAULT_SHARING, MODEL_GROUPS, SUM, get_reductions, get_sharing
 from makani.mpu.layer_norm import DistributedGeometricInstanceNormS2, DistributedInstanceNorm2d
 from makani.mpu.layers import (
-    DistributedAttention,
     DistributedEncoderDecoder,
     DistributedMatmul,
     DistributedMLP,
     DistributedPatchEmbed,
+    MultiHeadAttention,
     StochasticMLP,
 )
 
@@ -96,7 +96,7 @@ class TestDistributedLayerSharing(unittest.TestCase):
             ("matmul_row", lambda: DistributedMatmul(16, 8, parallel_mode="row")),
             ("mlp", lambda: DistributedMLP(8, 16, 8)),
             ("encoder", lambda: DistributedEncoderDecoder(1, 8, 4, 16, nn.GELU)),
-            ("attention", lambda: DistributedAttention(16, num_heads=4, qkv_bias=True, qk_norm=True)),
+            ("attention", lambda: MultiHeadAttention(16, num_heads=4, qkv_bias=True, qk_norm=True)),
             (
                 "patch_embed_split",
                 lambda: DistributedPatchEmbed((16, 16), (4, 4), 3, 8, output_is_matmul_parallel=True),
@@ -129,7 +129,7 @@ class TestDistributedLayerSharing(unittest.TestCase):
         )
 
     def test_attention_norms_are_summed_over_the_heads(self):
-        attention = DistributedAttention(16, num_heads=4, qk_norm=True)
+        attention = MultiHeadAttention(16, num_heads=4, qk_norm=True)
         for norm in (attention.q_norm, attention.k_norm):
             for param in norm.parameters():
                 self.assertEqual(get_sharing(param)["matmul"], SUM)
