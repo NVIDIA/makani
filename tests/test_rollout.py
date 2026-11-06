@@ -24,7 +24,7 @@ from parameterized import parameterized
 
 from makani.models.stepper import StepWrapper
 from makani.models.noise_controller import NoiseController
-from makani.models.preprocessor import INPUT_NOISE
+from makani.models.model_input import INPUT_NOISE
 from makani.utils.dataloaders.batch import (
     INPUT,
     TARGET,
@@ -479,15 +479,21 @@ def _stepwise(wrapper, batch, push_forward=False):
 
     preds = []
     for k in range(batch[TARGET].shape[1]):
-        sample = None
-        if hasattr(pp, "input_noise"):
+        appended = [zenith]
+        adapter = wrapper.input_adapter
+        if adapter.input_noise is not None:
             # the noise module driven directly, without the controller, which is what is checked
-            pp.input_noise.update(replace_state=(k == 0), batch_size=inp.shape[0])
-            sample = pp.input_noise()
+            process = adapter.input_noise.process
+            process.update(replace_state=(k == 0), batch_size=inp.shape[0])
+            appended.append(process())
 
-        x = pp.assemble_input(inp, {ZENITH: zenith}, sample)
-        stats = pp.compute_history_stats(x)
-        predn = wrapper.model(pp.pack_model_input(pp.history_normalize(x, stats)))
+        # the state normalized with its statistics, the zenith angle and the noise with theirs, then the time folded
+        # into the channels
+        stats = pp.compute_history_stats(inp)
+        extra = torch.cat(appended, dim=2)
+        extra = pp.history_normalize(extra, pp.compute_history_stats(extra))
+        x = torch.cat([pp.history_normalize(inp, stats), extra], dim=2)
+        predn = wrapper.model(x.flatten(1, 2))
         pred = pp.history_denormalize(pp.correct_bias(predn).unsqueeze(1), stats, target=True)
         preds.append(pred)
 
@@ -868,7 +874,7 @@ class TestWrapperRollout(unittest.TestCase):
         wrapper.zero_grad()
         _loss(wrapper(_rollout(wrapper, batch, noise_state=state)), batch[TARGET]).backward()
         grads = _gradients(wrapper)
-        self.assertTrue(any(name.startswith("preprocessor.") for name in grads))
+        self.assertTrue(any(name.startswith("input_adapter.input_noise.") for name in grads))
 
 
 if __name__ == "__main__":

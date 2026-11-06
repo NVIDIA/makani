@@ -36,7 +36,6 @@ from typing import Any, Dict, Optional
 
 import torch
 import torch.nn as nn
-from torch.utils.checkpoint import checkpoint
 
 from makani.models.noise import IsotropicGaussianRandomFieldS2
 from makani.models.noise_controller import NoiseController
@@ -324,6 +323,7 @@ class StochasticInterpolantWrapper(StepWrapper):
         self.n_samples = int(self.config["n_samples"])
         self.n_steps = int(self.config["n_steps"])
         self.time_aware = bool(self.config["time_aware"])
+        self.input_adapter.time_aware = self.time_aware
 
         # the keys of the random draws, driven by the controller with the other noise processes of the model
         self.path_keys = PathKeys(params.batch_size, seed=self.config["seed"])
@@ -426,16 +426,11 @@ class StochasticInterpolantWrapper(StepWrapper):
 
     # ------------------------------------------------------------------ network
 
-    def _drift_network(self, inpans, x, s, use_checkpoint=False):
-        # the drift at (x, s), conditioned on the packed window; s of shape (B,)
-        if self.time_aware:
-            args = (torch.cat([inpans, x], dim=1), s)
-        else:
-            s_channel = s.reshape(-1, 1, 1, 1).expand(-1, 1, x.shape[-2], x.shape[-1]).to(x.dtype)
-            args = (torch.cat([inpans, x, s_channel], dim=1),)
-        if use_checkpoint:
-            return checkpoint(self.model, *args, use_reentrant=False, preserve_rng_state=True)
-        return self.model(*args)
+    def _drift_network(self, model_input, x, s, use_checkpoint=False):
+        # the drift at (x, s), conditioned on the input of the step; s of shape (B,). The network gets the whole
+        # input at every sub-step, so a flat one has it packed again, input noise and statistics included: deliberate,
+        # the network alone decides what it takes, and the packing is cheap next to its forward
+        return self._network(model_input.replace(path_state=x, time=s), use_checkpoint)
 
     @torch.compiler.disable
     def path_noise(self, substep: int) -> torch.Tensor:
@@ -498,7 +493,7 @@ class StochasticInterpolantWrapper(StepWrapper):
 
     # ------------------------------------------------------------------ step
 
-    def _sample(self, inpans, x0, use_checkpoint=False):
+    def _sample(self, model_input, x0, use_checkpoint=False):
         # Euler-Maruyama from s = 0 to s = 1 in n_steps steps; the score correction of the Föllmer diffusion
         # is singular at s = 0, so the first step uses sigma, as in the paper
         batch_size = x0.shape[0]
@@ -507,7 +502,7 @@ class StochasticInterpolantWrapper(StepWrapper):
         for i in range(self.n_steps):
             s = times[i].expand(batch_size)
             ds = times[i + 1] - times[i]
-            b = self._drift_network(inpans, x, s, use_checkpoint)
+            b = self._drift_network(model_input, x, s, use_checkpoint)
             sr = s.reshape(-1, 1, 1, 1)
             if i == 0:
                 diffusion = self.sigma(sr) * torch.sqrt(ds)
@@ -518,11 +513,12 @@ class StochasticInterpolantWrapper(StepWrapper):
             x = x + b * ds + diffusion * self.path_noise(i)
         return x
 
-    def _predict_window(self, inp, dynamic_features, noise, use_checkpoint: bool = False):
+    def _predict_window(self, inp, dynamic_features, use_checkpoint: bool = False):
         pp = self.preprocessor
-        inpans, stats = self._prepare_window(inp, dynamic_features, noise)
+        model_input = self._model_input(inp, dynamic_features)
+        stats = model_input.stats
         x0 = self._current_state(inp, stats)
-        predn = pp.correct_bias(self._sample(inpans, x0, use_checkpoint)).unsqueeze(1)
+        predn = pp.correct_bias(self._sample(model_input, x0, use_checkpoint)).unsqueeze(1)
         return pp.history_denormalize(predn, target=True, stats=stats)
 
     def compile_step(self, **compile_kwargs):
@@ -543,6 +539,10 @@ class StochasticInterpolantWrapper(StepWrapper):
         # see StepWrapper.compile_step for the recompile limit
         torch._dynamo.config.recompile_limit = int(os.getenv("MAKANI_INDUCTOR_COMPILE_LIMIT", "32"))
         self._drift_network = torch.compile(self._drift_network, **compile_kwargs)
+        # a checkpointed network with noise of its own runs outside the compiled call, see
+        # StepWrapper._checkpoint_with_noise, so it is compiled on its own as well
+        if self._network_noise():
+            self._compiled["network"] = torch.compile(self.model, **compile_kwargs)
 
     def check_encodable(self):
         r"""
@@ -610,7 +610,8 @@ class StochasticInterpolantWrapper(StepWrapper):
         self._check_step_noise(step)
 
         pp = self.preprocessor
-        inpans, stats = self._prepare_window(step.input, step.input_dynamic_features, self._input_noise())
+        model_input = self._model_input(step.input, step.input_dynamic_features)
+        stats = model_input.stats
         with torch.no_grad():
             x0 = self._current_state(step.input, stats)
             x1 = pp.history_normalize(step.target, stats, target=True).squeeze(1)
@@ -620,7 +621,7 @@ class StochasticInterpolantWrapper(StepWrapper):
             point, drift = self.path(x0.unsqueeze(1), x1.unsqueeze(1), z.unsqueeze(1), s.reshape(*s.shape, 1, 1, 1))
 
         n = s.shape[1]
-        predicted = self._drift_network(inpans.repeat_interleave(n, dim=0), point.flatten(0, 1), s.flatten(0, 1))
+        predicted = self._drift_network(model_input.repeat_interleave(n), point.flatten(0, 1), s.flatten(0, 1))
         # the rollout is finished with its only step
         rollout.advance(step.target)
 

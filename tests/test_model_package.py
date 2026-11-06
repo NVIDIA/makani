@@ -43,7 +43,7 @@ from makani.models.model_package import (
     load_time_loop,
     save_model_package,
 )
-from makani.models.preprocessor import INPUT_NOISE
+from makani.models.model_input import INPUT_NOISE
 from makani.models.stepper import StepWrapper
 from makani.utils.driver import Driver
 from makani.utils.dataloaders.batch import make_batch
