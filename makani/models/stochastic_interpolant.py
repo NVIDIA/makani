@@ -427,7 +427,9 @@ class StochasticInterpolantWrapper(StepWrapper):
     # ------------------------------------------------------------------ network
 
     def _drift_network(self, model_input, x, s, use_checkpoint=False):
-        # the drift at (x, s), conditioned on the input of the step; s of shape (B,)
+        # the drift at (x, s), conditioned on the input of the step; s of shape (B,). The network gets the whole
+        # input at every sub-step, so a flat one has it packed again, input noise and statistics included: deliberate,
+        # the network alone decides what it takes, and the packing is cheap next to its forward
         return self._network(model_input.replace(path_state=x, time=s), use_checkpoint)
 
     @torch.compiler.disable

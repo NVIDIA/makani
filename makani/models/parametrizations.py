@@ -367,15 +367,21 @@ class ConstraintsWrapper(nn.Module):
             return self.model.noise_processes()
         return {}
 
+    @property
+    def takes_model_input(self) -> bool:
+        r"""Whether the wrapped network takes a :class:`~makani.models.model_input.ModelInput`, which the wrapper passes on as it is."""
+        return bool(getattr(self.model, "takes_model_input", False))
+
     def forward(self, inp: torch.Tensor) -> torch.Tensor:
         r"""
         Run the wrapped model, if any, and apply the constraints to the result.
 
         Parameters
         ----------
-        inp : torch.Tensor
-            Model input if a model is wrapped, otherwise the field to constrain
-            directly.
+        inp : torch.Tensor or ModelInput
+            Model input if a model is wrapped, a
+            :class:`~makani.models.model_input.ModelInput` if it takes one, see
+            :attr:`takes_model_input`; otherwise the field to constrain directly.
 
         Returns
         -------

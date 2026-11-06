@@ -405,6 +405,25 @@ class TestStepWrapperInput(unittest.TestCase):
             tuple(pred.shape), (params.batch_size, 1, params.N_out_channels, params.img_shape_x, params.img_shape_y)
         )
 
+    def test_constraints_pass_the_model_input_on(self):
+        # get_model wraps the network in a ConstraintsWrapper when constraints are configured
+        from makani.models.parametrizations import ConstraintsWrapper
+
+        params = _params(add_zenith=True)
+
+        def constrained():
+            return ConstraintsWrapper(
+                [], params.channel_names, None, None, model_handle=lambda: _StructuredNet(params, with_noise=False)
+            )
+
+        wrapper = StepWrapper(params, constrained)
+        self.assertTrue(wrapper.model.takes_model_input)
+        x, zenith = self._window(params)
+        wrapper.predict(x, {ZENITH: zenith})
+        ((model_input, _),) = wrapper.model.model.seen
+        self.assertIsInstance(model_input, ModelInput)
+        self.assertIs(model_input.dynamic_features[ZENITH], zenith)
+
     def test_a_structured_network_has_to_take_the_configured_noise(self):
         params = _params(input_noise=_CONCATENATE)
         with self.assertRaisesRegex(ValueError, "lists no noise process"):
