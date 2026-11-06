@@ -577,6 +577,31 @@ def scatter_optimizer_state_dict(
     return optimizer_state_dict
 
 
+def upgrade_state_dict(model: nn.Module, state_dict, prefix: str = "") -> None:
+    r"""
+    Upgrade a state dict of an earlier version of a model to the current one, in place.
+
+    Every module of the model that defines a static ``upgrade_state_dict(state_dict, prefix)``
+    upgrades its own keys, e.g. :class:`~makani.models.common.layers.MLP` the names of its layers.
+    The modules also do so on :meth:`torch.nn.Module.load_state_dict`; a flexible restore looks the
+    parameters up by name before that, so it upgrades the whole state dict first. Upgrading is
+    idempotent.
+
+    Parameters
+    ----------
+    model : nn.Module
+        The model the state dict is for, as it is now.
+    state_dict : dict
+        The state dict, with the keys of ``model``.
+    prefix : str, optional
+        The prefix of the keys of ``model`` in ``state_dict``.
+    """
+    for name, module in model.named_modules():
+        upgrade = getattr(type(module), "upgrade_state_dict", None)
+        if upgrade is not None:
+            upgrade(state_dict, prefix + (name + "." if name else ""))
+
+
 def get_model_state_dict_prefix(model: nn.Module) -> str:
     """Return the key prefix that the model's state_dict uses.
 

@@ -534,6 +534,14 @@ class PatchRecovery3D(nn.Module):
         ]
 
 
+def _flatten_biases(state_dict, keys):
+    # biases kept as (1, C, 1, 1) by checkpoints of earlier versions, flattened to (C,)
+    for key in keys:
+        bias = state_dict.get(key, None)
+        if (bias is not None) and (bias.dim() == 4):
+            state_dict[key] = bias.reshape(-1)
+
+
 class EncoderDecoder(nn.Module):
     r"""
     Stack of pointwise layers used as an encoder or decoder head.
@@ -641,6 +649,34 @@ class EncoderDecoder(nn.Module):
             nn.init.constant_(encoder_modules[-1].bias, 0.0)
 
         self.fwd = nn.Sequential(*encoder_modules)
+
+        # checkpoints of a DistributedEncoderDecoder of earlier versions keep the biases of the nchw format as (1, C, 1, 1)
+        self._register_load_state_dict_pre_hook(self._upgrade_state_dict_hook)
+
+    @staticmethod
+    def upgrade_state_dict(state_dict, prefix=""):
+        r"""
+        Upgrade a state dict of an earlier version in place: a :class:`~makani.mpu.layers.DistributedEncoderDecoder`
+        kept the biases of the nchw format as ``(1, C, 1, 1)``.
+
+        Parameters
+        ----------
+        state_dict : dict
+            A state dict holding the layers.
+        prefix : str, optional
+            The prefix of the keys of the layers.
+        """
+        _flatten_biases(
+            state_dict,
+            [
+                k
+                for k in state_dict
+                if k.startswith(prefix + "fwd.") and k.endswith(".bias") and k.count(".") == prefix.count(".") + 2
+            ],
+        )
+
+    def _upgrade_state_dict_hook(self, state_dict, prefix, *args):
+        self.upgrade_state_dict(state_dict, prefix)
 
     def forward(self, x):
         r"""
@@ -805,22 +841,52 @@ class MLP(nn.Module):
         else:
             drop = nn.Identity()
 
+        # the layers under the names of DistributedMLP, so that a checkpoint of one restores into the other
+        self.fc1 = fc1
+        self.act = act
+        self.drop = drop
+        self.fc2 = fc2
+
         if self.use_te:
-            # keep the modules separate so forward can insert the channels-last
-            # transposes around the te GEMMs.
-            self.fc1 = fc1
-            self.fc2 = fc2
-            self.act = act
-            self.drop = drop
             # Dropout2d ("features") drops whole channels at dim=1, so it needs the
             # nchw layout and forces a bounce back from channels-last around each
             # dropout. Plain Dropout ("iid") and Identity are elementwise/no-ops, so
             # for them we can stay channels-last across the whole MLP and pay only
             # one permute in + one out.
             self.inner_transpose = isinstance(drop, nn.Dropout2d)
-        else:
-            # create forward pass
-            self.fwd = nn.Sequential(fc1, act, drop, fc2, drop)
+
+        # checkpoints of earlier versions keep the layers in a sequence, fwd.0 and fwd.3
+        self._register_load_state_dict_pre_hook(self._upgrade_state_dict_hook)
+
+    @staticmethod
+    def upgrade_state_dict(state_dict, prefix=""):
+        r"""
+        Upgrade a state dict of an earlier version in place: the layers were kept in a sequence, ``fwd.0`` and
+        ``fwd.3``, and those of a :class:`~makani.mpu.layers.DistributedMLP` kept the bias of the nchw format as
+        ``(1, C, 1, 1)``.
+
+        Parameters
+        ----------
+        state_dict : dict
+            A state dict holding the MLP.
+        prefix : str, optional
+            The prefix of the keys of the MLP.
+        """
+        renames = {prefix + "fwd.0.": prefix + "fc1.", prefix + "fwd.3.": prefix + "fc2."}
+        for key in list(state_dict.keys()):
+            for old, new in renames.items():
+                if key.startswith(old):
+                    state_dict[new + key[len(old) :]] = state_dict.pop(key)
+                    break
+        # a DistributedMLP kept the bias of the nchw format as (1, C, 1, 1)
+        _flatten_biases(state_dict, [prefix + "fc1.bias", prefix + "fc2.bias"])
+
+    def _upgrade_state_dict_hook(self, state_dict, prefix, *args):
+        self.upgrade_state_dict(state_dict, prefix)
+
+    def fwd(self, x):
+        r"""The block body, without the checkpointing wrapper; see :meth:`forward`."""
+        return self.drop(self.fc2(self.drop(self.act(self.fc1(x)))))
 
     def _te_forward(self, x):
         if self.input_format == "nchw":

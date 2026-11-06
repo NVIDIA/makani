@@ -15,7 +15,9 @@
 
 import sys
 import os
+import tempfile
 import unittest
+from collections import OrderedDict
 from parameterized import parameterized, parameterized_class
 
 import torch
@@ -28,10 +30,15 @@ from makani.models.common.layers import (
     DownSample2D,
     UpSample3D,
     DownSample3D,
+    EncoderDecoder,
+    MLP,
 )
 from makani.models.common.imputation import MLPImputation, ConstantImputation
 from makani.models.common.pos_embedding import LearnablePositionEmbedding
-from makani.mpu.layers import StochasticMLP
+from makani.mpu.layers import DistributedEncoderDecoder, DistributedMatmul, DistributedMLP, StochasticMLP
+from makani.models import model_registry
+from makani.utils.checkpoint_helpers import upgrade_state_dict
+from makani.utils.driver import Driver
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from .testutils import disable_tf32, set_seed, get_default_parameters, compare_tensors
@@ -975,6 +982,139 @@ class TestStochasticMLP(unittest.TestCase):
             self.assertTrue(torch.isfinite(p.grad).all(), f"{name} grad not finite")
         self.assertIsNotNone(x.grad)
         self.assertTrue(torch.isfinite(x.grad).all())
+
+
+def _old_layout(state_dict, distributed=False):
+    """A state dict as earlier versions wrote it: the MLP layers in a sequence, or, for matmul-split layers, (1, C, 1, 1) biases."""
+    old = OrderedDict()
+    for key, value in state_dict.items():
+        if distributed:
+            # DistributedMLP had the current names, but the biases of the nchw format were (1, C, 1, 1)
+            old[key] = value.reshape(1, -1, 1, 1) if key.endswith("bias") else value
+        else:
+            old[key.replace("fc1.", "fwd.0.").replace("fc2.", "fwd.3.")] = value
+    return old
+
+
+class TestCheckpointLayout(unittest.TestCase):
+    """The serial and the matmul-split layers have the same parameters, and checkpoints of earlier versions load."""
+
+    def setUp(self):
+        set_seed(333)
+        self.x = torch.randn(2, 8, 4, 8)
+
+    def _mlp(self, cls, **kwargs):
+        return cls(in_features=8, hidden_features=16, out_features=8, act_layer=torch.nn.GELU, **kwargs)
+
+    def _layout(self, module):
+        return {name: tuple(p.shape) for name, p in module.named_parameters()}
+
+    def test_the_mlps_have_the_same_parameters(self):
+        serial, distributed = self._mlp(MLP), self._mlp(DistributedMLP)
+        self.assertEqual(self._layout(serial), self._layout(distributed))
+        self.assertEqual(list(self._layout(serial)), ["fc1.weight", "fc1.bias", "fc2.weight", "fc2.bias"])
+        # the same network: the weights of one compute the same in the other
+        distributed.load_state_dict(serial.state_dict(), strict=True)
+        self.assertTrue(compare_tensors("mlp", distributed(self.x), serial(self.x), atol=1e-6, rtol=1e-5))
+
+    def test_the_encoder_decoders_have_the_same_parameters(self):
+        for num_layers in (0, 1, 3):
+            with self.subTest(num_layers=num_layers):
+                kwargs = dict(num_layers=num_layers, input_dim=8, output_dim=4, hidden_dim=16, act_layer=torch.nn.GELU)
+                serial, distributed = EncoderDecoder(**kwargs), DistributedEncoderDecoder(**kwargs)
+                self.assertEqual(self._layout(serial), self._layout(distributed))
+                distributed.load_state_dict(serial.state_dict(), strict=True)
+                self.assertTrue(compare_tensors("encoder", distributed(self.x), serial(self.x), atol=1e-6, rtol=1e-5))
+
+    def test_a_matmul_keeps_a_flat_bias(self):
+        matmul = DistributedMatmul(8, 16, input_format="nchw")
+        self.assertEqual(tuple(matmul.bias.shape), (16,))
+        conv = torch.nn.Conv2d(8, 16, 1)
+        with torch.no_grad():
+            conv.weight.copy_(matmul.weight)
+            conv.bias.normal_()
+            matmul.bias.copy_(conv.bias)
+        self.assertTrue(compare_tensors("matmul", matmul(self.x), conv(self.x), atol=1e-6, rtol=1e-5))
+
+    def test_an_mlp_of_an_earlier_version_loads(self):
+        reference = self._mlp(MLP)
+        for distributed in (False, True):
+            with self.subTest(distributed=distributed):
+                mlp = self._mlp(MLP)
+                mlp.load_state_dict(_old_layout(reference.state_dict(), distributed=distributed), strict=True)
+                self.assertTrue(torch.equal(mlp(self.x), reference(self.x)))
+
+    def test_a_matmul_split_layer_of_an_earlier_version_loads(self):
+        reference = self._mlp(DistributedMLP)
+        mlp = self._mlp(DistributedMLP)
+        mlp.load_state_dict(_old_layout(reference.state_dict(), distributed=True), strict=True)
+        self.assertTrue(torch.equal(mlp(self.x), reference(self.x)))
+
+        kwargs = dict(num_layers=1, input_dim=8, output_dim=4, hidden_dim=16, act_layer=torch.nn.GELU)
+        reference = DistributedEncoderDecoder(**kwargs)
+        for cls in (EncoderDecoder, DistributedEncoderDecoder):
+            with self.subTest(cls=cls.__name__):
+                encoder = cls(**kwargs)
+                encoder.load_state_dict(_old_layout(reference.state_dict(), distributed=True), strict=True)
+                self.assertTrue(torch.equal(encoder(self.x), reference(self.x)))
+
+    def test_upgrading_is_idempotent(self):
+        state_dict = _old_layout(self._mlp(MLP).state_dict())
+        MLP.upgrade_state_dict(state_dict)
+        upgraded = OrderedDict(state_dict)
+        MLP.upgrade_state_dict(state_dict)
+        self.assertEqual(list(state_dict), list(upgraded))
+
+
+class TestModelCheckpointLayout(unittest.TestCase):
+    """A whole model of an earlier version loads, through load_state_dict and through a flexible restore."""
+
+    def setUp(self):
+        set_seed(333)
+        self.params = get_default_parameters()
+        self.params.nettype = "SFNO"
+        self.tmpdir = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def _old_model_state(self, model):
+        old = _old_layout(model.state_dict())
+        # instance norms follow the block MLPs, whose output bias was removed; checkpoints from before still carry it
+        removed = [key.replace("fwd.0.bias", "fwd.3.bias") for key in old if key.endswith("mlp.fwd.0.bias")]
+        self.assertTrue(removed)
+        for key in removed:
+            self.assertNotIn(key, old)
+            old[key] = torch.randn(old[key.replace("fwd.3.bias", "fwd.3.weight")].shape[0])
+        return old
+
+    def _check_same(self, model, reference):
+        for (name, p), q in zip(reference.named_parameters(), model.parameters()):
+            self.assertTrue(torch.equal(p, q), name)
+
+    def test_load_state_dict(self):
+        reference = model_registry.get_model(self.params)
+        old = self._old_model_state(reference)
+        model = model_registry.get_model(self.params)
+        model.load_state_dict(old, strict=True)
+        self._check_same(model, reference)
+
+    def test_flexible_restore(self):
+        reference = model_registry.get_model(self.params)
+        path = os.path.join(self.tmpdir.name, "ckpt_mp{mp_rank}.tar")
+        Driver.save_checkpoint(checkpoint_path=path, model=reference, checkpoint_mode="flexible")
+        checkpoint = torch.load(path.format(mp_rank=0), weights_only=False)
+        checkpoint["model_state"] = self._old_model_state(reference)
+        torch.save(checkpoint, path.format(mp_rank=0))
+
+        model = model_registry.get_model(self.params)
+        Driver.restore_from_checkpoint(checkpoint_path=path, model=model, checkpoint_mode="flexible", strict=True)
+        self._check_same(model, reference)
+
+        # upgrading the state dict by hand gives the current names
+        state_dict = self._old_model_state(reference)
+        upgrade_state_dict(model, state_dict)
+        self.assertFalse(any(".fwd.0." in key or ".fwd.3." in key for key in state_dict if ".mlp." in key))
 
 
 if __name__ == "__main__":

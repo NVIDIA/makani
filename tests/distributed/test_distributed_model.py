@@ -295,7 +295,8 @@ class TestDistributedModel(unittest.TestCase):
         inp_local = self._split_helper(inp_full, hdim=-2, wdim=-1)
         inp_local.requires_grad = True
         out_local = model_dist(single_step_rollout(inp_local.unsqueeze(1))).squeeze(1)
-        loss_dist = reduce_from_parallel_region(torch.sum(out_local), "model")
+        # the output is split over the spatial ranks and replicated over the matmul ranks, so only the former add up
+        loss_dist = reduce_from_parallel_region(torch.sum(out_local), "spatial")
         loss_dist.backward()
         igrad_local = inp_local.grad.clone()
 
