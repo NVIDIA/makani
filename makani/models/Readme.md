@@ -87,7 +87,7 @@ snapshot = model.noise.snapshot()            # rewind point
 model.noise.restore(snapshot)                # rewind
 ```
 
-A model package exposes the same controller as `ModelWrapper.noise`. A rollout of a stochastic model has to drive the noise of that model, and rollout checkpointing (`multistep_checkpoint`) is refused for a network with noise processes of its own, since the recompute in the backward pass would read the noise after the rollout has advanced it.
+A model package exposes the same controller as `ModelWrapper.noise`. A rollout of a stochastic model has to drive the noise of that model, and rollout checkpointing (`multistep_checkpoint`) draws the noise of each step again from the state of that step when it recomputes the step in the backward pass, after the rollout has advanced the noise.
 
 ### Model packages
 

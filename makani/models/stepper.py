@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import contextlib
 import os
 
 import torch
@@ -29,21 +30,27 @@ from makani.models.noise_controller import NoiseController
 from makani.utils.dataloaders.rollout import Rollout, RolloutStep
 
 
-def _assert_checkpoint_safe(module: nn.Module):
+def _assert_checkpoint_safe(module: nn.Module, noise: NoiseController):
     """Guard for rollout activation checkpointing.
 
     Checkpointing recomputes each step's model forward during backward. Global-RNG
     stochastic ops (e.g. DropPath) are covered by checkpoint's preserve_rng_state, but
     modules that advance their *own* torch.Generator (e.g. SeededDropout2d) are not:
     their recomputed mask would diverge from the original forward and corrupt gradients.
-    Fail loudly rather than train silently-wrong.
+    Fail loudly rather than train silently-wrong. The noise processes of the model are
+    exempt: their generators only advance them, outside the forward, and the recompute
+    draws from the state of its step, see :meth:`StepWrapper._network`.
     """
+    processes = {id(noise.process(name)) for name in noise}
     offenders = sorted(
         {
             type(m).__name__
             for m in module.modules()
-            if isinstance(getattr(m, "rng_cpu", None), torch.Generator)
-            or isinstance(getattr(m, "rng_gpu", None), torch.Generator)
+            if (id(m) not in processes)
+            and (
+                isinstance(getattr(m, "rng_cpu", None), torch.Generator)
+                or isinstance(getattr(m, "rng_gpu", None), torch.Generator)
+            )
         }
     )
     if offenders:
@@ -52,24 +59,6 @@ def _assert_checkpoint_safe(module: nn.Module):
             f"generators (found: {offenders}). Their dropout masks are not restored on "
             f"the checkpoint recompute, which would corrupt gradients. Disable "
             f"multistep_checkpoint or make these modules use the global RNG."
-        )
-
-
-def _assert_checkpoint_noise_safe(noise: NoiseController):
-    """Guard for rollout activation checkpointing of networks with noise of their own.
-
-    The checkpointed recompute of a step runs the network again during the backward pass, after the
-    rollout has advanced the noise. The input noise of a flat network is drawn while its input is
-    packed, outside the checkpoint, so its draw is kept; a network that draws from its own noise
-    processes inside its forward would read their state of the last step instead, and get the
-    gradients of another noise than it was run with.
-    """
-    network_processes = sorted(name for name in noise if name.startswith("model."))
-    if network_processes:
-        raise RuntimeError(
-            f"multistep_checkpoint is not supported for networks with noise processes of their own "
-            f"(found: {network_processes}): the recompute in the backward pass would read the noise after "
-            f"the rollout has advanced it. Disable multistep_checkpoint."
         )
 
 
@@ -168,6 +157,9 @@ class StepWrapper(nn.Module):
         self.multistep_checkpoint = params.get("multistep_checkpoint", False)
         self._checkpoint_checked = False
 
+        # compiled functions of the step, kept out of the module tree so that the state dict keeps its keys
+        self._compiled = {}
+
         # a network that takes a ModelInput owns the noise it takes, e.g. an InputNoise of its own
         if takes_model_input(self.model) and (self.input_adapter.input_noise is not None):
             self.input_adapter.input_noise = None
@@ -224,8 +216,30 @@ class StepWrapper(nn.Module):
             # outside the checkpoint, so it runs once. Global-RNG ops inside the network are handled by
             # preserve_rng_state=True; private-generator modules are rejected up front by
             # _assert_checkpoint_safe.
+            if (method is None) and self._network_noise():
+                return self._checkpoint_with_noise(*args)
             return checkpoint(fn, *args, use_reentrant=False, preserve_rng_state=True)
         return fn(*args)
+
+    def _network_noise(self):
+        # the noise processes the network draws from itself
+        return [name for name in self.noise if name.startswith("model.")]
+
+    @torch.compiler.disable
+    def _checkpoint_with_noise(self, *args):
+        # The noise the network draws itself is drawn again in the recompute, from the state of this step, which
+        # the rollout has advanced by then: the recompute context of the checkpoint draws from a copy of it. Dynamo
+        # cannot trace a checkpoint with a context of its own, so this runs eagerly, around the network compiled on
+        # its own, see compile_step.
+        states = self.noise.tensor_states(self._network_noise())
+        network = self._compiled.get("network", self.model)
+        return checkpoint(
+            network,
+            *args,
+            use_reentrant=False,
+            preserve_rng_state=True,
+            context_fn=lambda: (contextlib.nullcontext(), self.noise.drawing_from(states)),
+        )
 
     def _predict_window(self, inp, dynamic_features, use_checkpoint: bool = False):
         pp = self.preprocessor
@@ -257,6 +271,10 @@ class StepWrapper(nn.Module):
         # different sizes exceed torch's default limit of 8 and fall back to eager for the rest
         torch._dynamo.config.recompile_limit = int(os.getenv("MAKANI_INDUCTOR_COMPILE_LIMIT", "32"))
         self._predict_window = torch.compile(self._predict_window, **compile_kwargs)
+        # a checkpointed network with noise of its own runs outside the compiled step, see _checkpoint_with_noise,
+        # so it is compiled on its own as well
+        if self._network_noise():
+            self._compiled["network"] = torch.compile(self.model, **compile_kwargs)
 
     def predict(self, inp, dynamic_features):
         r"""
@@ -346,7 +364,7 @@ class StepWrapper(nn.Module):
             rollout advanced it to for this step, e.g. because the rollout does
             not drive the noise of this model, or if ``use_checkpoint`` is set
             for a model that is not safe to checkpoint, see
-            :func:`_assert_checkpoint_safe` and :func:`_assert_checkpoint_noise_safe`.
+            :func:`_assert_checkpoint_safe`.
         """
         self._check_step_noise(step)
         if use_checkpoint:
@@ -427,8 +445,7 @@ class StepWrapper(nn.Module):
         RuntimeError
             If the rollout has been started already, or if rollout
             checkpointing is configured for a model that is not safe to
-            checkpoint, see :func:`_assert_checkpoint_safe` and
-            :func:`_assert_checkpoint_noise_safe`.
+            checkpoint, see :func:`_assert_checkpoint_safe`.
         """
         if not isinstance(rollout, Rollout):
             raise TypeError(
@@ -465,8 +482,7 @@ class StepWrapper(nn.Module):
     def _check_checkpoint_safe(self):
         # once, on the first checkpointed step, so that loading a model for evaluation never fails on it
         if not self._checkpoint_checked:
-            _assert_checkpoint_noise_safe(self.noise)
-            _assert_checkpoint_safe(self.model)
+            _assert_checkpoint_safe(self.model, self.noise)
             self._checkpoint_checked = True
 
     def _steps(self, rollout, push_forward, use_checkpoint):

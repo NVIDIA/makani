@@ -537,6 +537,10 @@ class StochasticInterpolantWrapper(StepWrapper):
         # see StepWrapper.compile_step for the recompile limit
         torch._dynamo.config.recompile_limit = int(os.getenv("MAKANI_INDUCTOR_COMPILE_LIMIT", "32"))
         self._drift_network = torch.compile(self._drift_network, **compile_kwargs)
+        # a checkpointed network with noise of its own runs outside the compiled call, see
+        # StepWrapper._checkpoint_with_noise, so it is compiled on its own as well
+        if self._network_noise():
+            self._compiled["network"] = torch.compile(self.model, **compile_kwargs)
 
     def check_encodable(self):
         r"""
