@@ -46,7 +46,7 @@ from makani.utils.dataloaders.data_helpers import get_data_normalization
 from makani.utils.training.training_helpers import get_parameter_groups
 from makani.utils.profiling import Timer
 from makani.utils.checkpoint_helpers import (
-    upgrade_state_dict,
+    upgrade_checkpoint,
     get_latest_checkpoint_version,
     load_checkpoint,
     gather_model_state_dict,
@@ -761,8 +761,8 @@ class Driver(metaclass=abc.ABCMeta):
         if prefix:
             prepend_prefix_to_state_dict(state_dict, prefix)
 
-        # checkpoints of earlier versions; before the scatter, which looks the parameters up by name
-        upgrade_state_dict(model, state_dict)
+        # checkpoints of earlier format versions; before the scatter, which looks the parameters up by name
+        upgrade_checkpoint(checkpoint, model, optimizer)
 
         # load state dict
         model.load_state_dict(state_dict, strict=strict)
@@ -815,8 +815,8 @@ class Driver(metaclass=abc.ABCMeta):
         if prefix:
             prepend_prefix_to_state_dict(state_dict, prefix)
 
-        # checkpoints of earlier versions; before the scatter, which looks the parameters up by name
-        upgrade_state_dict(model, state_dict)
+        # checkpoints of earlier format versions; before the scatter, which looks the parameters up by name
+        upgrade_checkpoint(checkpoint, model, optimizer)
 
         if comm.get_size("model") > 1:
             state_dict = scatter_model_state_dict(model, state_dict, strict)

@@ -17,6 +17,7 @@
 import sys
 import os
 import unittest
+from collections import OrderedDict
 from parameterized import parameterized
 
 import torch
@@ -218,6 +219,41 @@ class TestDistributedModel(unittest.TestCase):
                 self.assertTrue(
                     reduce_success(
                         compare_tensors(f"parameter {key}", param_full, param_gather_full, verbose=verbose), self.device
+                    )
+                )
+
+    @parameterized.expand(["SFNO", "SNO", "FCN3"], skip_on_empty=True)
+    def test_distributed_model_restores_a_serial_checkpoint_of_an_earlier_version(self, nettype, verbose=False):
+        """A serial checkpoint written before the MLPs had the names of the distributed ones, fwd.0 and fwd.3."""
+        self.params.nettype = nettype
+        set_seed(333)
+
+        model, checkpoint_path = self._build_serial_reference()
+        with comm.serial():
+            state_dict_full = checkpoint_helpers.gather_model_state_dict(model, grads=False)
+
+        # rewrite the checkpoint as an earlier version wrote it
+        if self.world_rank == 0:
+            fname = checkpoint_path.format(mp_rank=0)
+            checkpoint = torch.load(fname, weights_only=False)
+            checkpoint["model_state"] = OrderedDict(
+                (key.replace(".mlp.fc1.", ".mlp.fwd.0.").replace(".mlp.fc2.", ".mlp.fwd.3."), value)
+                for key, value in checkpoint["model_state"].items()
+            )
+            self.assertTrue(any(".mlp.fwd.0." in key for key in checkpoint["model_state"]))
+            checkpoint["checkpoint_format"]["version"] = 1
+            torch.save(checkpoint, fname)
+        sync_and_barrier()
+
+        model_dist = self._build_distributed(checkpoint_path=checkpoint_path)
+        state_dict_gather_full = checkpoint_helpers.gather_model_state_dict(model_dist, grads=False)
+        self.assertEqual(set(state_dict_gather_full), set(state_dict_full))
+        for key in state_dict_full.keys():
+            with self.subTest(desc=f"parameter {key}"):
+                self.assertTrue(
+                    reduce_success(
+                        compare_tensors(f"parameter {key}", state_dict_full[key].cpu(), state_dict_gather_full[key]),
+                        self.device,
                     )
                 )
 

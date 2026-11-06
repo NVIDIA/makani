@@ -37,7 +37,7 @@ from makani.models.common.imputation import MLPImputation, ConstantImputation
 from makani.models.common.pos_embedding import LearnablePositionEmbedding
 from makani.mpu.layers import DistributedEncoderDecoder, DistributedMatmul, DistributedMLP, StochasticMLP
 from makani.models import model_registry
-from makani.utils.checkpoint_helpers import upgrade_state_dict
+from makani.utils.checkpoint_helpers import CHECKPOINT_FORMAT_VERSION, upgrade_state_dict
 from makani.utils.driver import Driver
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
@@ -1037,17 +1037,28 @@ class TestCheckpointLayout(unittest.TestCase):
         self.assertTrue(compare_tensors("matmul", matmul(self.x), conv(self.x), atol=1e-6, rtol=1e-5))
 
     def test_an_mlp_of_an_earlier_version_loads(self):
+        # either layout of earlier versions, into either MLP: a serial checkpoint may be restored split over matmul
         reference = self._mlp(MLP)
-        for distributed in (False, True):
-            with self.subTest(distributed=distributed):
-                mlp = self._mlp(MLP)
-                mlp.load_state_dict(_old_layout(reference.state_dict(), distributed=distributed), strict=True)
-                self.assertTrue(torch.equal(mlp(self.x), reference(self.x)))
+        for cls in (MLP, DistributedMLP):
+            for distributed in (False, True):
+                with self.subTest(cls=cls.__name__, distributed=distributed):
+                    old = _old_layout(reference.state_dict(), distributed=distributed)
+                    mlp = self._mlp(cls)
+                    if not distributed:
+                        # loaded as it is, a state dict of an earlier version is refused rather than converted
+                        with self.assertRaises(RuntimeError):
+                            mlp.load_state_dict(OrderedDict(old), strict=True)
+                    upgrade_state_dict(mlp, old)
+                    self.assertEqual(set(old), set(mlp.state_dict()))
+                    mlp.load_state_dict(old, strict=True)
+                    self.assertTrue(compare_tensors("mlp", mlp(self.x), reference(self.x), atol=1e-6, rtol=1e-5))
 
     def test_a_matmul_split_layer_of_an_earlier_version_loads(self):
         reference = self._mlp(DistributedMLP)
         mlp = self._mlp(DistributedMLP)
-        mlp.load_state_dict(_old_layout(reference.state_dict(), distributed=True), strict=True)
+        old = _old_layout(reference.state_dict(), distributed=True)
+        upgrade_state_dict(mlp, old)
+        mlp.load_state_dict(old, strict=True)
         self.assertTrue(torch.equal(mlp(self.x), reference(self.x)))
 
         kwargs = dict(num_layers=1, input_dim=8, output_dim=4, hidden_dim=16, act_layer=torch.nn.GELU)
@@ -1055,7 +1066,9 @@ class TestCheckpointLayout(unittest.TestCase):
         for cls in (EncoderDecoder, DistributedEncoderDecoder):
             with self.subTest(cls=cls.__name__):
                 encoder = cls(**kwargs)
-                encoder.load_state_dict(_old_layout(reference.state_dict(), distributed=True), strict=True)
+                old = _old_layout(reference.state_dict(), distributed=True)
+                upgrade_state_dict(encoder, old)
+                encoder.load_state_dict(old, strict=True)
                 self.assertTrue(torch.equal(encoder(self.x), reference(self.x)))
 
     def test_upgrading_is_idempotent(self):
@@ -1064,6 +1077,76 @@ class TestCheckpointLayout(unittest.TestCase):
         upgraded = OrderedDict(state_dict)
         MLP.upgrade_state_dict(state_dict)
         self.assertEqual(list(state_dict), list(upgraded))
+
+
+def _mark_earlier_version(checkpoint, version):
+    """Tag a checkpoint with an earlier format version, or remove the tag for one written before it."""
+    if version is None:
+        del checkpoint["checkpoint_format"]
+    else:
+        checkpoint["checkpoint_format"]["version"] = version
+
+
+class _MatmulNet(torch.nn.Module):
+    """A network with the bias of a DistributedMatmul, which earlier versions kept as (1, C, 1, 1)."""
+
+    def __init__(self):
+        super().__init__()
+        self.fc = DistributedMatmul(8, 16, input_format="nchw")
+
+    def forward(self, x):
+        return self.fc(x)
+
+
+class TestOptimizerStateLayout(unittest.TestCase):
+    """The optimizer state of a checkpoint of an earlier version resumes, with the moments of the biases flattened."""
+
+    def setUp(self):
+        set_seed(333)
+        self.x = torch.randn(2, 8, 4, 8)
+        self.tmpdir = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def _step(self, model, optimizer):
+        optimizer.zero_grad()
+        torch.square(model(self.x)).sum().backward()
+        optimizer.step()
+
+    @parameterized.expand([(mode, version) for mode in ("legacy", "flexible") for version in (None, 1)])
+    def test_resume(self, mode, version):
+        model = _MatmulNet()
+        optimizer = torch.optim.Adam(model.parameters(), lr=1e-2)
+        self._step(model, optimizer)
+        path = os.path.join(self.tmpdir.name, "ckpt_mp{mp_rank}.tar")
+        Driver.save_checkpoint(checkpoint_path=path, model=model, optimizer=optimizer, checkpoint_mode=mode)
+
+        # as an earlier version wrote it: the bias and its moments as (1, C, 1, 1)
+        checkpoint = torch.load(path.format(mp_rank=0), weights_only=False)
+        checkpoint["model_state"]["fc.bias"] = checkpoint["model_state"]["fc.bias"].reshape(1, -1, 1, 1)
+        bias_index = [name for name, _ in model.named_parameters()].index("fc.bias")
+        for name in ("exp_avg", "exp_avg_sq"):
+            moment = checkpoint["optimizer_state_dict"]["state"][bias_index][name]
+            checkpoint["optimizer_state_dict"]["state"][bias_index][name] = moment.reshape(1, -1, 1, 1)
+        _mark_earlier_version(checkpoint, version)
+        torch.save(checkpoint, path.format(mp_rank=0))
+
+        restored = _MatmulNet()
+        restored_optimizer = torch.optim.Adam(restored.parameters(), lr=1e-2)
+        Driver.restore_from_checkpoint(
+            checkpoint_path=path, model=restored, optimizer=restored_optimizer, checkpoint_mode=mode, strict=True
+        )
+        for name in ("exp_avg", "exp_avg_sq"):
+            self.assertTrue(
+                torch.equal(restored_optimizer.state[restored.fc.bias][name], optimizer.state[model.fc.bias][name])
+            )
+
+        # and the next step continues as the run would have
+        self._step(model, optimizer)
+        self._step(restored, restored_optimizer)
+        for (name, p), q in zip(model.named_parameters(), restored.parameters()):
+            self.assertTrue(torch.equal(p, q), name)
 
 
 class TestModelCheckpointLayout(unittest.TestCase):
@@ -1092,29 +1175,38 @@ class TestModelCheckpointLayout(unittest.TestCase):
         for (name, p), q in zip(reference.named_parameters(), model.parameters()):
             self.assertTrue(torch.equal(p, q), name)
 
-    def test_load_state_dict(self):
+    def test_upgrade_state_dict(self):
         reference = model_registry.get_model(self.params)
         old = self._old_model_state(reference)
         model = model_registry.get_model(self.params)
+        upgrade_state_dict(model, old)
+        self.assertFalse(any(".fwd.0." in key or ".fwd.3." in key for key in old if ".mlp." in key))
         model.load_state_dict(old, strict=True)
         self._check_same(model, reference)
 
-    def test_flexible_restore(self):
-        reference = model_registry.get_model(self.params)
+    def _save_old(self, reference, mode, version):
         path = os.path.join(self.tmpdir.name, "ckpt_mp{mp_rank}.tar")
-        Driver.save_checkpoint(checkpoint_path=path, model=reference, checkpoint_mode="flexible")
+        Driver.save_checkpoint(checkpoint_path=path, model=reference, checkpoint_mode=mode)
         checkpoint = torch.load(path.format(mp_rank=0), weights_only=False)
         checkpoint["model_state"] = self._old_model_state(reference)
+        _mark_earlier_version(checkpoint, version)
         torch.save(checkpoint, path.format(mp_rank=0))
+        return path
 
+    @parameterized.expand([(mode, version) for mode in ("legacy", "flexible") for version in (None, 1)])
+    def test_restore_of_an_earlier_version(self, mode, version):
+        reference = model_registry.get_model(self.params)
+        path = self._save_old(reference, mode, version)
         model = model_registry.get_model(self.params)
-        Driver.restore_from_checkpoint(checkpoint_path=path, model=model, checkpoint_mode="flexible", strict=True)
+        Driver.restore_from_checkpoint(checkpoint_path=path, model=model, checkpoint_mode=mode, strict=True)
         self._check_same(model, reference)
 
-        # upgrading the state dict by hand gives the current names
-        state_dict = self._old_model_state(reference)
-        upgrade_state_dict(model, state_dict)
-        self.assertFalse(any(".fwd.0." in key or ".fwd.3." in key for key in state_dict if ".mlp." in key))
+    def test_a_checkpoint_of_the_current_version_is_not_upgraded(self):
+        reference = model_registry.get_model(self.params)
+        path = self._save_old(reference, "flexible", CHECKPOINT_FORMAT_VERSION)
+        model = model_registry.get_model(self.params)
+        with self.assertRaises(RuntimeError):
+            Driver.restore_from_checkpoint(checkpoint_path=path, model=model, checkpoint_mode="flexible", strict=True)
 
 
 if __name__ == "__main__":

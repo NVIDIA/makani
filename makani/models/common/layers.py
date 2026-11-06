@@ -19,6 +19,7 @@ from torch.utils.checkpoint import checkpoint
 import math
 import warnings
 
+from makani.utils.checkpoint_helpers import flatten_biases, upgrade_mlp_state_dict
 from makani.utils.context import rng_context
 
 # transformer engine is an optional dependency: it is only used for the
@@ -534,14 +535,6 @@ class PatchRecovery3D(nn.Module):
         ]
 
 
-def _flatten_biases(state_dict, keys):
-    # biases kept as (1, C, 1, 1) by checkpoints of earlier versions, flattened to (C,)
-    for key in keys:
-        bias = state_dict.get(key, None)
-        if (bias is not None) and (bias.dim() == 4):
-            state_dict[key] = bias.reshape(-1)
-
-
 class EncoderDecoder(nn.Module):
     r"""
     Stack of pointwise layers used as an encoder or decoder head.
@@ -650,9 +643,6 @@ class EncoderDecoder(nn.Module):
 
         self.fwd = nn.Sequential(*encoder_modules)
 
-        # checkpoints of a DistributedEncoderDecoder of earlier versions keep the biases of the nchw format as (1, C, 1, 1)
-        self._register_load_state_dict_pre_hook(self._upgrade_state_dict_hook)
-
     @staticmethod
     def upgrade_state_dict(state_dict, prefix=""):
         r"""
@@ -666,7 +656,7 @@ class EncoderDecoder(nn.Module):
         prefix : str, optional
             The prefix of the keys of the layers.
         """
-        _flatten_biases(
+        flatten_biases(
             state_dict,
             [
                 k
@@ -674,9 +664,6 @@ class EncoderDecoder(nn.Module):
                 if k.startswith(prefix + "fwd.") and k.endswith(".bias") and k.count(".") == prefix.count(".") + 2
             ],
         )
-
-    def _upgrade_state_dict_hook(self, state_dict, prefix, *args):
-        self.upgrade_state_dict(state_dict, prefix)
 
     def forward(self, x):
         r"""
@@ -855,9 +842,6 @@ class MLP(nn.Module):
             # one permute in + one out.
             self.inner_transpose = isinstance(drop, nn.Dropout2d)
 
-        # checkpoints of earlier versions keep the layers in a sequence, fwd.0 and fwd.3
-        self._register_load_state_dict_pre_hook(self._upgrade_state_dict_hook)
-
     @staticmethod
     def upgrade_state_dict(state_dict, prefix=""):
         r"""
@@ -872,17 +856,7 @@ class MLP(nn.Module):
         prefix : str, optional
             The prefix of the keys of the MLP.
         """
-        renames = {prefix + "fwd.0.": prefix + "fc1.", prefix + "fwd.3.": prefix + "fc2."}
-        for key in list(state_dict.keys()):
-            for old, new in renames.items():
-                if key.startswith(old):
-                    state_dict[new + key[len(old) :]] = state_dict.pop(key)
-                    break
-        # a DistributedMLP kept the bias of the nchw format as (1, C, 1, 1)
-        _flatten_biases(state_dict, [prefix + "fc1.bias", prefix + "fc2.bias"])
-
-    def _upgrade_state_dict_hook(self, state_dict, prefix, *args):
-        self.upgrade_state_dict(state_dict, prefix)
+        upgrade_mlp_state_dict(state_dict, prefix)
 
     def fwd(self, x):
         r"""The block body, without the checkpointing wrapper; see :meth:`forward`."""

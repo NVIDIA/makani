@@ -22,6 +22,7 @@ from makani.utils import comm
 
 # parallel helpers
 from torch_harmonics.distributed import compute_split_shapes
+from makani.utils.checkpoint_helpers import upgrade_mlp_state_dict
 from makani.mpu.mappings import reduce_from_parallel_region
 from makani.mpu.mappings import gather_from_parallel_region
 from makani.mpu.mappings import copy_to_parallel_region
@@ -165,9 +166,6 @@ class DistributedMatmul(nn.Module):
             self.bias.is_shared_mp = ["spatial"]
             self.bias.sharded_dims_mp = [bias_shard]
 
-        # checkpoints of earlier versions keep the bias of the nchw format as (1, C, 1, 1)
-        self._register_load_state_dict_pre_hook(self._upgrade_state_dict_hook)
-
     @staticmethod
     def upgrade_state_dict(state_dict, prefix=""):
         r"""
@@ -183,9 +181,6 @@ class DistributedMatmul(nn.Module):
         key = prefix + "bias"
         if (key in state_dict) and (state_dict[key] is not None) and (state_dict[key].dim() == 4):
             state_dict[key] = state_dict[key].reshape(-1)
-
-    def _upgrade_state_dict_hook(self, state_dict, prefix, *args):
-        self.upgrade_state_dict(state_dict, prefix)
 
     @property
     def weight(self):
@@ -536,6 +531,14 @@ class DistributedMLP(nn.Module):
                 raise NotImplementedError(f"Error, drop_type {drop_type} not supported")
         else:
             self.drop = nn.Identity()
+
+    @staticmethod
+    def upgrade_state_dict(state_dict, prefix=""):
+        r"""
+        Upgrade a state dict of an earlier version in place, of a serial or a distributed MLP; see
+        :func:`~makani.utils.checkpoint_helpers.upgrade_mlp_state_dict`.
+        """
+        upgrade_mlp_state_dict(state_dict, prefix)
 
     def fwd(self, x):
         r"""

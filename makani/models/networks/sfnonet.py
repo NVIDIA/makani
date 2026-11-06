@@ -22,7 +22,6 @@ from torch import amp
 from functools import partial
 
 # helpers
-from makani.utils.checkpoint_helpers import upgrade_state_dict
 from makani.models.common import DropPath, MLP, EncoderDecoder
 
 # import global convolution and non-linear spectral layers
@@ -178,14 +177,9 @@ _MEAN_REMOVING_NORMS = (
 
 
 def _drop_removed_mlp_bias(module, state_dict, prefix, *args):
-    # the MLP biases a checkpoint has but the block does not, i.e. the removed output bias; the hooks of the block
-    # run before those of the MLP, so the names of the MLP are upgraded first
-    mlp_prefix = prefix + "mlp."
-    upgrade_state_dict(module.mlp, state_dict, mlp_prefix)
-    own = set(module.mlp.state_dict().keys())
-    for key in [k for k in state_dict if k.startswith(mlp_prefix) and k.endswith("bias")]:
-        if key[len(mlp_prefix) :] not in own:
-            del state_dict[key]
+    # the output bias of the MLP, which the block does not have; checkpoints of earlier format versions are upgraded
+    # to the current names before they are loaded, see upgrade_checkpoint
+    state_dict.pop(prefix + "mlp.fc2.bias", None)
 
 
 class NeuralOperatorBlock(nn.Module):

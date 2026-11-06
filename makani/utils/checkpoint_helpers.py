@@ -130,7 +130,12 @@ def get_latest_checkpoint_version(checkpoint_path, verbose: bool = True):
 
 # the version of the checkpoint layout, bumped whenever an entry changes incompatibly; a checkpoint without a
 # format tag counts as version 0. Version 1 tags the checkpoint and adds the noise generators, noise_rng_state
-CHECKPOINT_FORMAT_VERSION = 1
+# The format version of the checkpoints the driver writes. A checkpoint of an earlier version is upgraded on restore,
+# see upgrade_checkpoint:
+#   1: the format tag.
+#   2: the MLPs keep their layers as fc1 and fc2, not in a sequence (fwd.0, fwd.3), and DistributedMatmul keeps a 1-D
+#      bias, not (1, C, 1, 1), as do the moments of the optimizer for it.
+CHECKPOINT_FORMAT_VERSION = 2
 
 
 def checkpoint_format_tag(checkpoint_mode: str) -> Dict[str, Any]:
@@ -577,15 +582,91 @@ def scatter_optimizer_state_dict(
     return optimizer_state_dict
 
 
+def checkpoint_format_version(checkpoint: Dict[str, Any]) -> int:
+    """The format version of a checkpoint, 0 for one written before the format tag, see :func:`checkpoint_format_tag`."""
+    tag = checkpoint.get("checkpoint_format", None)
+    return 0 if tag is None else tag.get("version", 0)
+
+
+def upgrade_checkpoint(checkpoint: Dict[str, Any], model: nn.Module, optimizer: Optional[Optimizer] = None) -> None:
+    r"""
+    Upgrade a checkpoint of an earlier format version to the current one, in place, before anything is restored.
+
+    Which upgrades apply is decided by the format version of the checkpoint, see :data:`CHECKPOINT_FORMAT_VERSION`;
+    one without a format tag is of version 0. A checkpoint of the current version is left as it is.
+
+    Parameters
+    ----------
+    checkpoint : dict
+        The checkpoint as loaded, with ``model_state`` keyed as the parameters of ``model``, i.e. with the prefix of
+        any wrapper of the model already prepended.
+    model : nn.Module
+        The model the checkpoint is restored into.
+    optimizer : torch.optim.Optimizer, optional
+        The optimizer whose state is restored from ``optimizer_state_dict``, if any.
+    """
+    version = checkpoint_format_version(checkpoint)
+    if version < 2:
+        upgrade_state_dict(model, checkpoint["model_state"])
+        if (optimizer is not None) and ("optimizer_state_dict" in checkpoint):
+            upgrade_optimizer_state_dict(optimizer, checkpoint["optimizer_state_dict"])
+
+
+def flatten_biases(state_dict, keys) -> None:
+    r"""Flatten the biases of earlier versions kept as ``(1, C, 1, 1)`` to ``(C,)``, in place, where they are so."""
+    for key in keys:
+        bias = state_dict.get(key, None)
+        if (bias is not None) and (bias.dim() == 4):
+            state_dict[key] = bias.reshape(-1)
+
+
+def upgrade_mlp_state_dict(state_dict, prefix: str = "") -> None:
+    r"""
+    Upgrade the keys of an MLP of an earlier version in place, for ``MLP`` and ``DistributedMLP`` alike.
+
+    The serial MLP kept its layers in a sequence, ``fwd.0`` and ``fwd.3``, now ``fc1`` and ``fc2``, and the
+    distributed one kept the biases of the nchw format as ``(1, C, 1, 1)``. Either may be restored into either.
+    """
+    renames = {prefix + "fwd.0.": prefix + "fc1.", prefix + "fwd.3.": prefix + "fc2."}
+    for key in list(state_dict.keys()):
+        for old, new in renames.items():
+            if key.startswith(old):
+                state_dict[new + key[len(old) :]] = state_dict.pop(key)
+                break
+    flatten_biases(state_dict, [prefix + "fc1.bias", prefix + "fc2.bias"])
+
+
+def upgrade_optimizer_state_dict(optimizer: Optimizer, optimizer_state_dict) -> None:
+    r"""
+    Upgrade the state of an optimizer of an earlier version in place, to the parameters as they are now.
+
+    The moments of a bias kept as ``(1, C, 1, 1)`` by earlier versions, see :func:`flatten_biases`, are
+    flattened as the bias is. The saved states are matched to the parameters of ``optimizer`` in the
+    order torch.optim packs them, as :func:`scatter_optimizer_state_dict` does.
+    """
+    states = optimizer_state_dict.get("state", {})
+    seen = set()
+    index = 0
+    for pgroup in optimizer.param_groups:
+        for param in pgroup["params"]:
+            if id(param) in seen:
+                continue
+            seen.add(id(param))
+            if (param.dim() == 1) and (index in states):
+                for name, value in states[index].items():
+                    if torch.is_tensor(value) and (value.dim() == 4) and (value.numel() == value.shape[1]):
+                        states[index][name] = value.reshape(-1)
+            index += 1
+
+
 def upgrade_state_dict(model: nn.Module, state_dict, prefix: str = "") -> None:
     r"""
     Upgrade a state dict of an earlier version of a model to the current one, in place.
 
     Every module of the model that defines a static ``upgrade_state_dict(state_dict, prefix)``
     upgrades its own keys, e.g. :class:`~makani.models.common.layers.MLP` the names of its layers.
-    The modules also do so on :meth:`torch.nn.Module.load_state_dict`; a flexible restore looks the
-    parameters up by name before that, so it upgrades the whole state dict first. Upgrading is
-    idempotent.
+    Upgrading is idempotent. A restore calls it through :func:`upgrade_checkpoint`, for checkpoints
+    of an earlier format version only.
 
     Parameters
     ----------
