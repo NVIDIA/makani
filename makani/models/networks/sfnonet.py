@@ -177,12 +177,9 @@ _MEAN_REMOVING_NORMS = (
 
 
 def _drop_removed_mlp_bias(module, state_dict, prefix, *args):
-    # the MLP biases a checkpoint has but the block does not, i.e. the removed output bias
-    mlp_prefix = prefix + "mlp."
-    own = set(module.mlp.state_dict().keys())
-    for key in [k for k in state_dict if k.startswith(mlp_prefix) and k.endswith("bias")]:
-        if key[len(mlp_prefix) :] not in own:
-            del state_dict[key]
+    # the output bias of the MLP, which the block does not have; checkpoints of earlier format versions are upgraded
+    # to the current names before they are loaded, see upgrade_checkpoint
+    state_dict.pop(prefix + "mlp.fc2.bias", None)
 
 
 class NeuralOperatorBlock(nn.Module):

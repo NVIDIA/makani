@@ -22,6 +22,7 @@ from makani.utils import comm
 
 # parallel helpers
 from torch_harmonics.distributed import compute_split_shapes
+from makani.utils.checkpoint_helpers import upgrade_mlp_state_dict
 from makani.mpu.mappings import reduce_from_parallel_region
 from makani.mpu.mappings import gather_from_parallel_region
 from makani.mpu.mappings import copy_to_parallel_region
@@ -159,15 +160,29 @@ class DistributedMatmul(nn.Module):
             # is replicated over the matmul group: it is added after the all-reduce,
             # which every matmul rank computes alike, so its gradient is averaged
             bias_shard = comm_name if parallel_mode == "column" else None
+            # 1-D in either format, as nn.Conv2d and nn.Linear keep it, so that a checkpoint is the same as that
+            # of the serial layer
+            # a row bias is added after the reduction, which every matmul rank computes alike
             bias_sharing = {"spatial": "sum"} if parallel_mode == "column" else {"spatial": "sum", "matmul": "avg"}
-            if input_format == "nchw":
-                self.bias = nn.Parameter(torch.zeros(1, out_dim_local, 1, 1))
-                self.bias.is_shared_mp = bias_sharing
-                self.bias.sharded_dims_mp = [None, bias_shard, None, None]
-            elif input_format == "traditional":
-                self.bias = nn.Parameter(torch.zeros(out_dim_local))
-                self.bias.is_shared_mp = bias_sharing
-                self.bias.sharded_dims_mp = [bias_shard]
+            self.bias = nn.Parameter(torch.zeros(out_dim_local))
+            self.bias.is_shared_mp = bias_sharing
+            self.bias.sharded_dims_mp = [bias_shard]
+
+    @staticmethod
+    def upgrade_state_dict(state_dict, prefix=""):
+        r"""
+        Upgrade a state dict of an earlier version in place: the bias was kept as ``(1, C, 1, 1)`` in the nchw format.
+
+        Parameters
+        ----------
+        state_dict : dict
+            A state dict holding the layer.
+        prefix : str, optional
+            The prefix of the keys of the layer.
+        """
+        key = prefix + "bias"
+        if (key in state_dict) and (state_dict[key] is not None) and (state_dict[key].dim() == 4):
+            state_dict[key] = state_dict[key].reshape(-1)
 
     @property
     def weight(self):
@@ -240,7 +255,7 @@ class DistributedMatmul(nn.Module):
             x = reduce_from_parallel_region(x, self.comm_name)
 
         if self.bias is not None:
-            x = x + self.bias
+            x = x + (self.bias.reshape(1, -1, 1, 1) if self.input_format == "nchw" else self.bias)
 
         return x
 
@@ -259,14 +274,20 @@ class DistributedEncoderDecoder(nn.Module):
     all-reduce per column/row pair rather than one per layer.
 
     Because the modes alternate and the last must be ``"row"``, the first layer
-    is column-parallel only if ``num_layers`` is even -- hence the requirement
-    below.
+    is column-parallel only if the number of matmuls is even -- hence the
+    requirement below.
+
+    The layers are those of the serial
+    :class:`~makani.models.common.layers.EncoderDecoder`, with the same
+    parameter names and shapes, so that a checkpoint of one restores into the
+    other.
 
     Parameters
     ----------
     num_layers : int
-        Total number of matmul layers. Must be even when the communicator group
-        is larger than one.
+        Number of hidden layers before the output layer, as in
+        :class:`~makani.models.common.layers.EncoderDecoder`, so ``num_layers + 1``
+        matmuls. Must be odd when the communicator group is larger than one.
     input_dim : int
         Number of input features.
     output_dim : int
@@ -287,7 +308,7 @@ class DistributedEncoderDecoder(nn.Module):
     Raises
     ------
     ValueError
-        If ``num_layers`` is odd while matmul parallelism is active.
+        If ``num_layers`` is even while matmul parallelism is active.
     """
 
     def __init__(
@@ -306,22 +327,23 @@ class DistributedEncoderDecoder(nn.Module):
 
         self.comm_name = comm_name
 
-        # the chain takes a replicated input and must produce a replicated output.
-        # we therefore drive the column/row fork-join from the END: the last layer
-        # is row-parallel (reduces to a replicated output) and we alternate
-        # backwards. for the first layer to be column-parallel (consuming the
-        # replicated input) the number of layers must be even when we are actually
-        # feature-parallel.
-        if (comm.get_size(comm_name) > 1) and (num_layers % 2 != 0):
+        # num_layers hidden layers and the output layer, as in EncoderDecoder, so that both build the same network.
+        # the chain takes a replicated input and must produce a replicated output. we therefore drive the
+        # column/row fork-join from the END: the last layer is row-parallel (reduces to a replicated output) and
+        # we alternate backwards. for the first layer to be column-parallel (consuming the replicated input) the
+        # number of matmuls must be even when we are actually feature-parallel, i.e. num_layers odd.
+        num_matmuls = num_layers + 1
+        if (comm.get_size(comm_name) > 1) and (num_matmuls % 2 != 0):
             raise ValueError(
-                f"DistributedEncoderDecoder requires an even number of layers under matmul parallelism, got {num_layers}."
+                f"DistributedEncoderDecoder needs an even number of matmuls under matmul parallelism, i.e. an odd number "
+                f"of hidden layers, got {num_layers} hidden layers."
             )
-        modes = ["row" if ((num_layers - 1 - i) % 2 == 0) else "column" for i in range(num_layers)]
+        modes = ["row" if ((num_matmuls - 1 - i) % 2 == 0) else "column" for i in range(num_matmuls)]
 
         # get list of modules
         encoder_modules = []
         current_dim = input_dim
-        for i in range(num_layers - 1):
+        for i in range(num_layers):
             encoder_modules.append(
                 DistributedMatmul(
                     current_dim,
@@ -511,6 +533,14 @@ class DistributedMLP(nn.Module):
                 raise NotImplementedError(f"Error, drop_type {drop_type} not supported")
         else:
             self.drop = nn.Identity()
+
+    @staticmethod
+    def upgrade_state_dict(state_dict, prefix=""):
+        r"""
+        Upgrade a state dict of an earlier version in place, of a serial or a distributed MLP; see
+        :func:`~makani.utils.checkpoint_helpers.upgrade_mlp_state_dict`.
+        """
+        upgrade_mlp_state_dict(state_dict, prefix)
 
     def fwd(self, x):
         r"""
