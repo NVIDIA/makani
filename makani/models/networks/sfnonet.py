@@ -751,7 +751,7 @@ class SphericalFourierNeuralOperatorNet(nn.Module):
         # output transform
         if self.big_skip:
             self.residual_transform = nn.Conv2d(self.inp_chans, self.out_chans, 1, bias=False)
-            self.residual_transform.weight.is_shared_mp = ["spatial"]
+            self.residual_transform.weight.is_shared_mp = {"spatial": "sum", "matmul": "avg"}
             self.residual_transform.weight.sharded_dims_mp = [None, None, None, None]
             scale = math.sqrt(0.5 / self.inp_chans)
             nn.init.normal_(self.residual_transform.weight, mean=0.0, std=scale)
@@ -761,7 +761,8 @@ class SphericalFourierNeuralOperatorNet(nn.Module):
             # currently using deliberately a differently shape position embedding
             self.pos_embed = nn.Parameter(torch.zeros(1, embed_dim, self.inp_shape_loc[0], self.inp_shape_loc[1]))
             # information about how tensors are shared / sharded across ranks
-            self.pos_embed.is_shared_mp = []  # no reduction required since pos_embed is already serial
+            # split over the grid, so only shared over matmul, whose ranks compute the same
+            self.pos_embed.is_shared_mp = {"matmul": "avg"}
             self.pos_embed.sharded_dims_mp = [None, None, "h", "w"]
             self.pos_embed.type = "direct"
             with torch.no_grad():
@@ -786,8 +787,8 @@ class SphericalFourierNeuralOperatorNet(nn.Module):
                 nn.init.trunc_normal_(rcoeffs, std=0.02)
                 nn.init.trunc_normal_(ccoeffs, std=0.02)
             for coeffs in (rcoeffs, ccoeffs):
-                # no reduction: every rank holds its own block
-                coeffs.is_shared_mp = []
+                # every spatial rank holds its own block, the same on every matmul rank
+                coeffs.is_shared_mp = {"matmul": "avg"}
                 coeffs.sharded_dims_mp = [None, None, "h", "w"]
             self.pos_embed = nn.ParameterList([rcoeffs, ccoeffs])
             self.pos_embed.type = "frequency"

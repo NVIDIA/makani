@@ -29,7 +29,6 @@ import torch_harmonics.distributed as thd
 
 from makani.utils import comm
 
-from makani.mpu.mappings import init_gradient_reduction_hooks
 
 # distributed mlp + transformer engine availability flag
 from makani.mpu.layers import DistributedMLP, _TE_AVAILABLE
@@ -44,6 +43,15 @@ from ..testutils import disable_tf32, set_seed, compare_tensors
 
 
 class TestDistributedLayers(unittest.TestCase):
+    """
+    Distributed layers against their serial counterparts, on any decomposition.
+
+    The weight gradients are reduced in the tests themselves, see :meth:`_sum_gradient`, rather than by the
+    gradient reduction hooks of the training, so that they check the layers and nothing else: summed over the
+    spatial ranks, which split the computation of a layer and each hold the contribution of their part of the
+    grid. None of these layers splits its computation over the matmul ranks, which compute the same on each, so
+    the gradients are not summed over them: every matmul rank holds the full gradient already.
+    """
 
     @classmethod
     def setUpClass(cls):
@@ -60,6 +68,13 @@ class TestDistributedLayers(unittest.TestCase):
         tensor_local = _split_helper(tensor, dim=hdim, group=self.h_group)
         tensor_local = _split_helper(tensor_local, dim=wdim, group=self.w_group)
         return tensor_local
+
+    def _sum_gradient(self, grad, group):
+        """The gradient of a parameter shared over the ranks of a group that split its computation, summed over them."""
+        grad = grad.clone()
+        if comm.get_size(group) > 1:
+            dist.all_reduce(grad, group=comm.get_group(group))
+        return grad
 
     def _gather_helper(self, tensor, hdim=-2, wdim=-1):
         tensor_gather = _gather_helper(tensor, dim=hdim, group=self.h_group)
@@ -140,23 +155,11 @@ class TestDistributedLayers(unittest.TestCase):
             gain=1.0,
         ).to(self.device)
 
-        # set up wgrad reductions
-        spect_conv_dist = init_gradient_reduction_hooks(
-            spect_conv_dist,
-            device=self.device,
-            reduction_buffer_count=1,
-            broadcast_buffers=False,
-            find_unused_parameters=False,
-            gradient_as_bucket_view=True,
-            static_graph=True,
-            verbose=False,
-        )
-
         # make sure weights are the same:
         with torch.no_grad():
             weight = self._split_helper(spect_conv_local.weight, hdim=-1, wdim=None)
-            spect_conv_dist.module.weight.copy_(weight)
-            spect_conv_dist.module.bias.copy_(spect_conv_local.bias)
+            spect_conv_dist.weight.copy_(weight)
+            spect_conv_dist.bias.copy_(spect_conv_local.bias)
 
         # every rank draws the same input only from the same generator state: the distributed
         # weights were initialized on each rank's share of the degrees, which differ in size when
@@ -197,8 +200,10 @@ class TestDistributedLayers(unittest.TestCase):
         rgrad_local = self._split_helper(rgrad_full, hdim=-2, wdim=-1)
         torch.autograd.backward([out_local, res_local], [ograd_local, rgrad_local])
         igrad_local = inp_local.grad.clone()
-        wgrad_local = spect_conv_dist.module.weight.grad.clone()
-        bgrad_local = spect_conv_dist.module.bias.grad.clone()
+        # the weight is split over the degrees on the h ranks, and the w ranks each hold the contribution of their
+        # orders to them; the bias is shared by all spatial ranks
+        wgrad_local = self._sum_gradient(spect_conv_dist.weight.grad, "w")
+        bgrad_local = self._sum_gradient(spect_conv_dist.bias.grad, "spatial")
 
         #############################################################
         # evaluate FWD pass
@@ -323,9 +328,7 @@ class TestDistributedLayers(unittest.TestCase):
         out_local.backward(ograd_local)
         igrad_local = inp_local.grad.clone()
         # the weight is replicated over the spatial ranks, each holding the contribution of its part of the grid
-        wgrad_local = conv_dist.weight.grad.clone()
-        if comm.get_size("spatial") > 1:
-            dist.all_reduce(wgrad_local, group=comm.get_group("spatial"))
+        wgrad_local = self._sum_gradient(conv_dist.weight.grad, "spatial")
 
         with self.subTest(desc="output"):
             out_gather_full = self._gather_helper(out_local, hdim=-2, wdim=-1)
@@ -633,27 +636,11 @@ class TestDistributedLayers(unittest.TestCase):
             affine=affine,
         ).to(self.device)
 
-        # set up gradient reduction hooks for distributed version if affine=True
-        if affine:
-            norm_dist = init_gradient_reduction_hooks(
-                norm_dist,
-                device=self.device,
-                reduction_buffer_count=1,
-                broadcast_buffers=False,
-                find_unused_parameters=False,
-                gradient_as_bucket_view=True,
-                static_graph=True,
-                verbose=False,
-            )
-            norm_dist_handle = norm_dist.module
-        else:
-            norm_dist_handle = norm_dist
-
         # make sure weights are the same if affine=True
         if affine:
             with torch.no_grad():
-                norm_dist_handle.weight.copy_(norm_local.weight)
-                norm_dist_handle.bias.copy_(norm_local.bias)
+                norm_dist.weight.copy_(norm_local.weight)
+                norm_dist.bias.copy_(norm_local.bias)
 
         # input
         inp_full = torch.randn((B, C, H, W), dtype=torch.float32, device=self.device)
@@ -692,8 +679,9 @@ class TestDistributedLayers(unittest.TestCase):
         igrad_local = inp_local.grad.clone()
 
         if affine:
-            wgrad_local = norm_dist_handle.weight.grad.clone()
-            bgrad_local = norm_dist_handle.bias.grad.clone()
+            # shared by the spatial ranks, each holding the contribution of its part of the grid
+            wgrad_local = self._sum_gradient(norm_dist.weight.grad, "spatial")
+            bgrad_local = self._sum_gradient(norm_dist.bias.grad, "spatial")
 
         #############################################################
         # evaluate FWD pass
@@ -797,24 +785,11 @@ class TestDistributedLayers(unittest.TestCase):
             affine=affine,
         ).to(self.device)
 
-        # set up gradient reduction hooks for distributed version
-        if affine:
-            norm_dist = init_gradient_reduction_hooks(
-                norm_dist,
-                device=self.device,
-                reduction_buffer_count=1,
-                broadcast_buffers=False,
-                find_unused_parameters=False,
-                gradient_as_bucket_view=True,
-                static_graph=True,
-                verbose=False,
-            )
-
         # make sure weights are the same if affine=True
         if affine:
             with torch.no_grad():
-                norm_dist.module.weight.copy_(norm_local.weight)
-                norm_dist.module.bias.copy_(norm_local.bias)
+                norm_dist.weight.copy_(norm_local.weight)
+                norm_dist.bias.copy_(norm_local.bias)
 
         # input
         inp_full = torch.randn((B, C, H, W), dtype=torch.float32, device=self.device)
@@ -853,8 +828,9 @@ class TestDistributedLayers(unittest.TestCase):
         igrad_local = inp_local.grad.clone()
 
         if affine:
-            wgrad_local = norm_dist.module.weight.grad.clone()
-            bgrad_local = norm_dist.module.bias.grad.clone()
+            # shared by the spatial ranks, each holding the contribution of its part of the grid
+            wgrad_local = self._sum_gradient(norm_dist.weight.grad, "spatial")
+            bgrad_local = self._sum_gradient(norm_dist.bias.grad, "spatial")
 
         #############################################################
         # evaluate FWD pass

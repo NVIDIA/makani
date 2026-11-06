@@ -21,6 +21,7 @@ from parameterized import parameterized, parameterized_class
 import numpy as np
 import torch
 
+from makani.mpu.helpers import AVG, MODEL_GROUPS, get_sharing
 from makani.models.noise import (
     toep,
     IsotropicGaussianRandomFieldS2,
@@ -971,15 +972,10 @@ class TestLearnableNoiseAnnotations(unittest.TestCase):
     """
     The model-parallel annotations of the learnable noise parameters.
 
-    The gradient reduction sums the gradient of a parameter over every group in its ``is_shared_mp``, and one
-    without the attribute counts as shared over the whole model group. A parameter sharded over a group must
-    therefore not be shared over it, or the shards of other ranks would be added to its gradient; and one not
-    sharded over a group is the same on every rank of it, so it has to be shared over it, or its gradient would miss
-    the contributions of the other ranks. The distributed test checks the gradients themselves.
+    Over each model-parallel group, a parameter is either sharded, each rank holding its part, or shared, its
+    gradient summed or averaged over the ranks, see :func:`~makani.mpu.helpers.get_sharing`; never both, and never
+    neither. The distributed test checks the gradients themselves.
     """
-
-    _GROUPS = {"h", "w", "matmul"}
-    _EXPAND = {"model": {"h", "w", "matmul"}, "spatial": {"h", "w"}}
 
     @parameterized.expand(
         [
@@ -993,11 +989,11 @@ class TestLearnableNoiseAnnotations(unittest.TestCase):
             with self.subTest(param=name):
                 self.assertEqual(len(param.sharded_dims_mp), param.dim())
                 sharded = {group for group in param.sharded_dims_mp if group is not None}
-                shared = set()
-                for group in getattr(param, "is_shared_mp", ["model"]):
-                    shared |= self._EXPAND.get(group, {group})
+                shared = set(get_sharing(param))
                 self.assertEqual(shared & sharded, set(), "sharded over a group it is also shared over")
-                self.assertEqual(shared | sharded, self._GROUPS, "neither sharded nor shared over some group")
+                self.assertEqual(shared | sharded, set(MODEL_GROUPS), "neither sharded nor shared over some group")
+                # every matmul rank draws the same noise
+                self.assertEqual(get_sharing(param)["matmul"], AVG)
 
 
 # ===========================================================================

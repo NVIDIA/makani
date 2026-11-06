@@ -139,16 +139,16 @@ class DistributedMatmul(nn.Module):
             te = get_te()
             self.te_linear = te.Linear(inp_dim_local, out_dim_local, bias=False)
             # te weight is always 2D (out_local, in_local) regardless of input_format
-            self.weight.is_shared_mp = ["spatial"]
+            self.weight.is_shared_mp = {"spatial": "sum"}
             self.weight.sharded_dims_mp = [weight_out_shard, weight_inp_shard]
         elif input_format == "nchw":
             self.weight = nn.Parameter(torch.ones(out_dim_local, inp_dim_local, 1, 1))
-            self.weight.is_shared_mp = ["spatial"]
+            self.weight.is_shared_mp = {"spatial": "sum"}
             self.weight.sharded_dims_mp = [weight_out_shard, weight_inp_shard, None, None]
             self.matmul_handle = F.conv2d
         else:  # traditional
             self.weight = nn.Parameter(torch.ones(out_dim_local, inp_dim_local))
-            self.weight.is_shared_mp = ["spatial"]
+            self.weight.is_shared_mp = {"spatial": "sum"}
             self.weight.sharded_dims_mp = [weight_out_shard, weight_inp_shard]
             self.matmul_handle = F.linear
 
@@ -156,16 +156,17 @@ class DistributedMatmul(nn.Module):
         self.bias = None
         if bias:
             # a column bias is sharded over the (sharded) output dim, a row bias
-            # is replicated over the matmul group (added after the all-reduce) and
-            # must therefore NOT be summed over matmul in the gradient hook
+            # is replicated over the matmul group: it is added after the all-reduce,
+            # which every matmul rank computes alike, so its gradient is averaged
             bias_shard = comm_name if parallel_mode == "column" else None
+            bias_sharing = {"spatial": "sum"} if parallel_mode == "column" else {"spatial": "sum", "matmul": "avg"}
             if input_format == "nchw":
                 self.bias = nn.Parameter(torch.zeros(1, out_dim_local, 1, 1))
-                self.bias.is_shared_mp = ["spatial"]
+                self.bias.is_shared_mp = bias_sharing
                 self.bias.sharded_dims_mp = [None, bias_shard, None, None]
             elif input_format == "traditional":
                 self.bias = nn.Parameter(torch.zeros(out_dim_local))
-                self.bias.is_shared_mp = ["spatial"]
+                self.bias.is_shared_mp = bias_sharing
                 self.bias.sharded_dims_mp = [bias_shard]
 
     @property
@@ -634,9 +635,10 @@ class StochasticMLP(nn.Module):
 
     Notes
     -----
-    The weight parameters are tagged ``is_shared_mp = ["spatial"]``: they are
-    replicated across the spatial model-parallel group and their gradients are
-    reduced over it.
+    The weight parameters are tagged ``is_shared_mp = {"spatial": "sum", "matmul": "avg"}``:
+    they are replicated over the model-parallel ranks, summed over the spatial
+    ranks, each holding the contribution of its part of the grid, and averaged
+    over the matmul ranks, which compute the same.
 
     See Also
     --------
@@ -676,9 +678,9 @@ class StochasticMLP(nn.Module):
             raise NotImplementedError(f"Error, input format {input_format} not supported.")
 
         # sharing settings
-        self.fc1_weight_log_std.is_shared_mp = ["spatial"]
-        self.fc1_weight_mean.is_shared_mp = ["spatial"]
-        self.fc1_bias.is_shared_mp = ["spatial"]
+        self.fc1_weight_log_std.is_shared_mp = {"spatial": "sum", "matmul": "avg"}
+        self.fc1_weight_mean.is_shared_mp = {"spatial": "sum", "matmul": "avg"}
+        self.fc1_bias.is_shared_mp = {"spatial": "sum", "matmul": "avg"}
 
         # The stochastic weight is  weight = scale * exp(log_std) * eps + mean  with
         # eps ~ N(0, 1). log_std keeps its zero init (so the effective std == scale and
@@ -705,10 +707,10 @@ class StochasticMLP(nn.Module):
             raise NotImplementedError(f"Error, input format {input_format} not supported.")
 
         # sharing settings
-        self.fc2_weight_log_std.is_shared_mp = ["spatial"]
-        self.fc2_weight_mean.is_shared_mp = ["spatial"]
+        self.fc2_weight_log_std.is_shared_mp = {"spatial": "sum", "matmul": "avg"}
+        self.fc2_weight_mean.is_shared_mp = {"spatial": "sum", "matmul": "avg"}
         if self.fc2_bias is not None:
-            self.fc2_bias.is_shared_mp = ["spatial"]
+            self.fc2_bias.is_shared_mp = {"spatial": "sum", "matmul": "avg"}
 
         # gain factor for the output determines the scaling of the output init
         # (same scheme as fc1: log_std stays at its zero init, scale is a constant factor)
@@ -915,12 +917,19 @@ class DistributedPatchEmbed(nn.Module):
         else:
             out_chans_local = embed_dim
 
-        # the weights  of this layer is shared across spatial parallel ranks
+        # the weights of this layer are shared across the spatial ranks
         self.proj = nn.Conv2d(in_chans, out_chans_local, kernel_size=patch_size, stride=patch_size)
 
-        # make sure we reduce them across rank
-        self.proj.weight.is_shared_mp = ["spatial"]
-        self.proj.bias.is_shared_mp = ["spatial"]
+        # shared over the spatial ranks, each embedding its part of the grid; split over matmul if the output is,
+        # else every matmul rank computes the same
+        if self.output_parallel:
+            sharing, sharded = {"spatial": "sum"}, "matmul"
+        else:
+            sharing, sharded = {"spatial": "sum", "matmul": "avg"}, None
+        self.proj.weight.is_shared_mp = dict(sharing)
+        self.proj.weight.sharded_dims_mp = [sharded, None, None, None]
+        self.proj.bias.is_shared_mp = dict(sharing)
+        self.proj.bias.sharded_dims_mp = [sharded]
 
         # gather shapes
         self.gather_shapes = compute_split_shapes(in_chans, comm.get_size("matmul"))
@@ -1043,18 +1052,12 @@ class DistributedAttention(nn.Module):
         else:
             self.proj_drop = nn.Identity()
 
-        # set up weight sharing, depends on norm type
-        if isinstance(self.q_norm, nn.LayerNorm):
-            if hasattr(self.q_norm, "weight"):
-                self.q_norm.weight.is_shared_mp = []
-            if hasattr(self.q_norm, "bias"):
-                self.q_norm.bias.is_shared_mp = []
-
-        if isinstance(self.k_norm, nn.LayerNorm):
-            if hasattr(self.k_norm, "weight"):
-                self.k_norm.weight.is_shared_mp = []
-            if hasattr(self.k_norm, "bias"):
-                self.k_norm.bias.is_shared_mp = []
+        # the q and k norms act on every head, and the heads are split over matmul, so each matmul rank holds the
+        # contribution of its heads to their gradients; as for the other layers, the spatial ranks would each hold
+        # that of their part of the grid
+        for norm in (self.q_norm, self.k_norm):
+            for param in norm.parameters():
+                param.is_shared_mp = {"spatial": "sum", "matmul": "sum"}
 
     def forward(self, x):
         r"""

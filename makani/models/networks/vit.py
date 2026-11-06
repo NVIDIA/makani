@@ -343,7 +343,8 @@ class VisionTransformer(nn.Module):
 
         # annotate for distributed
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, self.embed_dim))
-        self.pos_embed.is_shared_mp = []
+        # the same on every rank, as the other layers of the network
+        self.pos_embed.is_shared_mp = {"spatial": "sum", "matmul": "avg"}
 
         self.pos_drop = nn.Dropout(p=path_drop_rate)
 

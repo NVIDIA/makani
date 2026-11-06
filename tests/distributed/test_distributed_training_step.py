@@ -20,6 +20,7 @@ from parameterized import parameterized
 import torch
 import torch.distributed as dist
 
+from makani.mpu.helpers import get_sharing
 from makani.utils import comm
 from makani.utils import driver
 from makani.utils import checkpoint_helpers
@@ -117,7 +118,7 @@ class TestDistributedTrainingStep(unittest.TestCase):
     def _is_sync_source(self, param):
         # sync_params broadcasts over the data group first, then over each group the parameter is
         # shared across, so the weights of a rank that roots all of them end up everywhere
-        groups = ["data"] + list(getattr(param, "is_shared_mp", ["model"]))
+        groups = ["data"] + list(get_sharing(param))
         return all((comm.get_size(group) == 1) or (self.world_rank == comm.get_root(group)) for group in groups)
 
     @staticmethod
@@ -224,8 +225,9 @@ class TestDistributedTrainingStep(unittest.TestCase):
         for _ in range(num_steps):
             optimizer.zero_grad(set_to_none=True)
             out_local = model_dist(single_step_rollout(inp_local.unsqueeze(1))).squeeze(1)
-            # the loss of the whole grid, from the sums over the shards of the model ranks
-            loss = reduce_from_parallel_region(self._loss(out_local, tar_local, numel), "model")
+            # the loss of the whole grid, from the sums over the shards of the spatial ranks; the output is replicated
+            # over the matmul ranks, so they do not add up
+            loss = reduce_from_parallel_region(self._loss(out_local, tar_local, numel), "spatial")
             loss.backward()
             optimizer.step()
 

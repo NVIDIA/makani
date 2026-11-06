@@ -229,9 +229,11 @@ class PatchEmbed2D(nn.Module):
 
     Notes
     -----
-    The projection weight and bias are tagged ``is_shared_mp = ["spatial"]``, so
-    they are replicated rather than sharded across the spatial model-parallel
-    group and their gradients are reduced over it.
+    The projection weight and bias are tagged
+    ``is_shared_mp = {"spatial": "sum", "matmul": "avg"}``: they are replicated
+    rather than sharded, and their gradients are summed over the spatial ranks,
+    each holding the contribution of its part of the grid, and averaged over
+    the matmul ranks, which compute the same.
     """
 
     def __init__(
@@ -250,8 +252,8 @@ class PatchEmbed2D(nn.Module):
         self.img_size = img_size
         self.patch_size = patch_size
         self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size, bias=True)
-        self.proj.weight.is_shared_mp = ["spatial"]
-        self.proj.bias.is_shared_mp = ["spatial"]
+        self.proj.weight.is_shared_mp = {"spatial": "sum", "matmul": "avg"}
+        self.proj.bias.is_shared_mp = {"spatial": "sum", "matmul": "avg"}
         self.padding = padding
         self.flatten = flatten
 
@@ -580,9 +582,11 @@ class EncoderDecoder(nn.Module):
 
     Notes
     -----
-    All weights and biases are tagged ``is_shared_mp = ["spatial"]``: the layer
-    is pointwise, so every spatial rank holds the same parameters and their
-    gradients are reduced across the spatial group.
+    All weights and biases are tagged
+    ``is_shared_mp = {"spatial": "sum", "matmul": "avg"}``: the layer is
+    pointwise, so every rank holds the same parameters; their gradients are
+    summed over the spatial ranks, each holding the contribution of its part of
+    the grid, and averaged over the matmul ranks, which compute the same.
     """
 
     def __init__(
@@ -610,14 +614,14 @@ class EncoderDecoder(nn.Module):
                 raise NotImplementedError(f"Error, input format {input_format} not supported.")
 
             # weight sharing
-            encoder_modules[-1].weight.is_shared_mp = ["spatial"]
+            encoder_modules[-1].weight.is_shared_mp = {"spatial": "sum", "matmul": "avg"}
 
             # proper initializaiton (fan-in per group for grouped conv)
             fan_in = (current_dim // groups) if input_format == "nchw" else current_dim
             scale = math.sqrt(2.0 / fan_in)
             nn.init.normal_(encoder_modules[-1].weight, mean=0.0, std=scale)
             if encoder_modules[-1].bias is not None:
-                encoder_modules[-1].bias.is_shared_mp = ["spatial"]
+                encoder_modules[-1].bias.is_shared_mp = {"spatial": "sum", "matmul": "avg"}
                 nn.init.constant_(encoder_modules[-1].bias, 0.0)
 
             encoder_modules.append(act_layer())
@@ -630,14 +634,14 @@ class EncoderDecoder(nn.Module):
             encoder_modules.append(nn.Linear(current_dim, output_dim, bias=False))
 
         # weight sharing
-        encoder_modules[-1].weight.is_shared_mp = ["spatial"]
+        encoder_modules[-1].weight.is_shared_mp = {"spatial": "sum", "matmul": "avg"}
 
         # proper initializaiton
         fan_in = (current_dim // groups) if input_format == "nchw" else current_dim
         scale = math.sqrt(gain / fan_in)
         nn.init.normal_(encoder_modules[-1].weight, mean=0.0, std=scale)
         if encoder_modules[-1].bias is not None:
-            encoder_modules[-1].bias.is_shared_mp = ["spatial"]
+            encoder_modules[-1].bias.is_shared_mp = {"spatial": "sum", "matmul": "avg"}
             nn.init.constant_(encoder_modules[-1].bias, 0.0)
 
         self.fwd = nn.Sequential(*encoder_modules)
@@ -773,15 +777,17 @@ class MLP(nn.Module):
         else:
             raise NotImplementedError(f"Error, input format {input_format} not supported.")
 
-        # sharing settings: weights/biases are replicated across the spatial model
-        # group, so the gradient reduction hook sums them over "spatial". This must
-        # be stamped on every parameter (including te.Linear ones, which otherwise
-        # arrive unannotated) for the comm hook to reduce them correctly.
-        fc1.weight.is_shared_mp = ["spatial"]
-        fc1.bias.is_shared_mp = ["spatial"]
-        fc2.weight.is_shared_mp = ["spatial"]
+        # sharing settings: weights/biases are replicated over the model group, so the
+        # gradient reduction hook sums them over "spatial", whose ranks each hold the
+        # contribution of their part of the grid, and averages them over "matmul",
+        # whose ranks compute the same. This must be stamped on every parameter
+        # (including te.Linear ones, which otherwise arrive unannotated) for the comm
+        # hook to reduce them correctly.
+        fc1.weight.is_shared_mp = {"spatial": "sum", "matmul": "avg"}
+        fc1.bias.is_shared_mp = {"spatial": "sum", "matmul": "avg"}
+        fc2.weight.is_shared_mp = {"spatial": "sum", "matmul": "avg"}
         if fc2.bias is not None:
-            fc2.bias.is_shared_mp = ["spatial"]
+            fc2.bias.is_shared_mp = {"spatial": "sum", "matmul": "avg"}
 
         # initialize the weights correctly (identical to the standard path so that
         # toggling use_te does not change initialization)

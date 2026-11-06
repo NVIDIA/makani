@@ -118,8 +118,8 @@ class DistributedInstanceNorm2d(nn.Module):
         if self.affine:
             self.weight = nn.Parameter(torch.ones(num_features))
             self.bias = nn.Parameter(torch.zeros(num_features))
-            self.weight.is_shared_mp = ["spatial"]
-            self.bias.is_shared_mp = ["spatial"]
+            self.weight.is_shared_mp = {"spatial": "sum", "matmul": "avg"}
+            self.bias.is_shared_mp = {"spatial": "sum", "matmul": "avg"}
 
     def _stats_welford(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Computes the statistics locally, then uses the Welford online algorithm to reduce them"""
@@ -274,10 +274,10 @@ class DistributedLayerNorm(nn.Module):
 
         if elementwise_affine:
             # set up weight sharing and sharding
-            self.norm.weight.is_shared_mp = ["model"]
+            self.norm.weight.is_shared_mp = {"spatial": "sum", "matmul": "avg"}
             self.norm.weight.sharded_dims_mp = [None]
             if bias:
-                self.norm.bias.is_shared_mp = ["model"]
+                self.norm.bias.is_shared_mp = {"spatial": "sum", "matmul": "avg"}
                 self.norm.bias.sharded_dims_mp = [None]
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

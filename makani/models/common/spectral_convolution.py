@@ -193,11 +193,12 @@ class SpectralConv(nn.Module):
         self.weight = nn.Parameter(init)
 
         if self.operator_type == "dhconv":
-            self.weight.is_shared_mp = ["matmul", "w"]
+            # split over the degrees on the h ranks; the w ranks each hold the contribution of their orders
+            self.weight.is_shared_mp = {"w": "sum", "matmul": "avg"}
             self.weight.sharded_dims_mp = [None for _ in weight_shape]
             self.weight.sharded_dims_mp[-1] = "h"
         else:
-            self.weight.is_shared_mp = ["matmul"]
+            self.weight.is_shared_mp = {"matmul": "avg"}
             self.weight.sharded_dims_mp = [None for _ in weight_shape]
             self.weight.sharded_dims_mp[-1] = "w"
             self.weight.sharded_dims_mp[-2] = "h"
@@ -207,7 +208,7 @@ class SpectralConv(nn.Module):
 
         if bias == True:
             self.bias = nn.Parameter(torch.zeros(1, self.out_channels, 1, 1))
-            self.bias.is_shared_mp = ["model"]
+            self.bias.is_shared_mp = {"spatial": "sum", "matmul": "avg"}
             self.bias.sharded_dims_mp = [None, None, None, None]
 
     def forward(self, x):

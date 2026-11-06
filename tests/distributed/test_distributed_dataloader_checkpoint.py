@@ -51,7 +51,7 @@ class _TinyModel(nn.Module):
     def __init__(self):
         super().__init__()
         self.weight = nn.Parameter(torch.zeros(2))
-        self.weight.is_shared_mp = ["spatial"]
+        self.weight.is_shared_mp = {"spatial": "sum", "matmul": "avg"}
         self.weight.sharded_dims_mp = [None]
 
     def forward(self, x):
