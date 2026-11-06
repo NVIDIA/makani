@@ -24,6 +24,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from makani.mpu.helpers import MODEL_GROUPS, get_sharing
 from makani.models import model_registry
 from makani.utils import checkpoint_helpers
 from makani.utils import LossHandler
@@ -66,6 +67,24 @@ class TestModels(unittest.TestCase):
         set_seed(333)
 
         return
+
+    @parameterized.expand(model_registry.list_models(), skip_on_empty=True)
+    def test_every_parameter_is_shared_or_sharded_over_each_model_group(self, nettype):
+        """
+        The model-parallel annotations of every parameter, see :func:`~makani.mpu.helpers.get_sharing`.
+
+        Over each model-parallel group, a parameter is either sharded, each rank holding its part, or shared, its
+        gradient summed or averaged over the ranks; never both, and never neither, which would leave the replicas
+        of the ranks to drift apart.
+        """
+        self.params.nettype = nettype
+        model = model_registry.get_model(self.params)
+        for name, param in model.named_parameters():
+            with self.subTest(param=name):
+                shared = set(get_sharing(param))
+                sharded = {group for group in getattr(param, "sharded_dims_mp", []) if group is not None}
+                self.assertEqual(shared & sharded, set(), "shared over a group it is sharded over")
+                self.assertEqual(shared | sharded, set(MODEL_GROUPS), "neither shared nor sharded over a group")
 
     @parameterized.expand(model_registry.list_models(), skip_on_empty=True)
     def test_model(self, nettype):

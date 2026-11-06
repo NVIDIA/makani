@@ -190,16 +190,22 @@ class TestDistributedModel(unittest.TestCase):
             "SFNO",
             "SNO",
             "FCN3",
+            "ViT",
         ],
         skip_on_empty=True,
     )
     def test_distributed_model_checkpoint_restore(self, nettype, verbose=False):
         """
-        Tests initialization of all the models and the forward and backward pass
+        A serial checkpoint, restored in flexible mode into the distributed model, gives the serial parameters.
         """
         self.params.nettype = nettype
         if nettype == "DebugNet":
             return
+        if nettype == "ViT":
+            # the heads and the MLPs are split over matmul; the tokens are not split over the grid
+            if comm.get_size("spatial") > 1:
+                self.skipTest("ViT does not split over the grid")
+            self.params.embed_dim, self.params.depth, self.params.num_heads = 32, 2, 4
 
         # fix seed
         set_seed(333)

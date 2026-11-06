@@ -37,6 +37,7 @@ import torch
 import torch.distributed as dist
 from parameterized import parameterized
 
+from makani.mpu.helpers import SUM, all_reduce_mean, get_sharing
 from makani.utils import comm
 from makani.models.noise import DiffusionNoiseS2, IsotropicGaussianRandomFieldS2, noise_base_seed
 from makani.models.noise_controller import NoiseController
@@ -166,22 +167,16 @@ class TestDistributedNoise(unittest.TestCase):
         """
         The gradient of a parameter as the trainers reduce it, gathered over the groups it is sharded over.
 
-        ``None`` if the parameter counts as shared over a group it is sharded over: the reduction would add up shards
-        of different coefficients, or fail on shards of different sizes. Unannotated, it counts as shared over the
-        whole model group, as in :func:`~makani.mpu.mappings.init_gradient_reduction_hooks`.
+        Summed or averaged over the groups it is shared over, as its annotation says, see
+        :func:`~makani.mpu.helpers.get_sharing`, which refuses a parameter shared over a group it is sharded over.
         """
-        shared = getattr(param, "is_shared_mp", ["model"])
-        expanded = set()
-        for group in shared:
-            expanded |= {"model": {"h", "w", "matmul"}, "spatial": {"h", "w"}}.get(group, {group})
-        sharded = {group for group in param.sharded_dims_mp if group is not None}
-        if any(comm.get_size(group) > 1 for group in expanded & sharded):
-            return None
-
         grad = param.grad.clone()
-        for group in shared:
+        for group, reduction in get_sharing(param).items():
             if comm.get_size(group) > 1:
-                dist.all_reduce(grad, group=comm.get_group(group))
+                if reduction == SUM:
+                    dist.all_reduce(grad, group=comm.get_group(group))
+                else:
+                    all_reduce_mean(grad, comm.get_group(group))
         for dim, group in enumerate(param.sharded_dims_mp):
             if (group is not None) and (comm.get_size(group) > 1):
                 grad = _gather_helper(grad, dim=dim, group=comm.get_group(group))
@@ -231,9 +226,8 @@ class TestDistributedNoise(unittest.TestCase):
         loss_ref = 0.0
         for step, replace_state in enumerate((True, False, False)):
             self._step(process, reference, draws, replace_state, seed=100 + step)
-            # the matmul ranks hold the same noise and compute the same loss, and the gradients are summed over them:
-            # each counts its share. In training, the network splits the work over matmul instead
-            loss = loss + (self._shard_grid(weights[step]) * process()).sum() / comm.get_size("matmul")
+            # the matmul ranks hold the same noise and compute the same loss, and the gradients are averaged over them
+            loss = loss + (self._shard_grid(weights[step]) * process()).sum()
             loss_ref = loss_ref + (weights[step] * reference()).sum()
         loss.backward()
         loss_ref.backward()
@@ -242,11 +236,7 @@ class TestDistributedNoise(unittest.TestCase):
             self.assertTrue(reduce_success(draws.ok, self.device))
         params = dict(reference.named_parameters())
         for name, param in process.named_parameters():
-            grad = self._reduce_gradient(param)
-            with self.subTest(desc=f"gradient {name}: annotations"):
-                self.assertIsNotNone(grad, f"{name} is shared over a group it is sharded over")
-            if grad is not None:
-                self._check(f"gradient {name}", grad, params[name].grad)
+            self._check(f"gradient {name}", self._reduce_gradient(param), params[name].grad)
 
     def test_controller_restores_its_shards(self):
         """A snapshot of the shards, restored, continues as the processes did after it, on every rank."""

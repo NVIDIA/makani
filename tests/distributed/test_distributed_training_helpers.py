@@ -20,7 +20,7 @@ import torch.nn as nn
 import torch.distributed as dist
 
 from makani.utils import comm
-from makani.mpu.helpers import sync_params
+from makani.mpu.helpers import AVG, SUM, get_sharing, sync_params
 from makani.mpu.mappings import init_gradient_reduction_hooks
 
 from .distributed_helpers import _init_grid, reduce_success, sync_and_barrier, teardown_comms
@@ -30,23 +30,32 @@ _NUM_FEATURES = 6
 
 class _TinyModel(nn.Module):
     """
-    Linear model with one parameter shared across the model ranks and one parameter that is
-    rank-local, like a sharded spectral weight. The loss is linear in the weights, so the local
-    gradient of each weight is its input.
+    Linear model with a parameter of each kind of sharing. The loss is linear in the weights, so the
+    local gradient of each weight is its input.
+
+    * ``shared``: without annotation, shared over the whole model group, summed over the spatial
+      ranks and averaged over the matmul ranks.
+    * ``local``: sharded over h, like a spectral weight, summed over w and averaged over matmul.
+    * ``summed``: summed over matmul, like the norms of the heads of an attention split over matmul.
+    * ``listed``: annotated with the list form of earlier versions, ``["spatial"]``.
+
+    With ``all_shared``, no parameter is annotated.
     """
 
     def __init__(self, all_shared=False):
         super().__init__()
         self.shared = nn.Parameter(torch.zeros(_NUM_FEATURES, dtype=torch.float64))
-        self.shared.is_shared_mp = ["model"]
-
         self.local = nn.Parameter(torch.zeros(_NUM_FEATURES, dtype=torch.float64))
-        self.local.is_shared_mp = ["model"] if all_shared else ["matmul"]
+        self.summed = nn.Parameter(torch.zeros(_NUM_FEATURES, dtype=torch.float64))
+        self.listed = nn.Parameter(torch.zeros(_NUM_FEATURES, dtype=torch.float64))
         if not all_shared:
+            self.local.is_shared_mp = {"w": "sum", "matmul": "avg"}
             self.local.sharded_dims_mp = ["h"]
+            self.summed.is_shared_mp = {"matmul": "sum"}
+            self.listed.is_shared_mp = ["spatial"]
 
-    def forward(self, x_shared, x_local):
-        return (self.shared * x_shared).sum() + (self.local * x_local).sum()
+    def forward(self, xs):
+        return sum((p * x).sum() for p, x in zip(self.parameters(), xs))
 
 
 class TestDistributedTrainingHelpers(unittest.TestCase):
@@ -111,17 +120,18 @@ class TestDistributedTrainingHelpers(unittest.TestCase):
     def _test_sync_params(self, mode, verbose=False):
         model = _TinyModel().to(self.device)
         with torch.no_grad():
-            model.shared.copy_(self._rank_values(0.0))
-            model.local.copy_(self._rank_values(0.5))
+            for i, p in enumerate(model.parameters()):
+                p.copy_(self._rank_values(0.5 * i))
 
         initial = {pname: self._all_gather(p.detach()) for pname, p in model.named_parameters()}
 
         sync_params(model, mode=mode)
 
         for pname, param in model.named_parameters():
-            # sync_params goes over the data group first, then over each group the parameter is shared across
+            # sync_params goes over the data group first, then over each group the parameter is shared across,
+            # whichever its gradient is reduced with
             expected = self._replay(initial[pname], "data", mode)
-            for group in param.is_shared_mp:
+            for group in get_sharing(param):
                 expected = self._replay(expected, group, mode)
             self._check(f"{mode} {pname}", param.detach(), expected[self.world_rank], verbose=verbose)
 
@@ -135,25 +145,30 @@ class TestDistributedTrainingHelpers(unittest.TestCase):
         model = _TinyModel(all_shared=all_shared).to(self.device)
         model_ddp = init_gradient_reduction_hooks(model, self.device, verbose=False)
 
-        x_shared = self._rank_values(1.0)
-        x_local = self._rank_values(2.0)
-        model_ddp(x_shared, x_local).backward()
+        xs = [self._rank_values(1.0 + i) for i, _ in enumerate(model.parameters())]
+        model_ddp(xs).backward()
 
-        # the local gradient of each weight is its input; it is averaged over the data group and
-        # summed over each group the parameter is shared across, whose ranks all contribute to it
-        local_grads = {"shared": x_shared, "local": x_local}
-        for pname, param in model.named_parameters():
-            expected = self._replay(self._all_gather(local_grads[pname]), "data", "mean")
-            for group in param.is_shared_mp:
-                expected = self._replay(expected, group, "sum")
+        # the local gradient of each weight is its input; it is averaged over the data group, then summed or
+        # averaged over each group the parameter is shared over, as its annotation says
+        for (pname, param), x in zip(model.named_parameters(), xs):
+            expected = self._replay(self._all_gather(x), "data", "mean")
+            for group, reduction in get_sharing(param).items():
+                expected = self._replay(expected, group, "sum" if reduction == SUM else "mean")
             self._check(f"gradient {pname}", param.grad, expected[self.world_rank], verbose=verbose)
 
+    def test_the_sharing_of_the_model(self):
+        model = _TinyModel()
+        self.assertEqual(get_sharing(model.shared), {"h": SUM, "w": SUM, "matmul": AVG})
+        self.assertEqual(get_sharing(model.local), {"w": SUM, "matmul": AVG})
+        self.assertEqual(get_sharing(model.summed), {"matmul": SUM})
+        # the list form of earlier versions: a sum over the spatial ranks
+        self.assertEqual(get_sharing(model.listed), {"h": SUM, "w": SUM})
+
     def test_gradient_reduction_all_shared(self, verbose=False):
-        # with model parallelism, plain DDP over the world with the gradients scaled by the model size
+        # no parameter annotated: each is shared over the whole model group
         self._test_gradient_reduction(all_shared=True, verbose=verbose)
 
     def test_gradient_reduction_mixed(self, verbose=False):
-        # with model parallelism, DDP over the data group with the custom per-parameter comm hook
         self._test_gradient_reduction(all_shared=False, verbose=verbose)
 
 

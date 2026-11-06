@@ -140,10 +140,10 @@ class DiscreteContinuousEncoder(nn.Module):
             theta_cutoff=theta_cutoff,
         )
         if comm.get_size("spatial") > 1:
-            self.conv.weight.is_shared_mp = ["spatial"]
+            self.conv.weight.is_shared_mp = {"spatial": "sum", "matmul": "avg"}
             self.conv.weight.sharded_dims_mp = [None, None, None]
             if self.conv.bias is not None:
-                self.conv.bias.is_shared_mp = ["model"]
+                self.conv.bias.is_shared_mp = {"spatial": "sum", "matmul": "avg"}
                 self.conv.bias.sharded_dims_mp = [None]
 
         if use_mlp:
@@ -316,10 +316,10 @@ class DiscreteContinuousDecoder(nn.Module):
             theta_cutoff=theta_cutoff,
         )
         if comm.get_size("spatial") > 1:
-            self.conv.weight.is_shared_mp = ["spatial"]
+            self.conv.weight.is_shared_mp = {"spatial": "sum", "matmul": "avg"}
             self.conv.weight.sharded_dims_mp = [None, None, None]
             if self.conv.bias is not None:
-                self.conv.bias.is_shared_mp = ["model"]
+                self.conv.bias.is_shared_mp = {"spatial": "sum", "matmul": "avg"}
                 self.conv.bias.sharded_dims_mp = [None]
 
     def forward(self, x):
@@ -465,10 +465,10 @@ class NeuralOperatorBlock(nn.Module):
                 theta_cutoff=math.sqrt(2) * torch.pi / float(self.input_shape[0] - 1),
             )
             if comm.get_size("spatial") > 1:
-                self.local_conv.weight.is_shared_mp = ["spatial"]
+                self.local_conv.weight.is_shared_mp = {"spatial": "sum", "matmul": "avg"}
                 self.local_conv.weight.sharded_dims_mp = [None, None, None]
                 if self.local_conv.bias is not None:
-                    self.local_conv.bias.is_shared_mp = ["model"]
+                    self.local_conv.bias.is_shared_mp = {"spatial": "sum", "matmul": "avg"}
                     self.local_conv.bias.sharded_dims_mp = [None]
 
             with torch.no_grad():
@@ -512,7 +512,7 @@ class NeuralOperatorBlock(nn.Module):
         if layer_scale:
             self.layer_scale = LayerScale(out_chans)
             if comm.get_size("spatial") > 1:
-                self.layer_scale.weight.is_shared_mp = ["model"]
+                self.layer_scale.weight.is_shared_mp = {"spatial": "sum", "matmul": "avg"}
                 self.layer_scale.weight.sharded_dims_mp = [None, None, None, None]
         else:
             self.layer_scale = nn.Identity()
@@ -523,10 +523,10 @@ class NeuralOperatorBlock(nn.Module):
             self.skip = nn.Conv2d(inp_chans, out_chans, 1, 1, bias=False)
             torch.nn.init.normal_(self.skip.weight, std=math.sqrt(gain_factor / inp_chans))
             if comm.get_size("spatial") > 1:
-                self.skip.weight.is_shared_mp = ["model"]
+                self.skip.weight.is_shared_mp = {"spatial": "sum", "matmul": "avg"}
                 self.skip.weight.sharded_dims_mp = [None, None, None, None]
                 if self.skip.bias is not None:
-                    self.skip.bias.is_shared_mp = ["model"]
+                    self.skip.bias.is_shared_mp = {"spatial": "sum", "matmul": "avg"}
                     self.skip.bias.sharded_dims_mp = [None]
 
         elif skip == "identity":
@@ -721,7 +721,7 @@ class SphericalNeuralOperatorNet(nn.Module):
         # residual prediction
         if self.big_skip:
             self.residual_transform = nn.Conv2d(self.out_chans, self.out_chans, 1, bias=False)
-            self.residual_transform.weight.is_shared_mp = ["spatial"]
+            self.residual_transform.weight.is_shared_mp = {"spatial": "sum", "matmul": "avg"}
             self.residual_transform.weight.sharded_dims_mp = [None, None, None, None]
             scale = math.sqrt(0.5 / self.out_chans)
             nn.init.normal_(self.residual_transform.weight, mean=0.0, std=scale)

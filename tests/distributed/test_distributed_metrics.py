@@ -100,13 +100,15 @@ class TestDistributedMetricHandler(unittest.TestCase):
         # set up distributed
         self.grid_size_h = int(os.getenv("GRID_H", 1))
         self.grid_size_w = int(os.getenv("GRID_W", 1))
+        self.grid_size_m = int(os.getenv("GRID_M", 1))
         self.grid_size_e = int(os.getenv("GRID_E", 1))
         self.grid_size_b = int(os.getenv("GRID_B", 1))
-        self.world_size = self.grid_size_h * self.grid_size_w * self.grid_size_e * self.grid_size_b
+        self.world_size = self.grid_size_h * self.grid_size_w * self.grid_size_m * self.grid_size_e * self.grid_size_b
 
         # init groups
         comm.init(
-            model_parallel_sizes=[self.grid_size_h, self.grid_size_w, 1],
+            # the matmul ranks hold the same fields, and compute the same metrics
+            model_parallel_sizes=[self.grid_size_h, self.grid_size_w, self.grid_size_m],
             model_parallel_names=["h", "w", "matmul"],
             data_parallel_sizes=[self.grid_size_e, self.grid_size_b],
             data_parallel_names=["ensemble", "batch"],
@@ -127,7 +129,8 @@ class TestDistributedMetricHandler(unittest.TestCase):
 
         if self.world_rank == 0:
             print(
-                f"Running distributed tests on grid H x W x E x B = {self.grid_size_h} x {self.grid_size_w} x {self.grid_size_e} x {self.grid_size_b}"
+                f"Running distributed tests on grid H x W x M x E x B = {self.grid_size_h} x {self.grid_size_w} x "
+                f"{self.grid_size_m} x {self.grid_size_e} x {self.grid_size_b}"
             )
 
         return

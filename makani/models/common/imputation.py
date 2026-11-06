@@ -162,7 +162,7 @@ class ConstantImputation(nn.Module):
         self.weight = nn.Parameter(torch.randn(inp_chans, 1, 1))
 
         if comm.get_size("spatial") > 1:
-            self.weight.is_shared_mp = ["spatial"]
+            self.weight.is_shared_mp = {"spatial": "sum", "matmul": "avg"}
             self.weight.sharded_dims_mp = [None, None, None]
 
     def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None):

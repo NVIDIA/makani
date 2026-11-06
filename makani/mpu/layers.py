@@ -140,16 +140,16 @@ class DistributedMatmul(nn.Module):
             te = get_te()
             self.te_linear = te.Linear(inp_dim_local, out_dim_local, bias=False)
             # te weight is always 2D (out_local, in_local) regardless of input_format
-            self.weight.is_shared_mp = ["spatial"]
+            self.weight.is_shared_mp = {"spatial": "sum"}
             self.weight.sharded_dims_mp = [weight_out_shard, weight_inp_shard]
         elif input_format == "nchw":
             self.weight = nn.Parameter(torch.ones(out_dim_local, inp_dim_local, 1, 1))
-            self.weight.is_shared_mp = ["spatial"]
+            self.weight.is_shared_mp = {"spatial": "sum"}
             self.weight.sharded_dims_mp = [weight_out_shard, weight_inp_shard, None, None]
             self.matmul_handle = F.conv2d
         else:  # traditional
             self.weight = nn.Parameter(torch.ones(out_dim_local, inp_dim_local))
-            self.weight.is_shared_mp = ["spatial"]
+            self.weight.is_shared_mp = {"spatial": "sum"}
             self.weight.sharded_dims_mp = [weight_out_shard, weight_inp_shard]
             self.matmul_handle = F.linear
 
@@ -157,13 +157,15 @@ class DistributedMatmul(nn.Module):
         self.bias = None
         if bias:
             # a column bias is sharded over the (sharded) output dim, a row bias
-            # is replicated over the matmul group (added after the all-reduce) and
-            # must therefore NOT be summed over matmul in the gradient hook
+            # is replicated over the matmul group: it is added after the all-reduce,
+            # which every matmul rank computes alike, so its gradient is averaged
             bias_shard = comm_name if parallel_mode == "column" else None
             # 1-D in either format, as nn.Conv2d and nn.Linear keep it, so that a checkpoint is the same as that
             # of the serial layer
+            # a row bias is added after the reduction, which every matmul rank computes alike
+            bias_sharing = {"spatial": "sum"} if parallel_mode == "column" else {"spatial": "sum", "matmul": "avg"}
             self.bias = nn.Parameter(torch.zeros(out_dim_local))
-            self.bias.is_shared_mp = ["spatial"]
+            self.bias.is_shared_mp = bias_sharing
             self.bias.sharded_dims_mp = [bias_shard]
 
     @staticmethod
@@ -663,9 +665,10 @@ class StochasticMLP(nn.Module):
 
     Notes
     -----
-    The weight parameters are tagged ``is_shared_mp = ["spatial"]``: they are
-    replicated across the spatial model-parallel group and their gradients are
-    reduced over it.
+    The weight parameters are tagged ``is_shared_mp = {"spatial": "sum", "matmul": "avg"}``:
+    they are replicated over the model-parallel ranks, summed over the spatial
+    ranks, each holding the contribution of its part of the grid, and averaged
+    over the matmul ranks, which compute the same.
 
     See Also
     --------
@@ -705,9 +708,9 @@ class StochasticMLP(nn.Module):
             raise NotImplementedError(f"Error, input format {input_format} not supported.")
 
         # sharing settings
-        self.fc1_weight_log_std.is_shared_mp = ["spatial"]
-        self.fc1_weight_mean.is_shared_mp = ["spatial"]
-        self.fc1_bias.is_shared_mp = ["spatial"]
+        self.fc1_weight_log_std.is_shared_mp = {"spatial": "sum", "matmul": "avg"}
+        self.fc1_weight_mean.is_shared_mp = {"spatial": "sum", "matmul": "avg"}
+        self.fc1_bias.is_shared_mp = {"spatial": "sum", "matmul": "avg"}
 
         # The stochastic weight is  weight = scale * exp(log_std) * eps + mean  with
         # eps ~ N(0, 1). log_std keeps its zero init (so the effective std == scale and
@@ -734,10 +737,10 @@ class StochasticMLP(nn.Module):
             raise NotImplementedError(f"Error, input format {input_format} not supported.")
 
         # sharing settings
-        self.fc2_weight_log_std.is_shared_mp = ["spatial"]
-        self.fc2_weight_mean.is_shared_mp = ["spatial"]
+        self.fc2_weight_log_std.is_shared_mp = {"spatial": "sum", "matmul": "avg"}
+        self.fc2_weight_mean.is_shared_mp = {"spatial": "sum", "matmul": "avg"}
         if self.fc2_bias is not None:
-            self.fc2_bias.is_shared_mp = ["spatial"]
+            self.fc2_bias.is_shared_mp = {"spatial": "sum", "matmul": "avg"}
 
         # gain factor for the output determines the scaling of the output init
         # (same scheme as fc1: log_std stays at its zero init, scale is a constant factor)
@@ -944,12 +947,19 @@ class DistributedPatchEmbed(nn.Module):
         else:
             out_chans_local = embed_dim
 
-        # the weights  of this layer is shared across spatial parallel ranks
+        # the weights of this layer are shared across the spatial ranks
         self.proj = nn.Conv2d(in_chans, out_chans_local, kernel_size=patch_size, stride=patch_size)
 
-        # make sure we reduce them across rank
-        self.proj.weight.is_shared_mp = ["spatial"]
-        self.proj.bias.is_shared_mp = ["spatial"]
+        # shared over the spatial ranks, each embedding its part of the grid; split over matmul if the output is,
+        # else every matmul rank computes the same
+        if self.output_parallel:
+            sharing, sharded = {"spatial": "sum"}, "matmul"
+        else:
+            sharing, sharded = {"spatial": "sum", "matmul": "avg"}, None
+        self.proj.weight.is_shared_mp = dict(sharing)
+        self.proj.weight.sharded_dims_mp = [sharded, None, None, None]
+        self.proj.bias.is_shared_mp = dict(sharing)
+        self.proj.bias.sharded_dims_mp = [sharded]
 
         # gather shapes
         self.gather_shapes = compute_split_shapes(in_chans, comm.get_size("matmul"))
@@ -986,135 +996,153 @@ class DistributedPatchEmbed(nn.Module):
         return x
 
 
-class DistributedAttention(nn.Module):
+class MultiHeadAttention(nn.Module):
     r"""
-    Multi-head self-attention with the heads sharded across ranks.
+    Multi-head self-attention, with the heads split over the matmul ranks under model parallelism.
 
-    Attention heads are independent by construction, which makes them the
-    natural unit to shard: each rank computes a subset of the heads end to end
-    and no communication is needed inside the attention itself. The QKV
-    projection is column-parallel (producing this rank's heads) and the output
-    projection is row-parallel (reducing the concatenated heads back to a
-    replicated result), so the layer costs a single all-reduce.
+    Projects the tokens to queries, keys and values, normalizes queries and keys
+    with ``qk_norm``, applies scaled dot-product attention per head, and
+    projects the concatenated heads back:
+
+    .. math::
+        \mathrm{Attention}(Q, K, V) =
+        \mathrm{softmax}\!\left(\frac{Q K^\top}{\sqrt{d_h}}\right) V
+
+    Heads are independent by construction, which makes them the natural unit
+    to split: with a ``comm_name`` group of more than one rank, the query, key
+    and value projections are column-parallel :class:`DistributedMatmul`
+    layers, each rank computing its heads end to end, and the output projection
+    is row-parallel, reducing the concatenated heads to a replicated result, so
+    the layer costs a single all-reduce. Without, they are
+    :class:`torch.nn.Linear` layers. Either way the parameters have the same
+    names and full shapes, and every projection keeps its heads in order, so a
+    checkpoint restores across any decomposition.
+
+    Biases that cannot affect the result are left out. A bias of the keys adds
+    :math:`q \cdot b_k` to every logit of a query, which the softmax removes, so
+    the keys have no bias without ``qk_norm``; with it, the normalization of
+    the keys has no bias, for the same reason, while the key projection has one
+    with ``qkv_bias``, as it acts before the normalization.
 
     Parameters
     ----------
     dim : int
         Feature dimension. Must be divisible by ``num_heads``.
-    input_format : str, optional
-        Input layout, by default ``"traditional"`` (channels last).
-    comm_name : str, optional
-        Communicator group to shard heads over, by default ``"matmul"``.
     num_heads : int, optional
-        Global number of attention heads, by default ``8``. Must be divisible
-        by the group size.
+        Number of attention heads, by default ``8``. Must be divisible by the
+        size of the ``comm_name`` group.
     qkv_bias : bool, optional
-        Whether the QKV projection carries a bias, by default ``False``.
+        Whether the query, key and value projections carry biases, by default
+        ``False``; see above for the keys.
     qk_norm : bool, optional
         Normalize queries and keys before the attention product, by default
         ``False``. Stabilizes training by bounding the logits.
     attn_drop_rate : float, optional
-        Dropout probability on the attention weights, by default ``0.0``.
+        Dropout probability on the attention weights in training, by default ``0.0``.
     proj_drop_rate : float, optional
         Dropout probability after the output projection, by default ``0.0``.
     norm_layer : callable, optional
-        Normalization used for ``qk_norm``, by default :class:`torch.nn.LayerNorm`.
+        Normalization used for ``qk_norm``, called with the head dimension, by
+        default :class:`torch.nn.LayerNorm`.
+    comm_name : str, optional
+        Group to split the heads over, by default ``"matmul"``.
     use_te : bool, optional
-        Use TransformerEngine linears for the projections, by default ``False``.
+        Use TransformerEngine linears for the split projections, by default ``False``.
 
     Raises
     ------
     ValueError
-        If ``dim`` is not divisible by ``num_heads``, or if ``num_heads`` is not
-        divisible by the communicator group size.
+        If ``dim`` is not divisible by ``num_heads``, or ``num_heads`` not by
+        the size of the ``comm_name`` group.
     """
 
     def __init__(
         self,
         dim,
-        input_format="traditional",
-        comm_name="matmul",
         num_heads=8,
         qkv_bias=False,
         qk_norm=False,
         attn_drop_rate=0.0,
         proj_drop_rate=0.0,
         norm_layer=nn.LayerNorm,
+        comm_name="matmul",
         use_te=False,
     ):
         super().__init__()
 
         if dim % num_heads != 0:
             raise ValueError(f"dim {dim} should be divisible by num_heads {num_heads}")
+        comm_size = comm.get_size(comm_name)
+        if num_heads % comm_size != 0:
+            raise ValueError(f"heads ({num_heads}) are not evenly split across model ranks ({comm_size})")
+
         self.num_heads = num_heads
-
-        if num_heads % comm.get_size(comm_name) != 0:
-            raise ValueError(
-                f"heads ({num_heads}) are not evenly split across model ranks ({comm.get_size(comm_name)})"
-            )
-        self.num_heads_local = num_heads // comm.get_size(comm_name)
-        self.head_dim = dim // self.num_heads
-
-        self.comm_name = comm_name
-
-        # column-parallel qkv (heads sharded over the matmul group) -> row-parallel proj
-        self.qkv = DistributedMatmul(
-            dim, dim * 3, input_format, comm_name=comm_name, parallel_mode="column", bias=qkv_bias, use_te=use_te
-        )
-        self.q_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
-        self.k_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
+        self.num_heads_local = num_heads // comm_size
+        self.head_dim = dim // num_heads
         self.attn_drop_rate = attn_drop_rate
-        self.proj = DistributedMatmul(
-            dim, dim, input_format, comm_name=comm_name, parallel_mode="row", bias=False, use_te=use_te
-        )
-        if proj_drop_rate > 0.0:
-            self.proj_drop = nn.Dropout(proj_drop_rate)
+
+        def projection(bias, parallel_mode):
+            if comm_size > 1:
+                return DistributedMatmul(
+                    dim, dim, "traditional", comm_name=comm_name, parallel_mode=parallel_mode, bias=bias, use_te=use_te
+                )
+            linear = nn.Linear(dim, dim, bias=bias)
+            for param in linear.parameters():
+                param.is_shared_mp = {"spatial": "sum", "matmul": "avg"}
+            return linear
+
+        # the heads of this rank, from the queries, keys and values
+        self.q = projection(qkv_bias, "column")
+        self.k = projection(qkv_bias and qk_norm, "column")
+        self.v = projection(qkv_bias, "column")
+
+        if qk_norm:
+            self.q_norm = norm_layer(self.head_dim)
+            self.k_norm = norm_layer(self.head_dim)
+            if getattr(self.k_norm, "bias", None) is not None:
+                self.k_norm.register_parameter("bias", None)
+            # the norms act on every head, and the heads are split over matmul, so each matmul rank holds the
+            # contribution of its heads to their gradients; as for the other layers, the spatial ranks would each
+            # hold that of their part of the grid
+            for norm in (self.q_norm, self.k_norm):
+                for param in norm.parameters():
+                    param.is_shared_mp = {"spatial": "sum", "matmul": "sum"}
         else:
-            self.proj_drop = nn.Identity()
+            self.q_norm = nn.Identity()
+            self.k_norm = nn.Identity()
 
-        # set up weight sharing, depends on norm type
-        if isinstance(self.q_norm, nn.LayerNorm):
-            if hasattr(self.q_norm, "weight"):
-                self.q_norm.weight.is_shared_mp = []
-            if hasattr(self.q_norm, "bias"):
-                self.q_norm.bias.is_shared_mp = []
+        # the heads back to the features, reduced over the ranks of the heads
+        self.proj = projection(True, "row")
+        self.proj_drop = nn.Dropout(proj_drop_rate) if proj_drop_rate > 0.0 else nn.Identity()
 
-        if isinstance(self.k_norm, nn.LayerNorm):
-            if hasattr(self.k_norm, "weight"):
-                self.k_norm.weight.is_shared_mp = []
-            if hasattr(self.k_norm, "bias"):
-                self.k_norm.bias.is_shared_mp = []
+    def _heads(self, x, projection):
+        # (B, N, dim) -> (B, heads, N, head_dim), the heads of this rank
+        B, N, _ = x.shape
+        return projection(x).reshape(B, N, self.num_heads_local, self.head_dim).transpose(1, 2)
 
     def forward(self, x):
         r"""
-        Apply head-parallel multi-head self-attention.
+        Apply multi-head self-attention.
 
         Parameters
         ----------
         x : torch.Tensor
-            Replicated token tensor of shape ``(B, N, dim)``.
+            Token tensor of shape ``(B, N, dim)``, replicated over the ranks of
+            the heads.
 
         Returns
         -------
         torch.Tensor
-            Replicated tensor of shape ``(B, N, dim)``.
+            Tensor of shape ``(B, N, dim)``, replicated as the input.
         """
-        B, N, C = x.shape
+        B, N, _ = x.shape
 
-        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads_local, self.head_dim).permute(2, 0, 3, 1, 4)
-        q, k, v = qkv.unbind(0)
-        q, k = self.q_norm(q), self.k_norm(k)
+        q = self.q_norm(self._heads(x, self.q))
+        k = self.k_norm(self._heads(x, self.k))
+        v = self._heads(x, self.v)
 
-        x = F.scaled_dot_product_attention(q, k, v, dropout_p=self.attn_drop_rate)
+        x = F.scaled_dot_product_attention(q, k, v, dropout_p=self.attn_drop_rate if self.training else 0.0)
 
-        # transpose back
+        # the heads of this rank side by side, then reduced over the ranks by the row-parallel projection
         x = x.transpose(1, 2).reshape(B, N, self.num_heads_local * self.head_dim)
-
-        # this is distributed again
-        x = self.proj(x)
-
-        # generally we have to be super careful with dropout layers, since
-        # those are normalized over the dropouts. That would need to be reduced across nodes
-        x = self.proj_drop(x)
-
-        return x
+        return self.proj_drop(self.proj(x))

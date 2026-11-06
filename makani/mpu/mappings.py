@@ -343,24 +343,27 @@ def init_gradient_reduction_hooks(
     r"""
     Wrap a model in DDP with the gradient reductions model parallelism requires.
 
-    Plain DDP reduces every gradient over the data-parallel group, which is
-    wrong once model parallelism is in play: a parameter replicated across model
-    ranks accumulates a gradient contribution on each of them, so it must also
-    be reduced over the group it is shared across, while a sharded parameter
-    must not be. This function inspects the ``is_shared_mp`` annotation each
-    layer stamps on its parameters and installs a communication hook that
-    performs the right reduction per parameter.
-
-    Two cases avoid the hook entirely: with no model parallelism, or when *all*
-    parameters are shared across all model ranks. In the latter case the correct
-    result is obtained by scaling gradients by the model group size and letting
-    ordinary DDP handle the rest, which is cheaper than a custom hook.
+    Plain DDP averages every gradient over the data-parallel group, which is not
+    enough once model parallelism is in play: a parameter shared over a model
+    group has to be reduced over it as well, while a sharded parameter must not
+    be. This function reads the ``is_shared_mp`` annotation each layer stamps
+    on its parameters, see :func:`~makani.mpu.helpers.get_sharing`, and
+    installs a communication hook that reduces each gradient over the groups it
+    is shared over, with the reduction of its annotation: a sum over ranks that
+    split the computation, e.g. over the grid, and an average over ranks that
+    replicate it, e.g. a layer that is not split over matmul, as over the data
+    ranks. Every reduction is a sum, after the gradient is scaled by the inverse
+    sizes of the groups it is averaged over, so that a gradient shared over the
+    whole model is reduced in a single collective over all ranks, see
+    :func:`~makani.mpu.helpers.get_reduction_plan`. Without model parallelism,
+    plain DDP is used.
 
     Parameters
     ----------
     model : torch.nn.Module
         Model to wrap. Parameters without an ``is_shared_mp`` annotation are
-        assumed to be shared across all model ranks.
+        shared over the whole model group, see
+        :data:`~makani.mpu.helpers.DEFAULT_SHARING`.
     device : torch.device
         Device the model lives on.
     reduction_buffer_count : int, optional
@@ -385,6 +388,12 @@ def init_gradient_reduction_hooks(
     torch.nn.Module
         The wrapped model, or the original model unchanged if torch.distributed
         is not initialized.
+
+    Raises
+    ------
+    ValueError
+        If the annotation of a parameter is invalid, see
+        :func:`~makani.mpu.helpers.get_sharing`.
     """
     # early exit if we are not in a distributed setting:
     if not dist.is_initialized():
@@ -393,44 +402,18 @@ def init_gradient_reduction_hooks(
     if verbose is None:
         verbose = config.debug
 
-    # set this to false in init and then find out if we can use it:
-    need_hooks = False
-    ddp_group = comm.get_group("data")
-
-    # this is the trivial case
-    if comm.get_size("model") == 1:
-        # the simple case, we can just continue then
-        ddp_group = None
-    else:
-        # count parameters and reduction groups
-        num_parameters_total = 0
-        num_parameters_shared_model = 0
-        for param in model.parameters():
-            # if it does not have any annotation, we assume it is shared between all model ranks
-            if not hasattr(param, "is_shared_mp"):
-                if verbose:
-                    print(f"Parameter {param.name} has no sharing mode specified, settting to globally shared.")
-                param.is_shared_mp = ["model"]
-
-            # add the sharing type to the dict
-            num_parameters_total += 1
-            if "model" in param.is_shared_mp:
-                num_parameters_shared_model += 1
-
-        # if all parameters are shared between all model ranks, then the situation is easy
-        if num_parameters_shared_model == num_parameters_total:
-            # we can always use DDP
-            ddp_group = None
-
-            # register some pre-multiply reduction hooks
-            if verbose:
-                print("Setting up gradient hooks to account for shared parameter multiplicity")
-            for param in model.parameters():
-                param.register_hook(lambda grad: grad * float(comm.get_size("model")))
-        else:
-            ddp_group = comm.get_group("data")
-            broadcast_buffers = False
-            need_hooks = True
+    # with model parallelism, the gradients of the parameters shared over a model group are reduced over it by a
+    # hook, with the reduction of their annotation, see get_sharing; plain DDP only averages over the data group
+    need_hooks = comm.get_size("model") > 1
+    ddp_group = comm.get_group("data") if need_hooks else None
+    if need_hooks:
+        broadcast_buffers = False
+        # check the annotations up front, rather than in the first backward pass
+        for name, param in model.named_parameters():
+            try:
+                get_reduction_plan(param)
+            except ValueError as error:
+                raise ValueError(f"Parameter {name}: {error}") from error
 
     # compute bucket cap in MB:
     if need_hooks:
@@ -476,7 +459,7 @@ def init_gradient_reduction_hooks(
         params = bucket.parameters()
 
         # define the grad reduction function
-        def grad_reduction(fut, grads, group, reduction="sum"):
+        def grad_reduction(fut, grads, group):
             # check if grads are complex
             is_complex = [g.is_complex() for g in grads]
             grads_real = [torch.view_as_real(g) if g.is_complex() else g for g in grads]
@@ -484,13 +467,8 @@ def init_gradient_reduction_hooks(
             # flatten
             coalesced = _flatten_dense_tensors(grads_real)
 
-            # reduce
-            if reduction == "sum":
-                dist.all_reduce(coalesced, op=dist.ReduceOp.SUM, group=comm.get_group(group), async_op=False)
-            elif reduction == "mean":
-                all_reduce_mean(coalesced, comm.get_group(group))
-            else:
-                raise NotImplementedError(f"Error, reduction {reduction} not supported.")
+            # reduce; an average is a sum of the scaled gradients, see get_reduction_plan
+            dist.all_reduce(coalesced, op=dist.ReduceOp.SUM, group=comm.get_group(group), async_op=False)
 
             # copy back
             for buf, synced_real, is_comp in zip(grads, _unflatten_dense_tensors(coalesced, grads_real), is_complex):
@@ -506,29 +484,20 @@ def init_gradient_reduction_hooks(
         fut = torch.futures.Future()
         fut.set_result(bucket.buffer())
 
-        # get the data gradients first:
-        grads = []
+        # every reduction is a sum, after the gradient is scaled by the inverse sizes of the groups it is averaged
+        # over, the data group among them; one collective per group, for all the gradients in the bucket summed over it
+        collectives = {}
         for p in params:
-            if p.grad is not None:
-                grads.append(p.grad.data)
-
-        if grads:
-            fut = fut.then(lambda x: grad_reduction(x, grads=grads, group="data", reduction="mean"))
-
-        # now go through the groups
-        for group in comm.get_comm_names():
-            if group == "data":
+            if p.grad is None:
                 continue
+            groups, scale = get_reduction_plan(p)
+            if scale != 1.0:
+                p.grad.data.mul_(scale)
+            for group in groups:
+                collectives.setdefault(group, []).append(p.grad.data)
 
-            # real first
-            grads = []
-            for p in params:
-                if (p.grad is not None) and (group in p.is_shared_mp):
-                    grads.append(p.grad.data)
-
-            # append the new reduction functions
-            if grads:
-                fut = fut.then(lambda x: grad_reduction(x, grads=grads, group=group, reduction="sum"))
+        for group, grads in collectives.items():
+            fut = fut.then(lambda x, grads=grads, group=group: grad_reduction(x, grads=grads, group=group))
 
         return fut
 
@@ -541,4 +510,4 @@ def init_gradient_reduction_hooks(
 # deferred to avoid circular imports with makani.utils
 from makani.utils import comm
 from makani.models.helpers import count_parameters
-from makani.mpu.helpers import all_reduce_mean
+from makani.mpu.helpers import get_reduction_plan

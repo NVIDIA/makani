@@ -48,12 +48,12 @@ class _ShardedTestModel(nn.Module):
         # Sharded along dim 2 ("h") and dim 3 ("w") — this is the spectral-weight
         # sharding pattern in fourcastnet3 / fourcastnatt3.
         self.weight = nn.Parameter(local_weight.clone())
-        self.weight.is_shared_mp = ["matmul"]
+        self.weight.is_shared_mp = {"matmul": "avg"}
         self.weight.sharded_dims_mp = [None, None, "h", "w"]
 
         # Replicated 1-D bias.
         self.bias = nn.Parameter(torch.zeros(num_features))
-        self.bias.is_shared_mp = ["spatial"]
+        self.bias.is_shared_mp = {"spatial": "sum", "matmul": "avg"}
         self.bias.sharded_dims_mp = [None]
 
     def forward(self, x):
@@ -80,7 +80,7 @@ class _DivergentPlanModel(_ShardedTestModel):
             # extra parameter sharded over "w" -> adds one entry to this rank's
             # gather plan only. (Never actually gathered: the crc check fires first.)
             self.extra = nn.Parameter(torch.zeros(num_features))
-            self.extra.is_shared_mp = ["spatial"]
+            self.extra.is_shared_mp = {"h": "sum", "matmul": "avg"}
             self.extra.sharded_dims_mp = ["w"]
 
 

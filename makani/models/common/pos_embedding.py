@@ -125,11 +125,11 @@ class LearnablePositionEmbedding(PositionEmbedding):
             self.position_embeddings = nn.Parameter(
                 torch.zeros(1, self.num_chans, self.local_shape_h, self.local_shape_w)
             )
-            self.position_embeddings.is_shared_mp = []
+            self.position_embeddings.is_shared_mp = {"matmul": "avg"}
             self.position_embeddings.sharded_dims_mp = [None, None, "h", "w"]
         elif embed_type == "lat":
             self.position_embeddings = nn.Parameter(torch.zeros(1, self.num_chans, self.local_shape_h, 1))
-            self.position_embeddings.is_shared_mp = ["w"]
+            self.position_embeddings.is_shared_mp = {"w": "sum", "matmul": "avg"}
             self.position_embeddings.sharded_dims_mp = [None, None, "h", None]
         else:
             raise ValueError(f"Unknown learnable position embedding type {embed_type}")

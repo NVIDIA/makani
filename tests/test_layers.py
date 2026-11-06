@@ -878,7 +878,7 @@ class TestLearnablePositionEmbedding(unittest.TestCase):
     # -- distributed sharding metadata -------------------------------------
 
     def test_sharded_dims_metadata_lat(self):
-        """In 'lat' mode: the W dim is broadcast/shared (is_shared_mp=['w']);
+        """In 'lat' mode: the W dim is broadcast/shared (summed over w, averaged over matmul);
         only H is sharded. Distributed model-parallel code reads these
         attributes — a regression here silently breaks spatial parallelism."""
         emb = LearnablePositionEmbedding(
@@ -886,18 +886,18 @@ class TestLearnablePositionEmbedding(unittest.TestCase):
             num_chans=self.C,
             embed_type="lat",
         )
-        self.assertEqual(emb.position_embeddings.is_shared_mp, ["w"])
+        self.assertEqual(emb.position_embeddings.is_shared_mp, {"w": "sum", "matmul": "avg"})
         self.assertEqual(emb.position_embeddings.sharded_dims_mp, [None, None, "h", None])
 
     def test_sharded_dims_metadata_latlon(self):
-        """In 'latlon' mode: nothing is shared — both H and W get sharded
-        across their respective spatial groups."""
+        """In 'latlon' mode: both H and W get sharded across their respective
+        spatial groups, and the embedding is only shared over matmul."""
         emb = LearnablePositionEmbedding(
             img_shape=(self.H, self.W),
             num_chans=self.C,
             embed_type="latlon",
         )
-        self.assertEqual(emb.position_embeddings.is_shared_mp, [])
+        self.assertEqual(emb.position_embeddings.is_shared_mp, {"matmul": "avg"})
         self.assertEqual(emb.position_embeddings.sharded_dims_mp, [None, None, "h", "w"])
 
 
