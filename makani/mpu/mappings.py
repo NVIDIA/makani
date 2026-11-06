@@ -351,8 +351,12 @@ def init_gradient_reduction_hooks(
     installs a communication hook that reduces each gradient over the groups it
     is shared over, with the reduction of its annotation: a sum over ranks that
     split the computation, e.g. over the grid, and an average over ranks that
-    replicate it, e.g. a layer that is not split over matmul. Without model
-    parallelism, plain DDP is used.
+    replicate it, e.g. a layer that is not split over matmul, as over the data
+    ranks. Every reduction is a sum, after the gradient is scaled by the inverse
+    sizes of the groups it is averaged over, so that a gradient shared over the
+    whole model is reduced in a single collective over all ranks, see
+    :func:`~makani.mpu.helpers.get_reduction_plan`. Without model parallelism,
+    plain DDP is used.
 
     Parameters
     ----------
@@ -407,7 +411,7 @@ def init_gradient_reduction_hooks(
         # check the annotations up front, rather than in the first backward pass
         for name, param in model.named_parameters():
             try:
-                get_reductions(param)
+                get_reduction_plan(param)
             except ValueError as error:
                 raise ValueError(f"Parameter {name}: {error}") from error
 
@@ -455,7 +459,7 @@ def init_gradient_reduction_hooks(
         params = bucket.parameters()
 
         # define the grad reduction function
-        def grad_reduction(fut, grads, group, reduction="sum"):
+        def grad_reduction(fut, grads, group):
             # check if grads are complex
             is_complex = [g.is_complex() for g in grads]
             grads_real = [torch.view_as_real(g) if g.is_complex() else g for g in grads]
@@ -463,13 +467,8 @@ def init_gradient_reduction_hooks(
             # flatten
             coalesced = _flatten_dense_tensors(grads_real)
 
-            # reduce
-            if reduction == "sum":
-                dist.all_reduce(coalesced, op=dist.ReduceOp.SUM, group=comm.get_group(group), async_op=False)
-            elif reduction == "mean":
-                all_reduce_mean(coalesced, comm.get_group(group))
-            else:
-                raise NotImplementedError(f"Error, reduction {reduction} not supported.")
+            # reduce; an average is a sum of the scaled gradients, see get_reduction_plan
+            dist.all_reduce(coalesced, op=dist.ReduceOp.SUM, group=comm.get_group(group), async_op=False)
 
             # copy back
             for buf, synced_real, is_comp in zip(grads, _unflatten_dense_tensors(coalesced, grads_real), is_complex):
@@ -485,29 +484,20 @@ def init_gradient_reduction_hooks(
         fut = torch.futures.Future()
         fut.set_result(bucket.buffer())
 
-        # get the data gradients first:
-        grads = []
-        for p in params:
-            if p.grad is not None:
-                grads.append(p.grad.data)
-
-        if grads:
-            fut = fut.then(lambda x, grads=grads: grad_reduction(x, grads=grads, group="data", reduction="mean"))
-
-        # then the model groups, one collective per group and reduction for all parameters in the bucket with it
+        # every reduction is a sum, after the gradient is scaled by the inverse sizes of the groups it is averaged
+        # over, the data group among them; one collective per group, for all the gradients in the bucket summed over it
         collectives = {}
         for p in params:
-            if p.grad is not None:
-                for group, reduction in get_reductions(p):
-                    collectives.setdefault((group, reduction), []).append(p.grad.data)
+            if p.grad is None:
+                continue
+            groups, scale = get_reduction_plan(p)
+            if scale != 1.0:
+                p.grad.data.mul_(scale)
+            for group in groups:
+                collectives.setdefault(group, []).append(p.grad.data)
 
-        for (group, reduction), grads in collectives.items():
-            reduction = "sum" if reduction == SUM else "mean"
-            fut = fut.then(
-                lambda x, grads=grads, group=group, reduction=reduction: grad_reduction(
-                    x, grads=grads, group=group, reduction=reduction
-                )
-            )
+        for group, grads in collectives.items():
+            fut = fut.then(lambda x, grads=grads, group=group: grad_reduction(x, grads=grads, group=group))
 
         return fut
 
@@ -520,4 +510,4 @@ def init_gradient_reduction_hooks(
 # deferred to avoid circular imports with makani.utils
 from makani.utils import comm
 from makani.models.helpers import count_parameters
-from makani.mpu.helpers import SUM, all_reduce_mean, get_reductions
+from makani.mpu.helpers import get_reduction_plan

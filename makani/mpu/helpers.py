@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Dict, List, Tuple
+from typing import Dict, Tuple
 
 import torch
 import torch.distributed as dist
@@ -103,25 +103,55 @@ def get_sharing(param) -> Dict[str, str]:
     return sharing
 
 
-def get_reductions(param) -> List[Tuple[str, str]]:
+def get_reduction_plan(param, data: bool = True) -> Tuple[Tuple[str, ...], float]:
     r"""
-    The reductions of the gradient of a parameter, as ``(group, reduction)`` collectives.
+    How the gradient of a parameter is reduced: the groups to sum it over, after scaling it by a factor.
 
-    Those of :func:`get_sharing`, with ``h`` and ``w`` reduced together over ``"spatial"`` and
-    all three over ``"model"`` where they have the same reduction.
+    An average over a group is a sum after dividing by its size, so the reductions of
+    :func:`get_sharing` are all sums, after the gradient is scaled by the inverse sizes of the
+    groups it is averaged over. The groups a gradient is summed over can then be merged whatever
+    their reduction: ``h`` and ``w`` into ``"spatial"``, all three into ``"model"``, and, for a
+    parameter shared over the whole model, the model and the data group into ``"world"``, so that
+    it takes a single collective. Groups of a single rank are left out.
+
+    Parameters
+    ----------
+    param : torch.nn.Parameter
+        The parameter.
+    data : bool, optional
+        Whether the gradient is also averaged over the data-parallel group, as in training. By
+        default ``True``.
+
+    Returns
+    -------
+    tuple
+        The groups to sum over, and the factor to scale the gradient by before.
     """
     sharing = get_sharing(param)
-    if (len(sharing) == len(MODEL_GROUPS)) and (len(set(sharing.values())) == 1):
-        return [("model", sharing["h"])]
 
-    reductions = []
-    if ("h" in sharing) and (sharing.get("w") == sharing["h"]):
-        reductions.append(("spatial", sharing["h"]))
+    scale = 1.0
+    for group, reduction in sharing.items():
+        if reduction == AVG:
+            scale /= comm.get_size(group)
+    if data:
+        scale /= comm.get_size("data")
+
+    # the groups of more than one rank: the others need no collective, and a parameter shared over all of them is
+    # shared over the whole model group
+    active = {group for group in MODEL_GROUPS if comm.get_size(group) > 1}
+    shared = set(sharing) & active
+    if shared and (shared == active):
+        groups = ["model"]
+    elif {"h", "w"} <= shared:
+        groups = ["spatial"] + (["matmul"] if "matmul" in shared else [])
     else:
-        reductions += [(group, sharing[group]) for group in ("h", "w") if group in sharing]
-    if "matmul" in sharing:
-        reductions.append(("matmul", sharing["matmul"]))
-    return reductions
+        groups = [group for group in MODEL_GROUPS if group in shared]
+
+    if data and (comm.get_size("data") > 1):
+        # over the whole model group and the data group at once, or the data group first
+        groups = ["world"] if (shared == active) else ["data"] + groups
+
+    return tuple(groups), scale
 
 
 @torch.compiler.disable

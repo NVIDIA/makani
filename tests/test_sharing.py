@@ -18,6 +18,7 @@
 import os
 import sys
 import unittest
+from unittest import mock
 
 import torch
 import torch.nn as nn
@@ -25,7 +26,7 @@ from parameterized import parameterized
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
-from makani.mpu.helpers import AVG, DEFAULT_SHARING, MODEL_GROUPS, SUM, get_reductions, get_sharing
+from makani.mpu.helpers import AVG, DEFAULT_SHARING, MODEL_GROUPS, SUM, get_reduction_plan, get_sharing
 from makani.mpu.layer_norm import DistributedGeometricInstanceNormS2, DistributedInstanceNorm2d
 from makani.mpu.layers import (
     DistributedEncoderDecoder,
@@ -74,12 +75,36 @@ class TestGetSharing(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "sharded over"):
             get_sharing(_param({"spatial": SUM}, sharded=["h"]))
 
-    def test_reductions_are_merged_where_they_agree(self):
-        self.assertEqual(get_reductions(_param({"model": SUM})), [("model", SUM)])
-        self.assertEqual(get_reductions(_param({"spatial": SUM, "matmul": AVG})), [("spatial", SUM), ("matmul", AVG)])
-        self.assertEqual(get_reductions(_param({"h": SUM, "w": AVG})), [("h", SUM), ("w", AVG)])
-        self.assertEqual(get_reductions(_param({"w": SUM, "matmul": AVG})), [("w", SUM), ("matmul", AVG)])
-        self.assertEqual(get_reductions(_param({})), [])
+    def _plan(self, sharing, sizes, data=True):
+        sizes = dict(sizes)
+        sizes["spatial"] = sizes["h"] * sizes["w"]
+        sizes["model"] = sizes["spatial"] * sizes["matmul"]
+        sizes["world"] = sizes["model"] * sizes["data"]
+        with mock.patch("makani.mpu.helpers.comm.get_size", side_effect=lambda name: sizes[name]):
+            return get_reduction_plan(_param(sharing), data=data)
+
+    def test_averages_are_sums_of_scaled_gradients(self):
+        sizes = {"h": 2, "w": 2, "matmul": 2, "data": 2}
+        # shared over the whole model: one collective over all ranks, averaged over matmul and the data ranks
+        self.assertEqual(self._plan({"spatial": SUM, "matmul": AVG}, sizes), (("world",), 1 / 4))
+        self.assertEqual(self._plan({"model": SUM}, sizes), (("world",), 1 / 2))
+        self.assertEqual(self._plan({"model": AVG}, sizes), (("world",), 1 / 16))
+        # sharded over h, like the spectral weights: w and matmul have no communicator of their own together
+        self.assertEqual(self._plan({"w": SUM, "matmul": AVG}, sizes), (("data", "w", "matmul"), 1 / 4))
+        # split over matmul
+        self.assertEqual(self._plan({"spatial": SUM}, sizes), (("data", "spatial"), 1 / 2))
+        self.assertEqual(self._plan({}, sizes), (("data",), 1 / 2))
+        # without the data group
+        self.assertEqual(self._plan({"spatial": SUM, "matmul": AVG}, sizes, data=False), (("model",), 1 / 2))
+
+    def test_groups_of_one_rank_are_left_out(self):
+        # with matmul alone, a parameter shared over the whole model is shared over all its ranks of more than one
+        sizes = {"h": 1, "w": 1, "matmul": 2, "data": 1}
+        self.assertEqual(self._plan({"spatial": SUM, "matmul": AVG}, sizes), (("model",), 1 / 2))
+        self.assertEqual(self._plan({"spatial": SUM}, sizes), ((), 1.0))
+        sizes = {"h": 2, "w": 1, "matmul": 1, "data": 2}
+        self.assertEqual(self._plan({"w": SUM, "matmul": AVG}, sizes), (("data",), 1 / 2))
+        self.assertEqual(self._plan({"h": SUM}, sizes), (("world",), 1 / 2))
 
 
 class TestDistributedLayerSharing(unittest.TestCase):
