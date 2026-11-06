@@ -26,7 +26,7 @@ import torch.nn as nn
 from makani.models.noise import DiffusionNoiseS2, IsotropicGaussianRandomFieldS2
 from makani.models.noise_controller import NoiseController, NoiseSnapshot, run_eager
 from makani.models.parametrizations import ConstraintsWrapper
-from makani.models.preprocessor import INPUT_NOISE
+from makani.models.model_input import INPUT_NOISE
 from makani.models.stepper import StepWrapper
 from makani.utils.dataloaders.batch import (
     INPUT,
@@ -409,22 +409,22 @@ class TestModelNoise(unittest.TestCase):
         wrapper = StepWrapper(params, lambda: _TinyNet(2 * (3 + 1 + 1), 3))
 
         self.assertEqual(list(wrapper.noise), [INPUT_NOISE])
-        self.assertIs(wrapper.noise.process(INPUT_NOISE), wrapper.preprocessor.input_noise)
+        self.assertIs(wrapper.noise.process(INPUT_NOISE), wrapper.input_adapter.input_noise.process)
         # the controller is no submodule, so the processes are registered once, where they live
         self.assertNotIn("noise", dict(wrapper.named_children()))
         keys = set(wrapper.state_dict())
-        self.assertTrue(any(key.startswith("preprocessor.input_noise.") for key in keys))
+        self.assertTrue(any(key.startswith("input_adapter.input_noise.") for key in keys))
         self.assertFalse(any(key.startswith("noise.") for key in keys))
         names = [name for name, _ in wrapper.named_parameters()]
         self.assertEqual(len(names), len(set(names)))
-        self.assertTrue(any(name.startswith("preprocessor.input_noise.") for name in names))
+        self.assertTrue(any(name.startswith("input_adapter.input_noise.") for name in names))
 
     def test_a_copy_of_the_model_drives_its_own_noise(self):
         noise = _NOISE["diffusion"]
         wrapper = StepWrapper(_params(1, False, noise), lambda: _TinyNet(2 * (3 + 1 + 1), 3))
         twin = copy.deepcopy(wrapper)
-        self.assertIs(twin.noise.process(INPUT_NOISE), twin.preprocessor.input_noise)
-        self.assertIsNot(twin.noise.process(INPUT_NOISE), wrapper.preprocessor.input_noise)
+        self.assertIs(twin.noise.process(INPUT_NOISE), twin.input_adapter.input_noise.process)
+        self.assertIsNot(twin.noise.process(INPUT_NOISE), wrapper.input_adapter.input_noise.process)
 
     def test_the_network_lists_its_own_noise(self):
         wrapper = _latent_wrapper(_NOISE["white"])

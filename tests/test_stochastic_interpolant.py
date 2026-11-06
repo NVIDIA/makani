@@ -127,9 +127,10 @@ class _Draws:
 def _window(wrapper, inp, zenith):
     """The packed window, its statistics and the start of the path, written out."""
     pp = wrapper.preprocessor
-    x = pp.assemble_input(inp, {ZENITH: zenith})
-    stats = pp.compute_history_stats(x)
-    inpans = pp.pack_model_input(pp.history_normalize(x, stats))
+    # the state normalized with its statistics, the zenith angle with its own, then the time folded into the channels
+    stats = pp.compute_history_stats(inp)
+    zenith = pp.history_normalize(zenith, pp.compute_history_stats(zenith))
+    inpans = torch.cat([pp.history_normalize(inp, stats), zenith], dim=2).flatten(1, 2)
     x0 = pp.history_normalize(inp[:, -1:], stats, target=True).squeeze(1)
     return inpans, stats, x0
 

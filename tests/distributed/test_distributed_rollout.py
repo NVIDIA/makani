@@ -69,6 +69,8 @@ class _StepModule(nn.Module):
     def __init__(self, wrapper):
         super().__init__()
         self.preprocessor = wrapper.preprocessor
+        # the input noise first, as in the wrapper
+        self.input_adapter = wrapper.input_adapter
         self.model = wrapper.model
         # the noise the rollout drives, that of the wrapper
         self.noise = wrapper.noise

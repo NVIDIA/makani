@@ -135,7 +135,9 @@ def get_latest_checkpoint_version(checkpoint_path, verbose: bool = True):
 #   1: the format tag.
 #   2: the MLPs keep their layers as fc1 and fc2, not in a sequence (fwd.0, fwd.3), and DistributedMatmul keeps a 1-D
 #      bias, not (1, C, 1, 1), as do the moments of the optimizer for it.
-CHECKPOINT_FORMAT_VERSION = 2
+#   3: the input noise of a model is kept by its input adapter, input_adapter.input_noise.process, not by its
+#      preprocessor, preprocessor.input_noise.
+CHECKPOINT_FORMAT_VERSION = 3
 
 
 def checkpoint_format_tag(checkpoint_mode: str) -> Dict[str, Any]:
@@ -605,8 +607,9 @@ def upgrade_checkpoint(checkpoint: Dict[str, Any], model: nn.Module, optimizer: 
     optimizer : torch.optim.Optimizer, optional
         The optimizer whose state is restored from ``optimizer_state_dict``, if any.
     """
+    # every upgrade acts on the keys and shapes of the earlier versions only, so the ones of all versions apply
     version = checkpoint_format_version(checkpoint)
-    if version < 2:
+    if version < CHECKPOINT_FORMAT_VERSION:
         upgrade_state_dict(model, checkpoint["model_state"])
         if (optimizer is not None) and ("optimizer_state_dict" in checkpoint):
             upgrade_optimizer_state_dict(optimizer, checkpoint["optimizer_state_dict"])

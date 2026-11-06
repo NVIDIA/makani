@@ -21,8 +21,7 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 import unittest
 import torch
 
-from makani.models.preprocessor import INPUT_NOISE, Preprocessor2D
-from makani.models.noise_controller import NoiseController
+from makani.models.preprocessor import Preprocessor2D
 from makani.utils.dataloaders.batch import ZENITH
 from makani.utils.functions import expand_history, flatten_history
 
@@ -36,13 +35,6 @@ def _make_pp(n_history=0, add_zenith=False, **overrides):
     for key, value in overrides.items():
         setattr(params, key, value)
     return Preprocessor2D(params)
-
-
-def _noise(pp, batch_size):
-    """A fresh sample of the input noise of the preprocessor, as a model draws it at the first step of a rollout."""
-    noise = NoiseController(pp.noise_processes())
-    noise.advance(replace_state=True, batch_size=batch_size)
-    return noise.sample(INPUT_NOISE)
 
 
 class TestPreprocessor2DBasic(unittest.TestCase):
@@ -114,30 +106,8 @@ class TestPreprocessor2DBasic(unittest.TestCase):
         self.assertTrue(compare_tensors("flatten/expand roundtrip", out, x, verbose=verbose))
 
     # -----------------------------------------------------------------------
-    # pack_model_input and static features
+    # static features
     # -----------------------------------------------------------------------
-
-    def test_pack_model_input_without_static_features_flattens(self, verbose=False):
-        """Without static features, packing only folds the time steps into the channels."""
-        pp = _make_pp(n_history=1)
-        x = self._field(2)
-        out = pp.pack_model_input(x)
-        self.assertTrue(compare_tensors("pack without static", out, flatten_history(x), verbose=verbose))
-
-    def test_pack_model_input_appends_static_features_after_all_steps(self, verbose=False):
-        """The static channels, which have no time axis, follow the stacked time steps."""
-        pp = _make_pp(n_history=1, add_grid=True, gridtype="raw")
-        x = self._field(2)
-        out = pp.pack_model_input(x)
-        self.assertEqual(tuple(out.shape), (self.B, 2 * self.C + 2, self.H, self.W))
-        self.assertTrue(compare_tensors("steps first", out[:, : 2 * self.C], flatten_history(x), verbose=verbose))
-        static = pp.get_static_features().expand(self.B, -1, -1, -1)
-        self.assertTrue(compare_tensors("static last", out[:, 2 * self.C :], static, verbose=verbose))
-
-    def test_pack_model_input_needs_the_time_axis(self):
-        """A flat input is refused rather than packed with the wrong layout."""
-        with self.assertRaises(RuntimeError):
-            self.pp.pack_model_input(self._rand(self.B, self.C, self.H, self.W))
 
     def test_get_static_features_returns_tensor_when_enabled(self):
         """get_static_features returns a non-None tensor when grid is enabled."""
@@ -156,112 +126,6 @@ class TestPreprocessor2DBasic(unittest.TestCase):
         sf = pp.get_static_features()
         self.assertEqual(sf.shape[-2], IMG_SIZE_H)
         self.assertEqual(sf.shape[-1], IMG_SIZE_W)
-
-    # -----------------------------------------------------------------------
-    # assemble_input: the dynamic features and the noise
-    # -----------------------------------------------------------------------
-
-    def test_assemble_input_noop_without_features(self, verbose=False):
-        """Without dynamic features or noise, the input comes back unchanged."""
-        x = self._field(1)
-        out = self.pp.assemble_input(x, {})
-        self.assertTrue(compare_tensors("noop", out, x, verbose=verbose))
-
-    def test_assemble_input_appends_the_zenith_angle(self, verbose=False):
-        """The feature follows the input channels of its step."""
-        pp = _make_pp(add_zenith=True)
-        x, xz = self._field(1), self._zenith(1)
-        out = pp.assemble_input(x, {ZENITH: xz})
-        self.assertEqual(tuple(out.shape), (self.B, 1, self.C + 1, self.H, self.W))
-        self.assertTrue(compare_tensors("x first", out[:, :, : self.C], x, verbose=verbose))
-        self.assertTrue(compare_tensors("zenith after", out[:, :, self.C :], xz, verbose=verbose))
-
-    def test_assemble_input_per_step_with_history(self, verbose=False):
-        """With history, every step gets the feature of that step."""
-        pp = _make_pp(n_history=1, add_zenith=True)
-        x, xz = self._field(2), self._zenith(2)
-        out = pp.assemble_input(x, {ZENITH: xz})
-        for t in range(2):
-            self.assertTrue(compare_tensors(f"x step {t}", out[:, t, : self.C], x[:, t], verbose=verbose))
-            self.assertTrue(compare_tensors(f"zenith step {t}", out[:, t, self.C], xz[:, t, 0], verbose=verbose))
-
-    def test_assemble_input_needs_the_features(self):
-        """A model with the zenith angle refuses to run without it, and a model without it refuses it."""
-        with self.assertRaisesRegex(ValueError, "zenith"):
-            _make_pp(add_zenith=True).assemble_input(self._field(1), {})
-        with self.assertRaisesRegex(ValueError, "zenith"):
-            self.pp.assemble_input(self._field(1), {ZENITH: self._zenith(1)})
-
-    def test_assemble_input_needs_the_time_axis(self):
-        """A flat input is refused."""
-        with self.assertRaises(RuntimeError):
-            self.pp.assemble_input(self._rand(self.B, self.C, self.H, self.W), {})
-
-    def test_concatenate_noise_channel_count(self):
-        """Concatenated noise adds its channels after the dynamic features."""
-        pp = _make_pp(add_zenith=True, input_noise={"type": "dummy", "mode": "concatenate", "n_channels": 2})
-        out = pp.assemble_input(self._field(1), {ZENITH: self._zenith(1)}, _noise(pp, self.B))
-        # C original + 1 zenith + 2 noise channels
-        self.assertEqual(out.shape[2], self.C + 1 + 2)
-
-    def test_channel_order_is_input_features_noise(self, verbose=False):
-        """[x | dynamic features | noise], the order the network was trained with."""
-        from makani.models.noise import DummyNoiseS2
-
-        pp = _make_pp(add_zenith=True, input_noise={"type": "dummy", "mode": "concatenate", "n_channels": 1})
-        pp.input_noise = DummyNoiseS2(
-            img_shape=[self.H, self.W], batch_size=self.B, num_channels=1, num_time_steps=1, mode="constant_random"
-        )
-        pp.input_noise.update()
-        x, xz, noise = self._field(1), self._zenith(1), pp.input_noise()
-        out = pp.assemble_input(x, {ZENITH: xz}, noise)
-        self.assertTrue(compare_tensors("x", out[:, :, : self.C], x, verbose=verbose))
-        self.assertTrue(compare_tensors("zenith", out[:, :, self.C : self.C + 1], xz, verbose=verbose))
-        self.assertTrue(compare_tensors("noise", out[:, :, self.C + 1 :], noise, verbose=verbose))
-
-    def test_concatenate_noise_original_channels_unchanged(self, verbose=False):
-        """With concatenated noise the input channels are bit-identical to x."""
-        pp = _make_pp(add_zenith=True, input_noise={"type": "dummy", "mode": "concatenate", "n_channels": 1})
-        x = self._field(1)
-        out = pp.assemble_input(x, {ZENITH: self._zenith(1)}, _noise(pp, self.B))
-        self.assertTrue(compare_tensors("x unchanged", out[:, :, : self.C], x, verbose=verbose))
-
-    def test_perturb_noise_channel_count_unchanged(self):
-        """Perturbing noise adds no channels of its own."""
-        pp = _make_pp(add_zenith=True, input_noise={"type": "dummy", "mode": "perturb", "perturb_channels": ["u10m"]})
-        out = pp.assemble_input(self._field(1), {ZENITH: self._zenith(1)}, _noise(pp, self.B))
-        # C original + 1 zenith, no extra noise channels
-        self.assertEqual(out.shape[2], self.C + 1)
-
-    def test_perturb_noise_zero_leaves_x_unchanged(self, verbose=False):
-        """With zero DummyNoiseS2 in perturb mode, the x channels are bit-identical."""
-        pp = _make_pp(input_noise={"type": "dummy", "mode": "perturb", "perturb_channels": ["u10m"]})
-        x = self._field(1)
-        out = pp.assemble_input(x, {}, _noise(pp, self.B))
-        self.assertTrue(compare_tensors("x unchanged with zero perturb noise", out, x, verbose=verbose))
-
-    def test_concatenate_noise_without_dynamic_features(self, verbose=False):
-        """Without the zenith angle the noise is still appended, as the channel count expects."""
-        pp = _make_pp(input_noise={"type": "dummy", "mode": "concatenate", "n_channels": 2})
-        x = self._field(1)
-        out = pp.assemble_input(x, {}, _noise(pp, self.B))
-        self.assertEqual(out.shape[2], self.C + 2)
-        self.assertTrue(compare_tensors("x channels unchanged", out[:, :, : self.C], x, verbose=verbose))
-
-    def test_concatenate_noise_with_history(self):
-        """With history, the noise is appended to every step."""
-        pp = _make_pp(n_history=1, input_noise={"type": "dummy", "mode": "concatenate", "n_channels": 1})
-        x = self._field(2)
-        out = pp.assemble_input(x, {}, _noise(pp, self.B))
-        self.assertEqual(tuple(out.shape), (self.B, 2, self.C + 1, self.H, self.W))
-        self.assertTrue(torch.equal(out[:, :, : self.C], x))
-
-    def test_stack_dynamic_features_in_model_order(self, verbose=False):
-        """Models that pack their input themselves get the features in the same order."""
-        pp = _make_pp(add_zenith=True)
-        xz = self._zenith(1)
-        self.assertTrue(compare_tensors("stacked", pp.stack_dynamic_features({ZENITH: xz}), xz, verbose=verbose))
-        self.assertIsNone(self.pp.stack_dynamic_features({}))
 
     # -----------------------------------------------------------------------
     # correct_bias
@@ -291,56 +155,6 @@ class TestPreprocessor2DBasic(unittest.TestCase):
         out = pp.correct_bias(x)
         expected = -bias.expand(self.B, self.C, self.H, self.W)
         self.assertTrue(compare_tensors("correct_bias broadcast", out, expected, verbose=verbose))
-
-    # -----------------------------------------------------------------------
-    # Noise processes: the preprocessor owns the input noise, the controller of the model drives it,
-    # see test_noise_controller.py
-    # -----------------------------------------------------------------------
-
-    def test_noise_processes_without_noise_is_empty(self):
-        """Without input noise, the preprocessor has no noise process."""
-        self.assertEqual(self.pp.noise_processes(), {})
-
-    def _make_pp_with_noise(self, input_noise_mode="concatenate", n_channels=1):
-        return _make_pp(input_noise={"type": "dummy", "mode": input_noise_mode, "n_channels": n_channels})
-
-    def test_noise_processes_with_noise_is_the_input_noise(self):
-        """The input noise is the one noise process of the preprocessor, and stays its submodule."""
-        pp = self._make_pp_with_noise()
-        self.assertEqual(list(pp.noise_processes()), [INPUT_NOISE])
-        self.assertIs(pp.noise_processes()[INPUT_NOISE], pp.input_noise)
-        self.assertIn("input_noise", dict(pp.named_children()))
-
-    def test_input_noise_is_seeded_with_the_seed_of_this_rank(self):
-        """The input noise draws the stream of noise_base_seed, as a process built with it does."""
-        from makani.models.noise import IsotropicGaussianRandomFieldS2, noise_base_seed
-
-        pp = _make_pp(input_noise={"type": "white", "mode": "concatenate", "n_channels": 1})
-        seed, reflect = noise_base_seed()
-        reference = IsotropicGaussianRandomFieldS2(
-            img_shape=(self.H, self.W), batch_size=1, num_channels=1, num_time_steps=1, seed=seed, reflect=reflect
-        )
-        samples = []
-        for process in (pp.input_noise, reference):
-            noise = NoiseController({INPUT_NOISE: process})
-            noise.advance(replace_state=True)
-            samples.append(noise.sample(INPUT_NOISE))
-        self.assertTrue(torch.equal(*samples))
-
-    def test_assemble_input_checks_the_noise(self):
-        """A model with input noise refuses to run without a sample, and a model without it refuses one."""
-        pp = self._make_pp_with_noise()
-        x = self._field(1)
-        with self.assertRaises(ValueError):
-            pp.assemble_input(x, {}, None)
-        with self.assertRaises(ValueError):
-            self.pp.assemble_input(x, {}, _noise(pp, self.B))
-
-    def test_assemble_input_refuses_an_unknown_feature(self):
-        """A dynamic feature the model was not built with is refused."""
-        pp = _make_pp(add_zenith=True)
-        with self.assertRaises(ValueError):
-            pp.assemble_input(self._field(1), {ZENITH: self._zenith(1), "other": self._zenith(1)})
 
     # -----------------------------------------------------------------------
     # compute_history_stats / history_normalize / history_denormalize
@@ -556,8 +370,8 @@ class TestPreprocessor2DBasic(unittest.TestCase):
     def _check_post_condition(self, pp, weights, verbose=False):
         x = self._field(pp.n_history + 1)
         xn = pp.history_normalize(x, pp.compute_history_stats(x))
-        quad_xn = pp.quadrature(xn)  # (B, T, C)
-        quad_xn2 = pp.quadrature(xn**2)  # (B, T, C)
+        quad_xn = pp.history_normalization.quadrature(xn)  # (B, T, C)
+        quad_xn2 = pp.history_normalization.quadrature(xn**2)  # (B, T, C)
         weighted_mean = (weights * quad_xn).sum(dim=1)  # (B, C)
         weighted_l2 = (weights * quad_xn2).sum(dim=1)  # (B, C)
         self.assertTrue(
@@ -588,33 +402,13 @@ class TestPreprocessor2DBasic(unittest.TestCase):
         pp = self._make_pp_exponential(n_history=2)
         T = pp.n_history + 1
         # exponential weights: buffer shape is (1, T, 1, 1, 1)
-        self._check_post_condition(pp, pp.history_normalization_weights.reshape(1, T, 1), verbose=verbose)
+        self._check_post_condition(
+            pp, pp.history_normalization.history_normalization_weights.reshape(1, T, 1), verbose=verbose
+        )
 
     # -----------------------------------------------------------------------
     # Gradient flow through train-path ops
     # -----------------------------------------------------------------------
-
-    def _check_grad_flows(self, pp):
-        pp.train()
-        x = self._field(1).requires_grad_(True)
-        out = pp.assemble_input(x, {ZENITH: self._zenith(1)}, _noise(pp, self.B))
-        out.sum().backward()
-        self.assertIsNotNone(x.grad)
-        self.assertTrue(torch.isfinite(x.grad).all().item())
-        # each element of x appears exactly once in the output, so the gradient is 1
-        self.assertTrue(torch.all(x.grad == 1.0).item())
-
-    def test_assemble_input_grad_flows_concatenate_noise(self):
-        """Appending with concatenated noise preserves autograd w.r.t. x."""
-        self._check_grad_flows(
-            _make_pp(add_zenith=True, input_noise={"type": "dummy", "mode": "concatenate", "n_channels": 1})
-        )
-
-    def test_assemble_input_grad_flows_perturb_noise(self):
-        """Appending with perturbing noise preserves autograd w.r.t. x."""
-        self._check_grad_flows(
-            _make_pp(add_zenith=True, input_noise={"type": "dummy", "mode": "perturb", "perturb_channels": ["u10m"]})
-        )
 
     def test_history_normalize_grad_flows_mean_mode(self):
         """history_normalize is differentiable w.r.t. its input (mean mode)."""
@@ -632,18 +426,6 @@ class TestPreprocessor2DBasic(unittest.TestCase):
     # -----------------------------------------------------------------------
     # CPU ↔ GPU numerical consistency
     # -----------------------------------------------------------------------
-
-    @unittest.skipUnless(torch.cuda.is_available(), "CUDA not available")
-    def test_assemble_input_cpu_gpu_match(self, verbose=False):
-        """assemble_input matches on CPU and GPU (no noise)."""
-        pp_cpu = _make_pp(add_zenith=True)
-        pp_gpu = _make_pp(add_zenith=True).to("cuda")
-        x, xz = self._field(1), self._zenith(1)
-        out_cpu = pp_cpu.assemble_input(x, {ZENITH: xz})
-        out_gpu = pp_gpu.assemble_input(x.to("cuda"), {ZENITH: xz.to("cuda")}).cpu()
-        self.assertTrue(
-            compare_tensors("assemble_input cpu vs gpu", out_cpu, out_gpu, atol=1e-6, rtol=1e-5, verbose=verbose)
-        )
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA not available")
     def test_compute_history_stats_cpu_gpu_match(self, verbose=False):
@@ -692,28 +474,6 @@ class TestPreprocessor2DBasic(unittest.TestCase):
         with self.assertRaises(RuntimeError) as cm:
             expand_history(x_bad, nhist=3)
         self.assertIn("not divisible", str(cm.exception))
-
-    def test_assemble_input_raises_on_feature_batch_mismatch(self):
-        """The input and the features must have the same batch size.
-
-        The check is a torch._check (compile-safe), so it surfaces as RuntimeError.
-        """
-        pp = _make_pp(add_zenith=True)
-        with self.assertRaises(RuntimeError) as cm:
-            pp.assemble_input(self._field(1, B=self.B + 1), {ZENITH: self._zenith(1)})
-        self.assertIn("different batch size", str(cm.exception))
-
-    def test_assemble_input_raises_on_noise_batch_mismatch(self):
-        """The noise sample and the input must have the same batch size.
-
-        The check is a torch._check (compile-safe), so it surfaces as RuntimeError.
-        """
-        pp = _make_pp(add_zenith=True, input_noise={"type": "dummy", "mode": "concatenate", "n_channels": 1})
-        noise = _noise(pp, self.B + 2)
-
-        with self.assertRaises(RuntimeError) as cm:
-            pp.assemble_input(self._field(1), {ZENITH: self._zenith(1)}, noise)
-        self.assertIn("the noise has batch", str(cm.exception))
 
 
 if __name__ == "__main__":
