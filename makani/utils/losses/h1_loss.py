@@ -65,7 +65,7 @@ class SpectralH1Loss(SpectralBaseLoss):
 
         # split up if distributed
         if self.spatial_distributed and (comm.get_size("h") > 1):
-            h1_weights = split_tensor_along_dim(h1_weights, 0, comm.get_size("h"))
+            h1_weights = split_tensor_along_dim(h1_weights, 0, comm.get_size("h"))[comm.get_rank("h")]
 
         h1_weights = h1_weights.reshape(1, 1, -1)
         self.register_buffer("h1_weights", h1_weights, persistent=False)

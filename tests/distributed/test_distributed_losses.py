@@ -31,6 +31,7 @@ from makani.utils.losses import (
     EnsembleNLLLoss,
     SpectralCRPSLoss,
     LpEnergyScoreLoss,
+    SpectralH1Loss,
     SpectralL2EnergyScoreLoss,
     SobolevEnergyScoreLoss,
     CoherenceRegularization,
@@ -701,6 +702,98 @@ class TestDistributedLoss(unittest.TestCase):
                     compare_tensors(
                         "observation gradients", obsgrad_gather_full, obsgrad_full, tol, tol, verbose=verbose
                     ),
+                    self.device,
+                )
+            )
+
+    @parameterized.expand(
+        [
+            [64, 128, 8, 13, False, False, 1e-4],
+            [65, 128, 2, 12, False, False, 1e-4],
+            [65, 128, 2, 12, False, True, 1e-4],
+            [65, 128, 2, 12, True, False, 1e-4],
+            [65, 128, 2, 12, True, True, 1e-4],
+        ],
+        skip_on_empty=True,
+    )
+    def test_distributed_h1(self, nlat, nlon, batch_size, num_chan, relative, squared, tol, verbose=False):
+
+        # disable tf32 for deterministic comparison
+        disable_tf32()
+
+        B, C, H, W = batch_size, num_chan, nlat, nlon
+
+        prd_full = torch.randn((B, C, H, W), dtype=torch.float32, device=self.device)
+        tar_full = torch.randn((B, C, H, W), dtype=torch.float32, device=self.device)
+
+        # local loss, in a serial context as its forward pass queries the rank in w
+        with comm.serial():
+            loss_fn_local = SpectralH1Loss(
+                img_shape=(H, W),
+                crop_shape=None,
+                crop_offset=(0, 0),
+                channel_names=(),
+                grid_type="equiangular",
+                relative=relative,
+                squared=squared,
+                spatial_distributed=False,
+            ).to(self.device)
+
+        # distributed loss
+        loss_fn_dist = SpectralH1Loss(
+            img_shape=(H, W),
+            crop_shape=None,
+            crop_offset=(0, 0),
+            channel_names=(),
+            grid_type="equiangular",
+            relative=relative,
+            squared=squared,
+            spatial_distributed=(comm.is_distributed("spatial") and (comm.get_size("spatial") > 1)),
+        ).to(self.device)
+
+        #############################################################
+        # local loss
+        #############################################################
+        prd_full.requires_grad = True
+        with comm.serial():
+            loss_full = loss_fn_local(prd_full, tar_full)
+
+        with torch.no_grad():
+            ograd_full = torch.randn_like(loss_full)
+            ograd_local = ograd_full.clone()
+
+        loss_full.backward(ograd_full)
+        pgrad_full = prd_full.grad.clone()
+
+        #############################################################
+        # distributed loss
+        #############################################################
+        prd_local = self._split_helper(prd_full.detach().clone())
+        tar_local = self._split_helper(tar_full)
+        prd_local.requires_grad = True
+
+        loss_local = loss_fn_dist(prd_local, tar_local)
+        loss_local.backward(ograd_local)
+        pgrad_local = prd_local.grad.clone()
+
+        #############################################################
+        # evaluate FWD pass
+        #############################################################
+        with self.subTest(desc="outputs"):
+            self.assertTrue(
+                reduce_success(
+                    compare_tensors("outputs", loss_local, loss_full, tol, tol, verbose=verbose), self.device
+                )
+            )
+
+        #############################################################
+        # evaluate BWD pass
+        #############################################################
+        with self.subTest(desc="prediction gradients"):
+            pgrad_gather_full = self._gather_helper_bwd(pgrad_local, False)
+            self.assertTrue(
+                reduce_success(
+                    compare_tensors("prediction gradients", pgrad_gather_full, pgrad_full, tol, tol, verbose=verbose),
                     self.device,
                 )
             )

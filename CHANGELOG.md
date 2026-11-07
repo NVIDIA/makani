@@ -19,6 +19,7 @@
 - The stochastic interpolant is brought up to speed with the rest of the codebase: a `StepWrapper` driven by rollouts and the noise controller, configured by a `stochastic_interpolant` block. Breaking: earlier interpolant checkpoints do not load, and `n_future > 0` is refused.
 
 **Fixed**
+- `SpectralH1Loss` under spatial parallelism with more than one rank in `h`: the weights were not reduced to the local chunk of the rank, so building the loss raised an `AttributeError`.
 - Learnable white noise (`IsotropicGaussianRandomFieldS2`) under spatial model parallelism: its `sigma_l` is sharded over `h` and `w` but was not annotated as shared over `matmul` only, so the gradient reduction summed the shards of other ranks (or failed on shards of different sizes) and `sync_params` overwrote them with those of rank 0.
 - Noise under matmul parallelism: `noise_base_seed` seeded by the model rank, so the matmul ranks, which hold the same input, drew different noise. It now seeds by the spatial rank; without matmul parallelism the seeds are unchanged.
 - `NoiseController.set_rng` (and `ModelWrapper.set_rng`) seeded every rank alike, so after it the spatial shards drew the same coefficients and the data-parallel and ensemble ranks the same noise. A process now lays the seed out over the ranks as it was built, through `rank_seed`, keeping centered pairs; serially the seeds are unchanged. Noise processes take a `centered` flag, which `build_noise` passes on.
