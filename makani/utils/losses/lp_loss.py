@@ -17,11 +17,7 @@ from typing import Optional, Tuple, List
 
 import torch
 
-from makani.mpu.mappings import reduce_from_parallel_region
-
 from makani.utils.losses.base_loss import GeometricBaseLoss, SpectralBaseLoss
-
-from makani.utils import comm
 
 
 class GeometricLpLoss(GeometricBaseLoss):
@@ -145,35 +141,15 @@ class SpectralLpLoss(SpectralBaseLoss):
         self.squared = squared
         self.eps = eps
 
-    def abs(self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None):
-        B, C, H, W = prd.shape
-
-        # compute SH coefficients of the difference
-        coeffs = self.sht(prd - tar)
-
-        # compute |coeffs|^p (orthonormal convention)
-        coeffsp = torch.abs(coeffs).pow(self.p)
-
+    def _normp(self, field: torch.Tensor, wgt: Optional[torch.Tensor] = None) -> torch.Tensor:
+        # |coeffs|^p (orthonormal convention), summed over m and l
+        coeffsp = torch.abs(self.sht(field)).pow(self.p)
         if wgt is not None:
             coeffsp = coeffsp * wgt
+        return self.sum_over_l(self.sum_over_m(coeffsp))
 
-        # Parseval sum: m=0 once, m!=0 twice (conjugate symmetry)
-        # divide by 4π to match the geometric quadrature normalization
-        inv_area = 1.0 / (4.0 * torch.pi)
-        if comm.get_rank("w") == 0:
-            normp = inv_area * (coeffsp[..., 0] + 2 * torch.sum(coeffsp[..., 1:], dim=-1))
-        else:
-            normp = inv_area * (2 * torch.sum(coeffsp, dim=-1))
-
-        if self.spatial_distributed and (comm.get_size("w") > 1):
-            normp = reduce_from_parallel_region(normp, "w")
-
-        # sum over l (degrees)
-        normp = normp.reshape(B, C, -1)
-        normp = torch.sum(normp, dim=-1)
-
-        if self.spatial_distributed and (comm.get_size("h") > 1):
-            normp = reduce_from_parallel_region(normp, "h")
+    def abs(self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None):
+        normp = self._normp(prd - tar, wgt)
 
         # take p-th root unless squared is True
         if not self.squared:
@@ -182,53 +158,8 @@ class SpectralLpLoss(SpectralBaseLoss):
         return normp
 
     def rel(self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None):
-        B, C, H, W = prd.shape
-
-        # compute SH coefficients of the difference
-        coeffs = self.sht(prd - tar)
-        coeffsp = torch.abs(coeffs).pow(self.p)
-
-        if wgt is not None:
-            coeffsp = coeffsp * wgt
-
-        # sum m != 0 coeffs for numerator
-        if comm.get_rank("w") == 0:
-            normp = coeffsp[..., 0] + 2 * torch.sum(coeffsp[..., 1:], dim=-1)
-        else:
-            normp = 2 * torch.sum(coeffsp, dim=-1)
-
-        if self.spatial_distributed and (comm.get_size("w") > 1):
-            normp = reduce_from_parallel_region(normp, "w")
-
-        # sum over l
-        normp = normp.reshape(B, C, -1)
-        normp = torch.sum(normp, dim=-1)
-
-        if self.spatial_distributed and (comm.get_size("h") > 1):
-            normp = reduce_from_parallel_region(normp, "h")
-
-        # compute target norm
-        tar_coeffs = self.sht(tar)
-        tar_coeffsp = torch.abs(tar_coeffs).pow(self.p)
-
-        if wgt is not None:
-            tar_coeffsp = tar_coeffsp * wgt
-
-        # sum m != 0 coeffs for denominator
-        if comm.get_rank("w") == 0:
-            tar_normp = tar_coeffsp[..., 0] + 2 * torch.sum(tar_coeffsp[..., 1:], dim=-1)
-        else:
-            tar_normp = 2 * torch.sum(tar_coeffsp, dim=-1)
-
-        if self.spatial_distributed and (comm.get_size("w") > 1):
-            tar_normp = reduce_from_parallel_region(tar_normp, "w")
-
-        # sum over l
-        tar_normp = tar_normp.reshape(B, C, -1)
-        tar_normp = torch.sum(tar_normp, dim=-1)
-
-        if self.spatial_distributed and (comm.get_size("h") > 1):
-            tar_normp = reduce_from_parallel_region(tar_normp, "h")
+        normp = self._normp(prd - tar, wgt)
+        tar_normp = self._normp(tar, wgt)
 
         # take p-th root unless squared is True
         if not self.squared:

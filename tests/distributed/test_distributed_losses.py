@@ -32,6 +32,8 @@ from makani.utils.losses import (
     SpectralCRPSLoss,
     LpEnergyScoreLoss,
     SpectralH1Loss,
+    SpectralLpLoss,
+    SpectralAMSELoss,
     SpectralL2EnergyScoreLoss,
     SobolevEnergyScoreLoss,
     CoherenceRegularization,
@@ -708,15 +710,22 @@ class TestDistributedLoss(unittest.TestCase):
 
     @parameterized.expand(
         [
-            [64, 128, 8, 13, False, False, 1e-4],
-            [65, 128, 2, 12, False, False, 1e-4],
-            [65, 128, 2, 12, False, True, 1e-4],
-            [65, 128, 2, 12, True, False, 1e-4],
-            [65, 128, 2, 12, True, True, 1e-4],
+            [64, 128, 8, 13, SpectralLpLoss, {"p": 2.0}, 1e-4],
+            [65, 128, 2, 12, SpectralLpLoss, {"p": 1.0}, 1e-4],
+            [65, 128, 2, 12, SpectralLpLoss, {"p": 2.0, "squared": True}, 1e-4],
+            [65, 128, 2, 12, SpectralLpLoss, {"p": 2.0, "relative": True}, 1e-4],
+            [64, 128, 8, 13, SpectralH1Loss, {}, 1e-4],
+            [65, 128, 2, 12, SpectralH1Loss, {"squared": True}, 1e-4],
+            [65, 128, 2, 12, SpectralH1Loss, {"relative": True}, 1e-4],
+            [65, 128, 2, 12, SpectralH1Loss, {"relative": True, "squared": True}, 1e-4],
+            [64, 128, 8, 13, SpectralAMSELoss, {}, 1e-4],
+            [65, 128, 2, 12, SpectralAMSELoss, {}, 1e-4],
         ],
         skip_on_empty=True,
     )
-    def test_distributed_h1(self, nlat, nlon, batch_size, num_chan, relative, squared, tol, verbose=False):
+    def test_distributed_spectral_deterministic(
+        self, nlat, nlon, batch_size, num_chan, loss_cls, loss_kwargs, tol, verbose=False
+    ):
 
         # disable tf32 for deterministic comparison
         disable_tf32()
@@ -726,37 +735,25 @@ class TestDistributedLoss(unittest.TestCase):
         prd_full = torch.randn((B, C, H, W), dtype=torch.float32, device=self.device)
         tar_full = torch.randn((B, C, H, W), dtype=torch.float32, device=self.device)
 
-        # local loss, in a serial context as its forward pass queries the rank in w
-        with comm.serial():
-            loss_fn_local = SpectralH1Loss(
-                img_shape=(H, W),
-                crop_shape=None,
-                crop_offset=(0, 0),
-                channel_names=(),
-                grid_type="equiangular",
-                relative=relative,
-                squared=squared,
-                spatial_distributed=False,
-            ).to(self.device)
+        loss_args = dict(
+            img_shape=(H, W), crop_shape=None, crop_offset=(0, 0), channel_names=(), grid_type="equiangular"
+        )
+        loss_args.update(loss_kwargs)
+
+        # local loss
+        loss_fn_local = loss_cls(**loss_args, spatial_distributed=False).to(self.device)
 
         # distributed loss
-        loss_fn_dist = SpectralH1Loss(
-            img_shape=(H, W),
-            crop_shape=None,
-            crop_offset=(0, 0),
-            channel_names=(),
-            grid_type="equiangular",
-            relative=relative,
-            squared=squared,
-            spatial_distributed=(comm.is_distributed("spatial") and (comm.get_size("spatial") > 1)),
+        loss_fn_dist = loss_cls(
+            **loss_args, spatial_distributed=(comm.is_distributed("spatial") and (comm.get_size("spatial") > 1))
         ).to(self.device)
 
         #############################################################
         # local loss
         #############################################################
         prd_full.requires_grad = True
-        with comm.serial():
-            loss_full = loss_fn_local(prd_full, tar_full)
+        tar_full.requires_grad = True
+        loss_full = loss_fn_local(prd_full, tar_full)
 
         with torch.no_grad():
             ograd_full = torch.randn_like(loss_full)
@@ -764,17 +761,20 @@ class TestDistributedLoss(unittest.TestCase):
 
         loss_full.backward(ograd_full)
         pgrad_full = prd_full.grad.clone()
+        tgrad_full = tar_full.grad.clone()
 
         #############################################################
         # distributed loss
         #############################################################
         prd_local = self._split_helper(prd_full.detach().clone())
-        tar_local = self._split_helper(tar_full)
+        tar_local = self._split_helper(tar_full.detach().clone())
         prd_local.requires_grad = True
+        tar_local.requires_grad = True
 
         loss_local = loss_fn_dist(prd_local, tar_local)
         loss_local.backward(ograd_local)
         pgrad_local = prd_local.grad.clone()
+        tgrad_local = tar_local.grad.clone()
 
         #############################################################
         # evaluate FWD pass
@@ -794,6 +794,15 @@ class TestDistributedLoss(unittest.TestCase):
             self.assertTrue(
                 reduce_success(
                     compare_tensors("prediction gradients", pgrad_gather_full, pgrad_full, tol, tol, verbose=verbose),
+                    self.device,
+                )
+            )
+
+        with self.subTest(desc="target gradients"):
+            tgrad_gather_full = self._gather_helper_bwd(tgrad_local, False)
+            self.assertTrue(
+                reduce_success(
+                    compare_tensors("target gradients", tgrad_gather_full, tgrad_full, tol, tol, verbose=verbose),
                     self.device,
                 )
             )
