@@ -1287,51 +1287,129 @@ class TestLossHandler(unittest.TestCase):
         with self.subTest(desc="var"):
             self.assertTrue(compare_tensors("var", var, expected_var, verbose=verbose))
 
-    # ------------------------------------------------------------------
-    # multistep_loss_weight modes — _compute_multistep_weight in loss.py:206
-    # The default "constant" is exercised by test_loss_multistep above, but
-    # "balanced", "linear", "last", "last-n-1", "custom" are all currently dead.
-    # ------------------------------------------------------------------
-
     @parameterized.expand(
         [
-            ("constant",),
-            ("balanced",),
-            ("linear",),
-            ("last",),
-            ("last-n-1",),
+            ("constant", {"weight_type": "constant"}, [1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0], (1.0, 10.0)),
+            ("balanced", {"weight_type": "balanced"}, [1.0 / 6.0, 1.0 / 3.0, 1.0 / 2.0], (1.0, 10.0)),
+            ("linear", {"weight_type": "linear"}, [1.0 / 3.0, 2.0 / 3.0, 1.0], (1.0, 10.0)),
+            ("last_n_1", {"weight_type": "last-n-1"}, [0.0, 0.5, 0.5], (1.0, 10.0)),
+            ("last", {"weight_type": "last"}, [0.0, 0.0, 1.0], (1.0, 10.0)),
+            ("custom", {"weight_type": "custom", "weights": [0.1, 0.3, 0.6]}, [0.1, 0.3, 0.6], (1.0, 10.0)),
+            ("single_loss", {"weight_type": "linear"}, [1.0 / 3.0, 2.0 / 3.0, 1.0], (10.0,)),
         ]
     )
-    def test_multistep_weight_mode(self, weight_type):
-        """Each multistep weight mode must build, forward, and backward without error.
-        Also asserts the computed multistep_weight buffer has the expected length
-        (n_future + 1) — the only invariant common to all modes."""
-        self.params.n_future = 2
-        self.params.losses = [{"type": "l2", "channel_weights": "constant"}]
-        self.params.multistep = {"weight_type": weight_type}
+    def test_multistep_weight_layout(self, name, multistep, step_weights, relative_weights):
+        """The losses are concatenated, each with all of its lead times, so an error in one channel of one
+        lead time must get the weights of exactly that lead time and channel, in every loss."""
+        n_future = len(step_weights) - 1
+        C = self.params.N_out_channels
+        channel_weights = [[1.0 + c for c in range(C)], [2.0 * (C - c) for c in range(C)]]
 
-        shape = (
-            self.params.batch_size,
-            (self.params.n_future + 1) * self.params.N_out_channels,
-            self.params.img_shape_x,
-            self.params.img_shape_y,
-        )
+        # an error of 2 is 2 in the first loss and 4 in the second, which tells apart the weights they get
+        error = 2.0
+        loss_specs = [
+            {"type": "l1"},
+            {"type": "l2", "parameters": {"squared": True}},
+        ]
+        loss_values = [error, error**2]
 
-        # self.compile selects the eager vs torch.compile path
+        self.params.n_future = n_future
+        self.params.multistep = multistep
+        self.params.losses = [
+            {**loss_specs[i], "channel_weights": [channel_weights[i]], "relative_weight": rw}
+            for i, rw in enumerate(relative_weights)
+        ]
+        shape = (self.params.batch_size, (n_future + 1) * C, self.params.img_shape_x, self.params.img_shape_y)
+
         loss_obj = LossHandler(self.params, compile=self.compile)
+        loss_obj.train()
 
-        # the multistep_weight buffer is tiled by ncw; the per-step prefix is n_future+1 entries
-        # tiled to (n_future + 1) * ncw — verify length matches that contract
-        expected_len = (self.params.n_future + 1) * loss_obj.channel_weights.shape[1]
-        self.assertEqual(loss_obj.multistep_weight.numel(), expected_len)
+        tar = torch.zeros(*shape)
+        for step in range(n_future + 1):
+            for chan in range(C):
+                with self.subTest(step=step, channel=chan):
+                    prd = torch.zeros(*shape)
+                    prd[:, step * C + chan] = error
+                    prd.requires_grad_(True)
+                    expected = step_weights[step] * sum(
+                        rw * channel_weights[i][chan] * loss_values[i] for i, rw in enumerate(relative_weights)
+                    )
+                    out = loss_obj(prd, tar)
+                    self.assertTrue(compare_tensors("loss", out, torch.tensor(expected), 1e-5, 1e-5))
+                    out.backward()
+                    self.assertTrue(torch.isfinite(prd.grad).all())
 
-        inp = torch.randn(*shape, requires_grad=True)
-        tar = torch.randn(*shape)
-        out = loss_obj(tar, inp)
-        self.assertEqual(torch.numel(out), 1)
-        self.assertTrue(torch.isfinite(out))
-        out.backward()
-        self.assertIsNotNone(inp.grad)
+    @parameterized.expand(
+        [(flag_name, n_future) for flag_name in ("uncertainty_weighting", "balanced_weighting") for n_future in (0, 1)]
+    )
+    def test_dynamic_weighting(self, flag_name, n_future):
+        """The running stats follow the layout of the losses, and so must the weights divided by them,
+        during the warmup with unit stats and past it, for one lead time and several."""
+        C = self.params.N_out_channels
+
+        self.params.n_future = n_future
+        self.params.losses = [
+            {"type": "l1", "channel_weights": "constant"},
+            {"type": "l2", "channel_weights": "constant"},
+        ]
+        setattr(self.params, flag_name, True)
+        shape = (self.params.batch_size, (n_future + 1) * C, self.params.img_shape_x, self.params.img_shape_y)
+
+        loss_obj = LossHandler(self.params, compile=self.compile)
+        loss_obj.train()
+
+        step, chan = n_future, 0
+        step_weight = 1.0 / (n_future + 1)
+        prd = torch.zeros(*shape)
+        prd[:, step * C + chan] = 1.0
+        tar = torch.zeros(*shape)
+
+        # warmup: a unit error in one lead time and channel of both losses
+        with self.subTest(desc="warmup"):
+            if flag_name == "uncertainty_weighting":
+                scale = 1.0 / (math.sqrt(2.0) + loss_obj.eps)
+            else:
+                scale = 1.0 / (1.0 + loss_obj.eps)
+            expected = step_weight * (1.0 / C) * 2.0 * scale
+            self.assertTrue(compare_tensors("loss", loss_obj(prd, tar), torch.tensor(expected), 1e-5, 1e-5))
+
+        # past the warmup: a different stat for every entry tells them apart. The forward pass folds the
+        # batch into the stats before using them, so these are read afterwards
+        with self.subTest(desc="past warmup"):
+            with torch.no_grad():
+                loss_obj.num_batches_tracked.fill_(1000)
+                loss_obj.running_mean.copy_(torch.arange(1, loss_obj.running_mean.numel() + 1, dtype=torch.float32))
+                loss_obj.running_var.copy_(1000.0 * loss_obj.running_mean)
+            out = loss_obj(prd, tar)
+            var, mean = loss_obj.get_running_stats()
+            denominator = torch.sqrt(2 * var) if flag_name == "uncertainty_weighting" else mean
+            denominator = denominator + loss_obj.eps
+
+            # [loss 0: step 0, step 1, ...; loss 1: step 0, step 1, ...], each step with C channels
+            entries = [loss * (n_future + 1) * C + step * C + chan for loss in range(2)]
+            expected = step_weight * (1.0 / C) * sum(1.0 / denominator[entry] for entry in entries)
+            self.assertTrue(compare_tensors("loss", out, expected, 1e-5, 1e-5))
+
+    def test_multistep_randomized_loss_weights(self):
+        """The random weights are drawn per channel of each loss and shared by its lead times, so with the
+        same error everywhere, the loss must not depend on the number of lead times."""
+        C = self.params.N_out_channels
+        self.params.randomized_loss_weights = True
+        self.params.losses = [
+            {"type": "l1", "channel_weights": "constant"},
+            {"type": "l2", "channel_weights": "constant"},
+        ]
+
+        out = []
+        for n_future in (0, 2):
+            self.params.n_future = n_future
+            shape = (self.params.batch_size, (n_future + 1) * C, self.params.img_shape_x, self.params.img_shape_y)
+            # the same default seed, and thus the same draw
+            loss_obj = LossHandler(self.params, compile=self.compile)
+            loss_obj.train()
+            out.append(loss_obj(torch.ones(*shape), torch.zeros(*shape)))
+
+        self.assertTrue(compare_tensors("loss", out[1], out[0], 1e-5, 1e-5))
 
     def test_multistep_weight_custom(self):
         """custom mode passes through user-supplied weights and asserts shape match."""
@@ -1443,32 +1521,6 @@ class TestLossHandler(unittest.TestCase):
         out.backward()
         self.assertIsNotNone(inp.grad)
         self.assertFalse(torch.isnan(inp.grad).any())
-
-    # ------------------------------------------------------------------
-    # balanced_weighting path — loss.py:420-424
-    # Activated only when track_running_stats=True AND num_batches_tracked > 100.
-    # ------------------------------------------------------------------
-
-    def test_balanced_weighting_after_warmup(self):
-        """balanced_weighting=True with > 100 tracked batches activates the
-        chw / (mean + eps) branch. Forward must remain finite under that path."""
-        self.params.losses = [{"type": "l2"}]
-        self.params.balanced_weighting = True
-
-        loss_obj = LossHandler(self.params, track_running_stats=True)
-        loss_obj.train()
-
-        shape = (self.params.batch_size, self.params.N_out_channels, self.params.img_shape_x, self.params.img_shape_y)
-
-        # warm up past the 100-batch gate that swaps from ones-like to running mean
-        for _ in range(105):
-            prd = torch.randn(*shape)
-            tar = torch.randn(*shape)
-            loss_obj(prd, tar)
-
-        # post-warmup forward — exercises the balanced_weighting branch
-        out = loss_obj(torch.randn(*shape), torch.randn(*shape))
-        self.assertTrue(torch.isfinite(out))
 
     # ------------------------------------------------------------------
     # reset_running_stats — loss.py:292-296
