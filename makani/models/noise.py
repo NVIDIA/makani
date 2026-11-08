@@ -135,6 +135,17 @@ class BaseNoiseS2(nn.Module):
         self.lmax = self.isht.lmax
         self.mmax = self.isht.mmax
 
+        # weights of the orders m, which the coefficients are drawn with. The real inverse SHT drops the imaginary
+        # part at m = 0, while a coefficient of order m > 0 also stands for its conjugate at -m. Drawn alike at all
+        # orders, the orders m > 0 would carry twice the power of m = 0 and the variance of the field would depend
+        # on the latitude: they are scaled by 1 / sqrt(2), so the field is isotropic. Kept apart from the spectra,
+        # since learnable spectra are restored from checkpoints, and split over w as the coefficients are
+        m_weights = torch.full((self.mmax,), 1.0 / math.sqrt(2.0), dtype=torch.float32)
+        m_weights[0] = 1.0
+        if comm.get_size("w") > 1:
+            m_weights = split_tensor_along_dim(m_weights, dim=0, num_chunks=comm.get_size("w"))[comm.get_rank("w")]
+        self.register_buffer("m_weights", m_weights.contiguous(), persistent=False)
+
         # generator objects:
         self.set_rng(seed=seed)
 
@@ -467,8 +478,11 @@ class IsotropicGaussianRandomFieldS2(BaseNoiseS2):
         Z = \sum_l \frac{(2l+1)\,(2l+1)^{-\alpha}}{4\pi}
 
     where the normalization :math:`Z` fixes the pointwise variance of the field
-    at :math:`\sigma^2` regardless of :math:`\alpha` or the truncation, so
+    at :math:`\sigma^2 / 2` regardless of :math:`\alpha` or the truncation, so
     changing the correlation length does not silently change the amplitude.
+    The coefficients of orders :math:`m > 0` are drawn with :math:`1/\sqrt{2}`
+    of the amplitude of :math:`m = 0`, as each also stands for its conjugate at
+    :math:`-m`, so the variance is the same at every latitude.
     :math:`\alpha = 0` gives white noise; larger :math:`\alpha` damps high
     degrees and yields a smoother, longer-correlated field.
 
@@ -486,8 +500,8 @@ class IsotropicGaussianRandomFieldS2(BaseNoiseS2):
     num_time_steps : int, optional
         Number of time steps held in the state, by default ``1``.
     sigma : float, default is 1.0
-        Scale parameter corresponding to the diagonal entry of the covariance
-        kernel, i.e. the pointwise standard deviation of the field.
+        Scale parameter of the covariance kernel: the pointwise variance of the
+        field is :math:`\sigma^2 / 2`.
     alpha : float, default is 0.0
         Decay factor in the angular power spectrum. White noise corresponds to
         ``alpha = 0.0``.
@@ -644,7 +658,7 @@ class IsotropicGaussianRandomFieldS2(BaseNoiseS2):
         # bug (set_() size mismatch when itemsize changes float32→complex64); construct
         # the complex tensor explicitly instead.
         _s = self.state / math.sqrt(2)
-        cstate = torch.complex(_s[..., 0], _s[..., 1]) * self.sigma_l
+        cstate = torch.complex(_s[..., 0], _s[..., 1]) * (self.sigma_l * self.m_weights)
         batch_size = cstate.shape[0]
 
         # flatten history
@@ -726,8 +740,9 @@ class DiffusionNoiseS2(BaseNoiseS2):
 
     with :math:`\xi_t` standard normal. The prefactor
     :math:`\sqrt{1-\phi^2}` keeps the process stationary: the marginal variance
-    stays at :math:`\sigma^2` for every :math:`t` instead of drifting as the
-    correlation length changes. :math:`\lambda = \Delta t / \tau` sets how fast
+    stays the same for every :math:`t` instead of drifting as the correlation
+    length changes, and at every latitude, as the orders :math:`m > 0` are drawn
+    with :math:`1/\sqrt{2}` of the amplitude of :math:`m = 0`. :math:`\lambda = \Delta t / \tau` sets how fast
     the field decorrelates in time, while ``kT`` sets the spatial correlation
     length through the angular power spectrum.
 
@@ -845,7 +860,8 @@ class DiffusionNoiseS2(BaseNoiseS2):
 
         # f-tensor:
         ektllp1 = torch.exp(-kT * ls * (ls + 1))
-        F0norm = torch.sum((2 * ls[1:] + 1) * ektllp1[..., 1:], dim=-1, keepdim=True)
+        # over all degrees the field has, l = 0 included, so that the variance is the same for every kT
+        F0norm = torch.sum((2 * ls + 1) * ektllp1, dim=-1, keepdim=True)
         # create a discount vector in time:
         phi = torch.exp(-lambd)
         F0 = sigma * torch.sqrt(0.5 * (1 - phi**2) / F0norm)
@@ -976,7 +992,7 @@ class DiffusionNoiseS2(BaseNoiseS2):
         with torch.set_grad_enabled(self.learnable and torch.is_grad_enabled()):
             with amp.autocast(device_type=self.state.device.type, enabled=False):
                 # multiply by sigma
-                eta_l = self.sigma_l * eta
+                eta_l = (self.sigma_l * self.m_weights.unsqueeze(-1)) * eta
 
                 # reflect if required:
                 if self.reflect:

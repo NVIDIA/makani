@@ -408,10 +408,11 @@ class TestIsotropicGRF(unittest.TestCase):
     # Statistical tests — require a large batch for reliable estimates
     # -----------------------------------------------------------------------
     def test_spatial_variance_matches_sigma(self):
-        """Empirical variance of the GRF output ≈ sigma² over a large batch.
+        """Empirical variance of the GRF output ≈ sigma² / 2 over a large batch.
 
-        By construction, sum_l (2l+1)*sigma_l²/(4π) = sigma², so the expected
-        spatial variance at any point equals sigma².
+        By construction, sum_l (2l+1)*sigma_l²/(4π) = sigma², and the orders m > 0
+        are drawn with 1/sqrt(2) of the amplitude of m = 0, so the expected
+        variance at any point is sigma² / 2. TestNoiseIsotropy checks it exactly.
         """
         B_stat = 500
         sigma = 2.0
@@ -421,7 +422,10 @@ class TestIsotropicGRF(unittest.TestCase):
 
         empirical_var = out.var().item()
         self.assertAlmostEqual(
-            empirical_var, sigma**2, delta=0.5, msg=f"Expected variance ≈ {sigma**2:.1f}, got {empirical_var:.4f}"
+            empirical_var,
+            sigma**2 / 2,
+            delta=0.25,
+            msg=f"Expected variance ≈ {sigma**2 / 2:.1f}, got {empirical_var:.4f}",
         )
 
     def test_zero_mean(self):
@@ -964,6 +968,86 @@ class TestDiffusionNoiseS2(unittest.TestCase):
         self.assertFalse(
             torch.equal(state_before, noise.state),
             "State should have changed after forward(update_internal_state=True)",
+        )
+
+
+# ===========================================================================
+# Isotropy: the variance of a field may not depend on the latitude
+# ===========================================================================
+@parameterized_class(("device",), _devices)
+class TestNoiseIsotropy(unittest.TestCase):
+    """
+    A field with an angular power spectrum C_l is isotropic, so its pointwise variance is the same at every
+    latitude. The real inverse SHT drops the imaginary part at m = 0, while a coefficient of order m > 0 also
+    stands for its conjugate at -m, so the orders m > 0 have to be drawn with 1/sqrt(2) of the amplitude of
+    m = 0. The variance is computed exactly: the field is linear in the drawn noise, so drawing one unit per
+    noise component, through the update and forward of the process, and summing the squares gives it.
+    """
+
+    def _exact_variance(self, process):
+        process = process.to(device=self.device, dtype=torch.float64)
+        n = 2 * process.lmax * process.mmax
+        basis = torch.eye(n, dtype=torch.float64, device=self.device)
+        basis = basis.reshape(n, 1, 1, process.lmax, process.mmax, 2)
+
+        def draw_the_basis(tensor, *args, **kwargs):
+            return tensor.copy_(basis)
+
+        # the draw of the process is replaced by the basis, a batch of one unit per noise component
+        with torch.no_grad(), mock.patch.object(torch.Tensor, "normal_", draw_the_basis):
+            process.update(replace_state=True, batch_size=n)
+            field = process()
+
+        # (n, T, C, H, W) -> variance by latitude, averaged over the longitudes
+        return field.pow(2).sum(dim=0).squeeze().mean(dim=-1)
+
+    def _assert_isotropic(self, variance):
+        # the spectra are built in float32, so the variance is exact to about 1e-8; without the weights of the
+        # orders the spread is about 0.5
+        spread = (variance.max() - variance.min()) / variance.mean()
+        self.assertLess(float(spread), 1e-6, f"variance by latitude {variance.tolist()}")
+
+    @parameterized.expand(
+        [
+            ("equiangular", (17, 32), 0.0),
+            ("equiangular", (17, 32), 2.0),
+            ("legendre-gauss", (16, 32), 0.0),
+            ("legendre-gauss", (16, 32), 2.0),
+            ("legendre-gauss", (16, 48), 1.0),
+        ]
+    )
+    def test_white_and_isotropic_noise(self, grid_type, img_shape, alpha):
+        sigma = 2.0
+        process = IsotropicGaussianRandomFieldS2(
+            img_shape=img_shape, batch_size=1, num_channels=1, sigma=sigma, alpha=alpha, grid_type=grid_type
+        )
+        variance = self._exact_variance(process)
+        self._assert_isotropic(variance)
+        # the normalization of the spectrum fixes the variance at sigma^2 / 2
+        self.assertTrue(
+            compare_tensors("variance", variance, torch.full_like(variance, sigma**2 / 2), atol=0.0, rtol=1e-6)
+        )
+
+    @parameterized.expand(
+        [
+            ("equiangular", (17, 32), 0.5 * (500.0 / 6370.0) ** 2),
+            ("equiangular", (17, 32), 3.1545e-2),
+            ("legendre-gauss", (16, 32), 0.5 * (500.0 / 6370.0) ** 2),
+            ("legendre-gauss", (16, 48), 1.2618e-1),
+            ("equiangular", (17, 32), 5.0472e-1),
+        ]
+    )
+    def test_diffusion_noise(self, grid_type, img_shape, kT):
+        sigma = 2.0
+        process = DiffusionNoiseS2(
+            img_shape=img_shape, batch_size=1, num_channels=1, sigma=sigma, kT=kT, grid_type=grid_type
+        )
+        variance = self._exact_variance(process)
+        self._assert_isotropic(variance)
+        # the stationary variance is sigma^2 / 2 for every kT: the normalization of the spectrum covers all of its
+        # degrees, the global mean at l = 0 included, which dominates for a large kT
+        self.assertTrue(
+            compare_tensors("variance", variance, torch.full_like(variance, sigma**2 / 2), atol=0.0, rtol=1e-6)
         )
 
 
