@@ -207,8 +207,11 @@ class LossHandler(nn.Module):
 
             channel_weights.append(chw)
 
+        # the losses are concatenated in forward, each with all of its lead times, so the channel and
+        # multistep weights have to be expanded per loss: [loss 0: step 0, step 1, ...; loss 1: step 0, step 1, ...]
+        self.loss_n_channels = [chw.shape[1] for chw in channel_weights]
+
         channel_weights = torch.cat(channel_weights, dim=1)
-        ncw = channel_weights.shape[1]
         self.register_buffer("channel_weights", channel_weights, persistent=False)
 
         # set up tensor to track running stats
@@ -223,8 +226,11 @@ class LossHandler(nn.Module):
         multistep_params = params.get("multistep", {"weight_type": "constant"})
         multistep_weight = self._compute_multistep_weight(**multistep_params)
 
-        # tile multistep_weights in channel_dim, but channel_dim needs to be fastest dim
-        multistep_weight = torch.repeat_interleave(multistep_weight.reshape(1, -1), ncw, dim=1)
+        # tile multistep_weights in channel_dim, but channel_dim needs to be fastest dim within each loss
+        multistep_weight = torch.cat(
+            [torch.repeat_interleave(multistep_weight.reshape(1, -1), ncw, dim=1) for ncw in self.loss_n_channels],
+            dim=1,
+        )
         self.register_buffer("multistep_weight", multistep_weight, persistent=False)
 
         # generator objects:
@@ -516,6 +522,24 @@ class LossHandler(nn.Module):
 
         # process channel weights
         chw = self.channel_weights
+
+        # one random weight per channel of each loss, shared by its lead times
+        if self.randomized_loss_weights:
+            rmask = torch.zeros_like(chw)
+            if rmask.is_cuda:
+                rmask.uniform_(0.0, 1.0, generator=self.rng_gpu)
+            else:
+                rmask.uniform_(0.0, 1.0, generator=self.rng_cpu)
+
+            rmask = rmask / rmask.sum()
+            chw = chw * rmask
+
+        # match the layout of all_losses, which the running stats share
+        if self.training and self.n_future > 0:
+            chw = torch.cat(
+                [torch.tile(c, (1, self.n_future + 1)) for c in torch.split(chw, self.loss_n_channels, dim=1)], dim=1
+            )
+
         if self.uncertainty_weighting and self.training:
             var, _ = self.get_running_stats()
             if self.num_batches_tracked.item() <= 100:
@@ -527,20 +551,8 @@ class LossHandler(nn.Module):
                 mean = torch.ones_like(mean)
             chw = chw / (mean + self.eps)
 
-        if self.randomized_loss_weights:
-            rmask = torch.zeros_like(chw)
-            if rmask.is_cuda:
-                rmask.uniform_(0.0, 1.0, generator=self.rng_gpu)
-            else:
-                rmask.uniform_(0.0, 1.0, generator=self.rng_cpu)
-
-            rmask = rmask / rmask.sum()
-            chw = chw * rmask
-
         # fold in multistep weight
         if self.training:
-            if self.n_future > 0:
-                chw = torch.tile(chw, (1, self.n_future + 1))
             chw = chw * self.multistep_weight
 
         # compute average over batch and weighted sum over channels
