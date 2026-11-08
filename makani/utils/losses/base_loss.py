@@ -27,6 +27,7 @@ import torch_harmonics.distributed as thd
 from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature, compute_spherical_bandlimit
 from makani.utils import comm
 from makani.utils.features import get_wind_channels
+from makani.mpu.mappings import reduce_from_parallel_region
 from torch_harmonics.distributed import split_tensor_along_dim
 
 
@@ -421,6 +422,26 @@ class SpectralBaseLoss(nn.Module, metaclass=ABCMeta):
 
         # register
         self.register_buffer("lm_weights", lm_weights, persistent=False)
+
+    def sum_over_m(self, coeffs: torch.Tensor) -> torch.Tensor:
+        """
+        Parseval sum of SH coefficient powers over the orders m, by the weights of each order in lm_weights:
+        m=0 once and m>0 twice for the conjugate symmetry, divided by 4π. Reduced over the ranks in w if the
+        loss is spatially distributed, so each rank holds the sum for its degrees l.
+        """
+        out = torch.sum(self.lm_weights * coeffs, dim=-1)
+        if self.spatial_distributed and (comm.get_size("w") > 1):
+            out = reduce_from_parallel_region(out, "w")
+        return out
+
+    def sum_over_l(self, values: torch.Tensor) -> torch.Tensor:
+        """
+        Sum over the degrees l, the last dimension, reduced over the ranks in h if the loss is spatially distributed.
+        """
+        out = torch.sum(values, dim=-1)
+        if self.spatial_distributed and (comm.get_size("h") > 1):
+            out = reduce_from_parallel_region(out, "h")
+        return out
 
     @property
     def type(self):

@@ -22,7 +22,6 @@ from makani.utils.losses.base_loss import SpectralBaseLoss
 # distributed stuff
 from makani.utils import comm
 from torch_harmonics.distributed import split_tensor_along_dim
-from makani.mpu.mappings import reduce_from_parallel_region
 
 
 # TODO: convert this to the seminorm
@@ -65,35 +64,19 @@ class SpectralH1Loss(SpectralBaseLoss):
 
         # split up if distributed
         if self.spatial_distributed and (comm.get_size("h") > 1):
-            h1_weights = split_tensor_along_dim(h1_weights, 0, comm.get_size("h"))
+            h1_weights = split_tensor_along_dim(h1_weights, 0, comm.get_size("h"))[comm.get_rank("h")]
 
-        h1_weights = h1_weights.reshape(1, 1, -1)
         self.register_buffer("h1_weights", h1_weights, persistent=False)
 
-    def abs(self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None):
-        B, C, H, W = prd.shape
-
-        coeffssq = torch.square(torch.abs(self.sht(prd - tar)))
-
+    def _h1_norm2(self, field: torch.Tensor, wgt: Optional[torch.Tensor] = None) -> torch.Tensor:
+        # |coeffs|^2 summed over m, weighted by l(l+1) and summed over l
+        coeffssq = torch.square(torch.abs(self.sht(field)))
         if wgt is not None:
             coeffssq = coeffssq * wgt
+        return self.sum_over_l(self.sum_over_m(coeffssq) * self.h1_weights)
 
-        # Parseval sum: m=0 once, m!=0 twice (conjugate symmetry)
-        # divide by 4π to match the geometric quadrature normalization
-        inv_area = 1.0 / (4.0 * torch.pi)
-        if comm.get_rank("w") == 0:
-            norm2 = inv_area * (coeffssq[..., 0] + 2 * torch.sum(coeffssq[..., 1:], dim=-1))
-        else:
-            norm2 = inv_area * (2 * torch.sum(coeffssq, dim=-1))
-        if self.spatial_distributed and (comm.get_size("w") > 1):
-            norm2 = reduce_from_parallel_region(norm2, "w")
-
-        # compute norms
-        norm2 = norm2.reshape(B, C, -1)
-        h1_norm2 = torch.sum(norm2 * self.h1_weights, dim=-1)
-
-        if self.spatial_distributed and (comm.get_size("h") > 1):
-            h1_norm2 = reduce_from_parallel_region(h1_norm2, "h")
+    def abs(self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None):
+        h1_norm2 = self._h1_norm2(prd - tar, wgt)
 
         if not self.squared:
             h1_norm2 = torch.sqrt(h1_norm2)
@@ -101,46 +84,8 @@ class SpectralH1Loss(SpectralBaseLoss):
         return h1_norm2
 
     def rel(self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None):
-        B, C, H, W = prd.shape
-
-        coeffssq = torch.square(torch.abs(self.sht(prd - tar)))
-
-        if wgt is not None:
-            coeffssq = coeffssq * wgt
-
-        # sum m != 0 coeffs:
-        if comm.get_rank("w") == 0:
-            norm2 = coeffssq[..., 0] + 2 * torch.sum(coeffssq[..., 1:], dim=-1)
-        else:
-            norm2 = 2 * torch.sum(coeffssq, dim=-1)
-        if self.spatial_distributed and (comm.get_size("w") > 1):
-            norm2 = reduce_from_parallel_region(norm2, "w")
-
-        # compute norms
-        norm2 = norm2.reshape(B, C, -1)
-        h1_norm2 = torch.sum(norm2 * self.h1_weights, dim=-1)
-        if self.spatial_distributed and (comm.get_size("h") > 1):
-            h1_norm2 = reduce_from_parallel_region(h1_norm2, "h")
-
-        # target
-        tar_coeffssq = torch.square(torch.abs(self.sht(tar)))
-
-        if wgt is not None:
-            tar_coeffssq = tar_coeffssq * wgt
-
-        # sum m != 0 coeffs:
-        if comm.get_rank("w") == 0:
-            tar_norm2 = tar_coeffssq[..., 0] + 2 * torch.sum(tar_coeffssq[..., 1:], dim=-1)
-        else:
-            tar_norm2 = 2 * torch.sum(tar_coeffssq, dim=-1)
-        if self.spatial_distributed and (comm.get_size("w") > 1):
-            tar_norm2 = reduce_from_parallel_region(tar_norm2, "w")
-
-        # compute target norms
-        tar_norm2 = tar_norm2.reshape(B, C, -1)
-        tar_h1_norm2 = torch.sum(tar_norm2 * self.h1_weights, dim=-1)
-        if self.spatial_distributed and (comm.get_size("h") > 1):
-            tar_h1_norm2 = reduce_from_parallel_region(tar_h1_norm2, "h")
+        h1_norm2 = self._h1_norm2(prd - tar, wgt)
+        tar_h1_norm2 = self._h1_norm2(tar, wgt)
 
         if not self.squared:
             diff_norms = torch.sqrt(h1_norm2)

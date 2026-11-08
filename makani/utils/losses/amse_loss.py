@@ -20,10 +20,6 @@ from torch import amp
 
 from makani.utils.losses.base_loss import SpectralBaseLoss
 
-# distributed stuff
-from makani.utils import comm
-from makani.mpu.mappings import reduce_from_parallel_region
-
 
 # Adjusted Mean Squared Error Loss
 class SpectralAMSELoss(SpectralBaseLoss):
@@ -79,23 +75,10 @@ class SpectralAMSELoss(SpectralBaseLoss):
             ycoeffssq = ycoeffssq * wgt
             xycoh_prod = xycoh_prod * wgt
 
-        # Parseval sum: m=0 once, m!=0 twice (conjugate symmetry)
-        # divide by 4π to match the geometric quadrature normalization
-        inv_area = 1.0 / (4.0 * torch.pi)
-        if comm.get_rank("w") == 0:
-            xnorm2 = inv_area * (xcoeffssq[..., 0] + 2 * torch.sum(xcoeffssq[..., 1:], dim=-1))
-            ynorm2 = inv_area * (ycoeffssq[..., 0] + 2 * torch.sum(ycoeffssq[..., 1:], dim=-1))
-            xycoh_sum = inv_area * (xycoh_prod[..., 0] + 2 * torch.sum(xycoh_prod[..., 1:], dim=-1))
-        else:
-            xnorm2 = inv_area * (2 * torch.sum(xcoeffssq, dim=-1))
-            ynorm2 = inv_area * (2 * torch.sum(ycoeffssq, dim=-1))
-            xycoh_sum = inv_area * (2 * torch.sum(xycoh_prod, dim=-1))
-
-        # distributed reduction
-        if self.spatial_distributed and (comm.get_size("w") > 1):
-            xnorm2 = reduce_from_parallel_region(xnorm2, "w")
-            ynorm2 = reduce_from_parallel_region(ynorm2, "w")
-            xycoh_sum = reduce_from_parallel_region(xycoh_sum, "w")
+        # Parseval sums over m
+        xnorm2 = self.sum_over_m(xcoeffssq)
+        ynorm2 = self.sum_over_m(ycoeffssq)
+        xycoh_sum = self.sum_over_m(xycoh_prod)
 
         # compute sqrt
         xnorm = torch.sqrt(xnorm2)
@@ -107,8 +90,6 @@ class SpectralAMSELoss(SpectralBaseLoss):
         loss = torch.square(xnorm - ynorm) + 2 * torch.maximum(xnorm2, ynorm2) * (1 - xycoh)
 
         # sum over l
-        loss = torch.sum(loss, dim=-1)
-        if self.spatial_distributed and (comm.get_size("h") > 1):
-            loss = reduce_from_parallel_region(loss, "h")
+        loss = self.sum_over_l(loss)
 
         return loss
