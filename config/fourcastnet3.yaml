@@ -170,6 +170,9 @@ ensemble_base: &ENSEMBLE_BASE
         n_channels: 8
         sigma: 1.0
         kT: [3.0806E-5, 1.2322E-4, 4.9289E-4, 1.9716E-3, 7.8862E-3, 3.1545E-2, 1.2618E-1, 5.0472E-1]
+        # the degrees FourCastNet 3 was trained with: torch-harmonics before 0.9 drew the noise on the 721 x 1440
+        # grid up to lmax = nlat = 721, from 0.9 on its default truncates equiangular grids to (nlat + 1) // 2 = 361
+        lmax: 721
 
 ensemble_finetune: &ENSEMBLE_FINETUNE
     <<: *ENSEMBLE_BASE
@@ -200,6 +203,9 @@ ensemble_finetune: &ENSEMBLE_FINETUNE
         n_channels: 8
         sigma: 1.0
         kT: [3.0806E-5, 1.2322E-4, 4.9289E-4, 1.9716E-3, 7.8862E-3, 3.1545E-2, 1.2618E-1, 5.0472E-1]
+        # the degrees FourCastNet 3 was trained with: torch-harmonics before 0.9 drew the noise on the 721 x 1440
+        # grid up to lmax = nlat = 721, from 0.9 on its default truncates equiangular grids to (nlat + 1) // 2 = 361
+        lmax: 721
 
 deterministic_base: &DETERMINISTIC_BASE
     <<: *BASE_CONFIG
@@ -357,6 +363,9 @@ fcn3_sc2_edim45_layers10_pretrain2:
         n_channels: 8
         sigma: 1.0
         kT: [3.0806E-5, 1.2322E-4, 4.9289E-4, 1.9716E-3, 7.8862E-3, 3.1545E-2, 1.2618E-1, 5.0472E-1]
+        # the degrees FourCastNet 3 was trained with: torch-harmonics before 0.9 drew the noise on the 721 x 1440
+        # grid up to lmax = nlat = 721, from 0.9 on its default truncates equiangular grids to (nlat + 1) // 2 = 361
+        lmax: 721
 
 ###########################################################################################################################
 # FourCastNet 3 model - finetuning
