@@ -478,7 +478,7 @@ class IsotropicGaussianRandomFieldS2(BaseNoiseS2):
         Z = \sum_l \frac{(2l+1)\,(2l+1)^{-\alpha}}{4\pi}
 
     where the normalization :math:`Z` fixes the pointwise variance of the field
-    at :math:`\sigma^2 / 2` regardless of :math:`\alpha` or the truncation, so
+    at :math:`\sigma^2` regardless of :math:`\alpha` or the truncation, so
     changing the correlation length does not silently change the amplitude.
     The coefficients of orders :math:`m > 0` are drawn with :math:`1/\sqrt{2}`
     of the amplitude of :math:`m = 0`, as each also stands for its conjugate at
@@ -501,7 +501,7 @@ class IsotropicGaussianRandomFieldS2(BaseNoiseS2):
         Number of time steps held in the state, by default ``1``.
     sigma : float, default is 1.0
         Scale parameter of the covariance kernel: the pointwise variance of the
-        field is :math:`\sigma^2 / 2`.
+        field is :math:`\sigma^2`.
     alpha : float, default is 0.0
         Decay factor in the angular power spectrum. White noise corresponds to
         ``alpha = 0.0``.
@@ -657,8 +657,7 @@ class IsotropicGaussianRandomFieldS2(BaseNoiseS2):
         # torch.view_as_complex on a registered buffer hits a torch.compile/Inductor
         # bug (set_() size mismatch when itemsize changes float32→complex64); construct
         # the complex tensor explicitly instead.
-        _s = self.state / math.sqrt(2)
-        cstate = torch.complex(_s[..., 0], _s[..., 1]) * (self.sigma_l * self.m_weights)
+        cstate = torch.complex(self.state[..., 0], self.state[..., 1]) * (self.sigma_l * self.m_weights)
         batch_size = cstate.shape[0]
 
         # flatten history
@@ -864,7 +863,7 @@ class DiffusionNoiseS2(BaseNoiseS2):
         F0norm = torch.sum((2 * ls + 1) * ektllp1, dim=-1, keepdim=True)
         # create a discount vector in time:
         phi = torch.exp(-lambd)
-        F0 = sigma * torch.sqrt(0.5 * (1 - phi**2) / F0norm)
+        F0 = sigma * torch.sqrt((1 - phi**2) / F0norm)
         sigma_l = F0 * torch.exp(-0.5 * kT * ls * (ls + 1))
         # we multiply by 4 pi to get the correct variance. Check ECMWF docs and their Spherical Harmonic normalization
         sigma_l = math.sqrt(4 * math.pi) * sigma_l

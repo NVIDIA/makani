@@ -408,11 +408,11 @@ class TestIsotropicGRF(unittest.TestCase):
     # Statistical tests — require a large batch for reliable estimates
     # -----------------------------------------------------------------------
     def test_spatial_variance_matches_sigma(self):
-        """Empirical variance of the GRF output ≈ sigma² / 2 over a large batch.
+        """Empirical variance of the GRF output ≈ sigma² over a large batch.
 
         By construction, sum_l (2l+1)*sigma_l²/(4π) = sigma², and the orders m > 0
         are drawn with 1/sqrt(2) of the amplitude of m = 0, so the expected
-        variance at any point is sigma² / 2. TestNoiseIsotropy checks it exactly.
+        variance at any point is sigma². TestNoiseIsotropy checks it exactly.
         """
         B_stat = 500
         sigma = 2.0
@@ -423,9 +423,9 @@ class TestIsotropicGRF(unittest.TestCase):
         empirical_var = out.var().item()
         self.assertAlmostEqual(
             empirical_var,
-            sigma**2 / 2,
-            delta=0.25,
-            msg=f"Expected variance ≈ {sigma**2 / 2:.1f}, got {empirical_var:.4f}",
+            sigma**2,
+            delta=0.5,
+            msg=f"Expected variance ≈ {sigma**2:.1f}, got {empirical_var:.4f}",
         )
 
     def test_zero_mean(self):
@@ -1023,10 +1023,8 @@ class TestNoiseIsotropy(unittest.TestCase):
         )
         variance = self._exact_variance(process)
         self._assert_isotropic(variance)
-        # the normalization of the spectrum fixes the variance at sigma^2 / 2
-        self.assertTrue(
-            compare_tensors("variance", variance, torch.full_like(variance, sigma**2 / 2), atol=0.0, rtol=1e-6)
-        )
+        # the normalization of the spectrum fixes the variance at sigma^2
+        self.assertTrue(compare_tensors("variance", variance, torch.full_like(variance, sigma**2), atol=0.0, rtol=1e-6))
 
     @parameterized.expand(
         [
@@ -1044,11 +1042,32 @@ class TestNoiseIsotropy(unittest.TestCase):
         )
         variance = self._exact_variance(process)
         self._assert_isotropic(variance)
-        # the stationary variance is sigma^2 / 2 for every kT: the normalization of the spectrum covers all of its
+        # the stationary variance is sigma^2 for every kT: the normalization of the spectrum covers all of its
         # degrees, the global mean at l = 0 included, which dominates for a large kT
-        self.assertTrue(
-            compare_tensors("variance", variance, torch.full_like(variance, sigma**2 / 2), atol=0.0, rtol=1e-6)
-        )
+        self.assertTrue(compare_tensors("variance", variance, torch.full_like(variance, sigma**2), atol=0.0, rtol=1e-6))
+
+    @parameterized.expand(
+        [
+            ("white", IsotropicGaussianRandomFieldS2, dict(alpha=0.0)),
+            ("isotropic", IsotropicGaussianRandomFieldS2, dict(alpha=2.0)),
+            ("diffusion", DiffusionNoiseS2, dict(kT=0.5 * (500.0 / 6370.0) ** 2)),
+            ("diffusion_smooth", DiffusionNoiseS2, dict(kT=3.1545e-2)),
+        ]
+    )
+    def test_sampled_noise_has_unit_std(self, _, cls, kwargs):
+        # end to end with the real draws: sigma = 1 gives fields of unit standard deviation, at the poles too. A
+        # check on the samples, independent of the exact variance above, which a stray factor in the convention
+        # of the draw would get past. The seed is fixed; with 512 fields the estimates scatter by a few percent,
+        # the polar caps, which hold fewer independent points, by more
+        process = cls(img_shape=(33, 64), batch_size=512, num_channels=1, sigma=1.0, seed=333, **kwargs)
+        process = process.to(self.device)
+        with torch.no_grad():
+            process.update(replace_state=True)
+            field = process().squeeze()  # (B, H, W)
+
+        self.assertAlmostEqual(float(field.std()), 1.0, delta=0.05)
+        caps = torch.cat([field[:, :3], field[:, -3:]], dim=1)
+        self.assertAlmostEqual(float(caps.std()), 1.0, delta=0.15)
 
 
 # ===========================================================================
