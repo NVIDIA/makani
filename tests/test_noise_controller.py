@@ -526,11 +526,13 @@ class TestModelNoise(unittest.TestCase):
             )
         finally:
             torch._dynamo.reset()
-        self.assertTrue(torch.allclose(loss_checkpointed, loss, rtol=1e-6, atol=1e-7))
+        # inductor fuses and reorders the float32 arithmetic, which changes the result in the last bits
+        tol = dict(rtol=1e-5, atol=1e-6) if compiled else dict(rtol=1e-6, atol=1e-7)
+        self.assertTrue(torch.allclose(loss_checkpointed, loss, **tol))
         self.assertEqual(set(grads_checkpointed), set(grads))
         self.assertTrue(any(name.startswith("model.latent_noise.") for name in grads))
         for name, grad in grads.items():
-            self.assertTrue(torch.allclose(grads_checkpointed[name], grad, rtol=1e-6, atol=1e-7), name)
+            self.assertTrue(torch.allclose(grads_checkpointed[name], grad, **tol), name)
 
     def test_without_the_noise_of_its_step_the_recompute_is_wrong(self):
         # the control: a recompute that draws from the advanced state gives other gradients
