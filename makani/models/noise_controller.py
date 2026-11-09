@@ -47,6 +47,7 @@ recompute, after the rollout has advanced them; rollout checkpointing is
 refused for such networks, see :class:`~makani.models.stepper.StepWrapper`.
 """
 
+import contextlib
 import itertools
 from dataclasses import dataclass
 from typing import Dict, Iterator, Mapping, Optional, Tuple
@@ -326,6 +327,54 @@ class NoiseController:
             raise
         if self._processes:
             self._version = next(_VERSIONS)
+
+    def live_states(self, names: Optional[Iterator[str]] = None) -> Dict[str, torch.Tensor]:
+        r"""
+        The state of the processes as it is, without their generators, see :meth:`drawing_from`.
+
+        A draw of a process is a function of its state and its parameters only, so the state is all
+        it takes to draw the same noise again. The states are not copied: the graph of the state of
+        learnable stateful noise, through which its parameters reach its draws, has to stay intact for
+        a draw from it to be the same draw, for the backward too. A process replaces its state rather
+        than writing into it, so the states stay as they are while the processes advance.
+
+        Parameters
+        ----------
+        names : iterable of str, optional
+            The processes, by default all of them.
+
+        Returns
+        -------
+        dict
+            The state of each process by name.
+        """
+        names = list(self._processes) if names is None else list(names)
+        return {name: self._processes[name].get_live_state() for name in names}
+
+    @contextlib.contextmanager
+    def drawing_from(self, states: Mapping[str, torch.Tensor]):
+        r"""
+        Draw from the given states for the duration of the context, then from the current ones again.
+
+        For the recompute of a checkpointed step in the backward pass, which has to draw the noise
+        the step was run with, after the rollout has advanced it: see
+        :meth:`~makani.models.stepper.StepWrapper.predict_step`. The recompute draws from the very
+        state of the step, so that its graph matches the one of the step. Nothing is advanced, so the
+        version of the state does not change.
+
+        Parameters
+        ----------
+        states : dict
+            The states to draw from by process, from :meth:`live_states`.
+        """
+        current = self.live_states(states.keys())
+        try:
+            for name, state in states.items():
+                self._processes[name].set_live_state(state)
+            yield
+        finally:
+            for name, state in current.items():
+                self._processes[name].set_live_state(state)
 
     def _write(self, snapshot: NoiseSnapshot):
         for name, process in self._processes.items():

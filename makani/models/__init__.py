@@ -14,6 +14,7 @@
 # limitations under the License.
 
 from .preprocessor import Preprocessor2D
+from .model_input import FlatInputAdapter, ModelInput
 from .stepper import StepWrapper
 from .stochastic_interpolant import StochasticInterpolantWrapper
 
