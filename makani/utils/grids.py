@@ -17,6 +17,14 @@ import torch
 
 import torch.amp as amp
 
+import torch_harmonics as th
+
+if not hasattr(th, "as_grid"):
+    raise ImportError(
+        f"makani needs the grid-descriptor API of torch-harmonics 1.0, which torch-harmonics "
+        f"{getattr(th, '__version__', '?')} does not have; install the version pinned in pyproject.toml"
+    )
+
 from torch_harmonics.quadrature import legendre_gauss_weights, clenshaw_curtiss_weights, precompute_latitudes
 
 
@@ -39,6 +47,38 @@ def grid_to_quadrature_rule(grid_type):
         raise NotImplementedError(f"Grid type {grid_type} does not have a quadrature rule")
     else:
         return grid_to_quad_dict[grid_type]
+
+
+#: makani grid types the spherical harmonic transforms run on. The other grid
+#: types makani knows (clenshaw-curtiss, weatherbench2) only name a quadrature
+#: rule for losses and metrics, and euclidean is not on the sphere at all.
+SHT_GRID_TYPES = ("equiangular", "legendre-gauss")
+
+
+def sht_grid(img_shape, grid_type):
+    """The torch-harmonics grid descriptor for a field of this shape and grid type.
+
+    torch-harmonics layers take a descriptor instead of ``(nlat, nlon, grid)``.
+    makani still passes the shape and the grid type name around, and converts
+    here, at the point where a layer is built.
+
+    Parameters
+    ----------
+    img_shape : (int, int)
+        Global ``(nlat, nlon)`` of the field.
+    grid_type : str
+        One of :data:`SHT_GRID_TYPES`.
+
+    Returns
+    -------
+    torch_harmonics.RegularGridS2
+    """
+    if grid_type not in SHT_GRID_TYPES:
+        raise NotImplementedError(
+            f"Grid type {grid_type} has no spherical harmonic transform; expected one of {SHT_GRID_TYPES}"
+        )
+    nlat, nlon = img_shape
+    return th.as_grid(grid_type, nlat=int(nlat), nlon=int(nlon))
 
 
 def compute_spherical_bandlimit(img_shape, grid_type):
@@ -210,19 +250,15 @@ class BandLimitMask(torch.nn.Module):
                     polar_group = None if (comm.get_size("h") == 1) else comm.get_group("h")
                     azimuth_group = None if (comm.get_size("w") == 1) else comm.get_group("w")
                     thd.init(polar_group, azimuth_group)
-                self.forward_transform = DistributedRealSHT(
-                    *img_shape, lmax=self.lmax, mmax=self.lmax, grid=grid_type
-                ).float()
-                self.inverse_transform = DistributedInverseRealSHT(
-                    *img_shape, lmax=self.lmax, mmax=self.lmax, grid=grid_type
-                ).float()
+                grid = sht_grid(img_shape, grid_type)
+                self.forward_transform = DistributedRealSHT(grid, lmax=self.lmax, mmax=self.lmax).float()
+                self.inverse_transform = DistributedInverseRealSHT(grid, lmax=self.lmax, mmax=self.lmax).float()
             else:
                 from torch_harmonics import RealSHT, InverseRealSHT
 
-                self.forward_transform = RealSHT(*img_shape, lmax=self.lmax, mmax=self.lmax, grid=grid_type).float()
-                self.inverse_transform = InverseRealSHT(
-                    *img_shape, lmax=self.lmax, mmax=self.lmax, grid=grid_type
-                ).float()
+                grid = sht_grid(img_shape, grid_type)
+                self.forward_transform = RealSHT(grid, lmax=self.lmax, mmax=self.lmax).float()
+                self.inverse_transform = InverseRealSHT(grid, lmax=self.lmax, mmax=self.lmax).float()
 
         elif self.type == "fft":
 

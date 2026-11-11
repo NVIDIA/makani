@@ -23,7 +23,7 @@ import torch
 from parameterized import parameterized
 
 from makani.utils.grid_types import expected_latitudes, matching_grid_types, verify_grid_type
-from makani.utils.grids import grid_to_quadrature_rule, GridConverter, GridQuadrature, BandLimitMask
+from makani.utils.grids import grid_to_quadrature_rule, GridConverter, GridQuadrature, BandLimitMask, sht_grid
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from .testutils import disable_tf32, set_seed, compare_tensors
@@ -390,7 +390,7 @@ class TestBandLimitMask(unittest.TestCase):
         import torch_harmonics as th
 
         nlat, nlon, lmax = 16, 32, 6
-        isht = th.InverseRealSHT(nlat, nlon, grid="legendre-gauss")
+        isht = th.InverseRealSHT(sht_grid((nlat, nlon), "legendre-gauss"))
 
         # random real field with modes up to the grid's full band limit
         coeffs = torch.randn(2, 3, isht.lmax, isht.mmax, dtype=torch.complex64)

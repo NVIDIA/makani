@@ -65,7 +65,10 @@ dependencies = [
     # 2.1+ to torch >= 2.10, above makani's own minimums declared here.
     "nvidia-physicsnemo>=1.3.0",
     "zarr>=3",
-    "torch-harmonics==0.9.4",
+    # torch-harmonics main ahead of the 1.0 release, for its grid-descriptor API; built
+    # from commit 38b285a it reports 0.9.4.dev39. The 0.9.4 release has the old API.
+    # Tighten to ">=1.0" once 1.0 is tagged.
+    "torch-harmonics>=0.9.4.dev39,!=0.9.4",
     "wandb>=0.13.7",
     "tqdm>=4.60.0",
     "more-itertools",

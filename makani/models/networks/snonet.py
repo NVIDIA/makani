@@ -35,6 +35,7 @@ from makani.mpu.layers import DistributedMLP
 
 # more distributed stuff
 from makani.utils import comm
+from makani.utils.grids import sht_grid
 
 # layer normalization
 from makani.mpu.layer_norm import DistributedInstanceNorm2d, DistributedLayerNorm, DistributedGeometricInstanceNormS2
@@ -126,15 +127,13 @@ class DiscreteContinuousEncoder(nn.Module):
             thd.DistributedDiscreteContinuousConvS2 if comm.get_size("spatial") > 1 else th.DiscreteContinuousConvS2
         )
         self.conv = conv_handle(
+            sht_grid(inp_shape, grid_in),
+            sht_grid(out_shape, grid_out),
             inp_chans,
             out_chans,
-            in_shape=inp_shape,
-            out_shape=out_shape,
             kernel_shape=kernel_shape,
             basis_type=basis_type,
             basis_norm_mode=basis_norm_mode,
-            grid_in=grid_in,
-            grid_out=grid_out,
             groups=groups,
             bias=bias,
             theta_cutoff=theta_cutoff,
@@ -285,13 +284,15 @@ class DiscreteContinuousDecoder(nn.Module):
             isht_handle = thd.DistributedInverseRealSHT if comm.get_size("spatial") > 1 else th.InverseRealSHT
 
             # set upsampling module
-            self.sht = sht_handle(*inp_shape, grid=grid_in).float()
-            self.isht = isht_handle(*out_shape, lmax=self.sht.lmax, mmax=self.sht.mmax, grid=grid_out).float()
+            self.sht = sht_handle(sht_grid(inp_shape, grid_in)).float()
+            self.isht = isht_handle(sht_grid(out_shape, grid_out), lmax=self.sht.lmax, mmax=self.sht.mmax).float()
             self.upsample = nn.Sequential(self.sht, self.isht)
         else:
             resample_handle = thd.DistributedResampleS2 if comm.get_size("spatial") > 1 else th.ResampleS2
 
-            self.upsample = resample_handle(*inp_shape, *out_shape, grid_in=grid_in, grid_out=grid_out, mode="bilinear")
+            self.upsample = resample_handle(
+                sht_grid(inp_shape, grid_in), sht_grid(out_shape, grid_out), mode="bilinear"
+            )
 
         # heuristic for finding theta_cutoff
         # nto entirely clear if out or in shape should be used here with a non-conv method for upsampling
@@ -302,15 +303,13 @@ class DiscreteContinuousDecoder(nn.Module):
             thd.DistributedDiscreteContinuousConvS2 if comm.get_size("spatial") > 1 else th.DiscreteContinuousConvS2
         )
         self.conv = conv_handle(
+            sht_grid(out_shape, grid_out),
+            sht_grid(out_shape, grid_out),
             inp_chans,
             out_chans,
-            in_shape=out_shape,
-            out_shape=out_shape,
             kernel_shape=kernel_shape,
             basis_type=basis_type,
             basis_norm_mode=basis_norm_mode,
-            grid_in=grid_out,
-            grid_out=grid_out,
             groups=groups,
             bias=False,
             theta_cutoff=theta_cutoff,
@@ -451,16 +450,14 @@ class NeuralOperatorBlock(nn.Module):
                 thd.DistributedDiscreteContinuousConvS2 if comm.get_size("spatial") > 1 else th.DiscreteContinuousConvS2
             )
             self.local_conv = conv_handle(
+                forward_transform.grid,
+                inverse_transform.grid,
                 inp_chans,
                 inp_chans,
-                in_shape=self.input_shape,
-                out_shape=self.output_shape,
                 kernel_shape=kernel_shape,
                 basis_type=basis_type,
                 basis_norm_mode=basis_norm_mode,
                 groups=num_groups,
-                grid_in=forward_transform.grid,
-                grid_out=inverse_transform.grid,
                 bias=False,
                 theta_cutoff=math.sqrt(2) * torch.pi / float(self.input_shape[0] - 1),
             )
@@ -769,6 +766,10 @@ class SphericalNeuralOperatorNet(nn.Module):
             modes_lat = int(self.h * hard_thresholding_fraction)
             modes_lon = int((self.w // 2 + 1) * hard_thresholding_fraction)
 
+        # orders m >= lmax carry no spherical harmonic (m <= l < lmax), and torch-harmonics
+        # refuses to keep them since 1.0; on a grid with nlon = 2 * nlat they would be mmax = lmax + 1
+        modes_lon = min(modes_lon, modes_lat)
+
         sht_handle = th.RealSHT
         isht_handle = th.InverseRealSHT
 
@@ -781,8 +782,8 @@ class SphericalNeuralOperatorNet(nn.Module):
             isht_handle = thd.DistributedInverseRealSHT
 
         # set up
-        self.sht = sht_handle(self.h, self.w, lmax=modes_lat, mmax=modes_lon, grid=sht_grid_type).float()
-        self.isht = isht_handle(self.h, self.w, lmax=modes_lat, mmax=modes_lon, grid=sht_grid_type).float()
+        self.sht = sht_handle(sht_grid((self.h, self.w), sht_grid_type), lmax=modes_lat, mmax=modes_lon).float()
+        self.isht = isht_handle(sht_grid((self.h, self.w), sht_grid_type), lmax=modes_lat, mmax=modes_lon).float()
 
     @torch.compiler.disable(recursive=True)
     def _get_norm_layer_handle(

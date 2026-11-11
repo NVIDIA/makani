@@ -29,6 +29,7 @@ import torch_harmonics as th
 import torch_harmonics.distributed as thd
 
 from makani.utils import comm
+from makani.utils.grids import sht_grid
 from makani.utils import checkpoint_helpers
 
 
@@ -97,10 +98,11 @@ class TestDistributedLayers(unittest.TestCase):
             [32, 64, 64, 128, 32, 8, 1e-4],
             [25, 48, 49, 96, 1, 10, 1e-4],
             # the three filters of SFNO with scale_factor=8 on a 36 x 72 grid: truncated modes,
-            # mixed grid types and an internal grid too small to split evenly
-            [36, 72, 4, 9, 4, 8, 1e-4, "equiangular", "legendre-gauss", 4, 5],
-            [4, 9, 4, 9, 4, 8, 1e-4, "legendre-gauss", "legendre-gauss", 4, 5],
-            [4, 9, 36, 72, 4, 8, 1e-4, "legendre-gauss", "equiangular", 4, 5],
+            # mixed grid types and an internal grid too small to split evenly. SFNO clamps mmax to lmax,
+            # as torch-harmonics keeps no orders m >= lmax
+            [36, 72, 4, 9, 4, 8, 1e-4, "equiangular", "legendre-gauss", 4, 4],
+            [4, 9, 4, 9, 4, 8, 1e-4, "legendre-gauss", "legendre-gauss", 4, 4],
+            [4, 9, 36, 72, 4, 8, 1e-4, "legendre-gauss", "equiangular", 4, 4],
         ],
         skip_on_empty=True,
     )
@@ -124,15 +126,19 @@ class TestDistributedLayers(unittest.TestCase):
         from makani.models.common import SpectralConv
 
         # set up handles; without explicit modes the inverse takes those of the forward
-        forward_transform_local = th.RealSHT(nlat=Hi, nlon=Wi, lmax=lmax, mmax=mmax, grid=grid_in).to(self.device)
+        forward_transform_local = th.RealSHT(sht_grid((Hi, Wi), grid_in), lmax=lmax, mmax=mmax).to(self.device)
         inverse_transform_local = th.InverseRealSHT(
-            nlat=Ho, nlon=Wo, lmax=forward_transform_local.lmax, mmax=forward_transform_local.mmax, grid=grid_out
+            sht_grid((Ho, Wo), grid_out),
+            lmax=forward_transform_local.lmax,
+            mmax=forward_transform_local.mmax,
         ).to(self.device)
-        forward_transform_dist = thd.DistributedRealSHT(nlat=Hi, nlon=Wi, lmax=lmax, mmax=mmax, grid=grid_in).to(
+        forward_transform_dist = thd.DistributedRealSHT(sht_grid((Hi, Wi), grid_in), lmax=lmax, mmax=mmax).to(
             self.device
         )
         inverse_transform_dist = thd.DistributedInverseRealSHT(
-            nlat=Ho, nlon=Wo, lmax=forward_transform_dist.lmax, mmax=forward_transform_dist.mmax, grid=grid_out
+            sht_grid((Ho, Wo), grid_out),
+            lmax=forward_transform_dist.lmax,
+            mmax=forward_transform_dist.mmax,
         ).to(self.device)
 
         set_seed(333)
@@ -296,20 +302,18 @@ class TestDistributedLayers(unittest.TestCase):
         B, C = batch_size, num_chan
 
         conv_args = dict(
-            in_shape=(nlat_in, nlon_in),
-            out_shape=(nlat_out, nlon_out),
             kernel_shape=kernel_shape,
             basis_type="harmonic",
             basis_norm_mode="mean",
-            grid_in=grid_in,
-            grid_out=grid_out,
+            grid_in=sht_grid((nlat_in, nlon_in), grid_in),
+            grid_out=sht_grid((nlat_out, nlon_out), grid_out),
             bias=False,
             theta_cutoff=theta_cutoff,
         )
 
         set_seed(333)
-        conv_local = th.DiscreteContinuousConvS2(C, C, **conv_args).to(self.device)
-        conv_dist = thd.DistributedDiscreteContinuousConvS2(C, C, **conv_args).to(self.device)
+        conv_local = th.DiscreteContinuousConvS2(in_channels=C, out_channels=C, **conv_args).to(self.device)
+        conv_dist = thd.DistributedDiscreteContinuousConvS2(in_channels=C, out_channels=C, **conv_args).to(self.device)
         with torch.no_grad():
             conv_dist.weight.copy_(conv_local.weight)
 
@@ -375,27 +379,25 @@ class TestDistributedLayers(unittest.TestCase):
 
         conv_args = dict(kernel_shape=(3, 3), basis_type="harmonic", basis_norm_mode="mean", bias=False)
         encoder_args = dict(
-            in_shape=(36, 72),
-            out_shape=(4, 9),
-            grid_in="equiangular",
-            grid_out="legendre-gauss",
+            grid_in=sht_grid((36, 72), "equiangular"),
+            grid_out=sht_grid((4, 9), "legendre-gauss"),
             theta_cutoff=2.0 * math.pi / 35.0,
             **conv_args,
         )
         decoder_args = dict(
-            in_shape=(36, 72),
-            out_shape=(36, 72),
-            grid_in="equiangular",
-            grid_out="equiangular",
+            grid_in=sht_grid((36, 72), "equiangular"),
+            grid_out=sht_grid((36, 72), "equiangular"),
             theta_cutoff=2.0 * math.pi / 35.0,
             **conv_args,
         )
 
         set_seed(333)
-        encoder_local = th.DiscreteContinuousConvS2(5, C, **encoder_args).to(self.device)
-        encoder_dist = thd.DistributedDiscreteContinuousConvS2(5, C, **encoder_args).to(self.device)
-        decoder_local = th.DiscreteContinuousConvS2(C, 5, **decoder_args).to(self.device)
-        decoder_dist = thd.DistributedDiscreteContinuousConvS2(C, 5, **decoder_args).to(self.device)
+        encoder_local = th.DiscreteContinuousConvS2(in_channels=5, out_channels=C, **encoder_args).to(self.device)
+        encoder_dist = thd.DistributedDiscreteContinuousConvS2(in_channels=5, out_channels=C, **encoder_args)
+        encoder_dist = encoder_dist.to(self.device)
+        decoder_local = th.DiscreteContinuousConvS2(in_channels=C, out_channels=5, **decoder_args).to(self.device)
+        decoder_dist = thd.DistributedDiscreteContinuousConvS2(in_channels=C, out_channels=5, **decoder_args)
+        decoder_dist = decoder_dist.to(self.device)
         with torch.no_grad():
             encoder_dist.weight.copy_(encoder_local.weight)
             decoder_dist.weight.copy_(decoder_local.weight)
@@ -434,9 +436,13 @@ class TestDistributedLayers(unittest.TestCase):
     ):
         B, C = batch_size, num_chan
 
-        resample_args = dict(grid_in=grid_in, grid_out=grid_out, mode="bilinear")
-        resample_local = th.ResampleS2(nlat_in, nlon_in, nlat_out, nlon_out, **resample_args).to(self.device)
-        resample_dist = thd.DistributedResampleS2(nlat_in, nlon_in, nlat_out, nlon_out, **resample_args).to(self.device)
+        resample_args = dict(
+            grid_in=sht_grid((nlat_in, nlon_in), grid_in),
+            grid_out=sht_grid((nlat_out, nlon_out), grid_out),
+            mode="bilinear",
+        )
+        resample_local = th.ResampleS2(**resample_args).to(self.device)
+        resample_dist = thd.DistributedResampleS2(**resample_args).to(self.device)
 
         set_seed(333)
         inp_full = torch.randn((B, C, nlat_in, nlon_in), dtype=torch.float32, device=self.device)
@@ -502,26 +508,28 @@ class TestDistributedLayers(unittest.TestCase):
         set_seed(333)
         if kind.startswith("disco"):
             conv_args = dict(
-                in_shape=(nlat_in, nlon_in),
-                out_shape=(nlat_out, nlon_out),
                 kernel_shape=(3, 3),
                 basis_type="harmonic",
                 basis_norm_mode="mean",
-                grid_in=grid_in,
-                grid_out=grid_out,
+                grid_in=sht_grid((nlat_in, nlon_in), grid_in),
+                grid_out=sht_grid((nlat_out, nlon_out), grid_out),
                 bias=False,
                 theta_cutoff=theta_cutoff,
             )
-            layer_local = th.DiscreteContinuousConvS2(C_in, C_out, **conv_args).to(self.device)
-            layer_dist = thd.DistributedDiscreteContinuousConvS2(C_in, C_out, **conv_args).to(self.device)
+            layer_local = th.DiscreteContinuousConvS2(in_channels=C_in, out_channels=C_out, **conv_args)
+            layer_local = layer_local.to(self.device)
+            layer_dist = thd.DistributedDiscreteContinuousConvS2(in_channels=C_in, out_channels=C_out, **conv_args)
+            layer_dist = layer_dist.to(self.device)
             with torch.no_grad():
                 layer_dist.weight.copy_(layer_local.weight)
         elif kind.startswith("resample"):
-            resample_args = dict(grid_in=grid_in, grid_out=grid_out, mode="bilinear")
-            layer_local = th.ResampleS2(nlat_in, nlon_in, nlat_out, nlon_out, **resample_args).to(self.device)
-            layer_dist = thd.DistributedResampleS2(nlat_in, nlon_in, nlat_out, nlon_out, **resample_args).to(
-                self.device
+            resample_args = dict(
+                grid_in=sht_grid((nlat_in, nlon_in), grid_in),
+                grid_out=sht_grid((nlat_out, nlon_out), grid_out),
+                mode="bilinear",
             )
+            layer_local = th.ResampleS2(**resample_args).to(self.device)
+            layer_dist = thd.DistributedResampleS2(**resample_args).to(self.device)
         elif kind == "instance_norm":
             # what SNO's blocks normalize with, on its internal grid; affine as in the model, with
             # weights away from the identity
@@ -536,12 +544,12 @@ class TestDistributedLayers(unittest.TestCase):
             from makani.models.common import SpectralConv
 
             transforms_local = (
-                th.RealSHT(nlat_in, nlon_in, lmax=4, mmax=5, grid=grid_in),
-                th.InverseRealSHT(nlat_out, nlon_out, lmax=4, mmax=5, grid=grid_out),
+                th.RealSHT(sht_grid((nlat_in, nlon_in), grid_in), lmax=4, mmax=4),
+                th.InverseRealSHT(sht_grid((nlat_out, nlon_out), grid_out), lmax=4, mmax=4),
             )
             transforms_dist = (
-                thd.DistributedRealSHT(nlat_in, nlon_in, lmax=4, mmax=5, grid=grid_in),
-                thd.DistributedInverseRealSHT(nlat_out, nlon_out, lmax=4, mmax=5, grid=grid_out),
+                thd.DistributedRealSHT(sht_grid((nlat_in, nlon_in), grid_in), lmax=4, mmax=4),
+                thd.DistributedInverseRealSHT(sht_grid((nlat_out, nlon_out), grid_out), lmax=4, mmax=4),
             )
             conv_args = dict(operator_type="dhconv", num_groups=1, bias=True, gain=1.0)
             spectral_local = SpectralConv(*[t.to(self.device) for t in transforms_local], C, C, **conv_args)

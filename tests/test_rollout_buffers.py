@@ -33,6 +33,7 @@ from makani.utils.inference.rollout_buffer import (
     ZonalSpectrumAverageBuffer,
 )
 from makani.utils.dataloaders.data_helpers import get_lat_lon_grid
+from makani.utils.grids import sht_grid
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from .testutils import (
@@ -659,7 +660,7 @@ class TestSpectrumAverageBufferUnit(unittest.TestCase):
     grid = "legendre-gauss"
 
     def setUp(self):
-        self.isht = th.InverseRealSHT(self.nlat, self.nlon, grid=self.grid)
+        self.isht = th.InverseRealSHT(sht_grid((self.nlat, self.nlon), self.grid))
         self.lmax, self.mmax = self.isht.lmax, self.isht.mmax
         self.generator = torch.Generator().manual_seed(4321)
 

@@ -29,6 +29,7 @@ from torch.utils.data import default_collate
 from parameterized import parameterized
 
 from makani.utils.dataloader import get_dataloader
+from makani.utils.grids import sht_grid
 from makani.utils.dataloaders.data_helpers import get_date_from_string
 from makani.utils.dataloaders.batch import INPUT, INPUT_TIMESTAMP, TARGET, TARGET_TIMESTAMP
 from makani.utils.dataloaders.rollout import Rollout
@@ -355,7 +356,7 @@ class TestInferencerScoring(_InferencerTestCase):
         self.assertTrue(np.isfinite(logs["base"]["validation loss"]), "validation loss")
 
         # the spectra: the verification in the first ensemble slot, the members after it
-        sht = th.RealSHT(*raw.shape[-2:], grid=inferencer.params.model_grid_type)
+        sht = th.RealSHT(sht_grid(raw.shape[-2:], inferencer.params.model_grid_type))
         with h5.File(paths["spectrum"], "r") as hf:
             spectrum_mean, spectrum_std = hf["mean"][...], hf["std"][...]
             spectrum_lead_times = hf["lead_time"][...]

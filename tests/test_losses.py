@@ -25,6 +25,7 @@ import numpy as np
 import torch
 
 from makani.utils import LossHandler
+from makani.utils.grids import sht_grid
 from makani.utils.missing_data import fill_missing, missing_values, missing_weights
 from makani.utils.losses.base_loss import abs_pow
 from makani.utils.losses import (
@@ -522,7 +523,7 @@ class TestSpectralH1Loss(unittest.TestCase):
         lmax = compute_spherical_bandlimit((_IMG_H, _IMG_W), "equiangular")
 
         # build single-mode field by inverse SHT of a unit coefficient at (l, m=0)
-        isht = th.InverseRealSHT(_IMG_H, _IMG_W, lmax=lmax, mmax=lmax, grid="equiangular").float()
+        isht = th.InverseRealSHT(sht_grid((_IMG_H, _IMG_W), "equiangular"), lmax=lmax, mmax=lmax).float()
         coeffs = torch.zeros(lmax, lmax, dtype=torch.complex64)
         coeffs[l_test, 0] = 1.0 + 0.0j
         single_mode = isht(coeffs).expand(_BATCH, _NUM_CH, -1, -1).contiguous()
