@@ -31,86 +31,158 @@ from makani.models.common.contractions import (
     compl_exp_muladd2d_fwd,
 )
 
+import torch_harmonics as th
 import torch_harmonics.distributed as thd
 
 
-class SpectralConv(nn.Module):
+def spectral_conv_s2(
+    forward_transform,
+    inverse_transform,
+    in_channels,
+    out_channels,
+    num_groups=1,
+    bias=False,
+    gain=1.0,
+):
     r"""
-    Spectral convolution implemented via SHT or FFT.
+    Build the spherical convolution of torch-harmonics on the grids and band of these transforms.
 
-    Convolution in grid space is multiplication in spectral space, so this layer
-    transforms the input, multiplies by learned coefficients, and transforms
-    back:
+    Returns :class:`torch_harmonics.SpectralConvS2`, or
+    :class:`torch_harmonics.distributed.DistributedSpectralConvS2` when the
+    transforms are distributed. The layer builds its own transforms; torch-harmonics
+    shares their tables with the ones passed here, so this costs no memory. Its
+    weight holds one entry per degree :math:`l`, shared over the orders :math:`m`
+    (``"dhconv"``), which is what makes it a convolution on :math:`S^2`.
 
-    .. math::
-
-        y = \mathcal{F}^{-1}\bigl( W \cdot \mathcal{F}(x) \bigr)
-
-    The learned weights therefore act globally on the field at a cost set by the
-    transform rather than by a kernel radius. Designed for convolutions on the
-    two-sphere :math:`S^2` using the spherical harmonic transforms in
-    torch-harmonics, but it works on the periodic plane too if the
-    :class:`~makani.models.common.fft.RealFFT2` /
-    :class:`~makani.models.common.fft.InverseRealFFT2` wrappers are passed
-    instead -- the layer only requires the transform interface, not sphericity.
-
-    Two weight layouts are available via ``operator_type``:
-
-    * ``"dhconv"`` -- one weight per spherical degree :math:`l`, shared across
-      orders :math:`m`. This is exactly the condition for the operator to be a
-      genuine convolution on :math:`S^2` (rotationally equivariant), and it
-      keeps the parameter count linear in ``lmax``.
-    * ``"diagonal"`` -- an independent weight per :math:`(l, m)` pair. More
-      expressive, but no longer rotation-equivariant.
-
-    Transforms run in fp32 with autocast disabled: the SHT is a long
-    accumulation over quadrature points, and doing it in reduced precision
-    loses accuracy in the high-degree coefficients. Only the contraction runs
-    in the surrounding precision.
+    The bias is the spectral bias of torch-harmonics: a learned coefficient per input
+    channel and mode, scaled by the integral of that channel over the sphere and added
+    before the contraction. It replaces the per-channel bias in grid space of makani's
+    earlier ``SpectralConv``.
 
     Parameters
     ----------
     forward_transform : torch.nn.Module
-        Grid-to-spectral transform (e.g. ``RealSHT`` or ``RealFFT2``).
+        Grid-to-spectral transform whose grid is the input grid.
     inverse_transform : torch.nn.Module
-        Spectral-to-grid transform. May target a different resolution or grid
-        than ``forward_transform``, in which case the residual is resampled
-        accordingly.
+        Spectral-to-grid transform whose grid is the output grid. Both transforms
+        have to keep the same degrees and orders.
     in_channels : int
         Number of input channels. Must be divisible by ``num_groups``.
     out_channels : int
         Number of output channels. Must be divisible by ``num_groups``.
     num_groups : int, optional
         Number of channel groups mixed independently, by default ``1``.
-    operator_type : str, optional
-        ``"dhconv"`` (default) or ``"diagonal"``; see above.
-    separable : bool, optional
-        If ``True``, apply one weight per input channel instead of mixing
-        channels, making the layer depthwise. Requires
-        ``out_channels == in_channels``. By default ``False``.
+    bias : bool, optional
+        If ``True``, learn the spectral bias described above, by default ``False``.
+    gain : float, optional
+        Scales the variance of the weight initialization, by default ``1.0``.
+
+    Returns
+    -------
+    torch.nn.Module
+        A module mapping ``(B, in_channels, *grid_in.shape)`` to
+        ``(B, out_channels, *grid_out.shape)``.
+
+    Raises
+    ------
+    ValueError
+        If the two transforms keep different degrees or orders.
+
+    Notes
+    -----
+    Under spatial parallelism the weight is split over its degrees on the ``h``
+    ranks, and each ``w`` rank computes the contribution of its own orders to the
+    gradient, so the weight is shared over ``w`` with a sum. The spectral bias is
+    split over degrees on ``h`` and orders on ``w``. Both are replicated over
+    ``matmul``.
+    """
+    if (forward_transform.lmax, forward_transform.mmax) != (inverse_transform.lmax, inverse_transform.mmax):
+        raise ValueError(
+            f"the forward transform keeps lmax={forward_transform.lmax}, mmax={forward_transform.mmax}, "
+            f"the inverse transform lmax={inverse_transform.lmax}, mmax={inverse_transform.mmax}"
+        )
+
+    distributed = isinstance(inverse_transform, (thd.DistributedInverseRealSHT, thd.DistributedRealSHT))
+    conv_handle = thd.DistributedSpectralConvS2 if distributed else th.SpectralConvS2
+    conv = conv_handle(
+        forward_transform.grid,
+        inverse_transform.grid,
+        in_channels,
+        out_channels,
+        num_groups=num_groups,
+        bias=bias,
+        lmax=inverse_transform.lmax,
+        mmax=inverse_transform.mmax,
+    )
+
+    with torch.no_grad():
+        conv.weight.mul_(math.sqrt(gain))
+
+    # split over the degrees on the h ranks; the w ranks each hold the contribution of their orders
+    conv.weight.is_shared_mp = {"w": "sum", "matmul": "avg"}
+    conv.weight.sharded_dims_mp = [None, None, None, "h"]
+    if bias:
+        conv.spectral_bias.is_shared_mp = {"matmul": "avg"}
+        conv.spectral_bias.sharded_dims_mp = [None, None, "h", "w"]
+
+    return conv
+
+
+class SpectralConv(nn.Module):
+    r"""
+    Spectral convolution on the periodic plane, via the 2D FFT.
+
+    The planar counterpart of :func:`spectral_conv_s2`, used by the Fourier
+    Neural Operator. Convolution in grid space is multiplication in Fourier space,
+    so this layer transforms the input, multiplies every mode by its own learned
+    channel-mixing matrix, and transforms back:
+
+    .. math::
+
+        y = \mathcal{F}^{-1}\bigl( W \cdot \mathcal{F}(x) \bigr)
+
+    Every wavenumber pair :math:`(k_y, k_x)` has an independent weight, as
+    translation equivariance on the plane allows. On the sphere use
+    :func:`spectral_conv_s2` instead.
+
+    Transforms run in fp32 with autocast disabled; only the contraction runs in
+    the surrounding precision.
+
+    Parameters
+    ----------
+    forward_transform : torch.nn.Module
+        Grid-to-spectral transform, :class:`~makani.models.common.fft.RealFFT2` or
+        :class:`~makani.mpu.fft.DistributedRealFFT2`.
+    inverse_transform : torch.nn.Module
+        Spectral-to-grid transform, :class:`~makani.models.common.fft.InverseRealFFT2`
+        or :class:`~makani.mpu.fft.DistributedInverseRealFFT2`. May target a
+        different resolution than ``forward_transform``, in which case the residual
+        is resampled accordingly.
+    in_channels : int
+        Number of input channels. Must be divisible by ``num_groups``.
+    out_channels : int
+        Number of output channels. Must be divisible by ``num_groups``.
+    num_groups : int, optional
+        Number of channel groups mixed independently, by default ``1``.
     bias : bool, optional
         If ``True``, add a learned per-channel bias in grid space, by default
         ``False``.
     gain : float, optional
         Scales the variance of the weight initialization, by default ``1.0``.
 
-    Returns
-    -------
-    See ``forward``, which returns both the transformed output and a residual.
-
     Raises
     ------
+    TypeError
+        If the transforms are spherical harmonic transforms.
     ValueError
-        If the channel counts are not divisible by ``num_groups``, if the
-        inverse transform's mode counts disagree with the forward transform's,
-        or if ``operator_type`` is unsupported.
+        If the channel counts are not divisible by ``num_groups``, or if the two
+        transforms keep different modes.
 
     Notes
     -----
-    Under model parallelism the weight is sharded along its spectral dimensions
-    (``h`` for degrees, ``w`` for orders) and marked shared over the groups it
-    is replicated across, so gradients are reduced correctly. For ``"dhconv"``
-    there is no order dimension, hence the weight is shared over ``w``.
+    Under spatial parallelism the weight is split along its spectral dimensions
+    (``h`` for the first, ``w`` for the second), as the distributed FFTs split
+    the modes.
     """
 
     def __init__(
@@ -120,17 +192,22 @@ class SpectralConv(nn.Module):
         in_channels,
         out_channels,
         num_groups=1,
-        operator_type="dhconv",
-        separable=False,
         bias=False,
         gain=1.0,
     ):
         super().__init__()
 
+        if isinstance(inverse_transform, (th.InverseRealSHT, thd.DistributedInverseRealSHT)):
+            raise TypeError("SpectralConv is the planar convolution; on the sphere use spectral_conv_s2")
         if in_channels % num_groups != 0:
             raise ValueError(f"in_channels ({in_channels}) must be divisible by num_groups ({num_groups})")
         if out_channels % num_groups != 0:
             raise ValueError(f"out_channels ({out_channels}) must be divisible by num_groups ({num_groups})")
+        if (forward_transform.lmax, forward_transform.mmax) != (inverse_transform.lmax, inverse_transform.mmax):
+            raise ValueError(
+                f"the forward transform keeps lmax={forward_transform.lmax}, mmax={forward_transform.mmax}, "
+                f"the inverse transform lmax={inverse_transform.lmax}, mmax={inverse_transform.mmax}"
+            )
 
         self.forward_transform = forward_transform
         self.inverse_transform = inverse_transform
@@ -145,68 +222,36 @@ class SpectralConv(nn.Module):
         self.scale_residual = (self.forward_transform.nlat != self.inverse_transform.nlat) or (
             self.forward_transform.nlon != self.inverse_transform.nlon
         )
-        if hasattr(self.forward_transform, "grid"):
-            self.scale_residual = self.scale_residual or (self.forward_transform.grid != self.inverse_transform.grid)
 
-        # remember factorization details
-        self.operator_type = operator_type
-        self.separable = separable
-
-        if self.inverse_transform.lmax != self.modes_lat:
-            raise ValueError(
-                f"inverse transform lmax ({self.inverse_transform.lmax}) must match modes_lat ({self.modes_lat})"
-            )
-        if self.inverse_transform.mmax != self.modes_lon:
-            raise ValueError(
-                f"inverse transform mmax ({self.inverse_transform.mmax}) must match modes_lon ({self.modes_lon})"
-            )
-
-        weight_shape = [num_groups, in_channels // num_groups]
-
-        if not self.separable:
-            weight_shape += [out_channels // num_groups]
-
-        if isinstance(self.inverse_transform, thd.DistributedInverseRealSHT):
+        # the distributed FFTs split the modes like this; the serial ones keep them all
+        if hasattr(self.inverse_transform, "l_shapes"):
             self.modes_lat_local = self.inverse_transform.l_shapes[comm.get_rank("h")]
             self.modes_lon_local = self.inverse_transform.m_shapes[comm.get_rank("w")]
-            self.nlat_local = self.inverse_transform.lat_shapes[comm.get_rank("h")]
-            self.nlon_local = self.inverse_transform.lon_shapes[comm.get_rank("w")]
         else:
             self.modes_lat_local = self.modes_lat
             self.modes_lon_local = self.modes_lon
-            self.nlat_local = self.inverse_transform.nlat
-            self.nlon_local = self.inverse_transform.nlon
 
-        # unpadded weights
-        if self.operator_type == "diagonal":
-            weight_shape += [self.modes_lat_local, self.modes_lon_local]
-        elif self.operator_type == "dhconv":
-            weight_shape += [self.modes_lat_local]
-        else:
-            raise ValueError(f"Unsupported operator type f{self.operator_type}")
+        weight_shape = [
+            num_groups,
+            in_channels // num_groups,
+            out_channels // num_groups,
+            self.modes_lat_local,
+            self.modes_lon_local,
+        ]
 
         # Compute scaling factor for correct initialization
-        scale = math.sqrt(gain / (in_channels // num_groups)) * torch.ones(self.modes_lat_local, dtype=torch.complex64)
+        scale = math.sqrt(gain / (in_channels // num_groups)) * torch.ones(
+            self.modes_lat_local, 1, dtype=torch.complex64
+        )
         # seemingly the first weight is not really complex, so we need to account for that
         scale[0] *= math.sqrt(2.0)
-        init = scale * torch.randn(*weight_shape, dtype=torch.complex64)
-        self.weight = nn.Parameter(init)
+        self.weight = nn.Parameter(scale * torch.randn(*weight_shape, dtype=torch.complex64))
+        self.weight.is_shared_mp = {"matmul": "avg"}
+        self.weight.sharded_dims_mp = [None, None, None, "h", "w"]
 
-        if self.operator_type == "dhconv":
-            # split over the degrees on the h ranks; the w ranks each hold the contribution of their orders
-            self.weight.is_shared_mp = {"w": "sum", "matmul": "avg"}
-            self.weight.sharded_dims_mp = [None for _ in weight_shape]
-            self.weight.sharded_dims_mp[-1] = "h"
-        else:
-            self.weight.is_shared_mp = {"matmul": "avg"}
-            self.weight.sharded_dims_mp = [None for _ in weight_shape]
-            self.weight.sharded_dims_mp[-1] = "w"
-            self.weight.sharded_dims_mp[-2] = "h"
+        self._contract = partial(_contract_dense_pytorch, separable=False, operator_type="diagonal")
 
-        # get the contraction handle. This should return a pyTorch contraction
-        self._contract = partial(_contract_dense_pytorch, separable=separable, operator_type=operator_type)
-
-        if bias == True:
+        if bias:
             self.bias = nn.Parameter(torch.zeros(1, self.out_channels, 1, 1))
             self.bias.is_shared_mp = {"spatial": "sum", "matmul": "avg"}
             self.bias.sharded_dims_mp = [None, None, None, None]
@@ -227,10 +272,10 @@ class SpectralConv(nn.Module):
             Output field of shape ``(B, out_channels, nlat_out, nlon_out)``.
         residual : torch.Tensor
             The input, resampled onto the output grid if the forward and
-            inverse transforms differ in resolution or grid type, and returned
-            unchanged otherwise. Returned so the caller can form its own skip
-            connection at the correct resolution, which it could not do itself
-            without repeating the transform.
+            inverse transforms differ in resolution, and returned unchanged
+            otherwise. Returned so the caller can form its own skip connection
+            at the correct resolution, which it could not do itself without
+            repeating the transform.
         """
         dtype = x.dtype
         residual = x
@@ -239,15 +284,10 @@ class SpectralConv(nn.Module):
             x = x.to(torch.float32)
             # No .contiguous() on the transform output: it is contiguous by construction, and a
             # copy over a complex buffer cannot be codegen'd by inductor -- triton has no complex
-            # type, so the kernel signature fails with KeyError: 'complex64'. Matches the fix in
-            # torch_harmonics.spectral_convolution.
+            # type, so the kernel signature fails with KeyError: 'complex64'.
             x = self.forward_transform(x)
             if self.scale_residual:
-                residual = self.inverse_transform(x)
-
-        # convert back
-        if self.scale_residual:
-            residual = residual.to(dtype=dtype)
+                residual = self.inverse_transform(x).to(dtype=dtype)
 
         B, C, H, W = x.shape
         x = x.reshape(B, self.num_groups, C // self.num_groups, H, W)
@@ -259,7 +299,6 @@ class SpectralConv(nn.Module):
         with amp.autocast(device_type=x.device.type, enabled=False):
             x = self.inverse_transform(x)
 
-        # convert back
         x = x.to(dtype=dtype)
 
         if hasattr(self, "bias"):
@@ -275,7 +314,7 @@ class SpectralAttention(nn.Module):
     r"""
     Nonlinear spectral layer: an MLP applied in spherical harmonic space.
 
-    Where :class:`SpectralConv` multiplies the spectrum by a fixed learned
+    Where :func:`spectral_conv_s2` multiplies the spectrum by a fixed learned
     factor, this layer runs a small complex-valued MLP over the coefficients,
 
     .. math::
@@ -330,7 +369,8 @@ class SpectralAttention(nn.Module):
 
     See Also
     --------
-    SpectralConv : the linear, cheaper spectral layer.
+    spectral_conv_s2 : the linear, cheaper spectral layer on the sphere.
+    SpectralConv : its counterpart on the plane.
     """
 
     def __init__(
@@ -500,7 +540,7 @@ class SpectralAttention(nn.Module):
         # convert back. Only the residual is cast here: x still holds the complex
         # spectral coefficients that forward_mlp consumes, so casting it to the (real)
         # input dtype at this point would discard the imaginary part. It is cast once
-        # after the inverse transform below, matching SpectralConv.forward.
+        # after the inverse transform below, as in SpectralConv.forward.
         if self.scale_residual:
             residual = residual.to(dtype=dtype)
 

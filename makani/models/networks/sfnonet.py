@@ -25,7 +25,7 @@ from functools import partial
 from makani.models.common import DropPath, MLP, EncoderDecoder
 
 # import global convolution and non-linear spectral layers
-from makani.models.common import SpectralConv, SpectralAttention
+from makani.models.common import SpectralConv, SpectralAttention, spectral_conv_s2
 
 # get spectral transforms from torch_harmonics
 import torch_harmonics as th
@@ -68,20 +68,20 @@ class SpectralFilterLayer(nn.Module):
     embed_dim : int
         Channel width; used for both input and output.
     filter_type : str, optional
-        ``"linear"`` (default) selects
-        :class:`~makani.models.common.spectral_convolution.SpectralConv`;
-        ``"non-linear"`` selects
+        ``"linear"`` (default) selects the spectral convolution, from
+        :func:`~makani.models.common.spectral_convolution.spectral_conv_s2` on
+        the sphere and :class:`~makani.models.common.spectral_convolution.SpectralConv`
+        on the plane; ``"non-linear"`` selects
         :class:`~makani.models.common.spectral_convolution.SpectralAttention`.
     operator_type : str, optional
-        Weight layout passed to the selected filter, by default ``"diagonal"``.
+        Weight layout of the filter, by default ``"diagonal"``. The linear filter
+        on the sphere takes ``"dhconv"`` only, one weight per degree, and on the
+        plane ``"diagonal"`` only, one weight per mode.
     hidden_size_factor : int, optional
         Hidden width multiplier for the nonlinear filter, by default ``1``.
         Ignored by the linear filter.
     rank : float, optional
         Accepted for config compatibility; currently unused.
-    separable : bool, optional
-        Depthwise (per-channel) filtering for the linear filter, by default
-        ``False``. Ignored by the nonlinear filter.
     complex_activation : str, optional
         Complex activation mode for the nonlinear filter, by default ``"real"``.
     spectral_layers : int, optional
@@ -97,6 +97,8 @@ class SpectralFilterLayer(nn.Module):
     ------
     NotImplementedError
         If ``filter_type`` is neither ``"linear"`` nor ``"non-linear"``.
+    ValueError
+        If the linear filter is asked for an ``operator_type`` it does not have.
     """
 
     def __init__(
@@ -108,7 +110,6 @@ class SpectralFilterLayer(nn.Module):
         operator_type="diagonal",
         hidden_size_factor=1,
         rank=1.0,
-        separable=False,
         complex_activation="real",
         spectral_layers=1,
         bias=False,
@@ -116,6 +117,9 @@ class SpectralFilterLayer(nn.Module):
         gain=1.0,
     ):
         super(SpectralFilterLayer, self).__init__()
+
+        # the linear filter on the sphere is the convolution of torch-harmonics, which returns no residual
+        self.spherical_conv = False
 
         if filter_type == "non-linear":
             self.filter = SpectralAttention(
@@ -132,14 +136,39 @@ class SpectralFilterLayer(nn.Module):
                 gain=gain,
             )
 
+        elif filter_type == "linear" and isinstance(forward_transform, (th.RealSHT, thd.DistributedRealSHT)):
+            if operator_type != "dhconv":
+                raise ValueError(
+                    f"the linear filter on the sphere has one weight per degree, operator_type 'dhconv', "
+                    f"not '{operator_type}'"
+                )
+            self.filter = spectral_conv_s2(
+                forward_transform,
+                inverse_transform,
+                embed_dim,
+                embed_dim,
+                bias=bias,
+                gain=gain,
+            )
+            self.spherical_conv = True
+
+            # the skips need the input on the output grid where the filter changes grids. The
+            # transforms only hold tables torch-harmonics shares with the filter's own, and no state
+            self.scale_residual = forward_transform.grid != inverse_transform.grid
+            if self.scale_residual:
+                self.residual_transforms = nn.ModuleList([forward_transform, inverse_transform])
+
         elif filter_type == "linear":
+            if operator_type != "diagonal":
+                raise ValueError(
+                    f"the linear filter on the plane has one weight per mode, operator_type 'diagonal', "
+                    f"not '{operator_type}'"
+                )
             self.filter = SpectralConv(
                 forward_transform,
                 inverse_transform,
                 embed_dim,
                 embed_dim,
-                operator_type=operator_type,
-                separable=separable,
                 bias=bias,
                 gain=gain,
             )
@@ -161,10 +190,19 @@ class SpectralFilterLayer(nn.Module):
         x : torch.Tensor
             Filtered field, on the inverse transform's grid.
         residual : torch.Tensor
-            The input resampled onto the output grid; see
-            :meth:`~makani.models.common.spectral_convolution.SpectralConv.forward`.
+            The input on the output grid: transformed to the spectrum and back,
+            where the filter changes grids, and unchanged otherwise.
         """
-        return self.filter(x)
+        if not self.spherical_conv:
+            return self.filter(x)
+
+        residual = x
+        if self.scale_residual:
+            forward_transform, inverse_transform = self.residual_transforms
+            with amp.autocast(device_type=x.device.type, enabled=False):
+                residual = inverse_transform(forward_transform(x.to(torch.float32))).to(dtype=x.dtype)
+
+        return self.filter(x), residual
 
 
 # normalizations that subtract the (quadrature weighted) mean per sample and channel, so that a
@@ -231,8 +269,6 @@ class NeuralOperatorBlock(nn.Module):
         MLP respectively. By default both are :class:`torch.nn.Identity`.
     rank : float, optional
         Accepted for config compatibility; currently unused.
-    separable : bool, optional
-        Depthwise filtering for the linear filter, by default ``False``.
     inner_skip : str, optional
         Skip around the filter: ``"linear"`` (default), ``"identity"``, or
         ``"none"``.
@@ -275,7 +311,6 @@ class NeuralOperatorBlock(nn.Module):
         act_layer=nn.GELU,
         norm_layer=(nn.Identity, nn.Identity),
         rank=1.0,
-        separable=False,
         inner_skip="linear",
         outer_skip=None,
         use_mlp=False,
@@ -331,7 +366,6 @@ class NeuralOperatorBlock(nn.Module):
             operator_type,
             hidden_size_factor=mlp_ratio,
             rank=rank,
-            separable=separable,
             complex_activation=complex_activation,
             spectral_layers=spectral_layers,
             bias=bias,
@@ -515,7 +549,9 @@ class SphericalFourierNeuralOperatorNet(nn.Module):
     rank : float, optional
         Accepted for config compatibility; currently unused.
     separable : bool, optional
-        Depthwise spectral filtering, by default ``False``.
+        Must be ``False``, the default. Depthwise spectral filtering is gone
+        with the move to the spectral convolution of torch-harmonics; the
+        parameter remains so that existing configs load.
     complex_activation : str, optional
         Complex activation mode for nonlinear filters, by default ``"real"``.
     spectral_layers : int, optional
@@ -577,6 +613,9 @@ class SphericalFourierNeuralOperatorNet(nn.Module):
         **kwargs,
     ):
         super(SphericalFourierNeuralOperatorNet, self).__init__()
+
+        if separable:
+            raise ValueError("depthwise spectral filtering (separable=True) is no longer supported")
 
         self.inp_shape = inp_shape
         self.out_shape = out_shape
@@ -713,7 +752,6 @@ class SphericalFourierNeuralOperatorNet(nn.Module):
                 use_mlp=use_mlp,
                 comm_feature_name="matmul",
                 rank=rank,
-                separable=separable,
                 complex_activation=complex_activation,
                 spectral_layers=spectral_layers,
                 bias=bias,
@@ -1040,7 +1078,8 @@ class FourierNeuralOperatorNet(SphericalFourierNeuralOperatorNet):
         Forwarded to :class:`SphericalFourierNeuralOperatorNet`.
     **kwargs
         Forwarded to :class:`SphericalFourierNeuralOperatorNet`. Passing
-        ``spectral_transform`` raises, since it is set here.
+        ``spectral_transform`` raises, since it is set here. ``operator_type``
+        defaults to ``"diagonal"``, the only layout of the planar linear filter.
 
     See Also
     --------
@@ -1049,6 +1088,8 @@ class FourierNeuralOperatorNet(SphericalFourierNeuralOperatorNet):
     """
 
     def __init__(self, *args, **kwargs):
+        # the planar filters have one weight per mode
+        kwargs.setdefault("operator_type", "diagonal")
         return super().__init__(*args, spectral_transform="fft", **kwargs)
 
 
