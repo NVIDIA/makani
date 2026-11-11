@@ -261,6 +261,101 @@ class TestDistributedLayers(unittest.TestCase):
                 )
             )
 
+    @parameterized.expand(
+        [
+            # nlat_in, nlon_in, nlat_out, nlon_out, lmax, mmax, batch_size, num_chan, tol
+            # all modes, lmax != mmax (32 and 33), splitting evenly over two ranks in h
+            [32, 64, 32, 64, None, None, 2, 8, 1e-5],
+            # odd sizes, splitting unevenly over two and four ranks (lmax = 33, mmax = 36)
+            [33, 70, 33, 70, None, None, 2, 8, 1e-5],
+            # truncated, lmax < mmax, both odd
+            [33, 70, 33, 70, 15, 21, 2, 8, 1e-5],
+            # FNO's first block: onto a coarser grid, which resamples the residual
+            [36, 72, 18, 36, 18, 19, 2, 8, 1e-5],
+            # lmax == mmax (64): the local weight has to be a block of the global one wherever the modes are split
+            [64, 126, 64, 126, None, None, 2, 8, 1e-5],
+        ],
+        skip_on_empty=True,
+    )
+    def test_distributed_fft_spectral_conv(
+        self, nlat_in, nlon_in, nlat_out, nlon_out, lmax, mmax, batch_size, num_chan, tol, verbose=False
+    ):
+        """The planar convolution of FNO, against its serial counterpart.
+
+        Its weight has one entry per mode and is split over the modes like the distributed FFTs split
+        them, lmax over h and mmax over w, so every rank holds its own block of it.
+        """
+        from makani.models.common import SpectralConv, RealFFT2, InverseRealFFT2
+        from makani.mpu.fft import DistributedRealFFT2, DistributedInverseRealFFT2
+
+        B, C = batch_size, num_chan
+
+        forward_local = RealFFT2(nlat_in, nlon_in, lmax=lmax, mmax=mmax).to(self.device)
+        inverse_local = InverseRealFFT2(nlat_out, nlon_out, lmax=forward_local.lmax, mmax=forward_local.mmax)
+        forward_dist = DistributedRealFFT2(nlat_in, nlon_in, lmax=lmax, mmax=mmax).to(self.device)
+        inverse_dist = DistributedInverseRealFFT2(nlat_out, nlon_out, lmax=forward_dist.lmax, mmax=forward_dist.mmax)
+
+        set_seed(333)
+        conv_local = SpectralConv(forward_local, inverse_local.to(self.device), C, C, bias=True).to(self.device)
+        conv_dist = SpectralConv(forward_dist, inverse_dist.to(self.device), C, C, bias=True).to(self.device)
+
+        # the local weights are a block of the global ones
+        self.assertEqual(conv_dist.weight.shape[-2:], self._split_helper(conv_local.weight).shape[-2:])
+
+        # the bias starts at zero; a random one checks that it is added once. Reseeded, since the
+        # distributed initialization draws a different number of values on each rank where the modes
+        # do not split evenly
+        set_seed(334)
+        with torch.no_grad():
+            conv_local.bias.copy_(torch.randn_like(conv_local.bias))
+            conv_dist.weight.copy_(self._split_helper(conv_local.weight))
+            conv_dist.bias.copy_(conv_local.bias)
+
+        inp_full = torch.randn((B, C, nlat_in, nlon_in), dtype=torch.float32, device=self.device)
+
+        # serial
+        inp_full.requires_grad = True
+        out_full, res_full = conv_local(inp_full)
+        with torch.no_grad():
+            ograd_full = torch.randn_like(out_full)
+            rgrad_full = torch.randn_like(res_full)
+        torch.autograd.backward([out_full, res_full], [ograd_full, rgrad_full])
+        igrad_full = inp_full.grad.clone()
+        wgrad_full = conv_local.weight.grad.clone()
+        bgrad_full = conv_local.bias.grad.clone()
+
+        # distributed
+        inp_local = self._split_helper(inp_full.detach().clone())
+        inp_local.requires_grad = True
+        out_local, res_local = conv_dist(inp_local)
+        torch.autograd.backward(
+            [out_local, res_local], [self._split_helper(ograd_full), self._split_helper(rgrad_full)]
+        )
+        igrad_local = inp_local.grad.clone()
+        # every mode lives on one rank, so the weight gradient of a rank is complete; the bias is
+        # shared by all spatial ranks, each holding the contribution of its points
+        wgrad_local = conv_dist.weight.grad.clone()
+        bgrad_local = self._sum_gradient(conv_dist.bias.grad, "spatial")
+
+        for desc, local, full in [
+            ("output", out_local, out_full),
+            ("residual", res_local, res_full),
+            ("input gradients", igrad_local, igrad_full),
+            ("weight gradients", wgrad_local, wgrad_full),
+        ]:
+            with self.subTest(desc=desc):
+                gathered = self._gather_helper(local)
+                self.assertTrue(
+                    reduce_success(compare_tensors(desc, gathered, full, tol, tol, verbose=verbose), self.device)
+                )
+
+        with self.subTest(desc="bias gradients"):
+            self.assertTrue(
+                reduce_success(
+                    compare_tensors("bias gradients", bgrad_local, bgrad_full, tol, tol, verbose=verbose), self.device
+                )
+            )
+
     # the DISCO convolutions of SNO with scale_factor=8 on a 36 x 72 grid: the encoder onto the internal
     # 4 x 9 grid and the convolution of the decoder on the output grid. The local convolution of the
     # blocks runs on a 16 x 33 grid instead of 4 x 9: its support would cover most of the sphere there,
