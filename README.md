@@ -20,13 +20,18 @@ Makani is a research code developed by engineers and researchers at NVIDIA and N
 
 ## Getting started
 
-Makani can be installed by running
+Makani needs torch-harmonics 1.0, which is not released yet. Until it is, build it from the commit that makani pins, against the PyTorch you will run makani with, and install makani afterwards:
 
 ```bash
+pip install setuptools_scm
+# set TORCH_HARMONICS_BUILD_CUDA_EXTENSION=1 when building without a visible GPU, e.g. in a container build
+pip install --no-build-isolation git+https://github.com/NVIDIA/torch-harmonics.git@38b285ab8f6341ea95405fad232f64b9f0c7a6fd
 git clone git@github.com:NVIDIA/makani.git
 cd makani
 pip install -e .
 ```
+
+`--no-build-isolation` compiles torch-harmonics against the installed PyTorch rather than a fresh one in a build environment, which its compiled extensions require. The commit is the one in `docker/Dockerfile` and the CI workflows.
 
 ### Training:
 
