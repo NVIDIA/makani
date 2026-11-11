@@ -123,7 +123,7 @@ class TestDistributedLayers(unittest.TestCase):
     ):
         B, C, Hi, Wi, Ho, Wo = batch_size, num_chan, nlat_in, nlon_in, nlat_out, nlon_out
 
-        from makani.models.common import SpectralConv
+        from makani.models.common import spectral_conv_s2
 
         # set up handles; without explicit modes the inverse takes those of the forward
         forward_transform_local = th.RealSHT(sht_grid((Hi, Wi), grid_in), lmax=lmax, mmax=mmax).to(self.device)
@@ -143,33 +143,36 @@ class TestDistributedLayers(unittest.TestCase):
 
         set_seed(333)
 
-        spect_conv_local = SpectralConv(
+        spect_conv_local = spectral_conv_s2(
             forward_transform_local,
             inverse_transform_local,
             C,
             C,
-            operator_type="dhconv",
             num_groups=1,
             bias=True,
             gain=1.0,
         ).to(self.device)
 
-        spect_conv_dist = SpectralConv(
+        spect_conv_dist = spectral_conv_s2(
             forward_transform_dist,
             inverse_transform_dist,
             C,
             C,
-            operator_type="dhconv",
             num_groups=1,
             bias=True,
             gain=1.0,
         ).to(self.device)
 
-        # make sure weights are the same:
+        # make sure weights are the same. The spectral bias starts at zero; a random one checks that
+        # every rank adds the right modes of it. Reseeded, since the distributed initialization above
+        # draws a different number of values on each rank where lmax does not split evenly
+        set_seed(334)
         with torch.no_grad():
+            spect_conv_local.spectral_bias.copy_(torch.randn_like(spect_conv_local.spectral_bias))
             weight = self._split_helper(spect_conv_local.weight, hdim=-1, wdim=None)
             spect_conv_dist.weight.copy_(weight)
-            spect_conv_dist.bias.copy_(spect_conv_local.bias)
+            bias = self._split_helper(spect_conv_local.spectral_bias, hdim=-2, wdim=-1)
+            spect_conv_dist.spectral_bias.copy_(bias)
 
         # every rank draws the same input only from the same generator state: the distributed
         # weights were initialized on each rank's share of the degrees, which differ in size when
@@ -183,19 +186,17 @@ class TestDistributedLayers(unittest.TestCase):
         #############################################################
         # FWD pass
         inp_full.requires_grad = True
-        out_full, res_full = spect_conv_local(inp_full)
+        out_full = spect_conv_local(inp_full)
 
-        # create grads for backward; the residual is part of it, since the blocks use it as their skip
-        # connection, and when the grids differ it is resampled through the transforms
+        # create grads for backward
         with torch.no_grad():
             ograd_full = torch.randn_like(out_full)
-            rgrad_full = torch.randn_like(res_full)
 
         # BWD pass
-        torch.autograd.backward([out_full, res_full], [ograd_full, rgrad_full])
+        out_full.backward(ograd_full)
         igrad_full = inp_full.grad.clone()
         wgrad_full = spect_conv_local.weight.grad.clone()
-        bgrad_full = spect_conv_local.bias.grad.clone()
+        bgrad_full = spect_conv_local.spectral_bias.grad.clone()
 
         #############################################################
         # distributed transform
@@ -203,17 +204,16 @@ class TestDistributedLayers(unittest.TestCase):
         # FWD pass
         inp_local = self._split_helper(inp_full, hdim=-2, wdim=-1)
         inp_local.requires_grad = True
-        out_local, res_local = spect_conv_dist(inp_local)
+        out_local = spect_conv_dist(inp_local)
 
         # BWD pass
         ograd_local = self._split_helper(ograd_full, hdim=-2, wdim=-1)
-        rgrad_local = self._split_helper(rgrad_full, hdim=-2, wdim=-1)
-        torch.autograd.backward([out_local, res_local], [ograd_local, rgrad_local])
+        out_local.backward(ograd_local)
         igrad_local = inp_local.grad.clone()
         # the weight is split over the degrees on the h ranks, and the w ranks each hold the contribution of their
-        # orders to them; the bias is shared by all spatial ranks
+        # orders to them; the spectral bias is split over the degrees on h and the orders on w
         wgrad_local = self._sum_gradient(spect_conv_dist.weight.grad, "w")
-        bgrad_local = self._sum_gradient(spect_conv_dist.bias.grad, "spatial")
+        bgrad_local = spect_conv_dist.spectral_bias.grad.clone()
 
         #############################################################
         # evaluate FWD pass
@@ -223,14 +223,6 @@ class TestDistributedLayers(unittest.TestCase):
             self.assertTrue(
                 reduce_success(
                     compare_tensors("output", out_gather_full, out_full, tol, tol, verbose=verbose), self.device
-                )
-            )
-
-        with self.subTest(desc="residual"):
-            res_gather_full = self._gather_helper(res_local, hdim=-2, wdim=-1)
-            self.assertTrue(
-                reduce_success(
-                    compare_tensors("residual", res_gather_full, res_full, tol, tol, verbose=verbose), self.device
                 )
             )
 
@@ -258,19 +250,16 @@ class TestDistributedLayers(unittest.TestCase):
                 )
             )
 
-        with self.subTest(desc="bias gradients"):
-            bgrad_gather_list = [torch.empty_like(bgrad_local) for _ in range(self.world_size)]
-            bgrad_gather_list[self.world_rank] = bgrad_local
-            dist.all_gather(bgrad_gather_list, bgrad_local, group=None)
-            for idb, bgrad_gather_full in enumerate(bgrad_gather_list):
-                self.assertTrue(
-                    reduce_success(
-                        compare_tensors(
-                            f"bias gradient {idb}", bgrad_gather_full, bgrad_full, tol, tol, verbose=verbose
-                        ),
-                        self.device,
-                    )
+        with self.subTest(desc="spectral bias gradients"):
+            bgrad_gather_full = self._gather_helper(bgrad_local, hdim=-2, wdim=-1)
+            self.assertTrue(
+                reduce_success(
+                    compare_tensors(
+                        "spectral bias gradients", bgrad_gather_full, bgrad_full, tol, tol, verbose=verbose
+                    ),
+                    self.device,
                 )
+            )
 
     # the DISCO convolutions of SNO with scale_factor=8 on a 36 x 72 grid: the encoder onto the internal
     # 4 x 9 grid and the convolution of the decoder on the output grid. The local convolution of the
@@ -541,7 +530,7 @@ class TestDistributedLayers(unittest.TestCase):
                 layer_dist.weight.copy_(layer_local.weight)
                 layer_dist.bias.copy_(layer_local.bias)
         else:
-            from makani.models.common import SpectralConv
+            from makani.models.common import spectral_conv_s2
 
             transforms_local = (
                 th.RealSHT(sht_grid((nlat_in, nlon_in), grid_in), lmax=4, mmax=4),
@@ -551,20 +540,16 @@ class TestDistributedLayers(unittest.TestCase):
                 thd.DistributedRealSHT(sht_grid((nlat_in, nlon_in), grid_in), lmax=4, mmax=4),
                 thd.DistributedInverseRealSHT(sht_grid((nlat_out, nlon_out), grid_out), lmax=4, mmax=4),
             )
-            conv_args = dict(operator_type="dhconv", num_groups=1, bias=True, gain=1.0)
-            spectral_local = SpectralConv(*[t.to(self.device) for t in transforms_local], C, C, **conv_args)
-            spectral_dist = SpectralConv(*[t.to(self.device) for t in transforms_dist], C, C, **conv_args)
-            spectral_local, spectral_dist = spectral_local.to(self.device), spectral_dist.to(self.device)
+            conv_args = dict(num_groups=1, bias=True, gain=1.0)
+            layer_local = spectral_conv_s2(*[t.to(self.device) for t in transforms_local], C, C, **conv_args)
+            layer_dist = spectral_conv_s2(*[t.to(self.device) for t in transforms_dist], C, C, **conv_args)
+            layer_local, layer_dist = layer_local.to(self.device), layer_dist.to(self.device)
+            # the same bias on every rank, however much of the generator the distributed initialization used
+            set_seed(334)
             with torch.no_grad():
-                spectral_dist.weight.copy_(self._split_helper(spectral_local.weight, hdim=-1, wdim=None))
-                spectral_dist.bias.copy_(spectral_local.bias)
-
-            # the output only; the residual is covered by test_distributed_spectral_conv
-            def layer_local(x):
-                return spectral_local(x)[0]
-
-            def layer_dist(x):
-                return spectral_dist(x)[0]
+                layer_local.spectral_bias.copy_(torch.randn_like(layer_local.spectral_bias))
+                layer_dist.weight.copy_(self._split_helper(layer_local.weight, hdim=-1, wdim=None))
+                layer_dist.spectral_bias.copy_(self._split_helper(layer_local.spectral_bias, hdim=-2, wdim=-1))
 
         # the same inputs on every rank, however much of the generator the distributed initialization
         # used, see test_distributed_spectral_conv
