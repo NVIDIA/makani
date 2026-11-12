@@ -106,7 +106,6 @@ sfno_dhealy: &SFNO_BASELINE_DHEALY
     nettype: "SFNO"
     filter_type: "linear"
     use_mlp: !!bool True
-    separable: !!bool False
     # to set the convolution to Driscoll-Healy style convolution
     operator_type: "dhconv"
 

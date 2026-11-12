@@ -22,7 +22,7 @@ from torch.utils.checkpoint import checkpoint
 from functools import partial
 
 # helpers
-from makani.models.common import DropPath, LayerScale, MLP, EncoderDecoder, SpectralConv
+from makani.models.common import DropPath, LayerScale, MLP, EncoderDecoder, spectral_conv_s2
 from makani.utils.features import get_water_channels, get_channel_groups
 from makani.utils.constraints import NonNegativeConstraint
 
@@ -550,12 +550,11 @@ class NeuralOperatorBlock(nn.Module):
 
         elif conv_type == "global":
             # convolution layer
-            self.global_conv = SpectralConv(
+            self.global_conv = spectral_conv_s2(
                 forward_transform,
                 inverse_transform,
                 inp_chans,
                 inp_chans,
-                operator_type="dhconv",
                 num_groups=num_groups,
                 bias=bias,
                 gain=gain_factor,
@@ -624,7 +623,7 @@ class NeuralOperatorBlock(nn.Module):
         x = self.norm1(x)
 
         if hasattr(self, "global_conv"):
-            dx, _ = self.global_conv(x)
+            dx = self.global_conv(x)
         elif hasattr(self, "local_conv"):
             dx = self.local_conv(x)
 
@@ -925,8 +924,11 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
         max_modes=None,
     ):
         """
-        Initialize the spectral transforms based on the maximum number of modes to keep. Handles the computation
-        of local image shapes and domain parallelism, based on the
+        Build the SHT pair of the processor, distributed under spatial parallelism.
+
+        ``max_modes`` gives the truncation ``(lmax, mmax)`` explicitly; otherwise
+        ``hard_thresholding_fraction`` of the degrees and orders the grid resolves are
+        kept. ``mmax`` is capped at ``lmax``, since there are no orders ``m >= lmax``.
         """
 
         # precompute the cutoff frequency on the sphere

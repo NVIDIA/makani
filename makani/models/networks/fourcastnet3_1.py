@@ -26,7 +26,7 @@ from makani.models.common import (
     DropPath,
     LayerScale,
     MLP,
-    SpectralConv,
+    spectral_conv_s2,
     LearnablePositionEmbedding,
     MLPImputation,
 )
@@ -528,12 +528,11 @@ class NeuralOperatorBlock(nn.Module):
 
         elif conv_type == "global":
             # convolution layer
-            self.global_conv = SpectralConv(
+            self.global_conv = spectral_conv_s2(
                 forward_transform,
                 inverse_transform,
                 inp_chans,
                 inp_chans if use_mlp else out_chans,
-                operator_type="dhconv",
                 num_groups=num_groups,
                 bias=False,
                 gain=gain_factor,
@@ -596,7 +595,7 @@ class NeuralOperatorBlock(nn.Module):
 
     def _conv_forward(self, x):
         if hasattr(self, "global_conv"):
-            dx, _ = self.global_conv(x)
+            dx = self.global_conv(x)
         elif hasattr(self, "local_conv"):
             dx = self.local_conv(x)
 
