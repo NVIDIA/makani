@@ -299,8 +299,8 @@ class TestDistributedLayers(unittest.TestCase):
         # the initialization scales each row of modes; with unit draws the weights are those scales, and
         # the distributed ones have to be the serial ones, split, whatever the split
         with mock.patch.object(torch, "randn", lambda *shape, **kwargs: torch.ones(*shape, **kwargs)):
-            scale_local = SpectralConv(forward_local, inverse_local, C, C).weight
-            scale_dist = SpectralConv(forward_dist, inverse_dist, C, C).weight
+            scale_local = SpectralConv(forward_local, inverse_local, C, C).to(self.device).weight
+            scale_dist = SpectralConv(forward_dist, inverse_dist, C, C).to(self.device).weight
         with self.subTest(desc="initialization"):
             self.assertTrue(
                 reduce_success(
