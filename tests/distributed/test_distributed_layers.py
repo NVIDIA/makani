@@ -18,6 +18,7 @@ import sys
 import os
 import math
 import unittest
+from unittest import mock
 from collections import OrderedDict
 from parameterized import parameterized
 
@@ -294,6 +295,21 @@ class TestDistributedLayers(unittest.TestCase):
         inverse_local = InverseRealFFT2(nlat_out, nlon_out, lmax=forward_local.lmax, mmax=forward_local.mmax)
         forward_dist = DistributedRealFFT2(nlat_in, nlon_in, lmax=lmax, mmax=mmax).to(self.device)
         inverse_dist = DistributedInverseRealFFT2(nlat_out, nlon_out, lmax=forward_dist.lmax, mmax=forward_dist.mmax)
+
+        # the initialization scales each row of modes; with unit draws the weights are those scales, and
+        # the distributed ones have to be the serial ones, split, whatever the split
+        with mock.patch.object(torch, "randn", lambda *shape, **kwargs: torch.ones(*shape, **kwargs)):
+            scale_local = SpectralConv(forward_local, inverse_local, C, C).weight
+            scale_dist = SpectralConv(forward_dist, inverse_dist, C, C).weight
+        with self.subTest(desc="initialization"):
+            self.assertTrue(
+                reduce_success(
+                    compare_tensors(
+                        "initialization", self._gather_helper(scale_dist.detach()), scale_local.detach(), 0.0, 0.0
+                    ),
+                    self.device,
+                )
+            )
 
         set_seed(333)
         conv_local = SpectralConv(forward_local, inverse_local.to(self.device), C, C, bias=True).to(self.device)

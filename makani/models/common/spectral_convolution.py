@@ -222,13 +222,16 @@ class SpectralConv(nn.Module):
             self.forward_transform.nlon != self.inverse_transform.nlon
         )
 
-        # the distributed FFTs split the modes like this; the serial ones keep them all
+        # the distributed FFTs split the modes like this; the serial ones keep them all. They split the
+        # rows contiguously, so global row zero is on the first h rank
         if hasattr(self.inverse_transform, "l_shapes"):
             self.modes_lat_local = self.inverse_transform.l_shapes[comm.get_rank("h")]
             self.modes_lon_local = self.inverse_transform.m_shapes[comm.get_rank("w")]
+            owns_row_zero = comm.get_rank("h") == 0
         else:
             self.modes_lat_local = self.modes_lat
             self.modes_lon_local = self.modes_lon
+            owns_row_zero = True
 
         weight_shape = [
             num_groups,
@@ -242,8 +245,10 @@ class SpectralConv(nn.Module):
         scale = math.sqrt(gain / (in_channels // num_groups)) * torch.ones(
             self.modes_lat_local, 1, dtype=torch.complex64
         )
-        # seemingly the first weight is not really complex, so we need to account for that
-        scale[0] *= math.sqrt(2.0)
+        # seemingly the first weight is not really complex, so we need to account for that. Only global
+        # row zero, so that the initialization does not depend on how the rows are split
+        if owns_row_zero:
+            scale[0] *= math.sqrt(2.0)
         self.weight = nn.Parameter(scale * torch.randn(*weight_shape, dtype=torch.complex64))
         self.weight.is_shared_mp = {"matmul": "avg"}
         self.weight.sharded_dims_mp = [None, None, None, "h", "w"]
