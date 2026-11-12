@@ -24,7 +24,7 @@ import torch.nn as nn
 import torch_harmonics as th
 import torch_harmonics.distributed as thd
 
-from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature, compute_spherical_bandlimit
+from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature, compute_spherical_bandlimit, sht_grid
 from makani.utils import comm
 from makani.utils.features import get_wind_channels
 from makani.mpu.mappings import reduce_from_parallel_region
@@ -396,9 +396,9 @@ class SpectralBaseLoss(nn.Module, metaclass=ABCMeta):
                 polar_group = None if (comm.get_size("h") == 1) else comm.get_group("h")
                 azimuth_group = None if (comm.get_size("w") == 1) else comm.get_group("w")
                 thd.init(polar_group, azimuth_group)
-            self.sht = thd.DistributedRealSHT(*img_shape, lmax=lmax, mmax=lmax, grid=grid_type)
+            self.sht = thd.DistributedRealSHT(sht_grid(img_shape, grid_type), lmax=lmax, mmax=lmax)
         else:
-            self.sht = th.RealSHT(*img_shape, lmax=lmax, mmax=lmax, grid=grid_type).float()
+            self.sht = th.RealSHT(sht_grid(img_shape, grid_type), lmax=lmax, mmax=lmax).float()
 
         # get the local l weights
         l_weights = torch.ones(self.sht.lmax, dtype=torch.float32)
@@ -498,15 +498,11 @@ class VortDivBaseLoss(nn.Module, metaclass=ABCMeta):
                 polar_group = None if (comm.get_size("h") == 1) else comm.get_group("h")
                 azimuth_group = None if (comm.get_size("w") == 1) else comm.get_group("w")
                 thd.init(polar_group, azimuth_group)
-            self.vsht = thd.DistributedRealVectorSHT(*img_shape, lmax=lmax, mmax=lmax, grid=grid_type)
-            self.isht = thd.DistributedInverseRealVectorSHT(
-                nlat=self.vsht.nlat, nlon=self.vsht.nlon, lmax=lmax, mmax=lmax, grid=grid_type
-            )
+            self.vsht = thd.DistributedRealVectorSHT(sht_grid(img_shape, grid_type), lmax=lmax, mmax=lmax)
+            self.isht = thd.DistributedInverseRealVectorSHT(self.vsht.grid, lmax=lmax, mmax=lmax)
         else:
-            self.vsht = th.RealVectorSHT(*img_shape, lmax=lmax, mmax=lmax, grid=grid_type)
-            self.isht = th.InverseRealVectorSHT(
-                nlat=self.vsht.nlat, nlon=self.vsht.nlon, lmax=lmax, mmax=lmax, grid=grid_type
-            )
+            self.vsht = th.RealVectorSHT(sht_grid(img_shape, grid_type), lmax=lmax, mmax=lmax)
+            self.isht = th.InverseRealVectorSHT(self.vsht.grid, lmax=lmax, mmax=lmax)
 
         # get the quadrature rule for the corresponding grid
         quadrature_rule = grid_to_quadrature_rule(grid_type)
@@ -583,15 +579,11 @@ class GradientBaseLoss(nn.Module, metaclass=ABCMeta):
                 polar_group = None if (comm.get_size("h") == 1) else comm.get_group("h")
                 azimuth_group = None if (comm.get_size("w") == 1) else comm.get_group("w")
                 thd.init(polar_group, azimuth_group)
-            self.sht = thd.DistributedRealSHT(*img_shape, lmax=lmax, mmax=lmax, grid=grid_type)
-            self.ivsht = thd.DistributedInverseRealVectorSHT(
-                nlat=self.sht.nlat, nlon=self.sht.nlon, lmax=lmax, mmax=lmax, grid=grid_type
-            )
+            self.sht = thd.DistributedRealSHT(sht_grid(img_shape, grid_type), lmax=lmax, mmax=lmax)
+            self.ivsht = thd.DistributedInverseRealVectorSHT(self.sht.grid, lmax=lmax, mmax=lmax)
         else:
-            self.sht = th.RealSHT(*img_shape, lmax=lmax, mmax=lmax, grid=grid_type)
-            self.ivsht = th.InverseRealVectorSHT(
-                nlat=self.sht.nlat, nlon=self.sht.nlon, lmax=lmax, mmax=lmax, grid=grid_type
-            )
+            self.sht = th.RealSHT(sht_grid(img_shape, grid_type), lmax=lmax, mmax=lmax)
+            self.ivsht = th.InverseRealVectorSHT(self.sht.grid, lmax=lmax, mmax=lmax)
 
         # get the quadrature rule for the corresponding grid
         quadrature_rule = grid_to_quadrature_rule(grid_type)

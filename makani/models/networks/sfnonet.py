@@ -38,6 +38,7 @@ from makani.mpu.layers import DistributedMLP, DistributedEncoderDecoder
 
 # more distributed stuff
 from makani.utils import comm
+from makani.utils.grids import sht_grid
 
 # layer normalization
 from makani.mpu.layer_norm import DistributedInstanceNorm2d, DistributedLayerNorm, DistributedGeometricInstanceNormS2
@@ -839,10 +840,16 @@ class SphericalFourierNeuralOperatorNet(nn.Module):
                 isht_handle = thd.DistributedInverseRealSHT
 
             # set up
-            self.trans_down = sht_handle(*self.inp_shape, lmax=modes_lat, mmax=modes_lon, grid=model_grid_type).float()
-            self.itrans_up = isht_handle(*self.out_shape, lmax=modes_lat, mmax=modes_lon, grid=model_grid_type).float()
-            self.trans = sht_handle(self.h, self.w, lmax=modes_lat, mmax=modes_lon, grid=sht_grid_type).float()
-            self.itrans = isht_handle(self.h, self.w, lmax=modes_lat, mmax=modes_lon, grid=sht_grid_type).float()
+            # orders m >= lmax carry no spherical harmonic (m <= l < lmax), and torch-harmonics
+            # refuses to keep them since 1.0; the planar FFT below has no such bound
+            modes_lon = min(modes_lon, modes_lat)
+            grid_inp = sht_grid(self.inp_shape, model_grid_type)
+            grid_out = sht_grid(self.out_shape, model_grid_type)
+            grid_internal = sht_grid((self.h, self.w), sht_grid_type)
+            self.trans_down = sht_handle(grid_inp, lmax=modes_lat, mmax=modes_lon).float()
+            self.itrans_up = isht_handle(grid_out, lmax=modes_lat, mmax=modes_lon).float()
+            self.trans = sht_handle(grid_internal, lmax=modes_lat, mmax=modes_lon).float()
+            self.itrans = isht_handle(grid_internal, lmax=modes_lat, mmax=modes_lon).float()
 
         elif spectral_transform == "fft":
             fft_handle = RealFFT2

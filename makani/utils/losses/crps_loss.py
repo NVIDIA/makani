@@ -29,6 +29,7 @@ from makani.utils.losses.base_loss import (
     GradientBaseLoss,
 )
 from makani.utils import comm
+from makani.utils.grids import sht_grid
 
 # distributed stuff
 from torch_harmonics.distributed import split_tensor_along_dim
@@ -1059,16 +1060,15 @@ class KernelScoreLoss(GeometricBaseLoss):
         fb = th.filter_basis.get_filter_basis(tuple(kernel_shape), kernel_basis_type)
         self.kernel_basis_size = fb.kernel_size
 
+        grid = sht_grid(img_shape, grid_type)
         self.conv = conv_handle(
+            grid,
+            grid,
             self.n_channels,
             self.n_channels * self.kernel_basis_size,
-            in_shape=img_shape,
-            out_shape=img_shape,
             kernel_shape=tuple(kernel_shape),
             basis_type=kernel_basis_type,
             basis_norm_mode=kernel_basis_norm_mode,
-            grid_in=grid_type,
-            grid_out=grid_type,
             groups=self.n_channels,
             bias=False,
             theta_cutoff=2 * kernel_shape[0] * math.pi / float(img_shape[0] - 1),

@@ -32,7 +32,7 @@ from mpi4py import MPI
 
 import torch
 import torch.distributed as dist
-from torch_harmonics import RealSHT
+from torch_harmonics import RealSHT, as_grid
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from data_process.data_process_helpers import DistributedProgressBar
@@ -240,7 +240,7 @@ def get_power_spectra(
     height, width = (data_shape[2], data_shape[3])
 
     # SHT:
-    sht = RealSHT(nlat=height, nlon=width, grid="equiangular").to(device)
+    sht = RealSHT(as_grid("equiangular", nlat=height, nlon=width)).to(device)
 
     if comm_rank == 0:
         print(

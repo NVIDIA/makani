@@ -38,9 +38,9 @@ jobs:
         # All git dependencies are pinned to immutable commit SHAs rather than branches
         # or tags, so that a force-push or a repointed tag upstream cannot change what
         # runs in CI. Bump these deliberately.
-        # torch-harmonics v0.9.4 (SHA of the tag), which makani pins exactly: built from the tag, it
-        # reports version 0.9.4, so installing makani keeps this build
-        python -m pip install --no-build-isolation git+https://github.com/NVIDIA/torch-harmonics.git@6b8f3aec75e0abf2c98588dc37ecd91512b9c099
+        # torch-harmonics main at 38b285a, ahead of the 1.0 release. Built from this commit it reports
+        # 0.9.4.dev39, which satisfies makani's `>=0.9.4.dev39,!=0.9.4`, so installing makani keeps this build
+        python -m pip install --no-build-isolation git+https://github.com/NVIDIA/torch-harmonics.git@38b285ab8f6341ea95405fad232f64b9f0c7a6fd
         # Freeze whatever torch version TH just compiled against. Strip the
         # local label (+cpu) so the constraint matches any build of that
         # public version.

@@ -31,6 +31,7 @@ import torch_harmonics as th
 import torch_harmonics.distributed as thd
 
 from makani.utils import comm
+from makani.utils.grids import sht_grid
 from torch_harmonics.distributed import split_tensor_along_dim
 
 
@@ -120,13 +121,13 @@ class BaseNoiseS2(nn.Module):
                 polar_group = None if (comm.get_size("h") == 1) else comm.get_group("h")
                 azimuth_group = None if (comm.get_size("w") == 1) else comm.get_group("w")
                 thd.init(polar_group, azimuth_group)
-            self.isht = thd.DistributedInverseRealSHT(self.nlat, self.nlon, lmax=lmax, mmax=lmax, grid=grid_type)
+            self.isht = thd.DistributedInverseRealSHT(sht_grid((self.nlat, self.nlon), grid_type), lmax=lmax, mmax=lmax)
             self.lmax_local = self.isht.l_shapes[comm.get_rank("h")]
             self.mmax_local = self.isht.m_shapes[comm.get_rank("w")]
             self.nlat_local = self.isht.lat_shapes[comm.get_rank("h")]
             self.nlon_local = self.isht.lon_shapes[comm.get_rank("w")]
         else:
-            self.isht = th.InverseRealSHT(self.nlat, self.nlon, lmax=lmax, mmax=lmax, grid=grid_type)
+            self.isht = th.InverseRealSHT(sht_grid((self.nlat, self.nlon), grid_type), lmax=lmax, mmax=lmax)
             self.lmax_local = self.isht.lmax
             self.mmax_local = self.isht.mmax
             self.nlat_local = self.nlat
