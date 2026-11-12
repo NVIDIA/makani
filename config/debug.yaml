@@ -36,7 +36,6 @@ base_config: &BASE_CONFIG
     use_mlp: !!bool True
     mlp_mode: "serial"
     mlp_ratio: 2
-    separable: !!bool False
     operator_type: "dhconv"
     activation_function: "gelu"
     pos_embed: "none" # "none", "direct" or "frequency". For resoltuion invariance, use add_grid instead or use "frequency"

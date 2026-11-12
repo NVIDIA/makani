@@ -754,8 +754,11 @@ class SphericalNeuralOperatorNet(nn.Module):
         max_modes=None,
     ):
         """
-        Initialize the spectral transforms based on the maximum number of modes to keep. Handles the computation
-        of local image shapes and domain parallelism, based on the
+        Build the SHT pair of the processor, distributed under spatial parallelism.
+
+        ``max_modes`` gives the truncation ``(lmax, mmax)`` explicitly; otherwise
+        ``hard_thresholding_fraction`` of the degrees and orders the grid resolves are
+        kept. ``mmax`` is capped at ``lmax``, since there are no orders ``m >= lmax``.
         """
 
         # precompute the cutoff frequency on the sphere

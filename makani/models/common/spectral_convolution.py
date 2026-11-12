@@ -17,7 +17,6 @@ import torch
 import torch.nn as nn
 import math
 
-from functools import partial
 from torch import amp
 
 # import convenience functions for factorized tensors
@@ -249,7 +248,7 @@ class SpectralConv(nn.Module):
         self.weight.is_shared_mp = {"matmul": "avg"}
         self.weight.sharded_dims_mp = [None, None, None, "h", "w"]
 
-        self._contract = partial(_contract_dense_pytorch, separable=False, operator_type="diagonal")
+        self._contract = _contract_dense_pytorch
 
         if bias:
             self.bias = nn.Parameter(torch.zeros(1, self.out_channels, 1, 1))

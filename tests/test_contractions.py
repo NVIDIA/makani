@@ -18,13 +18,7 @@ from parameterized import parameterized
 
 import torch
 
-from makani.models.common.contractions import (
-    _contract_lmwise,
-    _contract_lwise,
-    _contract_sep_lmwise,
-    _contract_sep_lwise,
-    _contract_dense_pytorch,
-)
+from makani.models.common.contractions import _contract_lmwise, _contract_dense_pytorch
 
 import sys
 import os
@@ -38,238 +32,69 @@ from makani.utils.functions import contiguous_complex_safe
 # ---------------------------------------------------------------------------
 B = 2  # batch
 G = 2  # groups
-I = 4  # in-channels per group  (== O for separable)
-O = 3  # out-channels per group (non-separable only)
-H = 6  # lmax  (l-modes)
-W = 5  # mmax  (m-modes)
+I = 4  # in-channels per group
+O = 3  # out-channels per group
+H = 6  # modes along the first spectral dimension
+W = 5  # modes along the second spectral dimension
 
 
 def _cx(*shape):
     return torch.randn(*shape, dtype=torch.complex64)
 
 
-# ---------------------------------------------------------------------------
-# Reference implementations (plain torch.einsum, no @torch.compile).
-# ---------------------------------------------------------------------------
-
-
 def _ref_lmwise(x, w):
-    return torch.einsum("bgixy,gioxy->bgoxy", x, w)
-
-
-def _ref_lwise(x, w):
-    return torch.einsum("bgixy,giox->bgoxy", x, w)
-
-
-def _ref_sep_lmwise(x, w):
-    return torch.einsum("bgixy,gixy->bgixy", x, w)
-
-
-def _ref_sep_lwise(x, w):
-    return torch.einsum("bgixy,gix->bgixy", x, w)
-
-
-# ---------------------------------------------------------------------------
-# Input / weight factories
-# ---------------------------------------------------------------------------
+    """Reference contraction, an explicit loop over the modes."""
+    out = torch.zeros(x.shape[0], w.shape[0], w.shape[2], x.shape[-2], x.shape[-1], dtype=x.dtype)
+    for k in range(x.shape[-2]):
+        for m in range(x.shape[-1]):
+            out[..., k, m] = torch.einsum("bgi,gio->bgo", x[..., k, m], w[..., k, m])
+    return out
 
 
 def _mk_lmwise():
     return _cx(B, G, I, H, W), _cx(G, I, O, H, W)
 
 
-def _mk_lwise():
-    return _cx(B, G, I, H, W), _cx(G, I, O, H)
+_KERNELS = [("kernel", _contract_lmwise), ("dense", _contract_dense_pytorch)]
 
 
-def _mk_sep_lmwise():
-    return _cx(B, G, I, H, W), _cx(G, I, H, W)
-
-
-def _mk_sep_lwise():
-    return _cx(B, G, I, H, W), _cx(G, I, H)
-
-
-# ---------------------------------------------------------------------------
-# Master table: (name, compiled_fn, ref_fn, input_factory, expected_output_shape)
-# ---------------------------------------------------------------------------
-_KERNEL_CASES = [
-    ("lmwise", _contract_lmwise, _ref_lmwise, _mk_lmwise, (B, G, O, H, W)),
-    ("lwise", _contract_lwise, _ref_lwise, _mk_lwise, (B, G, O, H, W)),
-    ("sep_lmwise", _contract_sep_lmwise, _ref_sep_lmwise, _mk_sep_lmwise, (B, G, I, H, W)),
-    ("sep_lwise", _contract_sep_lwise, _ref_sep_lwise, _mk_sep_lwise, (B, G, I, H, W)),
-]
-
-# Lookup helpers
-_MAKER = {name: mk for name, _, _, mk, _ in _KERNEL_CASES}
-_REF = {name: ref for name, _, ref, _, _ in _KERNEL_CASES}
-
-# Dispatcher: (separable, operator_type) → kernel name
-_DISPATCHER_CASES = [
-    (False, "diagonal", "lmwise"),
-    (False, "dhconv", "lwise"),
-    (True, "diagonal", "sep_lmwise"),
-    (True, "dhconv", "sep_lwise"),
-]
-
-
-# ===========================================================================
-# 1. Output shape
-# ===========================================================================
-class TestContractionShape(unittest.TestCase):
-    """Every kernel produces an output tensor with the expected shape."""
+class TestContraction(unittest.TestCase):
+    """The mode-wise contraction of the planar spectral convolution."""
 
     def setUp(self):
         disable_tf32()
         set_seed(333)
 
-    @parameterized.expand([(name, fn, mk, shape) for name, fn, _, mk, shape in _KERNEL_CASES])
-    def test_output_shape(self, name, fn, make_inputs, expected_shape):
-        x, w = make_inputs()
-        out = fn(x, w)
-        self.assertEqual(
-            tuple(out.shape),
-            expected_shape,
-            f"{name}: got {tuple(out.shape)}, expected {expected_shape}",
-        )
-
-
-# ===========================================================================
-# 2. Compile correctness (@torch.compile == plain torch.einsum)
-# ===========================================================================
-class TestContractionCorrectness(unittest.TestCase):
-    """Compiled kernels are numerically identical to the reference einsums."""
-
-    def setUp(self):
-        disable_tf32()
-
-    @parameterized.expand([(name, fn, ref, mk) for name, fn, ref, mk, _ in _KERNEL_CASES])
-    def test_compile_correctness(self, name, fn, ref_fn, make_inputs, verbose=False):
-        set_seed(333)
-        x, w = make_inputs()
-        self.assertTrue(
-            compare_tensors(f"{name} compile", fn(x, w), ref_fn(x, w), atol=1e-5, rtol=1e-4, verbose=verbose),
-            f"{name}: compiled result differs from reference einsum",
-        )
-
-
-# ===========================================================================
-# 3. Dispatcher routing
-# ===========================================================================
-class TestContractionDispatcher(unittest.TestCase):
-    """_contract_dense_pytorch routes every (separable, operator_type)
-    combination to the correct kernel."""
-
-    def setUp(self):
-        disable_tf32()
-        set_seed(333)
-
-    @parameterized.expand([(f"sep{s}_op{op}", s, op, kname) for s, op, kname in _DISPATCHER_CASES])
-    def test_routing(self, _label, separable, operator_type, kernel_name, verbose=False):
-        set_seed(333)
-        x, w = _MAKER[kernel_name]()
-        expected = _REF[kernel_name](x, w)
-        got = _contract_dense_pytorch(x, w, separable=separable, operator_type=operator_type)
-        self.assertTrue(
-            compare_tensors(f"dispatcher {kernel_name}", got, expected, atol=1e-5, rtol=1e-4, verbose=verbose),
-            f"dispatcher mismatch: separable={separable}, op={operator_type}",
-        )
-
-    def test_unknown_operator_nonsep_raises(self):
+    @parameterized.expand(_KERNELS)
+    def test_matches_reference(self, name, fn, verbose=False):
         x, w = _mk_lmwise()
-        with self.assertRaises(ValueError):
-            _contract_dense_pytorch(x, w, separable=False, operator_type="unknown")
-
-    def test_unknown_operator_sep_raises(self):
-        x, w = _mk_sep_lmwise()
-        with self.assertRaises(ValueError):
-            _contract_dense_pytorch(x, w, separable=True, operator_type="unknown")
-
-
-# ===========================================================================
-# 4. Separable == diagonal-weight non-separable
-# ===========================================================================
-class TestContractionConsistency(unittest.TestCase):
-    """Mathematical relationships between separable and non-separable kernels."""
-
-    def setUp(self):
-        disable_tf32()
-        set_seed(333)
-
-    def test_lmwise_diagonal_weight_equals_sep_lmwise(self, verbose=False):
-        """Non-separable lmwise with diagonal (I==O) weight must equal sep_lmwise."""
-        x = _cx(B, G, I, H, W)
-        w_sep = _cx(G, I, H, W)
-        w_full = torch.zeros(G, I, I, H, W, dtype=torch.complex64)
-        for i in range(I):
-            w_full[:, i, i, :, :] = w_sep[:, i, :, :]
+        out = fn(x, w)
+        self.assertEqual(tuple(out.shape), (B, G, O, H, W))
         self.assertTrue(
-            compare_tensors(
-                "lmwise diag == sep_lmwise",
-                _contract_lmwise(x, w_full),
-                _contract_sep_lmwise(x, w_sep),
-                atol=1e-5,
-                rtol=1e-4,
-                verbose=verbose,
-            )
+            compare_tensors(name, out, _ref_lmwise(x, w), atol=1e-5, rtol=1e-4, verbose=verbose),
+            f"{name}: differs from the loop over modes",
         )
 
-    def test_lwise_diagonal_weight_equals_sep_lwise(self, verbose=False):
-        """Non-separable lwise with diagonal weight must equal sep_lwise."""
-        x = _cx(B, G, I, H, W)
-        w_sep = _cx(G, I, H)
-        w_full = torch.zeros(G, I, I, H, dtype=torch.complex64)
-        for i in range(I):
-            w_full[:, i, i, :] = w_sep[:, i, :]
+    def test_dense_takes_non_contiguous_input(self, verbose=False):
+        """The spectral convolution hands over a reshaped transform output; the result has to be contiguous."""
+        x, w = _mk_lmwise()
+        x_t = x.transpose(-1, -2).contiguous().transpose(-1, -2)
+        self.assertFalse(x_t.is_contiguous())
+        out = _contract_dense_pytorch(x_t, w)
+        self.assertTrue(out.is_contiguous())
         self.assertTrue(
-            compare_tensors(
-                "lwise diag == sep_lwise",
-                _contract_lwise(x, w_full),
-                _contract_sep_lwise(x, w_sep),
-                atol=1e-5,
-                rtol=1e-4,
-                verbose=verbose,
-            )
+            compare_tensors("non-contiguous", out, _ref_lmwise(x, w), atol=1e-5, rtol=1e-4, verbose=verbose)
         )
 
-    def test_lwise_equals_lmwise_mconst_weight(self, verbose=False):
-        """lwise (no m-dim in weight) must equal lmwise when the weight is
-        constant across m."""
-        x = _cx(B, G, I, H, W)
-        w_l = _cx(G, I, O, H)
-        w_lm = w_l.unsqueeze(-1).expand(G, I, O, H, W).contiguous()
-        self.assertTrue(
-            compare_tensors(
-                "lwise == lmwise mconst",
-                _contract_lwise(x, w_l),
-                _contract_lmwise(x, w_lm),
-                atol=1e-5,
-                rtol=1e-4,
-                verbose=verbose,
-            )
-        )
-
-
-# ===========================================================================
-# 5. Backward pass
-# ===========================================================================
-class TestContractionBackward(unittest.TestCase):
-    """Gradients through every kernel are finite and NaN-free."""
-
-    def setUp(self):
-        disable_tf32()
-
-    @parameterized.expand([(name, fn, mk) for name, fn, _, mk, _ in _KERNEL_CASES])
-    def test_backward(self, name, fn, make_inputs):
-        set_seed(333)
-        x, w = make_inputs()
+    @parameterized.expand(_KERNELS)
+    def test_backward(self, name, fn):
+        x, w = _mk_lmwise()
         x = x.detach().requires_grad_(True)
         w = w.detach().requires_grad_(True)
         fn(x, w).sum().abs().backward()
         for tensor, label in ((x, "x"), (w, "w")):
             self.assertIsNotNone(tensor.grad, f"{name}: {label}.grad is None")
-            self.assertFalse(torch.isnan(tensor.grad).any(), f"{name}: NaN in {label}.grad")
-            self.assertFalse(torch.isinf(tensor.grad).any(), f"{name}: Inf in {label}.grad")
+            self.assertTrue(torch.isfinite(tensor.grad).all(), f"{name}: non-finite {label}.grad")
 
 
 class TestContiguousComplexSafe(unittest.TestCase):

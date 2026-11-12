@@ -74,9 +74,10 @@ class SpectralFilterLayer(nn.Module):
         on the plane; ``"non-linear"`` selects
         :class:`~makani.models.common.spectral_convolution.SpectralAttention`.
     operator_type : str, optional
-        Weight layout of the filter, by default ``"diagonal"``. The linear filter
+        Weight layout of the filter, by default ``"dhconv"``. The linear filter
         on the sphere takes ``"dhconv"`` only, one weight per degree, and on the
-        plane ``"diagonal"`` only, one weight per mode.
+        plane ``"diagonal"`` only, one weight per mode. The non-linear filter
+        takes ``"diagonal"`` or ``"l-dependant"``.
     hidden_size_factor : int, optional
         Hidden width multiplier for the nonlinear filter, by default ``1``.
         Ignored by the linear filter.
@@ -107,7 +108,7 @@ class SpectralFilterLayer(nn.Module):
         inverse_transform,
         embed_dim,
         filter_type="linear",
-        operator_type="diagonal",
+        operator_type="dhconv",
         hidden_size_factor=1,
         rank=1.0,
         complex_activation="real",
@@ -252,7 +253,8 @@ class NeuralOperatorBlock(nn.Module):
     filter_type : str, optional
         ``"linear"`` (default) or ``"non-linear"``; see :class:`SpectralFilterLayer`.
     operator_type : str, optional
-        Weight layout for the spectral filter, by default ``"diagonal"``.
+        Weight layout for the spectral filter, by default ``"dhconv"``; see
+        :class:`SpectralFilterLayer`.
     mlp_ratio : float, optional
         Hidden width of the MLP as a multiple of ``embed_dim``, by default ``2.0``.
         Also used as the nonlinear filter's hidden size factor.
@@ -304,7 +306,7 @@ class NeuralOperatorBlock(nn.Module):
         inverse_transform,
         embed_dim,
         filter_type="linear",
-        operator_type="diagonal",
+        operator_type="dhconv",
         mlp_ratio=2.0,
         mlp_drop_rate=0.0,
         path_drop_rate=0.0,
@@ -498,7 +500,8 @@ class SphericalFourierNeuralOperatorNet(nn.Module):
         ``"linear"`` (default) or ``"non-linear"`` spectral filter.
     operator_type : str, optional
         Weight layout of the spectral filter, by default ``"dhconv"``
-        (rotationally equivariant).
+        (rotationally equivariant); see :class:`SpectralFilterLayer` for the
+        layouts each filter takes.
     inp_shape : (int, int), optional
         Input grid as ``(nlat, nlon)``, by default ``(721, 1440)``.
     out_shape : (int, int), optional
@@ -539,7 +542,8 @@ class SphericalFourierNeuralOperatorNet(nn.Module):
         Normalization used inside the blocks, by default ``"instance_norm"``.
     max_modes : (int, int), optional
         Explicit spectral truncation as ``(lmax, mmax)``. Overrides
-        ``hard_thresholding_fraction`` when given.
+        ``hard_thresholding_fraction`` when given. With the spherical transform,
+        ``mmax`` is capped at ``lmax``, since there are no orders ``m >= lmax``.
     hard_thresholding_fraction : float, optional
         Fraction of the available modes retained, by default ``1.0``.
     big_skip : bool, optional

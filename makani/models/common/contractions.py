@@ -22,37 +22,29 @@ def _contract_lmwise(ac: torch.Tensor, bc: torch.Tensor) -> torch.Tensor:
     return torch.einsum("bgixy,gioxy->bgoxy", ac, bc)
 
 
-def _contract_lwise(ac: torch.Tensor, bc: torch.Tensor) -> torch.Tensor:
-    return torch.einsum("bgixy,giox->bgoxy", ac, bc)
+def _contract_dense_pytorch(x, weight):
+    r"""
+    Mix the channels of each group with a separate weight per mode, as the planar
+    :class:`~makani.models.common.spectral_convolution.SpectralConv` does.
 
+    .. math::
 
-def _contract_sep_lmwise(ac: torch.Tensor, bc: torch.Tensor) -> torch.Tensor:
-    return torch.einsum("bgixy,gixy->bgixy", ac, bc)
+        y_{b,g,o,k,m} = \sum_i x_{b,g,i,k,m}\, w_{g,i,o,k,m}
 
+    Parameters
+    ----------
+    x : torch.Tensor
+        Input coefficients of shape ``(batch, groups, in_channels, k, m)``.
+    weight : torch.Tensor
+        Weight of shape ``(groups, in_channels, out_channels, k, m)``.
 
-def _contract_sep_lwise(ac: torch.Tensor, bc: torch.Tensor) -> torch.Tensor:
-    return torch.einsum("bgixy,gix->bgixy", ac, bc)
-
-
-def _contract_dense_pytorch(x, weight, separable=False, operator_type="diagonal"):
-    """Dense spectral convolution contraction dispatching to the appropriate compiled einsum kernel."""
+    Returns
+    -------
+    torch.Tensor
+        Output of shape ``(batch, groups, out_channels, k, m)``, contiguous.
+    """
     x = contiguous_complex_safe(x)
-
-    if separable:
-        if operator_type == "diagonal":
-            x = _contract_sep_lmwise(x, weight)
-        elif operator_type == "dhconv":
-            x = _contract_sep_lwise(x, weight)
-        else:
-            raise ValueError(f"Unknown operator type {operator_type}")
-    else:
-        if operator_type == "diagonal":
-            x = _contract_lmwise(x, weight)
-        elif operator_type == "dhconv":
-            x = _contract_lwise(x, weight)
-        else:
-            raise ValueError(f"Unknown operator type {operator_type}")
-
+    x = _contract_lmwise(x, weight)
     return contiguous_complex_safe(x)
 
 
