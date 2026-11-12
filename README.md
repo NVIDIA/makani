@@ -84,6 +84,7 @@ By default, the inference script will perform inference on the out-of-sample dat
 | Metrics file              | `--metrics_file`                              | file path for metrics output |
 | Bias file                 | `--bias_file`                                 | file path for bias output    |
 | Spectrum file             | `--spectrum_file`                             | file path for spectra output |
+| Dataloader                | `--dataloader`                                | `multifiles` (default), `dali` |
 
 ### Benchmarking:
 

@@ -13,7 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 import datetime as dt
+import importlib.util
 import json
 import os
 import sys
@@ -26,7 +28,7 @@ import numpy as np
 import torch
 import torch_harmonics as th
 from torch.utils.data import default_collate
-from parameterized import parameterized
+from parameterized import parameterized, parameterized_class
 
 from makani.utils.dataloader import get_dataloader
 from makani.utils.grids import sht_grid
@@ -58,6 +60,12 @@ _SCORE_START = "2019-01-04T00:00:00"
 _SCORE_END = "2019-01-12T00:00:00"
 _SCORE_STEP_HOURS = 48
 _SCORE_AUTOREG_STEPS = 2
+
+# every test runs on the multifiles dataloader, and on the DALI one where it is installed. find_spec of a
+# submodule raises rather than return None when the nvidia namespace package itself is missing
+_LOADERS = [("multifiles",)]
+if importlib.util.find_spec("nvidia") is not None and importlib.util.find_spec("nvidia.dali") is not None:
+    _LOADERS.append(("dali",))
 
 
 class _RecordingBuffer:
@@ -138,6 +146,7 @@ class _InferencerTestCase(unittest.TestCase):
             num_data_workers=1,
         )
         params.inf_data_path = self.valid_path
+        params.multifiles = self.loader == "multifiles"
         # the output buffers place their data on the dataset's coordinates, which parse_dataset_metadata
         # reads from the metadata file in a real run
         with open(os.path.join(self.metadata_path, "data.json"), "r") as f:
@@ -154,6 +163,7 @@ class _InferencerTestCase(unittest.TestCase):
         return params
 
 
+@parameterized_class(("loader",), _LOADERS)
 class TestInferencerRollout(_InferencerTestCase):
     """
     The inference loop against a rollout of the same initial conditions with targets.
@@ -170,8 +180,10 @@ class TestInferencerRollout(_InferencerTestCase):
 
     def _reference(self, inferencer, ensemble_size):
         """The rollouts of the initial-condition batches with their targets, in the inferencer's order."""
-        params = inferencer.params
+        # read with targets from the multifiles dataset, whichever loader the inferencer used
+        params = copy.deepcopy(inferencer.params)
         params.valid_autoreg_steps = _ROLLOUT_STEPS - 1
+        params.multifiles = True
         dataset = get_dataloader(params, self.valid_path, mode="eval", device=inferencer.device)[0].dataset
 
         model = inferencer.model
@@ -194,6 +206,8 @@ class TestInferencerRollout(_InferencerTestCase):
     def test_predictions_match_a_rollout_with_targets(self, name, ensemble_size, n_history, noise, zenith):
         params = self._params(ensemble_size, n_history, noise, zenith)
         inferencer = Inferencer(params, world_rank=0, device="cpu")
+        # the loader asked for, not a fallback
+        self.assertEqual(hasattr(inferencer.valid_dataloader, "schedule"), self.loader == "dali")
 
         buffer, metrics = _RecordingBuffer(), _RecordingMetrics()
         inferencer.model.noise.set_rng(reset=True, seed=_NOISE_SEED)
@@ -257,6 +271,7 @@ def _zonal_power_spectrum(fields, lat):
     return power.to(torch.float64)
 
 
+@parameterized_class(("loader",), _LOADERS)
 class TestInferencerScoring(_InferencerTestCase):
     """
     ``score_model``, the entry point of ``makani/inference.py``, over a short date range with every output it
@@ -268,6 +283,7 @@ class TestInferencerScoring(_InferencerTestCase):
     def _score(self, params, outputs):
         params.valid_autoreg_steps = _SCORE_AUTOREG_STEPS
         inferencer = Inferencer(params, world_rank=0, device="cpu")
+        self.assertEqual(hasattr(inferencer.valid_dataloader, "schedule"), self.loader == "dali")
 
         # keep the logs score_model hands to log_score, which it does not return
         captured = {}

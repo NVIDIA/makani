@@ -104,9 +104,10 @@ class Inferencer(Driver):
         if self.params.log_to_screen:
             self.logger.info("initializing data loader")
 
-        # Only the multifiles and the synthetic dataloaders can serve inference: both address
-        # samples by index and by time, which is how the rollout schedule is built. Anything else
-        # is overridden to multifiles.
+        # Every dataloader serves inference: the multifiles and the synthetic ones address samples
+        # by index and by time, which is how the rollout schedule is built, and the DALI one reads
+        # the batches of that schedule through the multifiles dataset. Which one is ``multifiles``'s
+        # choice, multifiles unless set, so that inference does not depend on DALI by default.
         #
         # ..note::
         #     The second attribute check here used to read ``hasattr(self.params, "amp")`` while
@@ -116,7 +117,7 @@ class Inferencer(Driver):
         if not hasattr(self.params, "enable_synthetic_data"):
             self.params["enable_synthetic_data"] = False
 
-        if not self.params.enable_synthetic_data:
+        if not hasattr(self.params, "multifiles"):
             self.params["multifiles"] = True
 
         # the file path is taken from inf_data_path to perform inference on the out of sample dataset
@@ -578,13 +579,17 @@ class Inferencer(Driver):
         # etc: generate batched list first:
         # use sorted index sampler, which does the trick
         sampler = SortedIndexSampler(indices, num_samples, batch_size, rollout_steps, self.params.dt)
-        subset_dataloader = tud.DataLoader(
-            self.valid_dataset,
-            batch_sampler=sampler,
-            prefetch_factor=6,
-            pin_memory=True,
-            num_workers=self.params.num_data_workers,
-        )
+        if hasattr(self.valid_dataloader, "schedule"):
+            # DALI reads the batches of the schedule in its own pipeline, built for this one
+            subset_dataloader = self.valid_dataloader.schedule(sampler.indices)
+        else:
+            subset_dataloader = tud.DataLoader(
+                self.valid_dataset,
+                batch_sampler=sampler,
+                prefetch_factor=6,
+                pin_memory=True,
+                num_workers=self.params.num_data_workers,
+            )
 
         # a sample covers the window idx, ..., idx + n_history * dt, and the targets are verified at its latest step
         history_offset = self.valid_dataset.n_history * self.valid_dataset.dt
@@ -741,6 +746,10 @@ class Inferencer(Driver):
 
                 if profiler is not None:
                     profiler.step()
+
+        # a DALI pipeline serves one schedule; its workers are not needed past it
+        if hasattr(subset_dataloader, "close"):
+            subset_dataloader.close()
 
         # barrier to ensure everyone is here before calling finalize
         if dist.is_initialized():
