@@ -22,7 +22,7 @@ from torch.utils.checkpoint import checkpoint
 from functools import partial
 
 # helpers
-from makani.models.common import DropPath, LayerScale, MLP, EncoderDecoder, SpectralConv
+from makani.models.common import DropPath, LayerScale, MLP, EncoderDecoder, spectral_conv_s2
 from makani.utils.features import get_water_channels
 
 # get spectral transforms and spherical convolutions from torch_harmonics
@@ -473,12 +473,11 @@ class NeuralOperatorBlock(nn.Module):
 
         elif conv_type == "global":
             # convolution layer
-            self.global_conv = SpectralConv(
+            self.global_conv = spectral_conv_s2(
                 forward_transform,
                 inverse_transform,
                 inp_chans,
                 inp_chans,
-                operator_type="dhconv",
                 num_groups=num_groups,
                 bias=bias,
                 gain=gain_factor,
@@ -539,7 +538,7 @@ class NeuralOperatorBlock(nn.Module):
         """
 
         if hasattr(self, "global_conv"):
-            dx, _ = self.global_conv(x)
+            dx = self.global_conv(x)
         elif hasattr(self, "local_conv"):
             dx = self.local_conv(x)
 
