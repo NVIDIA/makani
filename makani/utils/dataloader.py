@@ -71,51 +71,52 @@ def init_distributed_io(params):
     return
 
 
+def _multifiles_dataset(params, files_pattern, mode, bias, scale):
+    """The map-style dataset of the multifiles path, which the DALI inference loader reads through as well."""
+    from makani.utils.dataloaders.data_loader_multifiles import MultifilesDataset
+
+    return MultifilesDataset(
+        location=files_pattern,
+        dt=params.get("dt"),
+        in_channels=params.get("in_channels"),
+        out_channels=params.get("out_channels"),
+        n_history=params.get("n_history", 0),
+        n_future=(params.get("valid_autoreg_steps") if (mode == "eval") else params.get("n_future", 0)),
+        add_zenith=params.get("add_zenith", False),
+        data_grid_type=params.data_grid_type,
+        model_grid_type=params.get("model_grid_type", "equiangular"),
+        bias=bias,
+        scale=scale,
+        crop_size=(params.get("crop_size_x", None), params.get("crop_size_y", None)),
+        crop_anchor=(params.get("crop_anchor_x", 0), params.get("crop_anchor_y", 0)),
+        subsampling_factor=params.get("subsampling_factor", 1),
+        grid_type=params.data_grid_type,
+        return_target=(False if (mode == "inference") else True),
+        dataset_name=params.get("h5_path", "fields"),
+        timestamp_name=params.get("timestamp_name", "timestamp"),
+        # required by layouts that address variables by name, such as WB2
+        channel_names=params.get("channel_names", None),
+        latitude_name=params.get("latitude_name", "lat"),
+        longitude_name=params.get("longitude_name", "lon"),
+        enable_s3=params.get("enable_s3", False),
+        enable_odirect=params.get("enable_odirect", False),
+        odirect_alignment=params.get("odirect_alignment", 0),
+        io_grid=params.get("io_grid", [1, 1, 1]),
+        io_rank=params.get("io_rank", [0, 0, 0]),
+        backend=params.get("dataset_backend", None),
+    )
+
+
 def get_dataloader(params, files_pattern, device, mode="train", dali_device=None):
     init_distributed_io(params)
-
-    if (mode == "inference") and not (params.get("multifiles", False) or params.enable_synthetic_data):
-        raise NotImplementedError(
-            "Error, only the multifiles and the synthetic dataloaders are supported in inference mode."
-        )
 
     # get data normalization
     bias, scale = get_data_normalization(params)
 
     if params.get("multifiles", False):
-        from makani.utils.dataloaders.data_loader_multifiles import MultifilesDataset as MultifilesDataset2D
         from torch.utils.data.distributed import DistributedSampler
 
-        dataset = MultifilesDataset2D(
-            location=files_pattern,
-            dt=params.get("dt"),
-            in_channels=params.get("in_channels"),
-            out_channels=params.get("out_channels"),
-            n_history=params.get("n_history", 0),
-            n_future=(params.get("valid_autoreg_steps") if (mode == "eval") else params.get("n_future", 0)),
-            add_zenith=params.get("add_zenith", False),
-            data_grid_type=params.data_grid_type,
-            model_grid_type=params.get("model_grid_type", "equiangular"),
-            bias=bias,
-            scale=scale,
-            crop_size=(params.get("crop_size_x", None), params.get("crop_size_y", None)),
-            crop_anchor=(params.get("crop_anchor_x", 0), params.get("crop_anchor_y", 0)),
-            subsampling_factor=params.get("subsampling_factor", 1),
-            grid_type=params.data_grid_type,
-            return_target=(False if (mode == "inference") else True),
-            dataset_name=params.get("h5_path", "fields"),
-            timestamp_name=params.get("timestamp_name", "timestamp"),
-            # required by layouts that address variables by name, such as WB2
-            channel_names=params.get("channel_names", None),
-            latitude_name=params.get("latitude_name", "lat"),
-            longitude_name=params.get("longitude_name", "lon"),
-            enable_s3=params.get("enable_s3", False),
-            enable_odirect=params.get("enable_odirect", False),
-            odirect_alignment=params.get("odirect_alignment", 0),
-            io_grid=params.get("io_grid", [1, 1, 1]),
-            io_rank=params.get("io_rank", [0, 0, 0]),
-            backend=params.get("dataset_backend", None),
-        )
+        dataset = _multifiles_dataset(params, files_pattern, mode, bias, scale)
 
         if mode in ["train", "eval"]:
             sampler = (
@@ -216,12 +217,27 @@ def get_dataloader(params, files_pattern, device, mode="train", dali_device=None
         if importlib.util.find_spec("nvidia") is None or importlib.util.find_spec("nvidia.dali") is None:
             raise ImportError("Setting multifiles to False requires nvidia-dali, but module was not found.")
 
-        from makani.utils.dataloaders.dali_dataloader import DaliDataloader
-
-        # dali loader
         if dali_device is None:
             dali_device = "gpu" if torch.cuda.is_available() else "cpu"
-        dataloader = DaliDataloader(params, files_pattern, (mode == "train"), dali_device=dali_device)
+
+        if mode == "inference":
+            # inference reads the batches of a schedule by index, through the same dataset as
+            # the multifiles path; DALI reads, batches and moves them. The inferencer sets the
+            # schedule, see DaliInferenceLoader.schedule
+            from makani.utils.dataloaders.dali_inference_dataloader import DaliInferenceLoader
+
+            dataloader = DaliInferenceLoader(
+                _multifiles_dataset(params, files_pattern, mode, bias, scale),
+                batch_size=params.batch_size,
+                num_data_workers=params.num_data_workers,
+                data_grid_type=params.data_grid_type,
+                model_grid_type=params.get("model_grid_type", "equiangular"),
+                dali_device=dali_device,
+            )
+        else:
+            from makani.utils.dataloaders.dali_dataloader import DaliDataloader
+
+            dataloader = DaliDataloader(params, files_pattern, (mode == "train"), dali_device=dali_device)
 
         data_shapes = dataloader.data_shapes
 
