@@ -33,6 +33,8 @@ from parameterized import parameterized, parameterized_class
 from makani.utils.dataloader import get_dataloader
 from makani.utils.grids import sht_grid
 from makani.utils.dataloaders.data_helpers import get_date_from_string
+from makani.utils.dataloaders.data_loader_dummy import DummyInferenceDataset
+from makani.utils.dataloaders.data_loader_multifiles import MultifilesDataset
 from makani.utils.dataloaders.batch import INPUT, INPUT_TIMESTAMP, TARGET, TARGET_TIMESTAMP
 from makani.utils.dataloaders.rollout import Rollout
 from makani.utils.functions import expand_ensemble
@@ -426,6 +428,29 @@ class TestInferencerScoring(_InferencerTestCase):
                 targets = raw[[idx + (k + 1) * inferencer.params.dt for idx in raw_ics]]
                 error = fields[:, k + 1, 0] - targets
                 self._assert_close(bias_mean[k], torch.from_numpy(error).mean(dim=0), "mean error")
+
+
+class TestInferencerLoaderDefault(_InferencerTestCase):
+    """Which loader the inferencer picks when ``multifiles`` is left unset, as the configs and the benchmark leave it."""
+
+    loader = "multifiles"
+
+    def _inferencer(self, synthetic):
+        params = self._params(ensemble_size=1, n_history=0, noise=None, zenith=False)
+        delattr(params, "multifiles")
+        params.enable_synthetic_data = synthetic
+        if synthetic:
+            # synthetic data lives nowhere, as in the benchmark
+            params.inf_data_path = os.path.join(self.tmpdir.name, "nowhere")
+        return Inferencer(params, world_rank=0, device="cpu")
+
+    def test_real_data_reads_multifiles(self):
+        inferencer = self._inferencer(synthetic=False)
+        self.assertIsInstance(inferencer.valid_dataloader.dataset, MultifilesDataset)
+
+    def test_synthetic_data_stays_synthetic(self):
+        inferencer = self._inferencer(synthetic=True)
+        self.assertIsInstance(inferencer.valid_dataloader.dataset, DummyInferenceDataset)
 
 
 if __name__ == "__main__":

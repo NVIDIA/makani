@@ -107,7 +107,9 @@ class Inferencer(Driver):
         # Every dataloader serves inference: the multifiles and the synthetic ones address samples
         # by index and by time, which is how the rollout schedule is built, and the DALI one reads
         # the batches of that schedule through the multifiles dataset. Which one is ``multifiles``'s
-        # choice, multifiles unless set, so that inference does not depend on DALI by default.
+        # choice. Unset, it picks multifiles for real data, so that inference does not depend on
+        # DALI by default, and stays off for synthetic data, which ``get_dataloader`` would
+        # otherwise never reach since it checks ``multifiles`` first.
         #
         # ..note::
         #     The second attribute check here used to read ``hasattr(self.params, "amp")`` while
@@ -118,7 +120,7 @@ class Inferencer(Driver):
             self.params["enable_synthetic_data"] = False
 
         if not hasattr(self.params, "multifiles"):
-            self.params["multifiles"] = True
+            self.params["multifiles"] = not self.params.enable_synthetic_data
 
         # the file path is taken from inf_data_path to perform inference on the out of sample dataset
         self.valid_dataloader, self.valid_data_shapes, _ = get_dataloader(
