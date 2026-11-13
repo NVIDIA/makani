@@ -1300,7 +1300,7 @@ class TestDummyLoader(unittest.TestCase):
         self.assertTrue((out_scale == 1).all())
 
 
-@parameterized_class(("kind",), [("dummy",), ("multifiles",)])
+@parameterized_class(("kind",), [("dummy",), ("multifiles",)] + ([("dali",)] if _have_dali else []))
 class TestInferenceLookup(unittest.TestCase):
     """
     The lookup by time the inferencer drives an inference dataset with.
@@ -1308,7 +1308,9 @@ class TestInferenceLookup(unittest.TestCase):
     The inferencer picks its initial conditions by time and reads them by index,
     so the synthetic dataset has to answer exactly as the multifiles one does:
     the same index for a time, the same range, the same number of samples, and
-    the same window for a sample looked up by time, starting at that time.
+    the same window for a sample looked up by time, starting at that time. For
+    DALI it is the dataset the inference loader of ``get_dataloader`` exposes,
+    which has no targets, since the loader reads input windows only.
     """
 
     _DT = 2
@@ -1318,13 +1320,29 @@ class TestInferenceLookup(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmpdir = tempfile.TemporaryDirectory()
-        cls.train_path, *_ = init_hdf5_dataset(cls.tmpdir.name)
+        cls.train_path, _, cls.valid_path, _, cls.stats_path, *_ = init_hdf5_dataset(cls.tmpdir.name)
 
     @classmethod
     def tearDownClass(cls):
         cls.tmpdir.cleanup()
 
     def _make(self, return_target=True):
+        if self.kind == "dali":
+            if return_target:
+                self.skipTest("the DALI inference loader reads input windows only")
+            params = init_dataset_params(
+                self.train_path, self.valid_path, self.stats_path, 1, self._N_HISTORY, self._N_FUTURE, "zscore", 1
+            )
+            params.multifiles = False
+            params.dt = self._DT
+            params.io_grid = [1, 1, 1]
+            params.io_rank = [0, 0, 0]
+            loader, _, _ = get_dataloader(
+                params, self.train_path, device=torch.device("cpu"), mode="inference", dali_device="cpu"
+            )
+            self.addCleanup(loader.close)
+            return loader.dataset
+
         kwargs = dict(
             dt=self._DT,
             in_channels=list(range(NUM_CHANNELS)),
@@ -1346,7 +1364,7 @@ class TestInferenceLookup(unittest.TestCase):
         return MultifilesDataset(location=self.train_path, **kwargs)
 
     def test_index_and_time_round_trip(self):
-        dataset = self._make()
+        dataset = self._make(return_target=False)
         for idx in [0, 3, len(dataset) - 1]:
             with self.subTest(idx=idx):
                 self.assertEqual(dataset.get_index_at_time(dataset.get_time_at_index(idx)), idx)
@@ -1354,12 +1372,12 @@ class TestInferenceLookup(unittest.TestCase):
                 self.assertEqual(dataset.get_index_at_time(dataset.get_time_at_index(idx).timestamp()), idx)
 
     def test_a_time_between_samples_maps_to_the_earlier_one(self):
-        dataset = self._make()
+        dataset = self._make(return_target=False)
         time = dataset.get_time_at_index(3) + dt.timedelta(minutes=30)
         self.assertEqual(dataset.get_index_at_time(time), 3)
 
     def test_times_outside_the_dataset_are_refused(self):
-        dataset = self._make()
+        dataset = self._make(return_target=False)
         before = dataset.get_time_at_index(0) - dt.timedelta(hours=1)
         after = dataset.get_time_at_index(dataset.n_samples_total - 1) + dt.timedelta(hours=1)
         for time in [before, after]:
@@ -1379,19 +1397,154 @@ class TestInferenceLookup(unittest.TestCase):
                 self.assertEqual(len(dataset), dataset.n_samples_total - self._DT * n_steps)
 
     def test_a_sample_looked_up_by_time_starts_at_that_time(self):
-        dataset = self._make()
-        time = dataset.get_time_at_index(3)
-        step = self._DT * dataset.dhours * 3600.0
+        for return_target in [True, False]:
+            with self.subTest(return_target=return_target):
+                dataset = self._make(return_target=return_target)
+                time = dataset.get_time_at_index(3)
+                step = self._DT * dataset.dhours * 3600.0
 
-        sample = dataset.get_sample_at_time(time)
+                sample = dataset.get_sample_at_time(time)
 
-        start = time.timestamp()
-        expected_input = start + step * torch.arange(self._N_HISTORY + 1, dtype=torch.float64)
-        expected_target = start + step * torch.arange(
-            self._N_HISTORY + 1, self._N_HISTORY + self._N_FUTURE + 2, dtype=torch.float64
+                start = time.timestamp()
+                expected_input = start + step * torch.arange(self._N_HISTORY + 1, dtype=torch.float64)
+                self.assertTrue(torch.equal(sample[INPUT_TIMESTAMP], expected_input))
+
+                if return_target:
+                    expected_target = start + step * torch.arange(
+                        self._N_HISTORY + 1, self._N_HISTORY + self._N_FUTURE + 2, dtype=torch.float64
+                    )
+                    self.assertTrue(torch.equal(sample[TARGET_TIMESTAMP], expected_target))
+                else:
+                    self.assertEqual(set(sample), _INFERENCE_KEYS)
+
+
+@parameterized_class(("dali_device",), _dali_devices)
+@unittest.skipUnless(_have_dali, "nvidia.dali is not installed")
+class TestDaliInferenceLoader(unittest.TestCase):
+    """
+    The DALI inference loader reads the batches of a schedule, as the inferencer lays them out.
+
+    It reads through the multifiles dataset, so a batch has to be what that dataset
+    gives for the same indices, down to the bit: windows with history that start in
+    one file and end in the next, the zenith angle and the timestamps, and batches of
+    any size up to the batch size, the last of a schedule usually being shorter.
+    """
+
+    _BATCH_SIZE = 3
+    _DT = 2
+    _N_HISTORY = 2
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmpdir = tempfile.TemporaryDirectory()
+        cls.train_path, _, cls.valid_path, _, cls.stats_path, *_ = init_hdf5_dataset(cls.tmpdir.name)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmpdir.cleanup()
+
+    def setUp(self):
+        disable_tf32()
+
+    def _params(self, multifiles):
+        params = init_dataset_params(
+            self.train_path,
+            self.valid_path,
+            self.stats_path,
+            batch_size=self._BATCH_SIZE,
+            n_history=self._N_HISTORY,
+            n_future=0,
+            normalization="zscore",
+            num_data_workers=2,
         )
-        self.assertTrue(torch.equal(sample[INPUT_TIMESTAMP], expected_input))
-        self.assertTrue(torch.equal(sample[TARGET_TIMESTAMP], expected_target))
+        params.multifiles = multifiles
+        params.dt = self._DT
+        params.add_zenith = True
+        params.io_grid = [1, 1, 1]
+        params.io_rank = [0, 0, 0]
+        return params
+
+    def _loader(self):
+        loader, _, _ = get_dataloader(
+            self._params(multifiles=False),
+            self.train_path,
+            device=torch.device("cpu"),
+            mode="inference",
+            dali_device=self.dali_device,
+        )
+        self.addCleanup(loader.close)
+        return loader
+
+    def _reference(self):
+        dataloader, _, _ = get_dataloader(
+            self._params(multifiles=True), self.train_path, device=torch.device("cpu"), mode="inference"
+        )
+        return dataloader.dataset
+
+    def _assert_batches_match(self, batches, schedule, reference):
+        self.assertEqual(len(batches), len(schedule))
+        for batch, indices in zip(batches, schedule):
+            with self.subTest(indices=indices):
+                self.assertEqual(set(batch), _INFERENCE_KEYS)
+                samples = [reference.get_sample_at_index(idx, return_target=False) for idx in indices]
+                expected = {
+                    INPUT: torch.stack([sample[INPUT] for sample in samples]),
+                    INPUT_TIMESTAMP: torch.stack([sample[INPUT_TIMESTAMP] for sample in samples]),
+                    ZENITH: torch.stack([sample[INPUT_DYNAMIC_FEATURES][ZENITH] for sample in samples]),
+                }
+                actual = {
+                    INPUT: batch[INPUT],
+                    INPUT_TIMESTAMP: batch[INPUT_TIMESTAMP],
+                    ZENITH: batch[INPUT_DYNAMIC_FEATURES][ZENITH],
+                }
+                for key, tensor in actual.items():
+                    self.assertEqual(tensor.device.type, "cuda" if self.dali_device == "gpu" else "cpu", key)
+                    self.assertEqual(tensor.dtype, expected[key].dtype, key)
+                    self.assertTrue(torch.equal(tensor.cpu(), expected[key]), key)
+
+    def test_batches_match_the_multifiles_dataset(self):
+        # 361 starts a window in the first year that ends in the second; the last batch is short
+        schedule = [[0, 361, 7], [364, 400], [12]]
+        loader = self._loader()
+        batches = list(loader.schedule(schedule))
+        self._assert_batches_match(batches, schedule, self._reference())
+
+    def test_a_new_schedule_replaces_the_old_one(self):
+        loader = self._loader()
+        reference = self._reference()
+        for schedule in [[[3, 4, 5], [6]], [[100], [200, 300]]]:
+            batches = list(loader.schedule(schedule))
+            self.assertEqual(len(loader), len(schedule))
+            self._assert_batches_match(batches, schedule, reference)
+
+    def test_an_empty_schedule_yields_nothing(self):
+        loader = self._loader()
+        self.assertEqual(list(loader.schedule([])), [])
+
+    def test_iterating_without_a_schedule_is_refused(self):
+        loader = self._loader()
+        with self.assertRaisesRegex(RuntimeError, "schedule"):
+            next(iter(loader))
+
+    def test_a_batch_larger_than_the_batch_size_is_refused(self):
+        loader = self._loader()
+        with self.assertRaisesRegex(ValueError, "larger than the batch size"):
+            loader.schedule([list(range(self._BATCH_SIZE + 1))])
+
+    def test_a_dataset_with_targets_is_refused(self):
+        from makani.utils.dataloaders.dali_inference_dataloader import DaliInferenceLoader
+
+        reference = self._loader().dataset
+        with mock.patch.object(reference, "return_target", True):
+            with self.assertRaisesRegex(ValueError, "without targets"):
+                DaliInferenceLoader(reference, self._BATCH_SIZE, 1, "equiangular", "equiangular", self.dali_device)
+
+    def test_close_releases_the_pipeline(self):
+        loader = self._loader()
+        loader.schedule([[0]])
+        loader.close()
+        self.assertIsNone(loader.pipeline)
+        self.assertIsNone(loader.iterator)
 
 
 def _without_dali(name, *args, **kwargs):
@@ -1659,13 +1812,15 @@ def _parity_cases():
                 for n_future in [0, 2]:
                     for zenith in [False, True]:
                         cases.append((loader, mode, n_history, n_future, zenith))
-    # every DALI loader starts a worker pool, so only a few representative cases; it has no inference mode
+    # every DALI loader starts a worker pool, so only a few representative cases
     if _have_dali:
         cases += [
             ("dali", "eval", 0, 0, False),
             ("dali", "eval", 2, 2, True),
             ("dali", "eval", 0, 2, True),
             ("dali", "train", 2, 0, True),
+            ("dali", "inference", 0, 0, False),
+            ("dali", "inference", 2, 0, True),
         ]
     return cases
 
@@ -1684,8 +1839,9 @@ class TestLoaderParity(unittest.TestCase):
     the same keys and dynamic features, shapes, dtypes and one device; timestamps
     that step by ``dt`` and a zenith angle that belongs to them; and, for DALI,
     the same values as the multifiles dataset for the same window, matched by
-    time since the two count their samples differently (multifiles from the
-    first input step, DALI from the last).
+    time since the two count their samples differently in training (multifiles
+    from the first input step, DALI from the last). The DALI inference loader
+    reads through the multifiles dataset, and counts as it does.
     """
 
     @classmethod
@@ -1737,6 +1893,9 @@ class TestLoaderParity(unittest.TestCase):
             self.addCleanup(dataloader.close)
 
         if mode == "inference":
+            # the DALI inference loader reads the batches the inferencer schedules
+            if hasattr(dataloader, "schedule"):
+                return next(iter(dataloader.schedule([[0, 1]])))
             dataset = dataloader.dataset
             return default_collate([dataset.get_sample_at_index(idx, return_target=False) for idx in range(2)])
         return next(iter(dataloader))
@@ -1831,13 +1990,16 @@ class TestLoaderParity(unittest.TestCase):
 
             with self.subTest(sample=b):
                 for key in [INPUT_TIMESTAMP, TARGET_TIMESTAMP]:
-                    self.assertTrue(torch.equal(batch[key][b].cpu(), sample[key]), key)
+                    if key in batch:
+                        self.assertTrue(torch.equal(batch[key][b].cpu(), sample[key]), key)
                 for key in [INPUT, TARGET]:
+                    if key not in batch:
+                        continue
                     self.assertTrue(
                         compare_tensors(key, batch[key][b].cpu(), sample[key], atol=1e-5, rtol=1e-5, shape_check=True)
                     )
                 for side in [INPUT_DYNAMIC_FEATURES, TARGET_DYNAMIC_FEATURES]:
-                    for name, feature in batch[side].items():
+                    for name, feature in batch.get(side, {}).items():
                         self.assertTrue(
                             compare_tensors(
                                 f"{side}/{name}",

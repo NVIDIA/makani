@@ -48,7 +48,17 @@ from makani.utils.dataloaders.data_helpers import (
 # storage backends
 from makani.utils.dataloaders.backends import get_backend
 from makani.utils.dataloaders.data_shapes import DataShapes
-from makani.utils.dataloaders.batch import ZENITH, make_batch
+from makani.utils.dataloaders.batch import (
+    INPUT,
+    INPUT_DYNAMIC_FEATURES,
+    INPUT_TIMESTAMP,
+    TARGET,
+    TARGET_DYNAMIC_FEATURES,
+    TARGET_TIMESTAMP,
+    ZENITH,
+    make_batch,
+)
+from makani.utils.dataloaders.sample_source import feature_output_name
 
 # for grid conversion
 from makani.utils.grid_types import DEFAULT_GRID_TYPE
@@ -356,32 +366,63 @@ class MultifilesDataset(Dataset):
         toff = 1 if self.return_target else 0
         return self.n_samples_total - self.dt * (self.n_history + self.n_future + toff)
 
+    def read_window(self, global_idx, return_target=True):
+        """The sample starting at ``global_idx`` as numpy arrays, normalized but still on the data grid.
+
+        Keyed like the outputs of the DALI sources: the batch keys, and
+        :func:`~makani.utils.dataloaders.sample_source.feature_output_name` for the
+        zenith angle. The fields are ``(T, C, H, W)`` float32, the timestamps
+        ``(T,)`` float64 seconds since the epoch. This is what
+        :meth:`get_sample_at_index` turns into a batch, and what the DALI inference
+        loader reads in its workers, so both see the same windows.
+        """
+        # the statistics are float64, so normalizing promotes the fields; they are float32 everywhere downstream
+        result = {
+            INPUT: self._get_data(global_idx, 0, self.n_history + 1, target=False).astype(np.float32),
+            INPUT_TIMESTAMP: self._compute_timestamps(global_idx, 0, self.n_history + 1),
+        }
+        if self.add_zenith:
+            result[feature_output_name(INPUT_DYNAMIC_FEATURES, ZENITH)] = self._compute_zenith_angle(
+                result[INPUT_TIMESTAMP]
+            )
+
+        if return_target:
+            stop = self.n_history + self.n_future + 2
+            result[TARGET] = self._get_data(global_idx, self.n_history + 1, stop, target=True).astype(np.float32)
+            result[TARGET_TIMESTAMP] = self._compute_timestamps(global_idx, self.n_history + 1, stop)
+            if self.add_zenith:
+                result[feature_output_name(TARGET_DYNAMIC_FEATURES, ZENITH)] = self._compute_zenith_angle(
+                    result[TARGET_TIMESTAMP]
+                )
+
+        return result
+
     def get_sample_at_index(self, global_idx, return_target=True):
         """The sample starting at ``global_idx``, as a dict, see :mod:`makani.utils.dataloaders.batch`."""
 
-        def as_field(arr):
-            return self.grid_converter(torch.as_tensor(arr, dtype=torch.float32))
+        def as_field(name):
+            if name not in window:
+                return None
+            return self.grid_converter(torch.as_tensor(window[name], dtype=torch.float32))
 
-        def as_time(arr):
-            return torch.as_tensor(arr, dtype=torch.float64)
+        def as_time(name):
+            if name not in window:
+                return None
+            return torch.as_tensor(window[name], dtype=torch.float64)
 
-        inp = self._get_data(global_idx, 0, self.n_history + 1, target=False)
-        inp_time = self._compute_timestamps(global_idx, 0, self.n_history + 1)
-        inp_zen = self._compute_zenith_angle(inp_time) if self.add_zenith else None
+        def as_features(side):
+            zenith = as_field(feature_output_name(side, ZENITH))
+            return None if zenith is None else {ZENITH: zenith}
 
-        tar = tar_time = tar_zen = None
-        if return_target:
-            tar = self._get_data(global_idx, self.n_history + 1, self.n_history + self.n_future + 2, target=True)
-            tar_time = self._compute_timestamps(global_idx, self.n_history + 1, self.n_history + self.n_future + 2)
-            tar_zen = self._compute_zenith_angle(tar_time) if self.add_zenith else None
+        window = self.read_window(global_idx, return_target=return_target)
 
         return make_batch(
-            inp=as_field(inp),
-            inp_timestamp=as_time(inp_time),
-            tar=None if tar is None else as_field(tar),
-            tar_timestamp=None if tar_time is None else as_time(tar_time),
-            inp_dynamic_features=None if inp_zen is None else {ZENITH: as_field(inp_zen)},
-            tar_dynamic_features=None if tar_zen is None else {ZENITH: as_field(tar_zen)},
+            inp=as_field(INPUT),
+            inp_timestamp=as_time(INPUT_TIMESTAMP),
+            tar=as_field(TARGET),
+            tar_timestamp=as_time(TARGET_TIMESTAMP),
+            inp_dynamic_features=as_features(INPUT_DYNAMIC_FEATURES),
+            tar_dynamic_features=as_features(TARGET_DYNAMIC_FEATURES),
         )
 
     # this is just for the torch dataloader

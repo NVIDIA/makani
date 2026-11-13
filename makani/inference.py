@@ -106,6 +106,13 @@ if __name__ == "__main__":
         help="At what interval to sample initial conditions. Needs to be an integer number specifying the step in terms of dhours.",
     )
     parser.add_argument(
+        "--dataloader",
+        default="multifiles",
+        choices=["multifiles", "dali"],
+        type=str,
+        help="Dataloader that reads the initial conditions and the verification. Both read the same samples; DALI reads them in its own worker processes and hands them over on the GPU, and requires nvidia-dali.",
+    )
+    parser.add_argument(
         "--wb2_compatible", action="store_true", help="Makes metrics and quadratures compatible with weatherbench2."
     )
     parser.add_argument(
@@ -205,8 +212,8 @@ if __name__ == "__main__":
             "--dataset_file_suffix is deprecated and ignored; the storage layout is detected from the data path."
         )
 
-    # by default we use only the multifiles dataloader for inference
-    params["multifiles"] = True
+    # the multifiles dataloader unless DALI is asked for; the synthetic one takes precedence over both
+    params["multifiles"] = args.dataloader == "multifiles"
 
     # wandb configuration
     if params["wandb_name"] is None:
