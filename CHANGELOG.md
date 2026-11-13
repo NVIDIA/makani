@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0rc1
 
 **Breaking**
 - The spherical models convolve with the spectral convolution of torch-harmonics: FCN3, FCN3.1, SNO and the linear filter of SFNO build `SpectralConvS2` / `DistributedSpectralConvS2` through `makani.models.common.spectral_conv_s2`, with the truncation of their transforms. Its bias is the spectral bias of torch-harmonics, a coefficient per input channel and mode scaled by the integral of the channel, where makani added a bias per channel in grid space. The weight keeps its name and layout, and without a bias the layer computes the same, so checkpoints of these models without a bias in the spectral convolution, which no shipped config enables, load and give the same results; with one, `bias` is gone and `spectral_bias` is new. The linear SFNO filter on the sphere takes `operator_type: "dhconv"` only, and `separable: True` raises. `SpectralConv` is now the planar convolution of FNO only, with one weight per mode (`"diagonal"`, FNO's default); it initializes the weights per row of modes, where its init failed for `lmax != mmax`, and under spatial parallelism takes the local modes from the distributed FFTs, where it built weights of the global size.
@@ -14,6 +14,7 @@
 - `IsotropicGaussianRandomFieldS2` and `DiffusionNoiseS2` are isotropic: the orders `m > 0` are drawn with `1/sqrt(2)` of the amplitude, as in torch-harmonics, and the diffusion spectrum is normalized including `l = 0`. The variance is now `sigma^2` at every latitude and for every `kT`; before, it dropped to about half towards the poles and grew with `kT`. Samples for a given seed change. The FourCastNet 3 configs set `lmax: 721` for the input noise, the degrees it was trained with: from torch-harmonics 0.9 on, the default truncates the 721 x 1440 grid to 361.
 
 **Data**
+- Inference can read through DALI: `makani.inference --dataloader dali` (default `multifiles`), or `multifiles: False` in the parameters. The new `DaliInferenceLoader` reads the batches of the rollout schedule through the multifiles dataset in DALI's worker processes, so the batches are bit for bit those of the multifiles loader; it needs `num_data_workers >= 1`. The inferencer no longer forces `multifiles` and only defaults it, to the multifiles loader for real data and to the synthetic loader with `enable_synthetic_data`. New `MultifilesDataset.read_window`, which returns a sample as numpy arrays.
 - The DALI loader takes the order, the names and the layouts of its outputs from one list, `SampleSource.outputs()`, and passes on any dynamic feature it names. New `batch_nbytes` and `without_target` helpers; the trainers and the inferencer move batches with `non_blocking=True`, and the autoencoder trainer no longer moves the targets it does not use.
 - `Rollout` folds the ensemble into the dynamic features and timestamps of a target step once.
 
