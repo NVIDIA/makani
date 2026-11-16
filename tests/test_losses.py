@@ -2917,6 +2917,18 @@ class TestLpEnergyScoreLoss(unittest.TestCase):
         self.assertEqual(loss.dtype, torch.float32)
         self.assertTrue(compare_tensors("lp_es bf16", loss, fn(fc.to(torch.float32), obs), verbose=verbose))
 
+    @staticmethod
+    def _difference_report(compiled, eager):
+        """How far apart the compiled and the eager result are, for the failure message, which pytest always shows."""
+        difference = torch.abs(compiled.detach() - eager.detach())
+        worst = torch.argmax(difference)
+        index = tuple(int(i) for i in torch.unravel_index(worst, difference.shape))
+        return (
+            f"max |difference| {difference.max().item():.3e} at {index}: compiled {compiled.detach().flatten()[worst].item():.6e}, "
+            f"eager {eager.detach().flatten()[worst].item():.6e}; max |eager| {eager.detach().abs().max().item():.3e}; "
+            f"{int((difference > 1e-7 + 1e-5 * eager.detach().abs()).sum())} of {difference.numel()} entries outside the tolerance"
+        )
+
     @parameterized.expand(
         [("random", 2.0, 1.0), ("identical members", 1.0, 0.5), ("member equals observation", 0.5, 1.0)]
     )
@@ -2938,10 +2950,16 @@ class TestLpEnergyScoreLoss(unittest.TestCase):
         (grad_compiled,) = torch.autograd.grad(torch.sum(loss_compiled), fc_compiled)
 
         with self.subTest(desc="loss"):
-            self.assertTrue(compare_tensors("lp_es compiled", loss_compiled, loss_eager, verbose=True))
+            self.assertTrue(
+                compare_tensors("lp_es compiled", loss_compiled, loss_eager, verbose=verbose),
+                self._difference_report(loss_compiled, loss_eager),
+            )
         with self.subTest(desc="gradient"):
             self.assertTrue(torch.all(torch.isfinite(grad_compiled)))
-            self.assertTrue(compare_tensors("lp_es compiled grad", grad_compiled, grad_eager, atol=1e-7, verbose=True))
+            self.assertTrue(
+                compare_tensors("lp_es compiled grad", grad_compiled, grad_eager, atol=1e-7, verbose=verbose),
+                self._difference_report(grad_compiled, grad_eager),
+            )
 
 
 # ===========================================================================
