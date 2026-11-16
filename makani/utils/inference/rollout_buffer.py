@@ -624,10 +624,18 @@ class RolloutBuffer(DataBuffer):
         continues writing into the freshly-zeroed buffer at the correct idt offset.
         """
 
+        if torch.cuda.is_available():
+            torch.cuda.nvtx.range_push("RolloutBuffer:flush")
+
         # wait for everything to complete (CUDA only — synchronize is a CUDA-specific
         # primitive and would raise on CPU-only builds).
         if self.device.type == "cuda":
+            torch.cuda.nvtx.range_push("RolloutBuffer:flush:synchronize")
             torch.cuda.synchronize(device=self.device)
+            torch.cuda.nvtx.range_pop()
+
+        if torch.cuda.is_available():
+            torch.cuda.nvtx.range_push("RolloutBuffer:flush:write")
 
         if (self.file_handle is not None) and (self.buffer_offset > 0):
             # write each batch chunk as one coalesced slab
@@ -645,6 +653,9 @@ class RolloutBuffer(DataBuffer):
                     dest_sel=ts_file_range,
                 )
 
+        if torch.cuda.is_available():
+            torch.cuda.nvtx.range_pop()
+
         # determine whether the last chunk's rollout is incomplete; if so, the next
         # update() for the same batch continues into a freshly-zeroed buffer and we
         # need a carry-over chunk to remember where in the file it goes.
@@ -661,11 +672,20 @@ class RolloutBuffer(DataBuffer):
                     "idt_count": 0,
                 }
 
+        if torch.cuda.is_available():
+            torch.cuda.nvtx.range_push("RolloutBuffer:flush:zero")
+
         # reset all buffer state (data, timestamps, chunks, offsets); file_offset preserved
         self.zero_buffers()
 
+        if torch.cuda.is_available():
+            torch.cuda.nvtx.range_pop()
+
         if carry is not None:
             self.chunks.append(carry)
+
+        if torch.cuda.is_available():
+            torch.cuda.nvtx.range_pop()
 
         return
 
@@ -674,6 +694,9 @@ class RolloutBuffer(DataBuffer):
 
         if self.file_handle is None:
             return
+
+        if torch.cuda.is_available():
+            torch.cuda.nvtx.range_push("RolloutBuffer:write")
 
         current_batch_size = predp.shape[0]
 
@@ -707,6 +730,9 @@ class RolloutBuffer(DataBuffer):
                 tarr,
                 dest_sel=batch_range,
             )
+
+        if torch.cuda.is_available():
+            torch.cuda.nvtx.range_pop()
 
         return
 
