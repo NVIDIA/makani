@@ -159,20 +159,31 @@ class LpEnergyScoreLoss(GeometricBaseLoss):
         #  ensemble size
         num_ensemble = forecasts.shape[0]
 
-        # espread: index all upper-triangular pairs via combinations — avoids the O(E^2 * B * C * H*W)
-        # full outer-product; peak allocation is O(P * B * C * H*W) where P = E*(E-1)/2.
-        idx = torch.combinations(torch.arange(num_ensemble, device=forecasts.device), r=2)  # (P, 2)
-        diff = abs_pow(forecasts[idx[:, 0]] - forecasts[idx[:, 1]], self.p)  # (P, B, C, H*W)
-
-        eskill = abs_pow(observations - forecasts, self.p)
-
-        # do the spatial reduction
+        # the quadrature weights, and the spatial weights if given, of the local grid points
+        point_weight = self.quad_weight_split
         if spatial_weights is not None:
-            diff = torch.sum(diff * self.quad_weight_split * spatial_weights_split, dim=-1)
-            eskill = torch.sum(eskill * self.quad_weight_split * spatial_weights_split, dim=-1)
+            point_weight = point_weight * spatial_weights_split
+
+        # espread: the upper-triangular member pairs, summed over the grid, (P, B, C). Gathering both members of
+        # every pair from the full fields, with torch.combinations, gave wrong gradients when compiled on the
+        # x86-64 CPU runners of the CI: its backward adds up repeated indices. Both forms below avoid that.
+        # Compiled, all pairs come from broadcasting, which inductor fuses into a pass over the members that
+        # holds no pairwise differences; the upper triangle is then taken of the small (E, E, B, C) result, where
+        # every index occurs once. Eager, the broadcast would hold the differences of all E^2 pairs, so the pairs
+        # (i, i + k) come from slices instead, the differences of one offset k at a time. The order of the
+        # pairs does not matter, they are summed below
+        if torch.compiler.is_compiling():
+            diff = torch.sum(abs_pow(forecasts.unsqueeze(1) - forecasts.unsqueeze(0), self.p) * point_weight, dim=-1)
+            pairs = torch.triu_indices(num_ensemble, num_ensemble, offset=1, device=forecasts.device)
+            diff = diff[pairs[0], pairs[1]]
         else:
-            diff = torch.sum(diff * self.quad_weight_split, dim=-1)  # (P, B, C)
-            eskill = torch.sum(eskill * self.quad_weight_split, dim=-1)
+            diff = [
+                torch.sum(abs_pow(forecasts[k:] - forecasts[:-k], self.p) * point_weight, dim=-1)
+                for k in range(1, num_ensemble)
+            ]
+            diff = torch.cat(diff, dim=0) if diff else forecasts.new_zeros((0, *forecasts.shape[1:-1]))
+
+        eskill = torch.sum(abs_pow(observations - forecasts, self.p) * point_weight, dim=-1)  # (E, B, C)
 
         # since we split spatial dim into ensemble dim, we need to do an ensemble sum as well
         if self.ensemble_distributed:
