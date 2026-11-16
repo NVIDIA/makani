@@ -680,9 +680,15 @@ class Inferencer(Driver):
                     rollout = Rollout(gbatch, n_steps=rollout_steps, noise=self.model.noise, ensemble_size=E)
 
                     if rollout_buffer is not None:
+                        if torch.cuda.is_available():
+                            torch.cuda.nvtx.range_push("Inferencer:rollout_buffer")
+
                         # every member starts from the same initial condition, (B, E, C, H, W)
                         ic = rollout.unfold(expand_ensemble(gfield[:, -1], E))
                         rollout_buffer.update(ic, tinp, idt=idte)
+
+                        if torch.cuda.is_available():
+                            torch.cuda.nvtx.range_pop()
 
                 else:
                     # rollout step: the sample is the verification, its latest step is the
@@ -694,6 +700,9 @@ class Inferencer(Driver):
                     targ = flatten_history(tar)
 
                     with self.autocast():
+                        if torch.cuda.is_available():
+                            torch.cuda.nvtx.range_push("Inferencer:predict")
+
                         # single forward on the folded batch
                         step = next(rollout)
                         pred_step = self.model.predict_step(step)
@@ -705,15 +714,30 @@ class Inferencer(Driver):
                         # split the ensemble back out, (B, E, ...), for metrics / loss / buffers
                         pred = rollout.unfold(flatten_history(pred_step))
 
+                        if torch.cuda.is_available():
+                            torch.cuda.nvtx.range_pop()
+                            torch.cuda.nvtx.range_push("Inferencer:loss")
+
                         # no weight here, since it is not clear what it would be for the spectral
                         # components in spectral CRPS
                         loss = self.loss_obj(pred, targ)
 
+                        if torch.cuda.is_available():
+                            torch.cuda.nvtx.range_pop()
+
                         if rollout_buffer is not None:
+                            if torch.cuda.is_available():
+                                torch.cuda.nvtx.range_push("Inferencer:rollout_buffer")
+
                             rollout_buffer.update(pred, ttar[:, 0], idt=idte)
+
+                            if torch.cuda.is_available():
+                                torch.cuda.nvtx.range_pop()
 
                     # update the metrics starting from the first actual prediction
                     if metrics is not None:
+                        if torch.cuda.is_available():
+                            torch.cuda.nvtx.range_push("Inferencer:metrics")
 
                         # subtract clim
                         if clims is not None:
@@ -726,18 +750,39 @@ class Inferencer(Driver):
                         # update metrics
                         metrics.update(predc, targc, loss, idte - 1, masks)
 
+                        if torch.cuda.is_available():
+                            torch.cuda.nvtx.range_pop()
+
                     # update the bias computation
                     if bias_buffer is not None:
+                        if torch.cuda.is_available():
+                            torch.cuda.nvtx.range_push("Inferencer:bias_buffer")
+
                         diff = pred - targ.unsqueeze(dim=1)
                         B, E, C, H, W = diff.shape
                         diff = diff.reshape(B * E, C, H, W).contiguous()
                         bias_buffer.update(diff, idte - 1)
 
+                        if torch.cuda.is_available():
+                            torch.cuda.nvtx.range_pop()
+
                     if spectrum_buffer is not None:
+                        if torch.cuda.is_available():
+                            torch.cuda.nvtx.range_push("Inferencer:spectrum_buffer")
+
                         spectrum_buffer.update(pred, targ.unsqueeze(1), idte - 1)
 
+                        if torch.cuda.is_available():
+                            torch.cuda.nvtx.range_pop()
+
                     if zonal_spectrum_buffer is not None:
+                        if torch.cuda.is_available():
+                            torch.cuda.nvtx.range_push("Inferencer:zonal_spectrum_buffer")
+
                         zonal_spectrum_buffer.update(pred, targ.unsqueeze(1), idte - 1)
+
+                        if torch.cuda.is_available():
+                            torch.cuda.nvtx.range_pop()
 
                 self.step_timer.end_step()
                 if torch.cuda.is_available():
