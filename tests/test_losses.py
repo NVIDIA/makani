@@ -2760,6 +2760,163 @@ class TestLpEnergyScoreLoss(unittest.TestCase):
             compare_tensors(f"lp_es combinations grad E={ensemble_size}", fc_ref.grad, fc_new.grad, verbose=verbose),
         )
 
+    @staticmethod
+    def _definition(fn, forecasts, observations, spatial_weights=None):
+        """
+        The energy score from its definition, one member and one pair at a time:
+        mean_i ||x_i - y||^beta - (E - 1 + alpha) / (E^2 (E - 1)) * sum_{i<j} ||x_i - x_j||^beta,
+        with ||d|| = (sum_k w_k |d_k|^p)^(1/p) over the grid, and over the channels as well with channel reduction.
+        """
+        B, E, C, H, W = forecasts.shape
+        weight = fn.quad_weight_split.reshape(1, 1, H * W).to(dtype=forecasts.dtype)
+        if spatial_weights is not None:
+            weight = weight * torch.reshape(spatial_weights, (B, C, H * W))
+        forecasts = torch.reshape(forecasts, (B, E, C, H * W))
+        observations = torch.reshape(observations, (B, C, H * W))
+
+        def norm(d):
+            s = torch.sum(weight * torch.abs(d) ** fn.p, dim=-1)
+            if fn.channel_reduction:
+                s = torch.sum(s, dim=-1, keepdim=True)
+            return s ** (1.0 / fn.p)
+
+        skill = sum(norm(forecasts[:, i] - observations) ** fn.beta for i in range(E)) / E
+        if E == 1:
+            return skill
+        spread = sum(norm(forecasts[:, i] - forecasts[:, j]) ** fn.beta for i in range(E) for j in range(i + 1, E))
+        return skill - 0.5 * spread * 2.0 * (E - 1.0 + fn.alpha) / float(E * E * (E - 1))
+
+    @parameterized.expand(
+        [
+            (p, beta, channel_reduction, weighted)
+            for p in (0.5, 1.0, 1.5, 2.0, 4.0)
+            for beta in (0.5, 1.0, 1.5)
+            for channel_reduction in (True, False)
+            for weighted in (False, True)
+        ]
+    )
+    def test_matches_definition(self, p, beta, channel_reduction, weighted, verbose=False):
+        """The loss and its gradient match the definition, for any p and beta, with and without weights."""
+        fn = self._fn(channel_reduction=channel_reduction, p=p, beta=beta)
+        fc = _rand_ensemble(self._E).to(torch.float64)
+        obs = _rand().to(torch.float64)
+        sw = (torch.rand(obs.shape, dtype=torch.float64) > 0.3).to(torch.float64) if weighted else None
+
+        fc_new = fc.clone().requires_grad_(True)
+        fc_ref = fc.clone().requires_grad_(True)
+        loss_new = fn(fc_new, obs, spatial_weights=sw)
+        loss_ref = self._definition(fn, fc_ref, obs, spatial_weights=sw)
+        (grad_new,) = torch.autograd.grad(torch.sum(loss_new), fc_new)
+        (grad_ref,) = torch.autograd.grad(torch.sum(loss_ref), fc_ref)
+
+        with self.subTest(desc="loss"):
+            self.assertTrue(compare_tensors("lp_es", loss_new, loss_ref, atol=0, rtol=1e-10, verbose=verbose))
+        with self.subTest(desc="gradient"):
+            self.assertTrue(compare_tensors("lp_es grad", grad_new, grad_ref, atol=1e-14, rtol=1e-8, verbose=verbose))
+
+    def _edge_case(self, case):
+        """Forecasts and observations where members, or a member and the observation, coincide."""
+        fc = _rand_ensemble(self._E).to(torch.float64)
+        obs = _rand().to(torch.float64)
+        if case == "identical members":
+            fc[:, 1] = fc[:, 0]
+        elif case == "members equal on part of the grid":
+            fc[:, 1, :, : _IMG_H // 2] = fc[:, 0, :, : _IMG_H // 2]
+        elif case == "member equals observation":
+            fc[:, 2] = obs
+        elif case == "collapsed ensemble":
+            fc[:] = fc[:, :1]
+        return fc, obs
+
+    @parameterized.expand(
+        [
+            (case, p, beta)
+            for case in (
+                "identical members",
+                "members equal on part of the grid",
+                "member equals observation",
+                "collapsed ensemble",
+            )
+            for p in (0.5, 1.0, 2.0)
+            for beta in (0.5, 1.0)
+        ]
+    )
+    def test_coinciding_members(self, case, p, beta, verbose=False):
+        """
+        Where members, or a member and the observation, coincide, the distance is zero and so is its contribution,
+        and the gradient stays finite: the derivatives of the root and of the beta power diverge at zero, and p = 1
+        with beta < 1 used to give NaN in the gradient of cdist.
+        """
+        fn = self._fn(p=p, beta=beta)
+        fc, obs = self._edge_case(case)
+        fc.requires_grad_(True)
+        loss = fn(fc, obs)
+        (grad,) = torch.autograd.grad(torch.sum(loss), fc)
+
+        with self.subTest(desc="loss"):
+            with torch.no_grad():
+                loss_ref = self._definition(fn, fc, obs)
+            self.assertTrue(compare_tensors("lp_es", loss, loss_ref, atol=0, rtol=1e-10, verbose=verbose))
+        with self.subTest(desc="finite gradient"):
+            self.assertTrue(torch.all(torch.isfinite(grad)))
+
+        # members equal only on part of the grid are still apart, so the gradient is the definition's,
+        # as long as |d|^p is differentiable at d = 0, i.e. p >= 1
+        if (case == "members equal on part of the grid") and (p >= 1.0):
+            fc_ref = fc.detach().clone().requires_grad_(True)
+            (grad_ref,) = torch.autograd.grad(torch.sum(self._definition(fn, fc_ref, obs)), fc_ref)
+            with self.subTest(desc="gradient"):
+                self.assertTrue(compare_tensors("lp_es grad", grad, grad_ref, atol=1e-14, rtol=1e-8, verbose=verbose))
+
+    @parameterized.expand([(0.5,), (1.0,), (2.0,)])
+    def test_masked_sample(self, p):
+        """A sample whose spatial weights are all zero has no skill and no spread, and gets no gradient."""
+        fn = self._fn(p=p, beta=0.5)
+        fc = _rand_ensemble(self._E).to(torch.float64).requires_grad_(True)
+        obs = _rand().to(torch.float64)
+        sw = torch.ones_like(obs)
+        sw[0] = 0.0
+        loss = fn(fc, obs, spatial_weights=sw)
+        (grad,) = torch.autograd.grad(torch.sum(loss), fc)
+
+        self.assertTrue(torch.all(loss[0] == 0.0))
+        self.assertTrue(torch.all(torch.isfinite(grad)))
+        self.assertTrue(torch.all(grad[0] == 0.0))
+
+    @parameterized.expand([(1.0,), (2.0,)])
+    def test_single_member(self, p, verbose=False):
+        """With one member there are no pairs: the loss is the skill term alone, with a finite gradient."""
+        fn = self._fn(p=p)
+        fc = _rand_ensemble(1).to(torch.float64).requires_grad_(True)
+        obs = _rand().to(torch.float64)
+        loss = fn(fc, obs)
+        (grad,) = torch.autograd.grad(torch.sum(loss), fc)
+        with torch.no_grad():
+            loss_ref = self._definition(fn, fc, obs)
+        self.assertTrue(compare_tensors("lp_es E=1", loss, loss_ref, atol=0, rtol=1e-10, verbose=verbose))
+        self.assertTrue(torch.all(torch.isfinite(grad)))
+
+    @parameterized.expand([(p, beta, scale) for p in (1.0, 2.0) for beta in (0.5, 1.0) for scale in (0.1, 10.0)])
+    def test_scale_homogeneity(self, p, beta, scale, verbose=False):
+        """The energy score is homogeneous of degree beta: scaling forecasts and observations by s scales it by s^beta."""
+        fn = self._fn(p=p, beta=beta)
+        fc = _rand_ensemble(self._E).to(torch.float64)
+        obs = _rand().to(torch.float64)
+        loss = fn(fc, obs)
+        loss_scaled = fn(scale * fc, scale * obs)
+        self.assertTrue(
+            compare_tensors("lp_es scaled", loss_scaled, scale**beta * loss, atol=0, rtol=1e-10, verbose=verbose)
+        )
+
+    def test_low_precision_input(self, verbose=False):
+        """Reduced-precision forecasts, as under autocast, are scored in float32: as their float32 values are."""
+        fn = self._fn()
+        fc = _rand_ensemble(self._E).to(torch.bfloat16)
+        obs = _rand()
+        loss = fn(fc, obs)
+        self.assertEqual(loss.dtype, torch.float32)
+        self.assertTrue(compare_tensors("lp_es bf16", loss, fn(fc.to(torch.float32), obs), verbose=verbose))
+
 
 # ===========================================================================
 class TestSpectralL2EnergyScoreLoss(unittest.TestCase):

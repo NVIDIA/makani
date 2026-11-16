@@ -156,20 +156,42 @@ class LpEnergyScoreLoss(GeometricBaseLoss):
         #  ensemble size
         num_ensemble = forecasts.shape[0]
 
-        # espread: index all upper-triangular pairs via combinations — avoids the O(E^2 * B * C * H*W)
-        # full outer-product; peak allocation is O(P * B * C * H*W) where P = E*(E-1)/2.
-        idx = torch.combinations(torch.arange(num_ensemble, device=forecasts.device), r=2)  # (P, 2)
-        diff = abs_pow(forecasts[idx[:, 0]] - forecasts[idx[:, 1]], self.p)  # (P, B, C, H*W)
-
-        eskill = abs_pow(observations - forecasts, self.p)
-
-        # do the spatial reduction
+        # the norms are weighted with the quadrature, and the spatial weights if given:
+        # sum_k w_k |x_k - y_k|^p. Scaling every point by w_k^(1/p) folds the weights into the
+        # fields, so that the norms become plain Lp distances, which cdist computes without
+        # materializing the differences of all member pairs. The weights are not negative and the
+        # same for every member, which this needs
+        # the distances run in float32 at least, as the reductions did; float64 inputs stay float64
+        work_dtype = torch.promote_types(forecasts.dtype, torch.float32)
+        point_weight = self.quad_weight_split.to(dtype=work_dtype)
         if spatial_weights is not None:
-            diff = torch.sum(diff * self.quad_weight_split * spatial_weights_split, dim=-1)
-            eskill = torch.sum(eskill * self.quad_weight_split * spatial_weights_split, dim=-1)
-        else:
-            diff = torch.sum(diff * self.quad_weight_split, dim=-1)  # (P, B, C)
-            eskill = torch.sum(eskill * self.quad_weight_split, dim=-1)
+            point_weight = point_weight * spatial_weights_split.to(dtype=work_dtype)
+        point_scale = torch.pow(point_weight, 1.0 / self.p)
+        forecasts = forecasts.to(dtype=work_dtype) * point_scale
+        observations = observations.to(dtype=work_dtype) * point_scale
+
+        # (B, C, E, H*W) for a norm per channel, (B, 1, E, C*H*W) for one over all channels
+        forecasts = torch.permute(forecasts, (1, 2, 0, 3))
+        observations = torch.permute(observations, (1, 2, 0, 3))
+        if self.channel_reduction:
+            forecasts = torch.reshape(torch.transpose(forecasts, 1, 2), (B, 1, num_ensemble, -1))
+            observations = torch.reshape(torch.transpose(observations, 1, 2), (B, 1, 1, -1))
+
+        # the distances on the local grid points; the matrix-multiply form of the Euclidean
+        # distance loses precision for close members, so it is not used
+        pairs = torch.triu_indices(num_ensemble, num_ensemble, offset=1, device=forecasts.device)
+        diff = torch.cdist(forecasts, forecasts, p=self.p, compute_mode="donot_use_mm_for_euclid_dist")
+        diff = diff[..., pairs[0], pairs[1]]  # (B, C, P)
+        eskill = torch.cdist(forecasts, observations, p=self.p, compute_mode="donot_use_mm_for_euclid_dist")
+        eskill = eskill[..., 0]  # (B, C, E)
+
+        # back to the sums sum_k w_k |x_k - y_k|^p, which add up over the ranks that split the grid.
+        # Where two members, or a member and the observation, coincide on the local points, the
+        # distance is zero and the derivative of its p-th power diverges for p < 1. The backward of
+        # cdist returns zero at zero distance whatever comes in, except for p = 1, where the power
+        # has a finite derivative; abs_pow keeps the gradient finite without relying on that
+        diff = abs_pow(diff, self.p)
+        eskill = abs_pow(eskill, self.p)
 
         # since we split spatial dim into ensemble dim, we need to do an ensemble sum as well
         if self.ensemble_distributed:
@@ -182,11 +204,9 @@ class LpEnergyScoreLoss(GeometricBaseLoss):
             diff = reduce_from_parallel_region(diff, "spatial")
             eskill = reduce_from_parallel_region(eskill, "spatial")
 
-        # do the channel reduction
-        # if channel weights are required they should be added here to the reduction
-        if self.channel_reduction:
-            diff = diff.sum(dim=-1, keepdim=True)  # (P, B, 1)
-            eskill = eskill.sum(dim=-1, keepdim=True)
+        # pairs and members first, as the reductions below expect: (P, B, C) and (E, B, C)
+        diff = torch.permute(diff, (2, 0, 1))
+        eskill = torch.permute(eskill, (2, 0, 1))
 
         # get the masks
         diff_mask = diff < self.eps
@@ -198,8 +218,8 @@ class LpEnergyScoreLoss(GeometricBaseLoss):
 
         with amp.autocast(device_type="cuda", enabled=False):
 
-            diff = diff.float()
-            eskill = eskill.float()
+            diff = diff.to(dtype=work_dtype)
+            eskill = eskill.to(dtype=work_dtype)
 
             # Lp norm = (sum |x|^p)^(1/p); then optional beta exponent (Gneiting et al. 2005)
             diff = diff.pow(1.0 / self.p).pow(self.beta)
