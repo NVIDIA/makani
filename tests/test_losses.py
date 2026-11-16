@@ -2938,12 +2938,10 @@ class TestLpEnergyScoreLoss(unittest.TestCase):
         (grad_compiled,) = torch.autograd.grad(torch.sum(loss_compiled), fc_compiled)
 
         with self.subTest(desc="loss"):
-            self.assertTrue(compare_tensors("lp_es compiled", loss_compiled, loss_eager, verbose=verbose))
+            self.assertTrue(compare_tensors("lp_es compiled", loss_compiled, loss_eager, verbose=True))
         with self.subTest(desc="gradient"):
             self.assertTrue(torch.all(torch.isfinite(grad_compiled)))
-            self.assertTrue(
-                compare_tensors("lp_es compiled grad", grad_compiled, grad_eager, atol=1e-7, verbose=verbose)
-            )
+            self.assertTrue(compare_tensors("lp_es compiled grad", grad_compiled, grad_eager, atol=1e-7, verbose=True))
 
 
 # ===========================================================================
