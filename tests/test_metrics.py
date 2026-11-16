@@ -430,7 +430,7 @@ class TestMetrics(unittest.TestCase):
 
         # for spatial averaging, flatten the spatial dims
         rankhist_xskillscore = rankhist_xskillscore.reshape(num_channels, nlat * nlon, ensemble_size + 1)
-        qw = rankhist_handle.quad_weight_split.squeeze(0).cpu().numpy()
+        qw = rankhist_handle.quad_weight_flat.reshape(1, -1, 1).cpu().numpy()
         rankhist_xskillscore = np.sum(rankhist_xskillscore * qw, axis=1)
 
         with self.subTest(desc="rank histogram"):
@@ -444,6 +444,128 @@ class TestMetrics(unittest.TestCase):
                     verbose=verbose,
                 )
             )
+
+    def _rank_histogram_handle(self, nlat, nlon, batch_reduction):
+        return GeometricRankHistogram(
+            grid_type="equiangular",
+            img_shape=(nlat, nlon),
+            crop_shape=(nlat, nlon),
+            crop_offset=(0, 0),
+            normalize=True,
+            channel_reduction="none",
+            batch_reduction=batch_reduction,
+        ).to(self.device)
+
+    def test_rank_histogram_ties(self, verbose=False):
+        """
+        An observation tied with members takes each of the tied ranks with the same probability, as xskillscore's
+        random_for_tied, and the histogram is the expectation of that.
+        """
+        batch_size, ensemble_size, num_channels, nlat, nlon = 4, 5, 3, 17, 32
+        rankhist_handle = self._rank_histogram_handle(nlat, nlon, "mean")
+
+        # few distinct values, so that most observations tie with some members
+        generator = torch.Generator().manual_seed(333)
+        fct = torch.randint(0, 4, (batch_size, ensemble_size, num_channels, nlat, nlon), generator=generator)
+        obs = torch.randint(0, 4, (batch_size, num_channels, nlat, nlon), generator=generator)
+        fct, obs = fct.to(self.device, torch.float32), obs.to(self.device, torch.float32)
+
+        rankhist = rankhist_handle(fct, obs).cpu().numpy()
+
+        # the expected histogram from the ranks xskillscore draws from: the lowest and the highest rank of the
+        # observation among the members, each in between equally likely
+        import scipy.stats
+
+        fct_np, obs_np = fct.cpu().numpy(), obs.cpu().numpy()
+        both = np.concatenate([obs_np[:, np.newaxis], fct_np], axis=1)
+        lowest = scipy.stats.rankdata(both, axis=1, method="min")[:, 0] - 1
+        highest = scipy.stats.rankdata(both, axis=1, method="max")[:, 0] - 1
+        ranks = np.arange(ensemble_size + 1).reshape(1, 1, 1, 1, -1)
+        shares = (lowest[..., np.newaxis] <= ranks) & (ranks <= highest[..., np.newaxis])
+        shares = shares / (highest - lowest + 1)[..., np.newaxis]
+        qw = rankhist_handle.quad_weight_flat.reshape(1, 1, nlat, nlon, 1).cpu().numpy()
+        expected = np.mean(np.sum(shares * qw, axis=(2, 3)), axis=0)
+
+        with self.subTest(desc="expectation of the random ranks"):
+            self.assertTrue(compare_arrays("rank histogram", rankhist, expected, atol=1e-6, rtol=1e-5, verbose=verbose))
+
+        # and xskillscore itself, which draws the ranks, within the sampling noise
+        np.random.seed(333)
+        obs_xr = xr.DataArray(obs_np, dims=["batch", "channels", "lat", "lon"])
+        fct_xr = xr.DataArray(fct_np, dims=["batch", "ensemble", "channels", "lat", "lon"])
+        counts = xs.rank_histogram(obs_xr, fct_xr, dim="batch", member_dim="ensemble").to_numpy()
+        drawn = np.sum(counts / float(batch_size) * qw[0], axis=(1, 2))
+
+        with self.subTest(desc="xskillscore"):
+            self.assertTrue(compare_arrays("rank histogram", rankhist, drawn, atol=5e-2, rtol=0, verbose=verbose))
+
+        # an observation tied with the two middle members of four is equally likely below, between or above them
+        fct = torch.tensor([0.0, 1.0, 1.0, 3.0], device=self.device).reshape(1, 4, 1, 1, 1).expand(1, 4, 1, nlat, nlon)
+        obs = torch.ones((1, 1, nlat, nlon), device=self.device)
+        rankhist = rankhist_handle(fct.contiguous(), obs).cpu().numpy()
+
+        with self.subTest(desc="symmetric tie"):
+            self.assertTrue(
+                compare_arrays(
+                    "rank histogram", rankhist, np.array([[0.0, 1 / 3, 1 / 3, 1 / 3, 0.0]]), atol=1e-6, verbose=verbose
+                )
+            )
+
+    def test_rank_histogram_nan(self, verbose=False):
+        """
+        A NaN member, or a NaN observation that reaches the histogram, makes the histogram of its channel NaN,
+        as with the other metrics. Masked through the weight, as the metric handler does with missing
+        observations, the point is left out, as in xskillscore, and the histogram still sums to one.
+        """
+        batch_size, ensemble_size, num_channels, nlat, nlon = 4, 5, 3, 17, 32
+
+        generator = torch.Generator().manual_seed(333)
+        fct = torch.randn((batch_size, ensemble_size, num_channels, nlat, nlon), generator=generator).to(self.device)
+        obs = torch.randn((batch_size, num_channels, nlat, nlon), generator=generator).to(self.device)
+
+        rankhist_handle = self._rank_histogram_handle(nlat, nlon, "mean")
+        clean = rankhist_handle(fct, obs)
+
+        # a NaN member in channel 0, and an unmasked NaN observation in channel 1
+        fct_nan = fct.clone()
+        fct_nan[1, 2, 0, 5, 7] = torch.nan
+        obs_nan = obs.clone()
+        obs_nan[3, 1, 9, 0] = torch.nan
+        rankhist = rankhist_handle(fct_nan, obs_nan)
+
+        with self.subTest(desc="NaN member"):
+            self.assertTrue(torch.all(torch.isnan(rankhist[0])))
+        with self.subTest(desc="NaN observation"):
+            self.assertTrue(torch.all(torch.isnan(rankhist[1])))
+        with self.subTest(desc="other channels"):
+            self.assertTrue(torch.equal(rankhist[2], clean[2]))
+
+        # missing observations masked as the metric handler does it, against xskillscore, which leaves them out
+        from makani.utils.missing_data import fill_missing, missing_values, missing_weights
+
+        obs_missing = obs.clone()
+        missing_points = torch.rand(obs.shape, generator=generator) < 0.2
+        obs_missing[missing_points.to(self.device)] = torch.nan
+        missing = missing_values(obs_missing)
+        obs_filled = fill_missing(obs_missing, 0.0, missing)
+        weight = missing_weights(missing)
+
+        rankhist_handle = self._rank_histogram_handle(nlat, nlon, "sum")
+        vals = rankhist_handle(fct, obs_filled, weight)
+        counts = rankhist_handle.compute_counts(fct, weight)
+        rankhist = rankhist_handle.finalize(vals, counts).cpu().numpy()
+
+        obs_xr = xr.DataArray(obs_missing.cpu().numpy(), dims=["batch", "channels", "lat", "lon"])
+        fct_xr = xr.DataArray(fct.cpu().numpy(), dims=["batch", "ensemble", "channels", "lat", "lon"])
+        hist = xs.rank_histogram(obs_xr, fct_xr, dim="batch", member_dim="ensemble").to_numpy()
+        qw = rankhist_handle.quad_weight_flat.reshape(1, nlat, nlon, 1).cpu().numpy()
+        expected = np.sum(hist * qw, axis=(1, 2))
+        expected = expected / np.sum(expected, axis=-1, keepdims=True)
+
+        with self.subTest(desc="masked like xskillscore"):
+            self.assertTrue(compare_arrays("rank histogram", rankhist, expected, atol=1e-6, rtol=1e-5, verbose=verbose))
+        with self.subTest(desc="sums to one"):
+            self.assertTrue(np.allclose(np.sum(rankhist, axis=-1), 1.0, atol=1e-6))
 
     @parameterized.expand(["acc", "ssr", "spread"], skip_on_empty=True)
     def test_masked_metrics(self, metric_name, verbose=False):

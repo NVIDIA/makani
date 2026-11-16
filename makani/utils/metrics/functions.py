@@ -18,7 +18,7 @@ from typing import Optional, Tuple
 import torch
 
 from makani.utils import comm
-from makani.mpu.mappings import scatter_to_parallel_region, reduce_from_parallel_region, distributed_transpose
+from makani.mpu.mappings import reduce_from_parallel_region
 from torch_harmonics.distributed import split_tensor_along_dim
 
 from makani.utils.losses import CRPSLoss, LossType
@@ -571,18 +571,20 @@ class GeometricRankHistogram(GeometricBaseMetric):
             comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1) and ensemble_distributed
         )
 
-        # we also need a variant of the weights split in ensemble direction:
-        quad_weight_split = self.quadrature.quad_weight.reshape(1, 1, -1, 1)
-        if self.ensemble_distributed:
-            quad_weight_split = split_tensor_along_dim(quad_weight_split, dim=-2, num_chunks=comm.get_size("ensemble"))[
-                comm.get_rank("ensemble")
-            ]
-        quad_weight_split = quad_weight_split.contiguous()
-        self.register_buffer("quad_weight_split", quad_weight_split, persistent=False)
+        # the quadrature weights of the local grid points, flattened to match the forecasts
+        quad_weight_flat = self.quadrature.quad_weight.reshape(1, 1, -1).contiguous()
+        self.register_buffer("quad_weight_flat", quad_weight_flat, persistent=False)
 
     @property
     def type(self):
         return LossType.Probabilistic
+
+    def _ensemble_size(self, forecasts: torch.Tensor) -> int:
+        """The size of the whole ensemble; every ensemble rank holds the same number of members."""
+        ensemble_size = forecasts.shape[1]
+        if self.ensemble_distributed:
+            ensemble_size = ensemble_size * comm.get_size("ensemble")
+        return ensemble_size
 
     def compute_counts(self, inp: torch.Tensor, weight: Optional[torch.Tensor] = None) -> torch.Tensor:
         if weight is not None:
@@ -630,51 +632,63 @@ class GeometricRankHistogram(GeometricBaseMetric):
         # forecasts: batch, ensemble, channels, lat, lon
         # observations: batch, channels, lat, lon
         B, E, C, H, W = forecasts.shape
-        forecasts = forecasts.reshape(B, E, C, H * W)
-        observations = observations.reshape(B, C, H * W)
+        ensemble_size = self._ensemble_size(forecasts)
+
+        # the rank of the observation needs no sorting: it follows from the number of members below it and
+        # equal to it. Both add up over the members, so each rank counts its own members, and one sum over
+        # the ensemble ranks gives the counts of the whole ensemble. The counts are exact in float32, the
+        # dtype of the quadrature weights they are combined with
+        wdtype = self.quad_weight_flat.dtype
+        below = torch.sum(forecasts < observations.unsqueeze(1), dim=1, dtype=wdtype)
+        equal = torch.sum(forecasts == observations.unsqueeze(1), dim=1, dtype=wdtype)
+
+        # a NaN member makes the point NaN, and carries through the sum over the ensemble ranks
+        nan_members = torch.any(torch.isnan(forecasts), dim=1)
 
         if self.ensemble_distributed:
-            ensemble_shapes = [E for _ in range(comm.get_size("ensemble"))]
-            forecasts = distributed_transpose(forecasts, (-1, 1), ensemble_shapes, "ensemble")
-            ensemble_size = E * comm.get_size("ensemble")
-        else:
-            ensemble_size = E
+            # pack both counts into one value for a single all-reduce; below + base * equal stays exact in
+            # float32 as long as base**2 does not exceed 2**24
+            base = ensemble_size + 1
+            if base * base > 2**24:
+                raise ValueError(f"The rank histogram supports ensembles of up to 4095 members, got {ensemble_size}.")
+            packed = torch.where(nan_members, torch.nan, below + base * equal)
+            packed = reduce_from_parallel_region(packed, "ensemble")
+            nan_members = torch.isnan(packed)
+            # the packed counts are whole numbers, so the integer division recovers them exactly
+            packed = torch.where(nan_members, 0.0, packed).to(dtype=torch.int64)
+            equal = torch.div(packed, base, rounding_mode="floor")
+            below = (packed - base * equal).to(dtype=wdtype)
+            equal = equal.to(dtype=wdtype)
 
-        # observations does not need a transpose, but just a split
-        if self.ensemble_distributed:
-            observations = scatter_to_parallel_region(observations, -1, "ensemble")
+        # the weight of each point, flattened over the grid. Missing observations are masked through the weight
+        # by the metric handler; one that reaches the histogram, or a NaN member, makes it NaN, as with the
+        # other metrics, rather than landing in a bin
+        point_weight = self.quad_weight_flat.expand(B, C, -1)
         if weight is not None:
-            weight = weight.flatten(start_dim=-2, end_dim=-1)
-            if self.ensemble_distributed:
-                weight = scatter_to_parallel_region(weight, -1, "ensemble")
+            point_weight = point_weight * torch.flatten(weight, start_dim=-2).to(dtype=wdtype)
+        nan_points = torch.logical_or(torch.isnan(observations), nan_members)
+        point_weight = torch.where(torch.flatten(nan_points, start_dim=-2), torch.nan, point_weight)
 
-        # we need to have ensemble dim innermost
-        forecasts = torch.moveaxis(forecasts, 1, -1)
+        # an observation tied with members takes each of the ranks from below to below + equal with the
+        # same probability, as xskillscore's random_for_tied; the histogram takes that expectation, which
+        # spreads the weight of the point evenly over those ranks
+        lowest = torch.flatten(below, start_dim=-2)
+        highest = lowest + torch.flatten(equal, start_dim=-2)
+        share = point_weight / (torch.flatten(equal, start_dim=-2) + 1).to(dtype=wdtype)
 
-        # sort ensemble members
-        forecasts_sorted, _ = torch.sort(forecasts, dim=-1, descending=False, stable=True)
-
-        # make everything contiguous
-        forecasts_sorted = forecasts_sorted.contiguous()
-        observations = observations.unsqueeze(-1).contiguous()
-        insertions = torch.searchsorted(forecasts_sorted, observations, side="right").squeeze(-1)
-
-        # one hot encode
-        rankhist = torch.nn.functional.one_hot(insertions, num_classes=ensemble_size + 1).to(dtype=torch.float32)
-
-        # do spatial contraction:
-        if weight is not None:
-            rankhist = torch.sum(rankhist * self.quad_weight_split * weight.unsqueeze(-1), dim=2)
-        else:
-            rankhist = torch.sum(rankhist * self.quad_weight_split, dim=2)
+        # one bin at a time, rather than a one-hot of (E + 1) times the size of the fields. Outside its ranks a
+        # point adds zero times its share, which carries a NaN into every bin
+        outside = 0.0 * share
+        bins = []
+        for rank in range(ensemble_size + 1):
+            in_bin = torch.logical_and(lowest <= rank, rank <= highest)
+            bins.append(torch.sum(torch.where(in_bin, share, outside), dim=-1))
+        rankhist = torch.stack(bins, dim=-1)
 
         # we need to do the spatial averaging manually since
         # we are not calling he quadrature forward function
         if self.spatial_distributed:
             rankhist = reduce_from_parallel_region(rankhist, "spatial")
-        # since we split spatial dim into ensemble dim, we need to do an ensemble sum as well
-        if self.ensemble_distributed:
-            rankhist = reduce_from_parallel_region(rankhist, "ensemble")
 
         # reduction over channels
         if self.channel_reduction == "mean":
