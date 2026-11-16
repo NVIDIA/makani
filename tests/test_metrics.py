@@ -17,6 +17,7 @@ import importlib.util
 import os
 import sys
 import unittest
+import unittest.mock
 from parameterized import parameterized, parameterized_class
 
 import itertools
@@ -39,6 +40,7 @@ from makani.utils.metrics.functions import (
     GeometricRankHistogram,
 )
 from makani.utils.dataloaders.data_helpers import get_lat_lon_grid
+from makani.utils.missing_data import fill_missing, missing_values, missing_weights
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from .testutils import disable_tf32, set_seed, get_default_parameters, compare_arrays
@@ -385,34 +387,110 @@ class TestMetrics(unittest.TestCase):
             batch_reduction="none",
         ).to(self.device)
 
-    @parameterized.expand([(ensemble_size, weighted) for ensemble_size in (1, 2, 5, 16) for weighted in (False, True)])
-    def test_skillspread_crps_matches_loss(self, ensemble_size, weighted, verbose=False):
-        """The skill-spread CRPS from member pairs is the one the loss computes from ranks."""
+    @staticmethod
+    def _compiled(crps_func, compiled):
+        """The metric as the metric handler runs it, compiled, or the module itself."""
+        return torch.compile(crps_func, dynamic=False) if compiled else crps_func
+
+    @staticmethod
+    def _crps_tolerances(dtype):
+        return dict(rtol=1e-12, atol=1e-15) if dtype == torch.float64 else dict(rtol=1e-5, atol=1e-6)
+
+    @parameterized.expand(
+        [
+            (ensemble_size, weighting, dtype, compiled)
+            for ensemble_size in (1, 5, 16)
+            for weighting in ("none", "mask", "missing observations")
+            for dtype in (torch.float64, torch.float32)
+            for compiled in (False, True)
+        ]
+    )
+    def test_skillspread_crps_matches_loss(self, ensemble_size, weighting, dtype, compiled, verbose=False):
+        """
+        The skill-spread CRPS from member pairs, compiled or not, is the one the eager loss computes from ranks: without
+        weights, with a mask, and with missing observations masked as the metric handler does it.
+        """
         batch_size, num_channels, nlat, nlon = 3, 4, 17, 32
         crps_func = self._skillspread_crps(nlat, nlon)
         self.assertTrue(crps_func.pairwise)
 
-        fct = torch.randn(batch_size, ensemble_size, num_channels, nlat, nlon, dtype=torch.float64, device=self.device)
-        obs = torch.randn(batch_size, num_channels, nlat, nlon, dtype=torch.float64, device=self.device)
+        fct = torch.randn(batch_size, ensemble_size, num_channels, nlat, nlon, dtype=dtype, device=self.device)
+        obs = torch.randn(batch_size, num_channels, nlat, nlon, dtype=dtype, device=self.device)
         weight = None
-        if weighted:
-            weight = (torch.rand(obs.shape, dtype=torch.float64, device=self.device) > 0.3).to(torch.float64)
+        if weighting == "mask":
+            weight = (torch.rand(obs.shape, device=self.device) > 0.3).to(dtype)
+        elif weighting == "missing observations":
+            obs[torch.rand(obs.shape, device=self.device) < 0.2] = torch.nan
+            missing = missing_values(obs)
+            obs = fill_missing(obs, 0.0, missing)
+            weight = missing_weights(missing).to(dtype)
 
-        crps = crps_func(fct, obs, weight)
+        crps = self._compiled(crps_func, compiled)(fct, obs, weight)
         crps_loss = crps_func.metric_func(fct, obs, weight)
         self.assertTrue(
-            compare_arrays("crps", crps.cpu().numpy(), crps_loss.cpu().numpy(), rtol=1e-12, atol=1e-15, verbose=verbose)
+            compare_arrays(
+                "crps", crps.cpu().numpy(), crps_loss.cpu().numpy(), **self._crps_tolerances(dtype), verbose=verbose
+            )
         )
 
-    def test_skillspread_crps_matches_xskillscore(self, verbose=False):
-        """With alpha = 0 the skill-spread CRPS is the standard ensemble CRPS, which xskillscore computes."""
+    def test_skillspread_crps_pair_bound(self):
+        """
+        The score comes from member pairs up to 64 members when compiled and up to 16 eager, and from the ranks
+        beyond; other CRPS variants always go through the loss.
+        """
+        crps_func = self._skillspread_crps(17, 32)
+        bounds = {False: GeometricCRPS.PAIRWISE_MAX_ENSEMBLE_EAGER, True: GeometricCRPS.PAIRWISE_MAX_ENSEMBLE_COMPILED}
+        self.assertEqual(bounds, {False: 16, True: 64})
+        for compiling, bound in bounds.items():
+            with unittest.mock.patch("torch.compiler.is_compiling", return_value=compiling):
+                with self.subTest(compiling=compiling):
+                    self.assertTrue(crps_func.uses_pairs(1))
+                    self.assertTrue(crps_func.uses_pairs(bound))
+                    self.assertFalse(crps_func.uses_pairs(bound + 1))
+
+        cdf_func = GeometricCRPS(
+            grid_type="equiangular", img_shape=(17, 32), crop_shape=(17, 32), crop_offset=(0, 0), crps_type="cdf"
+        )
+        self.assertFalse(cdf_func.uses_pairs(4))
+
+    @parameterized.expand([(False,), (True,)])
+    def test_skillspread_crps_above_eager_bound(self, compiled, verbose=False):
+        """Just above the eager bound the score comes from the ranks eager and from the pairs compiled; both match the loss."""
+        batch_size, ensemble_size, num_channels, nlat, nlon = (
+            2,
+            GeometricCRPS.PAIRWISE_MAX_ENSEMBLE_EAGER + 1,
+            3,
+            17,
+            32,
+        )
+        crps_func = self._skillspread_crps(nlat, nlon)
+
+        fct = torch.randn(batch_size, ensemble_size, num_channels, nlat, nlon, device=self.device)
+        obs = torch.randn(batch_size, num_channels, nlat, nlon, device=self.device)
+        weight = (torch.rand(obs.shape, device=self.device) > 0.3).to(torch.float32)
+
+        crps = self._compiled(crps_func, compiled)(fct, obs, weight)
+        crps_loss = crps_func.metric_func(fct, obs, weight)
+        self.assertTrue(
+            compare_arrays(
+                "crps",
+                crps.cpu().numpy(),
+                crps_loss.cpu().numpy(),
+                **self._crps_tolerances(torch.float32),
+                verbose=verbose,
+            )
+        )
+
+    @parameterized.expand([(False,), (True,)])
+    def test_skillspread_crps_matches_xskillscore(self, compiled, verbose=False):
+        """With alpha = 0 the skill-spread CRPS, compiled or not, is the standard ensemble CRPS, which xskillscore computes."""
         batch_size, ensemble_size, num_channels, nlat, nlon = 3, 5, 4, 17, 32
         crps_func = self._skillspread_crps(nlat, nlon)
         crps_func.metric_func.alpha = 0.0
 
         fct = torch.randn(batch_size, ensemble_size, num_channels, nlat, nlon, dtype=torch.float64, device=self.device)
         obs = torch.randn(batch_size, num_channels, nlat, nlon, dtype=torch.float64, device=self.device)
-        crps = crps_func(fct, obs).cpu().numpy()
+        crps = self._compiled(crps_func, compiled)(fct, obs).cpu().numpy()
 
         lwf = xr.DataArray(
             torch.squeeze(crps_func.metric_func.quadrature.quad_weight).cpu().numpy(), dims=["lat", "lon"]
@@ -424,8 +502,14 @@ class TestMetrics(unittest.TestCase):
         # xskillscore divides by the sum of the weights, which is one only up to the rounding of the float32 quadrature
         self.assertTrue(compare_arrays("crps", crps, crps_xskillscore, rtol=1e-6, atol=0, verbose=verbose))
 
-    @parameterized.expand(["identical members", "member equals observation", "collapsed ensemble"])
-    def test_skillspread_crps_coinciding_members(self, case, verbose=False):
+    @parameterized.expand(
+        [
+            (case, compiled)
+            for case in ("identical members", "member equals observation", "collapsed ensemble")
+            for compiled in (False, True)
+        ]
+    )
+    def test_skillspread_crps_coinciding_members(self, case, compiled, verbose=False):
         """Members that coincide with each other or with the observation give the CRPS the loss computes."""
         batch_size, ensemble_size, num_channels, nlat, nlon = 3, 5, 4, 17, 32
         crps_func = self._skillspread_crps(nlat, nlon)
@@ -439,27 +523,39 @@ class TestMetrics(unittest.TestCase):
         elif case == "collapsed ensemble":
             fct[:] = fct[:, :1]
 
-        crps = crps_func(fct, obs)
+        crps = self._compiled(crps_func, compiled)(fct, obs)
         crps_loss = crps_func.metric_func(fct, obs)
         self.assertTrue(
             compare_arrays("crps", crps.cpu().numpy(), crps_loss.cpu().numpy(), rtol=1e-12, atol=1e-15, verbose=verbose)
         )
 
-    def test_skillspread_crps_nan_member(self):
-        """A NaN member makes the CRPS of its channel NaN, as with the other metrics, and leaves the others alone."""
+    @parameterized.expand([(False,), (True,)])
+    def test_skillspread_crps_nan_member(self, compiled, verbose=False):
+        """
+        A NaN member makes the CRPS of its channel NaN, as with the other metrics, compiled or not, and the other
+        entries are those of the eager loss.
+        """
         batch_size, ensemble_size, num_channels, nlat, nlon = 3, 5, 4, 17, 32
         crps_func = self._skillspread_crps(nlat, nlon)
 
         fct = torch.randn(batch_size, ensemble_size, num_channels, nlat, nlon, device=self.device)
         obs = torch.randn(batch_size, num_channels, nlat, nlon, device=self.device)
-        clean = crps_func(fct, obs)
         fct[1, 2, 0, 5, 7] = torch.nan
-        crps = crps_func(fct, obs)
+        crps = self._compiled(crps_func, compiled)(fct, obs)
+        crps_loss = crps_func.metric_func(fct, obs)
 
-        self.assertTrue(torch.isnan(crps[1, 0]))
         nan_entries = torch.zeros_like(crps, dtype=torch.bool)
         nan_entries[1, 0] = True
-        self.assertTrue(torch.equal(crps[~nan_entries], clean[~nan_entries]))
+        self.assertTrue(torch.equal(torch.isnan(crps), nan_entries))
+        self.assertTrue(
+            compare_arrays(
+                "crps",
+                crps[~nan_entries].cpu().numpy(),
+                crps_loss[~nan_entries].cpu().numpy(),
+                **self._crps_tolerances(torch.float32),
+                verbose=verbose,
+            )
+        )
 
     # we need to relax the bounds here because on CPU, for some reason, the deviations are big
     @parameterized.expand(_probabilistic_metrics_params, skip_on_empty=True)
@@ -628,8 +724,6 @@ class TestMetrics(unittest.TestCase):
             self.assertTrue(torch.equal(rankhist[2], clean[2]))
 
         # missing observations masked as the metric handler does it, against xskillscore, which leaves them out
-        from makani.utils.missing_data import fill_missing, missing_values, missing_weights
-
         obs_missing = obs.clone()
         missing_points = torch.rand(obs.shape, generator=generator) < 0.2
         obs_missing[missing_points.to(self.device)] = torch.nan
@@ -1602,6 +1696,72 @@ class TestMetricsHandler(unittest.TestCase):
 
         with self.subTest(desc="rollouts"):
             self.assertTrue(compare_arrays("rollouts", data_full, data_split, rtol=1e-5, atol=1e-5, verbose=verbose))
+
+    @parameterized.expand([("none",), ("weighted",), ("missing observations",)])
+    def test_compiled_matches_eager(self, case, verbose=False):
+        """
+        The handler compiles its metrics: its results are those of the same handler with the metrics eager, for every
+        metric, with weights, and with missing observations, which the handler masks.
+        """
+        grid_type, batch_size, ensemble_size, num_rollout_steps, _ = _metric_handler_params[0]
+        num_steps = 2
+        num_channels = len(self.params.channel_names)
+        clim = torch.zeros(1, num_channels, self.params.img_local_shape_x, self.params.img_local_shape_y)
+        self.params.batch_size = batch_size
+        self.params.ensemble_size = ensemble_size
+
+        handlers = {}
+        for compile in (True, False):
+            handler = MetricsHandler(
+                self.params,
+                clim,
+                num_rollout_steps,
+                self.device,
+                l1_var_names=self.params.channel_names,
+                rmse_var_names=self.params.channel_names,
+                acc_var_names=self.params.channel_names,
+                crps_var_names=self.params.channel_names,
+                spread_var_names=self.params.channel_names,
+                ssr_var_names=self.params.channel_names,
+                rh_var_names=self.params.channel_names,
+                wb2_compatible=False,
+                compile=compile,
+            )
+            handler.initialize_buffers()
+            handler.zero_buffers()
+            handlers[compile] = handler
+
+        shape = (batch_size, num_channels, self.params.img_local_shape_x, self.params.img_local_shape_y)
+        for _ in range(num_steps):
+            for idt in range(num_rollout_steps):
+                inp = torch.randn((batch_size, ensemble_size, *shape[1:]), device=self.device)
+                tar = torch.randn(shape, device=self.device)
+                weight = None
+                if case == "weighted":
+                    weight = torch.abs(torch.randn(shape, device=self.device))
+                elif case == "missing observations":
+                    tar[torch.rand(shape, device=self.device) < 0.2] = torch.nan
+                loss = torch.tensor(1.0, device=self.device)
+                for handler in handlers.values():
+                    handler.update(inp, tar, loss, idt, weight=weight)
+
+        # every metric, including those the logs leave out, such as the rank histogram
+        names = [handle.metric_name for handle in handlers[False].metric_handles]
+        self.assertIn("Rank Histogram", names)
+        self.assertIn("CRPS", names)
+        for compiled, eager in zip(handlers[True].metric_handles, handlers[False].metric_handles):
+            for buffer in ("rollout_curve", "rollout_counter"):
+                with self.subTest(desc=f"{eager.metric_name} {buffer}"):
+                    self.assertTrue(
+                        compare_arrays(
+                            f"{eager.metric_name} {buffer}",
+                            getattr(compiled, buffer).cpu().numpy(),
+                            getattr(eager, buffer).cpu().numpy(),
+                            rtol=1e-5,
+                            atol=1e-6,
+                            verbose=verbose,
+                        )
+                    )
 
     @parameterized.expand(_metric_handler_params, skip_on_empty=True)
     def test_aggregation_weighted_vs_unweighted(

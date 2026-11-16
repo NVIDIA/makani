@@ -444,6 +444,13 @@ class GeometricSSR(GeometricBaseMetric):
 
 
 class GeometricCRPS(torch.nn.Module):
+    # The skill-spread score from member pairs does E (E - 1) / 2 differences of whole fields. Compiled, they fuse
+    # into one pass and beat the sort of the ranks many times over, but the traced graph, and the compile time,
+    # grow with the number of pairs: about a minute at 64 members. Eager, they are only on par with the ranks at
+    # 16 members and fall behind beyond. Above these ensemble sizes the metric uses the ranks.
+    PAIRWISE_MAX_ENSEMBLE_COMPILED = 64
+    PAIRWISE_MAX_ENSEMBLE_EAGER = 16
+
     def __init__(
         self,
         grid_type: str,
@@ -476,7 +483,8 @@ class GeometricCRPS(torch.nn.Module):
         self.batch_reduction = batch_reduction
 
         # the skill-spread score with members of equal weight, which is what the metric handler uses, is
-        # computed from member pairs; any other variant goes through the loss
+        # computed from member pairs, up to an ensemble size (see uses_pairs); any other variant goes through the
+        # loss
         self.pairwise = (crps_type == "skillspread") and (ensemble_weights is None)
 
         # get the quadrature
@@ -527,6 +535,20 @@ class GeometricCRPS(torch.nn.Module):
             return vals
         else:
             return vals / counts
+
+    def uses_pairs(self, local_ensemble_size: int) -> bool:
+        """
+        Whether the score is computed from member pairs, for the given number of members on this rank. The bound
+        is on the whole ensemble, and higher when the metric is being compiled, which is decided while tracing.
+        """
+        if not self.pairwise:
+            return False
+        ensemble_size = local_ensemble_size
+        if self.metric_func.ensemble_distributed:
+            ensemble_size = ensemble_size * comm.get_size("ensemble")
+        if torch.compiler.is_compiling():
+            return ensemble_size <= self.PAIRWISE_MAX_ENSEMBLE_COMPILED
+        return ensemble_size <= self.PAIRWISE_MAX_ENSEMBLE_EAGER
 
     def _pairwise_skillspread(
         self, forecasts: torch.Tensor, observations: torch.Tensor, weight: Optional[torch.Tensor] = None
@@ -595,7 +617,7 @@ class GeometricCRPS(torch.nn.Module):
     def forward(
         self, forecasts: torch.Tensor, observations: torch.Tensor, weight: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
-        if self.pairwise:
+        if self.uses_pairs(forecasts.shape[1]):
             crps = self._pairwise_skillspread(forecasts, observations, weight)
         else:
             crps = self.metric_func(forecasts, observations, weight)
