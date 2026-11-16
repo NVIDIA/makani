@@ -374,6 +374,93 @@ class TestMetrics(unittest.TestCase):
 
         self.assertTrue(compare_arrays("crps", crps, crps_xskillscore, rtol=5e-5, atol=0, verbose=verbose))
 
+    def _skillspread_crps(self, nlat, nlon):
+        return GeometricCRPS(
+            grid_type="equiangular",
+            img_shape=(nlat, nlon),
+            crop_shape=(nlat, nlon),
+            crop_offset=(0, 0),
+            crps_type="skillspread",
+            channel_reduction="none",
+            batch_reduction="none",
+        ).to(self.device)
+
+    @parameterized.expand([(ensemble_size, weighted) for ensemble_size in (1, 2, 5, 16) for weighted in (False, True)])
+    def test_skillspread_crps_matches_loss(self, ensemble_size, weighted, verbose=False):
+        """The skill-spread CRPS from member pairs is the one the loss computes from ranks."""
+        batch_size, num_channels, nlat, nlon = 3, 4, 17, 32
+        crps_func = self._skillspread_crps(nlat, nlon)
+        self.assertTrue(crps_func.pairwise)
+
+        fct = torch.randn(batch_size, ensemble_size, num_channels, nlat, nlon, dtype=torch.float64, device=self.device)
+        obs = torch.randn(batch_size, num_channels, nlat, nlon, dtype=torch.float64, device=self.device)
+        weight = None
+        if weighted:
+            weight = (torch.rand(obs.shape, dtype=torch.float64, device=self.device) > 0.3).to(torch.float64)
+
+        crps = crps_func(fct, obs, weight)
+        crps_loss = crps_func.metric_func(fct, obs, weight)
+        self.assertTrue(
+            compare_arrays("crps", crps.cpu().numpy(), crps_loss.cpu().numpy(), rtol=1e-12, atol=1e-15, verbose=verbose)
+        )
+
+    def test_skillspread_crps_matches_xskillscore(self, verbose=False):
+        """With alpha = 0 the skill-spread CRPS is the standard ensemble CRPS, which xskillscore computes."""
+        batch_size, ensemble_size, num_channels, nlat, nlon = 3, 5, 4, 17, 32
+        crps_func = self._skillspread_crps(nlat, nlon)
+        crps_func.metric_func.alpha = 0.0
+
+        fct = torch.randn(batch_size, ensemble_size, num_channels, nlat, nlon, dtype=torch.float64, device=self.device)
+        obs = torch.randn(batch_size, num_channels, nlat, nlon, dtype=torch.float64, device=self.device)
+        crps = crps_func(fct, obs).cpu().numpy()
+
+        lwf = xr.DataArray(
+            torch.squeeze(crps_func.metric_func.quadrature.quad_weight).cpu().numpy(), dims=["lat", "lon"]
+        )
+        obs = xr.DataArray(obs.cpu().numpy(), dims=["batch", "channels", "lat", "lon"])
+        fct = xr.DataArray(fct.cpu().numpy(), dims=["batch", "ensemble", "channels", "lat", "lon"])
+        crps_xskillscore = xs.crps_ensemble(obs, fct, member_dim="ensemble", weights=lwf, dim=["lat", "lon"]).to_numpy()
+
+        # xskillscore divides by the sum of the weights, which is one only up to the rounding of the float32 quadrature
+        self.assertTrue(compare_arrays("crps", crps, crps_xskillscore, rtol=1e-6, atol=0, verbose=verbose))
+
+    @parameterized.expand(["identical members", "member equals observation", "collapsed ensemble"])
+    def test_skillspread_crps_coinciding_members(self, case, verbose=False):
+        """Members that coincide with each other or with the observation give the CRPS the loss computes."""
+        batch_size, ensemble_size, num_channels, nlat, nlon = 3, 5, 4, 17, 32
+        crps_func = self._skillspread_crps(nlat, nlon)
+
+        fct = torch.randn(batch_size, ensemble_size, num_channels, nlat, nlon, dtype=torch.float64, device=self.device)
+        obs = torch.randn(batch_size, num_channels, nlat, nlon, dtype=torch.float64, device=self.device)
+        if case == "identical members":
+            fct[:, 1] = fct[:, 0]
+        elif case == "member equals observation":
+            fct[:, 2] = obs
+        elif case == "collapsed ensemble":
+            fct[:] = fct[:, :1]
+
+        crps = crps_func(fct, obs)
+        crps_loss = crps_func.metric_func(fct, obs)
+        self.assertTrue(
+            compare_arrays("crps", crps.cpu().numpy(), crps_loss.cpu().numpy(), rtol=1e-12, atol=1e-15, verbose=verbose)
+        )
+
+    def test_skillspread_crps_nan_member(self):
+        """A NaN member makes the CRPS of its channel NaN, as with the other metrics, and leaves the others alone."""
+        batch_size, ensemble_size, num_channels, nlat, nlon = 3, 5, 4, 17, 32
+        crps_func = self._skillspread_crps(nlat, nlon)
+
+        fct = torch.randn(batch_size, ensemble_size, num_channels, nlat, nlon, device=self.device)
+        obs = torch.randn(batch_size, num_channels, nlat, nlon, device=self.device)
+        clean = crps_func(fct, obs)
+        fct[1, 2, 0, 5, 7] = torch.nan
+        crps = crps_func(fct, obs)
+
+        self.assertTrue(torch.isnan(crps[1, 0]))
+        nan_entries = torch.zeros_like(crps, dtype=torch.bool)
+        nan_entries[1, 0] = True
+        self.assertTrue(torch.equal(crps[~nan_entries], clean[~nan_entries]))
+
     # we need to relax the bounds here because on CPU, for some reason, the deviations are big
     @parameterized.expand(_probabilistic_metrics_params, skip_on_empty=True)
     def test_rank_histogram(
