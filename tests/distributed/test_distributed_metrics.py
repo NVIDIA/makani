@@ -231,6 +231,10 @@ class TestDistributedMetricHandler(unittest.TestCase):
             for _ in range(num_steps)
         ]
 
+        # quarter steps, so that observations tie with members, which the rank histogram splits over the tied ranks
+        inplist = [torch.round(tensor * 4.0) / 4.0 for tensor in inplist]
+        tarlist = [torch.round(tensor * 4.0) / 4.0 for tensor in tarlist]
+
         for inp, tar in zip(inplist, tarlist):
             for idt in range(num_rollout_steps):
                 inpp = inp[idt, ...]
