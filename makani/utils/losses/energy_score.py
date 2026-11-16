@@ -215,9 +215,9 @@ class LpEnergyScoreLoss(GeometricBaseLoss):
             diff = diff.to(dtype=work_dtype)
             eskill = eskill.to(dtype=work_dtype)
 
-            # Lp norm = (sum |x|^p)^(1/p); then optional beta exponent (Gneiting et al. 2005)
-            diff = diff.pow(1.0 / self.p).pow(self.beta)
-            eskill = eskill.pow(1.0 / self.p).pow(self.beta)
+            # the Lp norm (sum |x|^p)^(1/p) to the power beta (Gneiting et al. 2005), as one power
+            diff = diff.pow(self.beta / self.p)
+            eskill = eskill.pow(self.beta / self.p)
 
         # mask and sum; factor of 2 accounts for symmetric (j,i) counterparts
         diff = torch.where(diff_mask, 0.0, diff)
@@ -424,9 +424,9 @@ class SobolevEnergyScoreLoss(SpectralBaseLoss):
             espread = espread.float()
             eskill = eskill.float()
 
-            # This is according to the definition in Gneiting et al. 2005
-            espread = torch.sqrt(espread).pow(self.beta)
-            eskill = torch.sqrt(eskill).pow(self.beta)
+            # the L2 norm to the power beta, as one power, according to the definition in Gneiting et al. 2005
+            espread = espread.pow(0.5 * self.beta)
+            eskill = eskill.pow(0.5 * self.beta)
 
         # mask espread and sum
         espread = torch.where(espread_mask, 0.0, espread)
@@ -596,9 +596,9 @@ class SpectralL2EnergyScoreLoss(SpectralBaseLoss):
             espread = espread.float()
             eskill = eskill.float()
 
-            # This is according to the definition in Gneiting et al. 2005
-            espread = torch.sqrt(espread).pow(self.beta)
-            eskill = torch.sqrt(eskill).pow(self.beta)
+            # the L2 norm to the power beta, as one power, according to the definition in Gneiting et al. 2005
+            espread = espread.pow(0.5 * self.beta)
+            eskill = eskill.pow(0.5 * self.beta)
 
         # mask espread and sum
         espread = torch.where(espread_mask, 0.0, espread)
@@ -979,8 +979,8 @@ class CorrectedSpectralL2EnergyScoreLoss(SpectralBaseLoss):
         with amp.autocast(device_type="cuda", enabled=False):
             espread = espread.float()
             eskill = eskill.float()
-            espread = torch.sqrt(espread).pow(self.beta)
-            eskill = torch.sqrt(eskill).pow(self.beta)
+            espread = espread.pow(0.5 * self.beta)
+            eskill = eskill.pow(0.5 * self.beta)
 
         espread = torch.where(espread_mask, 0.0, espread)
         eskill = torch.where(eskill_mask, 0.0, eskill)
