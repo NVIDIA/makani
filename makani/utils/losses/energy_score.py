@@ -164,14 +164,12 @@ class LpEnergyScoreLoss(GeometricBaseLoss):
         if spatial_weights is not None:
             point_weight = point_weight * spatial_weights_split
 
-        # espread: the upper-triangular member pairs, summed over the grid, (P, B, C). Gathering both members of
-        # every pair from the full fields, with torch.combinations, gave wrong gradients when compiled on the
-        # x86-64 CPU runners of the CI: its backward adds up repeated indices. Both forms below avoid that.
-        # Compiled, all pairs come from broadcasting, which inductor fuses into a pass over the members that
-        # holds no pairwise differences; the upper triangle is then taken of the small (E, E, B, C) result, where
-        # every index occurs once. Eager, the broadcast would hold the differences of all E^2 pairs, so the pairs
-        # (i, i + k) come from slices instead, the differences of one offset k at a time. The order of the
-        # pairs does not matter, they are summed below
+        # espread: the upper-triangular member pairs, summed over the grid, (P, B, C). Compiled, all pairs come
+        # from broadcasting, which inductor fuses into a pass over the members that holds no pairwise
+        # differences; the upper triangle is then taken of the small (E, E, B, C) result. This needs less memory
+        # and time than gathering both members of every pair from the full fields. Eager, the broadcast would
+        # hold the differences of all E^2 pairs, so the pairs (i, i + k) come from slices instead, the
+        # differences of one offset k at a time. The order of the pairs does not matter, they are summed below
         if torch.compiler.is_compiling():
             diff = torch.sum(abs_pow(forecasts.unsqueeze(1) - forecasts.unsqueeze(0), self.p) * point_weight, dim=-1)
             pairs = torch.triu_indices(num_ensemble, num_ensemble, offset=1, device=forecasts.device)
