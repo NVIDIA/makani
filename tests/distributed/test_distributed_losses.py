@@ -596,12 +596,19 @@ class TestDistributedLoss(unittest.TestCase):
 
     @parameterized.expand(
         [
-            [64, 128, 8, 3, 4, 1e-4],
-            [65, 128, 2, 5, 4, 1e-4],
+            [64, 128, 8, 3, 4, 1e-4, 2.0, 1.0, True, False],
+            [65, 128, 2, 5, 4, 1e-4, 2.0, 1.0, True, False],
+            [65, 128, 2, 5, 4, 1e-4, 1.5, 1.5, False, False],
+            # two members equal on the northern half, so that the local distance vanishes on some ranks
+            # while the global one does not
+            [64, 128, 2, 3, 4, 1e-4, 0.5, 1.0, True, True],
+            [64, 128, 2, 3, 4, 1e-4, 1.0, 0.5, False, True],
         ],
         skip_on_empty=True,
     )
-    def test_distributed_lp_energy_score(self, nlat, nlon, batch_size, num_chan, ens_size, tol, verbose=False):
+    def test_distributed_lp_energy_score(
+        self, nlat, nlon, batch_size, num_chan, ens_size, tol, p, beta, channel_reduction, coinciding, verbose=False
+    ):
 
         # disable tf32 for deterministic comparison# disable tf32
         disable_tf32()
@@ -614,6 +621,8 @@ class TestDistributedLoss(unittest.TestCase):
         mean, sigma = (1.0, 2.0)
         forecasts_full = torch.randn((B, E, C, H, W), dtype=torch.float32, device=self.device) * sigma + mean
         obs_full = torch.randn((B, C, H, W), dtype=torch.float32, device=self.device) * sigma * 0.01 + mean
+        if coinciding:
+            forecasts_full[:, 1, :, : H // 2] = forecasts_full[:, 0, :, : H // 2]
 
         # local loss
         loss_fn_local = LpEnergyScoreLoss(
@@ -623,8 +632,9 @@ class TestDistributedLoss(unittest.TestCase):
             channel_names=tuple(),
             grid_type="equiangular",
             alpha=1.0,
-            beta=1.0,
-            p=2.0,
+            beta=beta,
+            p=p,
+            channel_reduction=channel_reduction,
             eps=1.0e-5,
             spatial_distributed=False,
             ensemble_distributed=False,
@@ -639,8 +649,9 @@ class TestDistributedLoss(unittest.TestCase):
             channel_names=(),
             grid_type="equiangular",
             alpha=1.0,
-            beta=1.0,
-            p=2.0,
+            beta=beta,
+            p=p,
+            channel_reduction=channel_reduction,
             eps=1.0e-5,
             spatial_distributed=(comm.is_distributed("spatial") and (comm.get_size("spatial") > 1)),
             ensemble_distributed=(comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1)),

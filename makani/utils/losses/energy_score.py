@@ -128,8 +128,11 @@ class LpEnergyScoreLoss(GeometricBaseLoss):
         # observations: batch, channels, lat, lon
         B, E, C, H, W = forecasts.shape
 
-        # get the data type before stripping amp types
-        dtype = forecasts.dtype
+        # the score runs in float32 at least: reduced-precision forecasts, as under autocast, are
+        # differenced in float32, and float64 inputs stay float64
+        work_dtype = torch.promote_types(forecasts.dtype, torch.float32)
+        forecasts = forecasts.to(dtype=work_dtype)
+        observations = observations.to(dtype=work_dtype)
 
         # transpose the forecasts to ensemble, batch, channels, lat, lon and then do distributed transpose into ensemble direction.
         # ideally we split spatial dims
@@ -198,8 +201,8 @@ class LpEnergyScoreLoss(GeometricBaseLoss):
 
         with amp.autocast(device_type="cuda", enabled=False):
 
-            diff = diff.float()
-            eskill = eskill.float()
+            diff = diff.to(dtype=work_dtype)
+            eskill = eskill.to(dtype=work_dtype)
 
             # Lp norm = (sum |x|^p)^(1/p); then optional beta exponent (Gneiting et al. 2005)
             diff = diff.pow(1.0 / self.p).pow(self.beta)
