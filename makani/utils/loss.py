@@ -352,7 +352,7 @@ class LossHandler(nn.Module):
             prdm = reduce_from_parallel_region(prdm, "ensemble") / float(comm.get_size("ensemble"))
         return prdm
 
-    def _mask_missing_targets(self, prd: torch.Tensor, prdm: torch.Tensor, tar: torch.Tensor):
+    def _mask_missing_targets(self, prd: torch.Tensor, prdm: torch.Tensor, tar: torch.Tensor, missing: torch.Tensor):
         """Take missing target points out of every loss, see :mod:`makani.utils.missing_data`.
 
         At those points the target, every ensemble member and the ensemble mean
@@ -362,7 +362,9 @@ class LossHandler(nn.Module):
         them. Filling with the prediction rather than a constant keeps the
         fields smooth for the spectral losses: the only jump left at the edge
         of a missing region is the prediction error there. The ensemble mean is
-        already reduced across ranks, so the fill agrees between them.
+        already reduced across ranks, so the fill agrees between them. Where
+        the prediction is not finite at a missing point, the fill is zero: what
+        the model predicts where there is nothing to compare with is not scored.
 
         The masking is deliberately per pixel: every valid point contributes
         equally to the loss, and a sample is not renormalized by how much of it
@@ -380,8 +382,8 @@ class LossHandler(nn.Module):
         would cost a device synchronization on every step; on complete targets
         it changes nothing.
         """
-        missing = missing_values(tar)
         fill = prdm.detach()
+        fill = torch.where(torch.isfinite(fill), fill, 0.0)
         tar = fill_missing(tar, fill, missing)
         prdm = fill_missing(prdm, fill, missing)
         if prd.dim() == 5:
@@ -421,17 +423,21 @@ class LossHandler(nn.Module):
         # otherwise we assume that the dims are
         # batch, channel, h, w
 
-        # A non-finite prediction is a failure of the model and must never be
-        # scored around. Only NaN in the target means missing data, but some
-        # losses also mask NaN in the forecasts or treat a NaN observation as
-        # missing, so this is enforced here for all of them: the returned loss
-        # is NaN whenever the prediction is not finite anywhere.
-        prediction_failed = torch.logical_not(torch.isfinite(prd).all())
+        # Only NaN in the target means missing data. Where the target is
+        # missing, the prediction is not scored either, whatever it is. Where
+        # the target has a value, a non-finite prediction is a failure of the
+        # model and must never be scored around. Some losses also mask NaN in
+        # the forecasts or treat a NaN observation as missing, so this is
+        # enforced here for all of them: the returned loss is NaN whenever the
+        # prediction is not finite at a point where the target has a value.
+        missing = missing_values(tar)
+        missing_prd = missing.unsqueeze(1) if prd.dim() == 5 else missing
+        prediction_failed = torch.logical_not(torch.logical_or(torch.isfinite(prd), missing_prd).all())
 
         # take missing target values out of the losses. This has to come before
         # the random slicing, which mixes channels and would spread the NaN
         prdm = self._ensemble_mean(prd)
-        prd, prdm, tar = self._mask_missing_targets(prd, prdm, tar)
+        prd, prdm, tar = self._mask_missing_targets(prd, prdm, tar, missing)
 
         # if random slices are enabled, we need to recombine both prediction and targets across the channel dimension
         if self.random_slice_loss:

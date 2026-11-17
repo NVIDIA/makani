@@ -1781,9 +1781,12 @@ class TestLossHandler(unittest.TestCase):
         self._assert_masked(loss_obj(prd, tar), prd, missing, verbose=verbose)
 
     @parameterized.expand(_missing_target_deterministic_params + _missing_target_probabilistic_params)
-    def test_nan_predictions_are_not_masked(self, losses, verbose=False):
-        """Only NaN in the target means missing data. NaN coming out of the model is
-        a failure and has to reach the loss, whether the target is valid there or not."""
+    def test_non_finite_predictions(self, losses, verbose=False):
+        """
+        Only NaN in the target means missing data. Where the target has a value, a NaN or inf coming out of the model
+        is a failure and has to reach the loss. Where the target is missing, the prediction is not scored, whatever it
+        is: the loss is finite, as if the prediction were zero there, and so is its gradient.
+        """
         self.params.losses = losses
         loss_obj = LossHandler(self.params, compile=self.compile)
         probabilistic = "ensemble" in losses[0]["type"] or "energy_score" in losses[0]["type"]
@@ -1794,15 +1797,37 @@ class TestLossHandler(unittest.TestCase):
         valid_point = torch.nonzero(torch.logical_not(missing))[0].tolist()
         missing_point = torch.nonzero(missing)[0].tolist()
 
-        for desc, point in [("valid target", valid_point), ("missing target", missing_point)]:
-            with self.subTest(at=desc):
-                prd = torch.randn(shape[0], 5, *shape[1:]) if probabilistic else torch.randn(*shape)
+        def prediction(point, value):
+            prd = torch.randn(shape[0], 5, *shape[1:]) if probabilistic else torch.randn(*shape)
+            if probabilistic:
+                # a single member is enough
+                prd[point[0], 0, point[1], point[2], point[3]] = value
+            else:
+                prd[tuple(point)] = value
+            return prd
+
+        for value in (torch.nan, torch.inf):
+            with self.subTest(at="valid target", value=value):
+                self.assertTrue(
+                    torch.isnan(loss_obj(prediction(valid_point, value), tar)), "failed prediction was masked"
+                )
+
+            with self.subTest(at="missing target", value=value):
+                prd = prediction(missing_point, value).requires_grad_(True)
+                out = loss_obj(prd, tar)
+                self.assertTrue(torch.isfinite(out), "prediction at a missing target point was scored")
+
+                # the same as a zero prediction there, for every member
+                reference_prd = prd.detach().clone()
                 if probabilistic:
-                    # a single member going NaN is enough
-                    prd[point[0], 0, point[1], point[2], point[3]] = torch.nan
+                    reference_prd[missing_point[0], :, missing_point[1], missing_point[2], missing_point[3]] = 0.0
                 else:
-                    prd[tuple(point)] = torch.nan
-                self.assertTrue(torch.isnan(loss_obj(prd, tar)), f"NaN prediction at a {desc} point was masked")
+                    reference_prd[tuple(missing_point)] = 0.0
+                reference = loss_obj(reference_prd, tar)
+                self.assertTrue(compare_tensors("loss", out.detach(), reference, verbose=verbose))
+
+                out.backward()
+                self.assertTrue(torch.all(torch.isfinite(prd.grad)), "gradient is not finite")
 
     def test_missing_targets_with_random_slices(self, verbose=False):
         """The masking happens before the random slice, which mixes channels and would spread the NaN."""
