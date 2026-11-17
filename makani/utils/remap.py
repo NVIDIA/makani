@@ -521,6 +521,7 @@ class ConservativeRemap(nn.Module):
         self.spatial_distributed = False
         self.halo_lat = 0
         self.halo_lon = 0
+        self.halo_lat_plan = None
 
     # ---- construction ------------------------------------------------------
 
@@ -616,6 +617,9 @@ class ConservativeRemap(nn.Module):
         remap.register_buffer("pole_mask", torch.as_tensor(pole_mask, dtype=torch.bool))
         remap.halo_lat = int(halo_lat)
         remap.halo_lon = int(halo_lon)
+        # halo_lat source rows from each "h" neighbour, zero rows at the poles: the layout the latitude
+        # weights above are built for
+        remap.halo_lat_plan = thd.PolarHaloPlan.symmetric(remap.halo_lat, h_rank, h_size)
         return remap
 
     @classmethod
@@ -763,7 +767,7 @@ class ConservativeRemap(nn.Module):
             padded = data.reshape(-1, 1, s_lat, s_lon)
             if self.halo_lat > 0:
                 _ensure_thd_initialized()
-                padded = thd.polar_halo_exchange(padded, self.halo_lat)
+                padded = thd.polar_halo_exchange(padded, self.halo_lat_plan)
             if self.halo_lon > 0:
                 padded = azimuthal_halo_exchange(padded, self.halo_lon, comm.get_group("w"))
             data = padded.reshape(*leading, padded.shape[-2], padded.shape[-1])

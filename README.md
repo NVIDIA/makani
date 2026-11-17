@@ -25,7 +25,7 @@ Makani needs torch-harmonics 1.0, which is not released yet. Until it is, build 
 ```bash
 pip install setuptools_scm
 # set TORCH_HARMONICS_BUILD_CUDA_EXTENSION=1 when building without a visible GPU, e.g. in a container build
-pip install --no-build-isolation git+https://github.com/NVIDIA/torch-harmonics.git@38b285ab8f6341ea95405fad232f64b9f0c7a6fd
+pip install --no-build-isolation git+https://github.com/NVIDIA/torch-harmonics.git@c2db9778a5757187e2e363ab25b2017cfa751512
 git clone git@github.com:NVIDIA/makani.git
 cd makani
 pip install -e .

@@ -39,7 +39,7 @@ jobs:
         python -m pip install setuptools_scm
         # torch-harmonics main ahead of 1.0, the same SHA as in test_serial.yml
         python -m pip wheel --no-build-isolation --no-deps -w dist \
-          git+https://github.com/NVIDIA/torch-harmonics.git@38b285ab8f6341ea95405fad232f64b9f0c7a6fd
+          git+https://github.com/NVIDIA/torch-harmonics.git@c2db9778a5757187e2e363ab25b2017cfa751512
 
     - uses: actions/upload-artifact@v4
       with:
