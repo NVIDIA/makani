@@ -60,6 +60,7 @@ class MetricRollout:
         mask_target_nan=True,
         integrate=False,
         report_metric=True,
+        compile=True,
     ):
 
         # store members
@@ -81,7 +82,11 @@ class MetricRollout:
         # instantiate handle
         self.metric_func = metric_handle().to(self.device)
         self.metric_type = self.metric_func.type
-        # self.metric_func = torch.compile(self.metric_func, mode="max-autotune-no-cudagraphs")
+
+        # the metric is compiled, as the loss handler compiles the losses: the metrics are elementwise
+        # arithmetic and reductions over the members and the grid, which inductor fuses. Only the forward
+        # call is compiled; the counts, the combination and the finalization stay on the module
+        self.metric_forward = torch.compile(self.metric_func, dynamic=False) if compile else self.metric_func
 
         if self.metric_func.batch_reduction == "none":
             raise ValueError("Batch reduction mode 'none' is not supported for rollout handlers")
@@ -156,7 +161,7 @@ class MetricRollout:
                 wgtt = missing_weights(missing, wgtt)
 
         # compute metric
-        metric = self.metric_func(inpp, tarp, wgtt)
+        metric = self.metric_forward(inpp, tarp, wgtt)
 
         if hasattr(self, "scale"):
             metric = metric * self.scale
@@ -277,9 +282,11 @@ class MetricsHandler:
         rh_var_names=[],
         mask_target_nan=True,
         wb2_compatible=False,
+        compile=True,
     ):
 
         self.device = device
+        self.compile = compile
         self.log_to_screen = params.log_to_screen
         self.log_to_wandb = params.log_to_wandb
         # these are the names of the channels emitted by the dataloader in that order
@@ -378,6 +385,7 @@ class MetricsHandler:
                     device=self.device,
                     integrate=False,
                     mask_target_nan=self.mask_target_nan,
+                    compile=self.compile,
                     report_metric=True,
                 )
             )
@@ -407,6 +415,7 @@ class MetricsHandler:
                     scale=scale.reshape(-1),
                     integrate=False,
                     mask_target_nan=self.mask_target_nan,
+                    compile=self.compile,
                     report_metric=True,
                 )
             )
@@ -448,6 +457,7 @@ class MetricsHandler:
                     device=self.device,
                     integrate=True,
                     mask_target_nan=self.mask_target_nan,
+                    compile=self.compile,
                     report_metric=True,
                 )
             )
@@ -480,6 +490,7 @@ class MetricsHandler:
                     scale=scale.reshape(-1),
                     integrate=False,
                     mask_target_nan=self.mask_target_nan,
+                    compile=self.compile,
                     report_metric=True,
                 )
             )
@@ -511,6 +522,7 @@ class MetricsHandler:
                     scale=scale.reshape(-1),
                     integrate=False,
                     mask_target_nan=self.mask_target_nan,
+                    compile=self.compile,
                     report_metric=True,
                 )
             )
@@ -540,6 +552,7 @@ class MetricsHandler:
                     device=self.device,
                     integrate=False,
                     mask_target_nan=self.mask_target_nan,
+                    compile=self.compile,
                     report_metric=True,
                 )
             )
@@ -575,6 +588,7 @@ class MetricsHandler:
                     aux_shape_finalized=(ens_size + 1,),
                     integrate=False,
                     mask_target_nan=self.mask_target_nan,
+                    compile=self.compile,
                     report_metric=False,
                 )
             )

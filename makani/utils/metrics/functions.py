@@ -18,7 +18,7 @@ from typing import Optional, Tuple
 import torch
 
 from makani.utils import comm
-from makani.mpu.mappings import reduce_from_parallel_region
+from makani.mpu.mappings import scatter_to_parallel_region, reduce_from_parallel_region, distributed_transpose
 from torch_harmonics.distributed import split_tensor_along_dim
 
 from makani.utils.losses import CRPSLoss, LossType
@@ -444,6 +444,13 @@ class GeometricSSR(GeometricBaseMetric):
 
 
 class GeometricCRPS(torch.nn.Module):
+    # The skill-spread score from member pairs does E (E - 1) / 2 differences of whole fields. Compiled, they fuse
+    # into one pass and beat the sort of the ranks many times over, but the traced graph, and the compile time,
+    # grow with the number of pairs: about a minute at 64 members. Eager, they are only on par with the ranks at
+    # 16 members and fall behind beyond. Above these ensemble sizes the metric uses the ranks.
+    PAIRWISE_MAX_ENSEMBLE_COMPILED = 64
+    PAIRWISE_MAX_ENSEMBLE_EAGER = 16
+
     def __init__(
         self,
         grid_type: str,
@@ -474,6 +481,11 @@ class GeometricCRPS(torch.nn.Module):
 
         self.channel_reduction = channel_reduction
         self.batch_reduction = batch_reduction
+
+        # the skill-spread score with members of equal weight, which is what the metric handler uses, is
+        # computed from member pairs, up to an ensemble size (see uses_pairs); any other variant goes through the
+        # loss
+        self.pairwise = (crps_type == "skillspread") and (ensemble_weights is None)
 
         # get the quadrature
         quadrature_rule = grid_to_quadrature_rule(grid_type)
@@ -524,10 +536,91 @@ class GeometricCRPS(torch.nn.Module):
         else:
             return vals / counts
 
+    def uses_pairs(self, local_ensemble_size: int) -> bool:
+        """
+        Whether the score is computed from member pairs, for the given number of members on this rank. The bound
+        is on the whole ensemble, and higher when the metric is being compiled, which is decided while tracing.
+        """
+        if not self.pairwise:
+            return False
+        ensemble_size = local_ensemble_size
+        if self.metric_func.ensemble_distributed:
+            ensemble_size = ensemble_size * comm.get_size("ensemble")
+        if torch.compiler.is_compiling():
+            return ensemble_size <= self.PAIRWISE_MAX_ENSEMBLE_COMPILED
+        return ensemble_size <= self.PAIRWISE_MAX_ENSEMBLE_EAGER
+
+    def _pairwise_skillspread(
+        self, forecasts: torch.Tensor, observations: torch.Tensor, weight: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """
+        The skill-spread CRPS integrated over the grid, (B, C), as the loss computes it, from member pairs
+        instead of ranks:
+
+            sum_k w_k [ mean_i |x_ik - y_k| - (E - 1 + alpha) / (E^2 (E - 1)) sum_{i<j} |x_ik - x_jk| ].
+
+        The ranks need the members sorted at every point, which is slow. The sum over pairs, accumulated
+        point by point, keeps a single field in memory; compiled, as the metric handler does it, it becomes
+        one pass over the members. The pairwise differences are not differentiable where members tie, which
+        is why the loss keeps the ranks; the metric does not need gradients.
+        """
+        loss = self.metric_func
+        B, E, C, H, W = forecasts.shape
+
+        # members first, then the same layout as the loss: under ensemble parallelism, all members on a part
+        # of the grid
+        forecasts = torch.reshape(torch.moveaxis(forecasts, 1, 0), (E, B, C, H * W))
+        observations = torch.reshape(observations, (B, C, H * W))
+        if weight is not None:
+            weight = torch.flatten(weight, start_dim=-2)
+        if loss.ensemble_distributed:
+            ensemble_shapes = [E for _ in range(comm.get_size("ensemble"))]
+            forecasts = distributed_transpose(forecasts, (-1, 0), ensemble_shapes, "ensemble")
+            observations = scatter_to_parallel_region(observations, -1, "ensemble")
+            if weight is not None:
+                weight = scatter_to_parallel_region(weight, -1, "ensemble")
+        num_ensemble = forecasts.shape[0]
+
+        # in float32 at least
+        work_dtype = torch.promote_types(forecasts.dtype, torch.float32)
+        forecasts = forecasts.to(dtype=work_dtype)
+        observations = observations.to(dtype=work_dtype)
+
+        skill = torch.abs(forecasts[0] - observations)
+        for i in range(1, num_ensemble):
+            skill = skill + torch.abs(forecasts[i] - observations)
+        crps = skill / float(num_ensemble)
+
+        if num_ensemble > 1:
+            spread = torch.zeros_like(observations)
+            for i in range(num_ensemble):
+                for j in range(i + 1, num_ensemble):
+                    spread = spread + torch.abs(forecasts[i] - forecasts[j])
+            crps = crps - spread * (num_ensemble - 1.0 + loss.alpha) / float(
+                num_ensemble * num_ensemble * (num_ensemble - 1)
+            )
+
+        # integrate over the local grid points
+        point_weight = loss.quad_weight_split.to(dtype=work_dtype)
+        if weight is not None:
+            point_weight = point_weight * weight.to(dtype=work_dtype)
+        crps = torch.sum(crps * point_weight, dim=-1)
+
+        # the integrals over the local part of the grid add up over the ranks that split it
+        if loss.ensemble_distributed:
+            crps = reduce_from_parallel_region(crps, "ensemble")
+        if loss.spatial_distributed:
+            crps = reduce_from_parallel_region(crps, "spatial")
+
+        return crps
+
     def forward(
         self, forecasts: torch.Tensor, observations: torch.Tensor, weight: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
-        crps = self.metric_func(forecasts, observations, weight)
+        if self.uses_pairs(forecasts.shape[1]):
+            crps = self._pairwise_skillspread(forecasts, observations, weight)
+        else:
+            crps = self.metric_func(forecasts, observations, weight)
 
         if self.channel_reduction == "mean":
             crps = torch.mean(crps, dim=1)
