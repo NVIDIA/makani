@@ -57,7 +57,6 @@ class MetricRollout:
         aux_shape=None,
         aux_shape_finalized=None,
         scale=None,
-        mask_target_nan=True,
         integrate=False,
         report_metric=True,
         compile=True,
@@ -68,8 +67,6 @@ class MetricRollout:
         self.metric_channels = metric_channels
         self.device = device
         self.integrate = integrate
-        # we assume that the prediction are nan-free (the model should take care of this)
-        self.mask_target_nan = mask_target_nan
         self.report_metric = report_metric
         self.num_rollout_steps = num_rollout_steps
         self.dtphys = dtphys
@@ -150,15 +147,6 @@ class MetricRollout:
         tarp = tar[..., self.channel_mask, :, :]
 
         wgtt = wgt[..., self.channel_mask, :, :] if wgt is not None else None
-
-        # missing target values get zero weight, and the metric is renormalized
-        # to the valid area. Only masked if there actually are any, since the
-        # weighted path costs more
-        if self.mask_target_nan:
-            missing = missing_values(tarp)
-            if torch.any(missing):
-                tarp = fill_missing(tarp, 0.0, missing)
-                wgtt = missing_weights(missing, wgtt)
 
         # compute metric
         metric = self.metric_forward(inpp, tarp, wgtt)
@@ -384,7 +372,6 @@ class MetricsHandler:
                     dtphys=self.dtxdh,
                     device=self.device,
                     integrate=False,
-                    mask_target_nan=self.mask_target_nan,
                     compile=self.compile,
                     report_metric=True,
                 )
@@ -414,7 +401,6 @@ class MetricsHandler:
                     device=self.device,
                     scale=scale.reshape(-1),
                     integrate=False,
-                    mask_target_nan=self.mask_target_nan,
                     compile=self.compile,
                     report_metric=True,
                 )
@@ -456,7 +442,6 @@ class MetricsHandler:
                     dtphys=self.dtxdh,
                     device=self.device,
                     integrate=True,
-                    mask_target_nan=self.mask_target_nan,
                     compile=self.compile,
                     report_metric=True,
                 )
@@ -489,7 +474,6 @@ class MetricsHandler:
                     device=self.device,
                     scale=scale.reshape(-1),
                     integrate=False,
-                    mask_target_nan=self.mask_target_nan,
                     compile=self.compile,
                     report_metric=True,
                 )
@@ -521,7 +505,6 @@ class MetricsHandler:
                     device=self.device,
                     scale=scale.reshape(-1),
                     integrate=False,
-                    mask_target_nan=self.mask_target_nan,
                     compile=self.compile,
                     report_metric=True,
                 )
@@ -551,7 +534,6 @@ class MetricsHandler:
                     dtphys=self.dtxdh,
                     device=self.device,
                     integrate=False,
-                    mask_target_nan=self.mask_target_nan,
                     compile=self.compile,
                     report_metric=True,
                 )
@@ -587,7 +569,6 @@ class MetricsHandler:
                     aux_shape=(ens_size + 1,),
                     aux_shape_finalized=(ens_size + 1,),
                     integrate=False,
-                    mask_target_nan=self.mask_target_nan,
                     compile=self.compile,
                     report_metric=False,
                 )
@@ -632,6 +613,19 @@ class MetricsHandler:
 
     def update(self, prediction, target, loss, idt, weight=None):
         """update function to update buffers on each autoregressive rollout step"""
+
+        # NaN in the target means missing data. There, neither the target nor the prediction is scored: both
+        # are set to zero, and the point gets zero weight, so that the metrics are renormalized to the valid
+        # area. A NaN prediction where the target has a value is a failure of the model, and is left to show
+        # in the metrics. Some channels have missing values at every step, such as the sea surface temperature
+        # over land, so this is done unconditionally, once for all metrics, rather than behind a check, which
+        # would cost a device synchronization
+        if self.mask_target_nan:
+            missing = missing_values(target)
+            target = fill_missing(target, 0.0, missing)
+            missing_prediction = missing.unsqueeze(1) if prediction.dim() == 5 else missing
+            prediction = fill_missing(prediction, 0.0, missing_prediction)
+            weight = missing_weights(missing, weight)
 
         if prediction.dim() == 5:
             prediction_mean = torch.mean(prediction, dim=1)
