@@ -1697,6 +1697,100 @@ class TestMetricsHandler(unittest.TestCase):
         with self.subTest(desc="rollouts"):
             self.assertTrue(compare_arrays("rollouts", data_full, data_split, rtol=1e-5, atol=1e-5, verbose=verbose))
 
+    def _missing_data_handler(self, compile):
+        """A handler with every metric on every channel, and the shapes of a step."""
+        _, batch_size, ensemble_size, _, _ = _metric_handler_params[0]
+        num_channels = len(self.params.channel_names)
+        clim = torch.zeros(1, num_channels, self.params.img_local_shape_x, self.params.img_local_shape_y)
+        self.params.batch_size = batch_size
+        self.params.ensemble_size = ensemble_size
+        names = self.params.channel_names
+        handler = MetricsHandler(
+            self.params,
+            clim,
+            1,
+            self.device,
+            l1_var_names=names,
+            rmse_var_names=names,
+            acc_var_names=names,
+            crps_var_names=names,
+            spread_var_names=names,
+            ssr_var_names=names,
+            rh_var_names=names,
+            wb2_compatible=False,
+            compile=compile,
+        )
+        handler.initialize_buffers()
+        handler.zero_buffers()
+        shape = (batch_size, num_channels, self.params.img_local_shape_x, self.params.img_local_shape_y)
+        return handler, shape, ensemble_size
+
+    def _missing_data(self, shape, ensemble_size):
+        """
+        Targets with the missing values of real data: channel 0 is missing over a fixed land region, as the sea
+        surface temperature is, and channel 1 has scattered missing values.
+        """
+        generator = torch.Generator().manual_seed(1234)
+        prd = torch.randn((shape[0], ensemble_size, *shape[1:]), generator=generator).to(self.device)
+        tar = torch.randn(shape, generator=generator).to(self.device)
+        missing = torch.zeros(shape, dtype=torch.bool)
+        missing[:, 0, 4:10, 3:20] = True
+        missing[:, 1] = torch.rand(shape[0], *shape[2:], generator=generator) < 0.2
+        missing = missing.to(self.device)
+        return prd, torch.where(missing, torch.nan, tar), missing
+
+    @staticmethod
+    def _metric_values(handler):
+        return {handle.metric_name: handle.rollout_curve[0].clone() for handle in handler.metric_handles}
+
+    @parameterized.expand([(False,), (True,)])
+    def test_missing_targets_mask_the_prediction(self, compile, verbose=False):
+        """
+        Where the target is missing, the prediction is not scored, whatever it is: NaN or inf there, even in a single
+        member, gives the metrics of a finite prediction there.
+        """
+        handler, shape, ensemble_size = self._missing_data_handler(compile)
+        prd, tar, missing = self._missing_data(shape, ensemble_size)
+        loss = torch.tensor(1.0, device=self.device)
+
+        # a finite prediction where the target is missing
+        handler.update(prd, tar, loss, 0)
+        reference = self._metric_values(handler)
+
+        # NaN in every member over land, inf in a single member at the scattered missing points
+        prd_failed = prd.clone()
+        prd_failed[:, :, 0][missing[:, 0].unsqueeze(1).expand(-1, ensemble_size, -1, -1)] = torch.nan
+        prd_failed[:, 1, 1][missing[:, 1]] = torch.inf
+        handler.zero_buffers()
+        handler.update(prd_failed, tar, loss, 0)
+        values = self._metric_values(handler)
+
+        for name, value in values.items():
+            with self.subTest(metric=name):
+                self.assertTrue(torch.all(torch.isfinite(value)), f"{name} is not finite")
+                self.assertTrue(
+                    compare_arrays(
+                        name, value.cpu().numpy(), reference[name].cpu().numpy(), rtol=1e-6, atol=1e-7, verbose=verbose
+                    )
+                )
+
+    def test_failed_predictions_reach_the_metrics(self):
+        """A NaN prediction where the target has a value makes every metric of that channel NaN, and no other."""
+        handler, shape, ensemble_size = self._missing_data_handler(compile=False)
+        prd, tar, missing = self._missing_data(shape, ensemble_size)
+
+        # a single member over the ocean of channel 0
+        point = torch.nonzero(torch.logical_not(missing[0, 0]))[0].tolist()
+        prd[0, 1, 0, point[0], point[1]] = torch.nan
+        handler.update(prd, tar, torch.tensor(1.0, device=self.device), 0)
+
+        for name, value in self._metric_values(handler).items():
+            # one entry per channel, the rank histogram has one per bin as well
+            per_channel = torch.isnan(value.reshape(value.shape[0], -1)).any(dim=-1)
+            with self.subTest(metric=name):
+                self.assertTrue(per_channel[0], f"{name} hides the failed prediction")
+                self.assertFalse(torch.any(per_channel[1:]), f"{name} is NaN in other channels")
+
     @parameterized.expand([("none",), ("weighted",), ("missing observations",)])
     def test_compiled_matches_eager(self, case, verbose=False):
         """
