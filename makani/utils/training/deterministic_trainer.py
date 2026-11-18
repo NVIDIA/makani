@@ -44,14 +44,14 @@ from makani.utils.YParams import YParams
 from makani.models import model_registry
 
 # distributed computing stuff
-from makani.utils import comm
+from makani.distributed import comm
 from makani.utils.precision import AutocastManager
 
 from makani.distributed.mappings import init_gradient_reduction_hooks
 from makani.distributed.helpers import sync_params, gather_uneven, barrier
 
 # for counting model parameters
-from makani.models.helpers import count_parameters
+from makani.distributed.helpers import count_parameters
 
 # checkpoint helpers
 

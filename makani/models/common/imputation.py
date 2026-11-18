@@ -17,7 +17,7 @@ import torch
 import torch.nn as nn
 from typing import Optional
 
-from makani.utils import comm
+from makani.distributed import comm
 from .mlp import EncoderDecoder
 
 

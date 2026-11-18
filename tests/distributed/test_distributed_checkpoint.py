@@ -20,7 +20,7 @@ import torch
 import torch.nn as nn
 import torch.distributed as dist
 
-from makani.utils import comm
+from makani.distributed import comm
 from makani.utils.driver import Driver
 from makani.utils.checkpoint_helpers import gather_model_state_dict
 

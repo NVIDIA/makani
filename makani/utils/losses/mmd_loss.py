@@ -18,7 +18,7 @@ from typing import Optional, Tuple, List
 import torch
 
 from makani.utils.losses.base_loss import GeometricBaseLoss, LossType, abs_pow
-from makani.utils import comm
+from makani.distributed import comm
 
 
 # distributed stuff

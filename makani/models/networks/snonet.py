@@ -34,7 +34,7 @@ from makani.models.common import GeometricInstanceNormS2
 from makani.models.common.distributed.mlp import DistributedMLP
 
 # more distributed stuff
-from makani.utils import comm
+from makani.distributed import comm
 from makani.utils.grids import sht_grid
 
 # layer normalization

@@ -29,7 +29,7 @@ import torch.distributed as dist
 import torch_harmonics as th
 import torch_harmonics.distributed as thd
 
-from makani.utils import comm
+from makani.distributed import comm
 from makani.utils.grids import sht_grid
 from makani.utils import checkpoint_helpers
 

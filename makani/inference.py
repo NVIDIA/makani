@@ -23,7 +23,7 @@ from makani.utils import logging_utils
 from makani.utils.YParams import YParams
 
 # distributed computing stuff
-from makani.utils import comm
+from makani.distributed import comm
 from makani.utils.checkpoint_helpers import set_checkpoint_paths
 from makani.utils.parse_dataset_metada import parse_dataset_metadata
 from makani.utils import argument_parser

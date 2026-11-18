@@ -28,7 +28,7 @@ from makani.utils.functions import flatten_history
 import torch
 
 from makani import Trainer, EnsembleTrainer, StochasticTrainer, AutoencoderTrainer
-from makani.utils import comm
+from makani.distributed import comm
 from makani.utils.dataloaders.batch import TARGET, batch_to_device
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))

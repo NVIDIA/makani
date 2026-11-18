@@ -687,8 +687,8 @@ class TestCheckpointFormat(unittest.TestCase):
         # a model-parallel legacy restore of a flexible checkpoint: rank 1 finds no file of its own
         self._save("flexible")
         with (
-            mock.patch("makani.utils.comm.get_rank", return_value=1),
-            mock.patch("makani.utils.comm.get_size", return_value=2),
+            mock.patch("makani.distributed.comm.get_rank", return_value=1),
+            mock.patch("makani.distributed.comm.get_size", return_value=2),
         ):
             with self.assertRaisesRegex(ValueError, "load_checkpoint: flexible"):
                 self._restore("legacy")

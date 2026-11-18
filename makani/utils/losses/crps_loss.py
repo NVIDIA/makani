@@ -28,7 +28,7 @@ from makani.utils.losses.base_loss import (
     VortDivBaseLoss,
     GradientBaseLoss,
 )
-from makani.utils import comm
+from makani.distributed import comm
 from makani.utils.grids import sht_grid
 
 # distributed stuff

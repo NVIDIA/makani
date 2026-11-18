@@ -44,7 +44,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 
-from makani.utils import comm
+from makani.distributed import comm
 
 
 def summarize_timings(times_ms: Sequence[float]) -> Dict[str, Any]:
@@ -105,7 +105,7 @@ def get_decomposition_record() -> Dict[str, Any]:
     """The decomposition ``comm`` actually built, not the one that was requested.
 
     The distinction matters: the data dimensions are auto-sized from ``-1`` in
-    :func:`makani.utils.comm.init`, so what a launcher asked for and what the run
+    :func:`makani.distributed.comm.init`, so what a launcher asked for and what the run
     used are not the same thing. Reporting the resolved sizes makes it
     impossible for the logged decomposition to disagree with the measured one.
     """

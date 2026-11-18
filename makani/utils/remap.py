@@ -75,7 +75,7 @@ from makani.distributed.halo import (
     redistribute_indexed,
 )
 from makani.distributed.mappings import copy_to_parallel_region, reduce_from_parallel_region
-from makani.utils import comm
+from makani.distributed import comm
 
 
 def cell_bounds_sin(latitudes: np.ndarray) -> np.ndarray:

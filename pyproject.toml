@@ -180,10 +180,6 @@ ignore = ["E711", "E712", "E722", "E741", "F841"]
 [tool.ruff.lint.per-file-ignores]
 # Package __init__ files re-export their imports as the public API.
 "**/__init__.py" = ["F401"]
-# Imports are deferred to the bottom of the module on purpose to break a
-# circular import with makani.utils; see the comment at the import site.
-"makani/distributed/mappings.py" = ["E402"]
-
 
 [tool.coverage.run]
 # record paths relative to the checkout, so the data files of the serial and the distributed

@@ -19,7 +19,7 @@ import torch
 import torch.nn as nn
 import torch.distributed as dist
 
-from makani.utils import comm
+from makani.distributed import comm
 from makani.distributed.helpers import AVG, SUM, get_sharing, sync_params
 from makani.distributed.mappings import init_gradient_reduction_hooks
 

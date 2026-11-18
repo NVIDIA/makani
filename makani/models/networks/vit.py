@@ -18,7 +18,7 @@ import torch
 import torch.nn as nn
 
 # mp stuff
-from makani.utils import comm
+from makani.distributed import comm
 from makani.models.common import DropPath, MLP, PatchEmbed2D
 from makani.models.common.distributed.mlp import DistributedMLP
 from makani.models.common.distributed.attention import MultiHeadAttention

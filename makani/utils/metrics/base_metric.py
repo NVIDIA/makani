@@ -22,7 +22,7 @@ import torch.nn as nn
 
 from makani.utils.losses.base_loss import LossType
 from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature
-from makani.utils import comm
+from makani.distributed import comm
 
 
 def _sanitize_shapes(vals, counts, dim):

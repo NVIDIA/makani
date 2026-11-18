@@ -16,7 +16,7 @@
 import unittest
 from unittest import mock
 
-from makani.utils import comm
+from makani.distributed import comm
 
 
 class _FakeManager:

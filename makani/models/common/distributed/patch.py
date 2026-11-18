@@ -20,7 +20,7 @@ import torch.nn as nn
 
 from torch_harmonics.distributed import compute_split_shapes
 
-from makani.utils import comm
+from makani.distributed import comm
 from makani.distributed.mappings import gather_from_parallel_region, copy_to_parallel_region
 
 

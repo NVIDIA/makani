@@ -41,7 +41,7 @@ import nvidia.dali.fn as fn
 from nvidia.dali.plugin.pytorch import DALIGenericIterator, LastBatchPolicy
 
 # distributed stuff
-from makani.utils import comm
+from makani.distributed import comm
 from makani.utils.dataloaders.data_helpers import parse_data_normalization_mode
 
 # es helper

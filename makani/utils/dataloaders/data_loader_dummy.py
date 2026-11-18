@@ -24,7 +24,7 @@ import h5py
 import math
 
 # distributed stuff
-from makani.utils import comm
+from makani.distributed import comm
 
 # we need this
 from torch_harmonics.distributed import compute_split_shapes

@@ -40,7 +40,7 @@ from wandb.sdk.lib.runid import generate_id as generate_run_id
 from makani.utils.YParams import YParams
 from makani.utils.features import get_auxiliary_channels, is_dynamic_aux_channel, is_static_aux_channel
 from makani.utils.grid_types import DEFAULT_GRID_TYPE
-from makani.utils import comm
+from makani.distributed import comm
 from makani.utils.profiling import StepTimer
 from makani.utils.dataloaders.data_helpers import get_data_normalization
 from makani.utils.training.training_helpers import get_parameter_groups

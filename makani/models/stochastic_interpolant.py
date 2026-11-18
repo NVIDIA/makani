@@ -40,7 +40,7 @@ import torch.nn as nn
 from makani.models.noise import IsotropicGaussianRandomFieldS2
 from makani.models.noise_controller import NoiseController
 from makani.models.stepper import StepWrapper
-from makani.utils import comm
+from makani.distributed import comm
 from makani.utils.dataloaders.rollout import Rollout
 
 # the configuration of the interpolant and its defaults, see interpolant_config

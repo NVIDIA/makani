@@ -32,7 +32,7 @@ import torch.distributed as dist
 import torch.nn as nn
 
 from makani.models.stochastic_interpolant import StochasticInterpolantWrapper, interpolant_input_channels
-from makani.utils import comm
+from makani.distributed import comm
 from makani.utils.dataloaders.batch import INPUT, TARGET
 from makani.utils.dataloaders.rollout import Rollout
 

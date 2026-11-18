@@ -18,7 +18,7 @@ from typing import Optional, Tuple, List
 import torch
 
 from makani.utils.losses.base_loss import GeometricBaseLoss, LossType
-from makani.utils import comm
+from makani.distributed import comm
 
 # distributed stuff
 from torch_harmonics.distributed import split_tensor_along_dim

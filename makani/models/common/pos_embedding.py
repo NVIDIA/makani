@@ -18,7 +18,7 @@ import abc
 import torch
 import torch.nn as nn
 
-from makani.utils import comm
+from makani.distributed import comm
 from torch_harmonics.distributed import compute_split_shapes
 
 
