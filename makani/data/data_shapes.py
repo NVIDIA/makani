@@ -25,7 +25,7 @@ hand into a ``types.SimpleNamespace`` per branch. Three copies of one mapping,
 and nothing anywhere stating what the mapping was.
 
 :class:`DataShapes` is that statement. A loader reports one, ``get_dataloader``
-returns it, and :meth:`makani.driver.Driver._set_data_shapes` reads it.
+returns it, and :meth:`makani.driver.base.Driver._set_data_shapes` reads it.
 
 Shape of the type
 -----------------

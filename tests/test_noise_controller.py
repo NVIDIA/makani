@@ -317,9 +317,9 @@ class TestGeneratorState(unittest.TestCase):
 def _layout(**sizes):
     """Mocks the comm of the checkpoint helpers with a decomposition, every rank 0."""
     with (
-        mock.patch("makani.training.checkpoint_helpers.comm.get_comm_names", return_value=list(sizes)),
-        mock.patch("makani.training.checkpoint_helpers.comm.get_size", side_effect=lambda name: sizes.get(name, 1)),
-        mock.patch("makani.training.checkpoint_helpers.comm.get_rank", return_value=0),
+        mock.patch("makani.driver.checkpoint.comm.get_comm_names", return_value=list(sizes)),
+        mock.patch("makani.driver.checkpoint.comm.get_size", side_effect=lambda name: sizes.get(name, 1)),
+        mock.patch("makani.driver.checkpoint.comm.get_rank", return_value=0),
     ):
         yield
 
@@ -331,7 +331,7 @@ class TestGeneratorCheckpoint(unittest.TestCase):
     _MATMUL = {"model": 2, "spatial": 1, "h": 1, "w": 1, "matmul": 2, "data": 1, "ensemble": 1, "batch": 1}
 
     def test_same_decomposition_restores(self):
-        from makani.training.checkpoint_helpers import gather_noise_rng_state, scatter_noise_rng_state
+        from makani.driver.checkpoint import gather_noise_rng_state, scatter_noise_rng_state
 
         noise = NoiseController({"white": _white()})
         with _layout(**self._SPATIAL):
@@ -341,7 +341,7 @@ class TestGeneratorCheckpoint(unittest.TestCase):
 
     def test_same_totals_other_split_refused(self):
         # two spatial ranks draw different streams, two matmul ranks the same: the totals alone do not tell them apart
-        from makani.training.checkpoint_helpers import gather_noise_rng_state, scatter_noise_rng_state
+        from makani.driver.checkpoint import gather_noise_rng_state, scatter_noise_rng_state
 
         noise = NoiseController({"white": _white()})
         with _layout(**self._SPATIAL):
@@ -350,8 +350,8 @@ class TestGeneratorCheckpoint(unittest.TestCase):
             scatter_noise_rng_state(stored)
 
     def test_driver_keeps_fresh_streams_on_another_decomposition(self):
-        from makani.training.checkpoint_helpers import gather_noise_rng_state
-        from makani.driver import Driver
+        from makani.driver.checkpoint import gather_noise_rng_state
+        from makani.driver.base import Driver
 
         noise = NoiseController({"white": _white()})
         with _layout(**self._SPATIAL):

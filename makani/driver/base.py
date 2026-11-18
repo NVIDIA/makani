@@ -43,9 +43,9 @@ from makani.data.grid_types import DEFAULT_GRID_TYPE
 from makani.distributed import comm
 from makani.utils.profiling import StepTimer
 from makani.data.data_helpers import get_data_normalization
-from makani.training.training_helpers import get_parameter_groups
+from makani.driver.helpers import get_parameter_groups
 from makani.utils.profiling import Timer
-from makani.training.checkpoint_helpers import (
+from makani.driver.checkpoint import (
     upgrade_checkpoint,
     get_latest_checkpoint_version,
     load_checkpoint,
@@ -474,7 +474,7 @@ class Driver(metaclass=abc.ABCMeta):
         """
         Restore the state a run starts from, and return its counters.
 
-        One of three cases, see :func:`~makani.training.checkpoint_helpers.run_has_checkpoint`:
+        One of three cases, see :func:`~makani.driver.checkpoint.run_has_checkpoint`:
 
         * **Resume**, if the run directory holds a checkpoint of this run (``params.resuming``):
           everything is restored from its latest checkpoint -- the weights, the loss, the

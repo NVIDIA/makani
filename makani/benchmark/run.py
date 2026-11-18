@@ -47,7 +47,7 @@ import torch.distributed as dist
 
 from makani.benchmark import helpers as benchmark_utils
 from makani.distributed import comm
-from makani.training.checkpoint_helpers import set_checkpoint_paths
+from makani.driver.checkpoint import set_checkpoint_paths
 from makani.utils import argument_parser
 from makani.utils import logging_utils
 from makani.utils.params import YParams

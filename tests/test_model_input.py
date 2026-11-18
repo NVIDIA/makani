@@ -31,8 +31,8 @@ from makani.models.model_input import INPUT_NOISE, FlatInputAdapter, InputNoise,
 from makani.models.noise.controller import NoiseController
 from makani.models.preprocessor import HistoryStats, Preprocessor2D
 from makani.models.stepper import StepWrapper
-from makani.training.checkpoint_helpers import upgrade_state_dict
-from makani.driver import Driver
+from makani.driver.checkpoint import upgrade_state_dict
+from makani.driver.base import Driver
 from makani.data.batch import ZENITH
 from makani.utils.functions import flatten_history
 

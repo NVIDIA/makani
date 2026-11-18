@@ -24,7 +24,7 @@ import torch
 import torch.distributed as dist
 import torch.utils.data as tud
 
-from makani.driver import Driver
+from makani.driver.base import Driver
 from makani.losses import LossHandler
 from makani.metrics import MetricsHandler
 from makani.utils.functions import expand_ensemble, flatten_history
@@ -63,8 +63,8 @@ from makani.inference.rollout_buffer import (
 )
 
 # checkpoint helpers
-from makani.training.checkpoint_helpers import get_latest_checkpoint_version
-from makani.training.training_helpers import get_memory_usage
+from makani.driver.checkpoint import get_latest_checkpoint_version
+from makani.driver.helpers import get_memory_usage
 
 
 class Inferencer(Driver):

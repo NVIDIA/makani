@@ -23,8 +23,8 @@ from parameterized import parameterized
 import torch
 
 from makani.distributed import comm
-from makani import driver
-from makani.training import checkpoint_helpers
+from makani.driver import base as driver
+from makani.driver import checkpoint as checkpoint_helpers
 from makani.losses import LossHandler
 from makani.models import model_registry
 from makani.distributed.mappings import init_gradient_reduction_hooks

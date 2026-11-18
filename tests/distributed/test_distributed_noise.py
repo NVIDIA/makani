@@ -41,7 +41,7 @@ from makani.distributed.helpers import SUM, all_reduce_mean, get_sharing
 from makani.distributed import comm
 from makani.models.noise import DiffusionNoiseS2, IsotropicGaussianRandomFieldS2, noise_base_seed
 from makani.models.noise.controller import NoiseController
-from makani.training.checkpoint_helpers import gather_noise_rng_state, scatter_noise_rng_state
+from makani.driver.checkpoint import gather_noise_rng_state, scatter_noise_rng_state
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 from .distributed_helpers import _gather_helper, _init_grid, _split_helper, reduce_success, teardown_comms

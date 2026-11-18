@@ -129,16 +129,16 @@ makani
 │   ├── benchmark               # step time on synthetic data: python -m makani.benchmark (run.py)
 │   ├── data                    # dataloaders, storage backends, batches and rollouts, normalization statistics
 │   ├── distributed             # communication for model parallelism: comm, mappings, gradient reduction, halo exchange
-│   ├── inference               # the inferencer, rollout buffers, model packages; python -m makani.inference
+│   ├── driver                  # what training and inference share: the Driver, checkpoints, model packages
+│   ├── inference               # the inferencer and rollout buffers; python -m makani.inference
 │   ├── losses                  # the losses and the LossHandler
 │   ├── metrics                 # the metrics and the MetricsHandler
 │   ├── models                  # model wrappers, preprocessor, noise, registry
 │   │   ├── common              # layers shared by the networks, with their distributed versions in common/distributed
 │   │   └── networks            # the networks: SFNO, FCN3, FCN3.1, SNO, AFNO, ViT, Pangu
 │   ├── third_party/climt       # the solar zenith angle
-│   ├── training                # the trainers, training and checkpoint helpers
+│   ├── training                # the trainers
 │   ├── utils                   # small helpers: parameters, argument parsing, grids, logging, profiling
-│   ├── driver.py               # the base of the trainers and the inferencer
 │   ├── train.py                # CLI script for launching training
 │   └── ...                     # further CLI scripts: ensemble.py, train_stochastic.py, convert_checkpoint.py, ...
 ├── tests                       # test files

@@ -179,7 +179,7 @@ class StepWrapper(nn.Module):
         Upgrade a state dict of an earlier version in place: the input noise was kept by the preprocessor.
 
         ``preprocessor.input_noise.*`` becomes ``input_adapter.input_noise.process.*``; see
-        :func:`~makani.training.checkpoint_helpers.upgrade_checkpoint`.
+        :func:`~makani.driver.checkpoint.upgrade_checkpoint`.
         """
         old, new = prefix + "preprocessor.input_noise.", prefix + "input_adapter.input_noise.process."
         for key in [k for k in state_dict if k.startswith(old)]:

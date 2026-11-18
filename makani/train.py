@@ -20,7 +20,7 @@ from functools import partial
 
 # utilities
 from makani.utils.profiling import Timer
-from makani.training.checkpoint_helpers import setup_training_run
+from makani.driver.checkpoint import setup_training_run
 from makani.utils import logging_utils
 from makani.utils.params import YParams
 

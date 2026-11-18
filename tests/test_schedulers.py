@@ -19,7 +19,7 @@ import unittest
 import torch
 from torch.optim import lr_scheduler
 
-from makani.driver import Driver
+from makani.driver.base import Driver
 from makani.utils.params import ParamsBase
 
 _LR = 1.0

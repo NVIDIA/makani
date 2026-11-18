@@ -30,7 +30,7 @@ import wandb
 # makani depenedencies
 from makani.losses import LossHandler
 from makani.metrics import MetricsHandler
-from makani.driver import Driver
+from makani.driver.base import Driver
 from makani.data.dataloader import get_dataloader
 from makani.data.data_helpers import get_climatology
 from makani.data.batch import batch_nbytes, batch_to_device, without_target, INPUT
@@ -52,7 +52,8 @@ from makani.distributed.helpers import count_parameters
 # checkpoint helpers
 
 # weight normalizing helper
-from makani.training.training_helpers import get_memory_usage, clip_grads, NonFiniteLossCheck
+from makani.training.training_helpers import clip_grads, NonFiniteLossCheck
+from makani.driver.helpers import get_memory_usage
 
 
 class AutoencoderTrainer(Driver):
@@ -110,7 +111,7 @@ class AutoencoderTrainer(Driver):
 
         # record data required to reproduce workflow using a model package
         if self.world_rank == 0:
-            from makani.inference.model_package import save_model_package
+            from makani.driver.model_package import save_model_package
 
             save_model_package(self.params)
 

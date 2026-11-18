@@ -26,7 +26,7 @@ import torch.nn as nn
 
 from makani.distributed.helpers import MODEL_GROUPS, get_sharing
 from makani.models import model_registry
-from makani.training import checkpoint_helpers
+from makani.driver import checkpoint as checkpoint_helpers
 from makani.losses import LossHandler
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))

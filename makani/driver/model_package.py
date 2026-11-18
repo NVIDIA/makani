@@ -24,7 +24,7 @@ import numpy as np
 import torch
 from makani.utils.functions import expand_history
 from makani.utils.params import ParamsBase, ensure_resampled_shapes
-from makani.driver import Driver
+from makani.driver.base import Driver
 from makani.third_party.climt.zenith_angle_v2 import cos_zenith_angle
 from makani.data.data_helpers import get_data_normalization
 from makani.data.batch import ZENITH
@@ -53,7 +53,7 @@ class LocalPackage:
     """
 
     # These define the model package in terms of where makani expects the files to be located
-    THIS_MODULE = "makani.inference.model_package"
+    THIS_MODULE = "makani.driver.model_package"
     MODEL_PACKAGE_CHECKPOINT_PATH = "training_checkpoints/best_ckpt_mp0.tar"
     MINS_FILE = "mins.npy"
     MAXS_FILE = "maxs.npy"
