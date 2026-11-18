@@ -18,8 +18,8 @@ import torch
 import h5py
 
 
-def get_bias_correction(bias_correction_path, output_channels):
-    """returns the bias correction from"""
+def read_bias_correction(bias_correction_path):
+    """Read the bias correction field, the ``mean`` dataset of the file, without its leading dimension."""
 
     with h5py.File(bias_correction_path, "r") as f:
         bias = f["mean"][0, :]

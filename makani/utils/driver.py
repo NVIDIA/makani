@@ -41,7 +41,7 @@ from makani.utils.YParams import YParams
 from makani.utils.features import get_auxiliary_channels, is_dynamic_aux_channel, is_static_aux_channel
 from makani.utils.grid_types import DEFAULT_GRID_TYPE
 from makani.utils import comm
-from makani.utils.benchmark import StepTimer
+from makani.utils.profiling import StepTimer
 from makani.utils.dataloaders.data_helpers import get_data_normalization
 from makani.utils.training.training_helpers import get_parameter_groups
 from makani.utils.profiling import Timer
@@ -111,7 +111,7 @@ class Driver(metaclass=abc.ABCMeta):
         self.params = self._set_default_parameters(params)
 
         # per-step timer for benchmarking. Disabled unless benchmark_mode is set, in which
-        # case makani/benchmark.py reads the timings back out after the loop -- the training
+        # case makani.benchmark.run reads the timings back out after the loop -- the training
         # and inference loops call into it unconditionally and pay nothing when it is off.
         self.step_timer = StepTimer(
             enabled=bool(self.params.get("benchmark_mode", False)),

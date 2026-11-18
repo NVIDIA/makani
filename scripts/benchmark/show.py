@@ -18,7 +18,7 @@
 """Print benchmark records as the summary block each run prints when it finishes.
 
 A record carries everything needed to reproduce and compare a run, which makes it long to read
-directly. This renders the same block ``makani/benchmark.py`` prints at the end of a run, for
+directly. This renders the same block ``makani.benchmark`` prints at the end of a run, for
 records already written to a results file:
 
     python scripts/benchmark/show.py benchmark_results/results.jsonl
@@ -30,7 +30,7 @@ Use ``report.py`` instead to compare runs against each other in a table; this on
 at runs one at a time.
 
 ..note::
-    The block layout is duplicated from ``makani.utils.benchmark.format_record`` rather than
+    The block layout is duplicated from ``makani.benchmark.helpers.format_record`` rather than
     imported, for the same reason ``report.py`` duplicates its device-name handling: importing
     makani pulls in torch, and reading a results file should work on a login node. Keep the two
     in sync when either changes.
@@ -195,7 +195,7 @@ def load_records(paths):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("results", nargs="+", help="JSON-lines result file(s) written by makani/benchmark.py")
+    parser.add_argument("results", nargs="+", help="JSON-lines result file(s) written by makani.benchmark")
     parser.add_argument("--last", type=int, default=None, metavar="N", help="Show only the last N records.")
     parser.add_argument("--tag", default=None, help="Only records with this run_tag.")
     parser.add_argument("--config", default=None, help="Only records whose config name contains this string.")

@@ -21,7 +21,8 @@ import unittest
 
 sys.path.append(os.path.join(os.path.dirname(os.path.dirname(__file__)), "scripts", "benchmark"))
 
-from makani.utils import benchmark as benchmark_utils
+from makani.benchmark import helpers as benchmark_utils
+from makani.utils.profiling import StepTimer
 from makani.utils.parse_dataset_metada import parse_dataset_metadata
 
 from .testutils import get_default_parameters
@@ -33,7 +34,7 @@ class TestStepTimer(unittest.TestCase):
     """The timer is on the training hot path, so its disabled state has to be free and exact."""
 
     def test_disabled_records_nothing(self):
-        timer = benchmark_utils.StepTimer(enabled=False)
+        timer = StepTimer(enabled=False)
         for _ in range(4):
             timer.begin_step()
             timer.end_step()
@@ -42,7 +43,7 @@ class TestStepTimer(unittest.TestCase):
         self.assertEqual(timer.timings_ms(), [])
 
     def test_records_steps_and_drops_warmup(self):
-        timer = benchmark_utils.StepTimer(enabled=True, warmup_steps=2)
+        timer = StepTimer(enabled=True, warmup_steps=2)
         for _ in range(5):
             timer.begin_step()
             timer.end_step()
@@ -52,7 +53,7 @@ class TestStepTimer(unittest.TestCase):
         self.assertEqual(len(timer.timings_ms(include_warmup=True)), 5)
 
     def test_unbalanced_calls_raise(self):
-        timer = benchmark_utils.StepTimer(enabled=True)
+        timer = StepTimer(enabled=True)
 
         timer.begin_step()
         with self.assertRaises(RuntimeError):
@@ -63,7 +64,7 @@ class TestStepTimer(unittest.TestCase):
             timer.end_step()
 
     def test_reset_clears_timings(self):
-        timer = benchmark_utils.StepTimer(enabled=True)
+        timer = StepTimer(enabled=True)
         timer.begin_step()
         timer.end_step()
         timer.reset()

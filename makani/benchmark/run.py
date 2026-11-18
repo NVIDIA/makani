@@ -34,7 +34,7 @@ launchers remain comparable.
 Data is synthetic by default. The dataset descriptor that the synthetic loader
 needs is generated from the resolved config rather than checked in, since the
 metadata parser validates the config's channel names against the descriptor's
-channel list -- see :func:`makani.utils.benchmark.generate_metadata_json`.
+channel list -- see :func:`makani.benchmark.helpers.generate_metadata_json`.
 """
 
 import os
@@ -45,7 +45,7 @@ import tempfile
 import torch
 import torch.distributed as dist
 
-from makani.utils import benchmark as benchmark_utils
+from makani.benchmark import helpers as benchmark_utils
 from makani.utils import comm
 from makani.utils.checkpoint_helpers import set_checkpoint_paths
 from makani.utils import argument_parser

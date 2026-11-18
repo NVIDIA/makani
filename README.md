@@ -88,7 +88,7 @@ By default, the inference script will perform inference on the out-of-sample dat
 
 ### Benchmarking:
 
-`makani/benchmark.py` measures the training or inference step time of a model on synthetic data, so that architectures and parallel decompositions can be compared without a dataset. The model is selected with `--yaml_config` and `--config` exactly as for training:
+`python -m makani.benchmark` (`makani/benchmark/run.py`) measures the training or inference step time of a model on synthetic data, so that architectures and parallel decompositions can be compared without a dataset. The model is selected with `--yaml_config` and `--config` exactly as for training:
 
 ```bash
 mpirun -np 8 --allow-run-as-root python -u -m makani.benchmark \
@@ -141,7 +141,7 @@ makani
 │   │   ├── trainer_profile.py  # copy of trainer.py used for profiling
 │   │   └── trainer.py          # main file for handling training
 │   ├── ...
-│   ├── benchmark.py            # CLI script for measuring step time on synthetic data
+│   ├── benchmark               # step time on synthetic data: python -m makani.benchmark (run.py)
 │   ├── inference.py            # CLI script for launching inference
 │   ├── train.py                # CLI script for launching training
 ├── tests                       # test files

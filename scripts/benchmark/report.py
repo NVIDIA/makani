@@ -17,7 +17,7 @@
 
 """Aggregate benchmark records into a comparison table.
 
-Runs are grouped by the comparability hash written by ``makani/benchmark.py``:
+Runs are grouped by the comparability hash written by ``makani.benchmark``:
 two runs land in the same table only when everything that has to match for their
 step times to mean the same thing does match. Runs that differ are reported
 separately, with the diverging keys named, rather than silently averaged
@@ -78,7 +78,7 @@ def load_records(paths):
 #: script reads result files and should stay runnable without makani (and therefore torch).
 _ARCH_STRIP = ("NVIDIA ", "AMD ", "Intel ")
 
-#: Mirrors makani.utils.benchmark._PLACEHOLDER_GPU_NAMES, for records written before
+#: Mirrors makani.benchmark.helpers._PLACEHOLDER_GPU_NAMES, for records written before
 #: gpu_name_is_placeholder existed.
 _PLACEHOLDER_GPU_NAMES = ("NVIDIA Graphics Device", "Graphics Device", "NVIDIA Device")
 
@@ -220,7 +220,7 @@ def describe_group(record):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("results", nargs="+", help="JSON-lines result file(s) written by makani/benchmark.py")
+    parser.add_argument("results", nargs="+", help="JSON-lines result file(s) written by makani.benchmark")
     parser.add_argument("--csv", default=None, help="Also write the rows to this CSV file.")
     parser.add_argument(
         "--force",

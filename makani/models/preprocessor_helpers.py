@@ -48,7 +48,7 @@ def get_bias_correction(params):
         If ``bias_correction`` is set but does not point at an existing file.
     """
     if params.get("bias_correction", None) is not None:
-        from makani.utils.auxiliary_fields import get_bias_correction
+        from makani.utils.auxiliary_fields import read_bias_correction
 
         # set up sharding parameters
         start_x = params.get("img_local_offset_x", 0)
@@ -60,7 +60,7 @@ def get_bias_correction(params):
         if not os.path.isfile(bc_path):
             raise IOError(f"Specify a valid bias correction path, got {bc_path}")
 
-        bias = torch.as_tensor(get_bias_correction(bc_path, params.get("out_channels")), dtype=torch.float32)
+        bias = torch.as_tensor(read_bias_correction(bc_path), dtype=torch.float32)
 
         # shard the bias correction
         subsampling_factor = params.get("subsampling_factor", 1)

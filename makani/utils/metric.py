@@ -28,7 +28,7 @@ from makani.utils import comm
 from makani.utils.dataloaders.data_helpers import get_data_normalization
 from makani.utils.losses import LossType
 from makani.utils.missing_data import fill_missing, missing_values, missing_weights
-from makani.utils.metrics.functions import (
+from makani.utils.metrics.geometric_metrics import (
     GeometricL1,
     GeometricRMSE,
     GeometricACC,
