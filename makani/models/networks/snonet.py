@@ -19,8 +19,6 @@ import torch.nn as nn
 import torch.amp as amp
 from torch.utils.checkpoint import checkpoint
 
-from functools import partial
-
 # helpers
 from makani.models.common import DropPath, LayerScale, MLP, EncoderDecoder, spectral_conv_s2
 from makani.utils.features import get_water_channels
@@ -30,19 +28,12 @@ import torch_harmonics as th
 import torch_harmonics.distributed as thd
 
 # get pre-formulated layers
-from makani.models.common import GeometricInstanceNormS2
 from makani.models.common.distributed.mlp import DistributedMLP
+from makani.models.common.norm_layers import get_norm_layer_handle
 
 # more distributed stuff
 from makani.distributed import comm
 from makani.utils.grids import sht_grid
-
-# layer normalization
-from makani.models.common.distributed.layer_norm import (
-    DistributedInstanceNorm2d,
-    DistributedLayerNorm,
-    DistributedGeometricInstanceNormS2,
-)
 
 
 # heuristic for finding theta_cutoff
@@ -663,7 +654,7 @@ class SphericalNeuralOperatorNet(nn.Module):
         dpr = [x.item() for x in torch.linspace(0, path_drop_rate, num_layers)]
 
         # get the handle for the normalization layer
-        norm_layer = self._get_norm_layer_handle(
+        norm_layer = get_norm_layer_handle(
             self.h, self.w, embed_dim, normalization_layer=normalization_layer, sht_grid_type=sht_grid_type
         )
 
@@ -792,50 +783,6 @@ class SphericalNeuralOperatorNet(nn.Module):
         self.isht = isht_handle(sht_grid((self.h, self.w), sht_grid_type), lmax=modes_lat, mmax=modes_lon).float()
 
     @torch.compiler.disable(recursive=True)
-    def _get_norm_layer_handle(
-        self,
-        h,
-        w,
-        embed_dim,
-        normalization_layer="none",
-        sht_grid_type="legendre-gauss",
-    ):
-        """
-        get the handle for ionitializing normalization layers
-        """
-        # pick norm layer
-        if normalization_layer == "layer_norm":
-            norm_layer_handle = partial(
-                DistributedLayerNorm, normalized_shape=(embed_dim), elementwise_affine=True, eps=1e-6
-            )
-        elif normalization_layer == "instance_norm":
-            if comm.get_size("spatial") > 1:
-                norm_layer_handle = partial(DistributedInstanceNorm2d, num_features=embed_dim, eps=1e-6, affine=True)
-            else:
-                norm_layer_handle = partial(
-                    nn.InstanceNorm2d, num_features=embed_dim, eps=1e-6, affine=True, track_running_stats=False
-                )
-        elif normalization_layer == "instance_norm_s2":
-            norm_layer_handle = (
-                DistributedGeometricInstanceNormS2 if comm.get_size("spatial") > 1 else GeometricInstanceNormS2
-            )
-            norm_layer_handle = partial(
-                norm_layer_handle,
-                img_shape=(h, w),
-                crop_shape=(h, w),
-                crop_offset=(0, 0),
-                grid_type=sht_grid_type,
-                num_features=embed_dim,
-                eps=1e-6,
-                affine=True,
-            )
-        elif normalization_layer == "none":
-            norm_layer_handle = nn.Identity
-        else:
-            raise NotImplementedError(f"Error, normalization {normalization_layer} not implemented.")
-
-        return norm_layer_handle
-
     def _forward_features(self, x):
         for blk in self.blocks:
             if self.checkpointing_level >= 3:

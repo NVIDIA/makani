@@ -33,7 +33,7 @@ from makani.utils.driver import Driver
 from makani.utils.dataloader import get_dataloader
 from makani.utils.dataloaders.data_helpers import get_climatology
 from makani.utils.dataloaders.batch import batch_nbytes, batch_to_device, without_target, INPUT
-from makani.utils.YParams import YParams
+from makani.utils.params import YParams
 
 # model registry
 from makani.models import model_registry

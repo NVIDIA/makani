@@ -29,7 +29,7 @@ import zarr
 
 import torch
 
-from makani.utils.YParams import ParamsBase
+from makani.utils.params import ParamsBase
 
 H5_PATH = "fields"
 NUM_CHANNELS = 5

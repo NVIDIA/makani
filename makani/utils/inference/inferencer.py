@@ -37,7 +37,7 @@ from makani.utils.dataloaders.batch import (
 )
 from makani.utils.dataloaders.rollout import Rollout
 from makani.utils.dataloaders.data_helpers import get_date_from_timestamp, get_data_normalization, get_climatology
-from makani.utils.YParams import YParams
+from makani.utils.params import YParams
 
 from makani.models import model_registry
 

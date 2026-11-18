@@ -21,7 +21,7 @@ import unittest
 import numpy as np
 
 from makani.utils.grid_types import expected_latitudes
-from makani.utils.parse_dataset_metada import parse_dataset_metadata
+from makani.utils.parse_dataset_metadata import parse_dataset_metadata
 
 import sys
 

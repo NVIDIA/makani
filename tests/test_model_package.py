@@ -49,7 +49,7 @@ from makani.utils.driver import Driver
 from makani.utils.dataloaders.batch import make_batch
 from makani.utils.dataloaders.rollout import Rollout
 from .testutils import set_seed, get_default_parameters, compare_tensors, NUM_CHANNELS, IMG_SIZE_H, IMG_SIZE_W
-from makani.utils.YParams import ParamsBase, ensure_resampled_shapes
+from makani.utils.params import ParamsBase, ensure_resampled_shapes
 from makani.models import model_registry
 
 # earth2mip is optional; load_time_loop builds one of its TimeLoops

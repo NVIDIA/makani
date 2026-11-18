@@ -511,7 +511,7 @@ def generate_metadata_json(params, path: str, dhours: int = 1, grid_type: Option
     """Write a dataset descriptor for the synthetic loader, derived from the config.
 
     A checked-in descriptor would have to pin a channel list, and
-    :func:`makani.utils.parse_dataset_metada.parse_dataset_metadata` validates
+    :func:`makani.utils.parse_dataset_metadata.parse_dataset_metadata` validates
     every name in the config's ``channel_names`` against ``coords.channel`` --
     so a static file would silently restrict the suite to the models whose
     channel naming it happens to match. Deriving it from the resolved config

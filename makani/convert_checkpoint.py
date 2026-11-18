@@ -29,7 +29,7 @@ from makani.models import model_registry
 # distributed computing stuff
 from makani.utils.driver import Driver
 from makani.utils.checkpoint_helpers import load_checkpoint, upgrade_checkpoint
-from makani.utils.YParams import ParamsBase
+from makani.utils.params import ParamsBase
 
 
 def parse_comm_grid(checkpoints):

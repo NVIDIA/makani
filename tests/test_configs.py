@@ -23,7 +23,7 @@ import unittest
 from ruamel.yaml import YAML
 
 from makani.models import model_registry
-from makani.utils.YParams import ParamsBase, YParams
+from makani.utils.params import ParamsBase, YParams
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
