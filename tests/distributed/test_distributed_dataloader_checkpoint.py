@@ -23,9 +23,9 @@ import torch.nn as nn
 import torch.distributed as dist
 
 from makani.distributed import comm
-from makani.utils.driver import Driver
-from makani.utils.dataloader import get_dataloader
-from makani.utils.dataloaders.batch import INPUT
+from makani.driver import Driver
+from makani.data.dataloader import get_dataloader
+from makani.data.batch import INPUT
 
 from ..testutils import init_hdf5_dataset, compare_arrays
 from ..test_dataloader import init_dataset_params, get_sample

@@ -17,7 +17,7 @@ import unittest
 import torch
 import torch.nn as nn
 
-from makani.utils.training.training_helpers import (
+from makani.training.training_helpers import (
     clip_grads,
     _compute_total_grad_norm,
     normalize_weights,

@@ -29,8 +29,8 @@ import xarray as xr
 import xskillscore as xs
 
 from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature
-from makani.utils import MetricsHandler
-from makani.utils.metrics.geometric_metrics import (
+from makani.metrics import MetricsHandler
+from makani.metrics.geometric_metrics import (
     GeometricL1,
     GeometricRMSE,
     GeometricACC,
@@ -39,8 +39,8 @@ from makani.utils.metrics.geometric_metrics import (
     GeometricSSR,
     GeometricRankHistogram,
 )
-from makani.utils.dataloaders.data_helpers import get_lat_lon_grid
-from makani.utils.missing_data import fill_missing, missing_values, missing_weights
+from makani.data.data_helpers import get_lat_lon_grid
+from makani.data.missing_data import fill_missing, missing_values, missing_weights
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from .testutils import disable_tf32, set_seed, get_default_parameters, compare_arrays

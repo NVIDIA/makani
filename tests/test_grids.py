@@ -22,7 +22,7 @@ import numpy as np
 import torch
 from parameterized import parameterized
 
-from makani.utils.grid_types import expected_latitudes, matching_grid_types, verify_grid_type
+from makani.data.grid_types import expected_latitudes, matching_grid_types, verify_grid_type
 from makani.utils.grids import grid_to_quadrature_rule, GridConverter, GridQuadrature, sht_grid
 from makani.models.common.bandlimit import BandLimitMask
 

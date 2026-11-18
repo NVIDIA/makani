@@ -19,7 +19,7 @@ import unittest
 
 import numpy as np
 
-from makani.utils.dataloaders.data_helpers import (
+from makani.data.data_helpers import (
     parse_data_normalization_mode,
     get_lat_lon_grid,
     get_data_normalization,

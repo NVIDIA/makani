@@ -22,7 +22,7 @@ import datetime as dt
 import warnings
 import xarray as xr
 
-from makani.utils.dataloaders.wb2_helpers import (
+from makani.data.wb2_helpers import (
     split_convert_channel_names,
     gcs_storage_options,
     invariant_variables,

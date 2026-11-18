@@ -26,7 +26,7 @@ The noise of a model is the model's own: the model owns its noise processes
 and draws from them where it uses them, e.g. with an :class:`InputNoise` layer
 for noise on the input, or in its latent space. It lists them through
 ``noise_processes()``, so that the
-:class:`~makani.models.noise_controller.NoiseController` of the wrapper can
+:class:`~makani.models.noise.controller.NoiseController` of the wrapper can
 advance, snapshot, restore and re-seed them, consistently with a rollout.
 """
 
@@ -141,7 +141,7 @@ class InputNoise(nn.Module):
 
     Owns its noise process, so that its learnable parameters are trained and
     checkpointed with the model, and draws from it in its forward. It does not
-    drive it: the :class:`~makani.models.noise_controller.NoiseController` of
+    drive it: the :class:`~makani.models.noise.controller.NoiseController` of
     the model advances, snapshots and re-seeds the process, which the owner of
     the layer lists through ``noise_processes()``. A draw is a deterministic
     function of the state of the process and of its parameters, so it stays in
@@ -338,7 +338,7 @@ class FlatInputAdapter(nn.Module):
 
     def noise_processes(self):
         r"""
-        The noise processes of the adapter, for the :class:`~makani.models.noise_controller.NoiseController` of the model.
+        The noise processes of the adapter, for the :class:`~makani.models.noise.controller.NoiseController` of the model.
 
         Returns
         -------

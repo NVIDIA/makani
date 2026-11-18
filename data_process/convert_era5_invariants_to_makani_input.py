@@ -34,7 +34,7 @@ import datetime as dt
 import argparse as ap
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from makani.utils.dataloaders.ncar_helpers import NCAR_ERA5_BUCKET, invariant_variables
+from makani.data.ncar_helpers import NCAR_ERA5_BUCKET, invariant_variables
 from data_process.sources import InvariantSource
 
 

@@ -30,7 +30,7 @@ import torch_harmonics.distributed as thd
 from makani.distributed import comm
 from torch_harmonics.distributed import compute_split_shapes
 
-from makani.utils import MetricsHandler
+from makani.metrics import MetricsHandler
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 

@@ -266,7 +266,7 @@ instance, lack `dl`), and `--skip_missing_channels` writes those as missing rath
 failing. `--force_overwrite` replaces an existing file.
 
 Training selects channels from this file and says how each is encoded, see
-`makani/utils/invariants.py`:
+`makani/data/invariants.py`:
 ```yaml
 invariants_path: /invariants/invariants.h5
 invariants:

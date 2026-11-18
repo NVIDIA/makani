@@ -20,7 +20,7 @@ import datetime as dt
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
-from makani.utils.inference.helpers import (
+from makani.inference.helpers import (
     split_list,
     SortedIndexSampler,
     SimpleIndexSampler,

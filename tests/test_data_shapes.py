@@ -33,7 +33,7 @@ import unittest
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
-from makani.utils.dataloaders.data_shapes import DataShapes, Shard
+from makani.data.data_shapes import DataShapes, Shard
 
 
 def make_loader(**overrides):

@@ -77,7 +77,7 @@ Any other network is a flat network and gets a single channel stack, which the `
 The noise of a model is the model's own: the model owns its noise processes, so that their learnable parameters are trained and checkpointed with it, and draws from them where it uses them. Noise on the input is an `InputNoise` layer, which appends its draw as channels (`concatenate`) or adds it to selected channels of the state as a perturbation in data space (`perturb`); the `FlatInputAdapter` holds the one configured in `input_noise` for a flat network, and a network that takes a `ModelInput` builds its own, with `InputNoise.from_params(params)`. Noise in a latent space is drawn by the network wherever it needs it. Every process is listed through `noise_processes()`, and driven from outside only through `model.noise`, a `NoiseController`, which keeps its state consistent with the rollout:
 
 ```python
-from makani.utils.dataloaders.rollout import Rollout
+from makani.data.rollout import Rollout
 
 rollout = Rollout(batch, noise=model.noise)  # advances the noise before each step
 preds = model(rollout)

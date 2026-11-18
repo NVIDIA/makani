@@ -31,9 +31,9 @@ import numpy as np
 import h5py as h5
 import zarr
 
-from makani.utils.dataloader import get_dataloader
-from makani.utils.dataloaders.data_helpers import get_data_normalization
-from makani.utils.dataloaders.batch import (
+from makani.data.dataloader import get_dataloader
+from makani.data.data_helpers import get_data_normalization
+from makani.data.batch import (
     INPUT,
     TARGET,
     INPUT_DYNAMIC_FEATURES,
@@ -97,7 +97,7 @@ def get_zarr_sample(path: str, idx):
 
 def get_wb2_zarr_sample(path: str, idx: int, channel_names=None):
     """Read one sample from a WB2-layout zarr store and return it as (C, H, W)."""
-    from makani.utils.dataloaders.wb2_helpers import build_wb2_channel_map
+    from makani.data.wb2_helpers import build_wb2_channel_map
 
     if channel_names is None:
         channel_names = list(CHANNEL_NAMES)
@@ -1207,7 +1207,7 @@ class TestDummyLoader(unittest.TestCase):
         self.out_channels = list(range(5))
 
     def _make_loader(self, **overrides):
-        from makani.utils.dataloaders.data_loader_dummy import DummyLoader
+        from makani.data.data_loader_dummy import DummyLoader
 
         kwargs = dict(
             location="/nonexistent",
@@ -1353,13 +1353,13 @@ class TestInferenceLookup(unittest.TestCase):
             enable_logging=False,
         )
         if self.kind == "dummy":
-            from makani.utils.dataloaders.data_loader_dummy import DummyInferenceDataset
+            from makani.data.data_loader_dummy import DummyInferenceDataset
 
             return DummyInferenceDataset(
                 location="/nonexistent", batch_size=1, dhours=6, img_shape=(8, 16), n_samples_per_epoch=40, **kwargs
             )
 
-        from makani.utils.dataloaders.data_loader_multifiles import MultifilesDataset
+        from makani.data.data_loader_multifiles import MultifilesDataset
 
         return MultifilesDataset(location=self.train_path, **kwargs)
 
@@ -1532,7 +1532,7 @@ class TestDaliInferenceLoader(unittest.TestCase):
             loader.schedule([list(range(self._BATCH_SIZE + 1))])
 
     def test_a_dataset_with_targets_is_refused(self):
-        from makani.utils.dataloaders.dali_inference_dataloader import DaliInferenceLoader
+        from makani.data.dali_inference_dataloader import DaliInferenceLoader
 
         reference = self._loader().dataset
         with mock.patch.object(reference, "return_target", True):
@@ -1569,7 +1569,7 @@ class TestGetDataloaderWithoutDali(unittest.TestCase):
         return params
 
     def test_synthetic_loader_does_not_need_dali(self):
-        from makani.utils.dataloaders.data_loader_dummy import DummyLoader
+        from makani.data.data_loader_dummy import DummyLoader
 
         params = self._params()
         params.enable_synthetic_data = True
@@ -1626,7 +1626,7 @@ class TestMultifilesDataset(unittest.TestCase):
         cls.tmpdir.cleanup()
 
     def _make(self, location=None, **overrides):
-        from makani.utils.dataloaders.data_loader_multifiles import MultifilesDataset
+        from makani.data.data_loader_multifiles import MultifilesDataset
 
         kwargs = dict(
             location=location or self.train_path,
@@ -1772,7 +1772,7 @@ class TestMultifilesWb2(unittest.TestCase):
         cls.tmpdir.cleanup()
 
     def _make(self, **overrides):
-        from makani.utils.dataloaders.data_loader_multifiles import MultifilesDataset
+        from makani.data.data_loader_multifiles import MultifilesDataset
 
         kwargs = dict(
             location=self.train_path,
@@ -1835,7 +1835,7 @@ class TestLoaderParity(unittest.TestCase):
     Every loader emits the same batch for the same configuration.
 
     The other suites test each loader on its own, against the files. Here the
-    loaders are held to one contract, see :mod:`makani.utils.dataloaders.batch`:
+    loaders are held to one contract, see :mod:`makani.data.batch`:
     the same keys and dynamic features, shapes, dtypes and one device; timestamps
     that step by ``dt`` and a zenith angle that belongs to them; and, for DALI,
     the same values as the multifiles dataset for the same window, matched by
@@ -1902,7 +1902,7 @@ class TestLoaderParity(unittest.TestCase):
 
     def _reference(self, params, path):
         """The multifiles dataset over the same files, with targets and zenith: the values to compare with."""
-        from makani.utils.dataloaders.data_loader_multifiles import MultifilesDataset
+        from makani.data.data_loader_multifiles import MultifilesDataset
 
         bias, scale = get_data_normalization(params)
         return MultifilesDataset(
@@ -1966,7 +1966,7 @@ class TestLoaderParity(unittest.TestCase):
 
         # the zenith angle of every step belongs to that step's time
         from makani.third_party.climt.zenith_angle_v2 import cos_zenith_angle
-        from makani.utils.dataloaders.data_helpers import get_date_from_timestamp
+        from makani.data.data_helpers import get_date_from_timestamp
 
         sides = [(INPUT_DYNAMIC_FEATURES, INPUT_TIMESTAMP)]
         if mode != "inference":

@@ -126,23 +126,21 @@ makani
 ├── datasets                    # dataset utility scripts
 ├── docker                      # scripts for building a docker image for training
 ├── makani                      # Main directory containing the package
-│   ├── inference               # contains the inferencer
-│   ├── distributed             # communication for model parallelism: comm, mappings, gradient reduction, halo exchange
-│   ├── networks                # networks, contains definitions of various ML models
-│   ├── third_party/climt       # third party modules
-│   │   └── zenith_angle.py     # computation of zenith angle
-│   ├── utils                   # utilities
-│   │   ├── dataloaders         # contains various dataloaders
-│   │   ├── metrics             # metrics folder contains routines for scoring and benchmarking.
-│   │   ├── ...
-│   │   ├── dataloader.py       # dataloader interface
-│   │   ├── metric.py           # centralized metrics handler
-│   │   ├── trainer_profile.py  # copy of trainer.py used for profiling
-│   │   └── trainer.py          # main file for handling training
-│   ├── ...
 │   ├── benchmark               # step time on synthetic data: python -m makani.benchmark (run.py)
-│   ├── inference.py            # CLI script for launching inference
+│   ├── data                    # dataloaders, storage backends, batches and rollouts, normalization statistics
+│   ├── distributed             # communication for model parallelism: comm, mappings, gradient reduction, halo exchange
+│   ├── inference               # the inferencer, rollout buffers, model packages; python -m makani.inference
+│   ├── losses                  # the losses and the LossHandler
+│   ├── metrics                 # the metrics and the MetricsHandler
+│   ├── models                  # model wrappers, preprocessor, noise, registry
+│   │   ├── common              # layers shared by the networks, with their distributed versions in common/distributed
+│   │   └── networks            # the networks: SFNO, FCN3, FCN3.1, SNO, AFNO, ViT, Pangu
+│   ├── third_party/climt       # the solar zenith angle
+│   ├── training                # the trainers, training and checkpoint helpers
+│   ├── utils                   # small helpers: parameters, argument parsing, grids, logging, profiling
+│   ├── driver.py               # the base of the trainers and the inferencer
 │   ├── train.py                # CLI script for launching training
+│   └── ...                     # further CLI scripts: ensemble.py, train_stochastic.py, convert_checkpoint.py, ...
 ├── tests                       # test files
 └── README.md                   # this file
 ```

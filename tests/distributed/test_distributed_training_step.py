@@ -22,8 +22,8 @@ import torch.distributed as dist
 
 from makani.distributed.helpers import get_sharing
 from makani.distributed import comm
-from makani.utils import driver
-from makani.utils import checkpoint_helpers
+from makani import driver
+from makani.training import checkpoint_helpers
 from makani.models import model_registry
 from makani.distributed.helpers import sync_params
 from makani.distributed.mappings import init_gradient_reduction_hooks, reduce_from_parallel_region

@@ -38,10 +38,10 @@ import torch
 import torch.nn as nn
 
 from makani.models.noise import IsotropicGaussianRandomFieldS2
-from makani.models.noise_controller import NoiseController
+from makani.models.noise.controller import NoiseController
 from makani.models.stepper import StepWrapper
 from makani.distributed import comm
-from makani.utils.dataloaders.rollout import Rollout
+from makani.data.rollout import Rollout
 
 # the configuration of the interpolant and its defaults, see interpolant_config
 _DEFAULTS = {
@@ -89,7 +89,7 @@ class PathKeys(nn.Module):
     each with a field of noise of its own, and a training step draws the
     interpolation times and the noise of the path. The interpolant derives all
     of these from one key per sample, which this process draws at each
-    :meth:`update`. So the :class:`~makani.models.noise_controller.NoiseController`
+    :meth:`update`. So the :class:`~makani.models.noise.controller.NoiseController`
     advances, snapshots, restores and re-seeds them like any noise process, at
     the cost of one integer per sample: a restored state redraws the same
     fields and times.
@@ -129,7 +129,7 @@ class PathKeys(nn.Module):
 
         The data-parallel ranks hold different samples, so they draw different
         keys; the model ranks of a sample draw the same, see the class.
-        :meth:`~makani.models.noise_controller.NoiseController.set_rng`
+        :meth:`~makani.models.noise.controller.NoiseController.set_rng`
         re-seeds the keys with it, as it does the other noise processes, see
         :meth:`~makani.models.noise.BaseNoiseS2.rank_seed`. Serially, it is
         ``seed`` itself.

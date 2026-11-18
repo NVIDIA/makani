@@ -13,9 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .loss import LossHandler
-from .metric import MetricsHandler
-from .visualize import VisualizationWrapper
+"""Small helpers shared across makani: parameters, argument parsing, logging, profiling and the like.
 
-from .training import Trainer, AutoencoderTrainer, EnsembleTrainer, StochasticTrainer
-from .inference import Inferencer
+The package imports nothing itself, so that a helper can be imported from anywhere without loading
+the trainers or the inferencer."""

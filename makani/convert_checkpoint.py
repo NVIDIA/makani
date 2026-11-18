@@ -21,14 +21,14 @@ from collections import OrderedDict
 import torch
 from torch import nn
 
-from makani.models.model_package import LocalPackage
+from makani.inference.model_package import LocalPackage
 
 # model registry
 from makani.models import model_registry
 
 # distributed computing stuff
-from makani.utils.driver import Driver
-from makani.utils.checkpoint_helpers import load_checkpoint, upgrade_checkpoint
+from makani.driver import Driver
+from makani.training.checkpoint_helpers import load_checkpoint, upgrade_checkpoint
 from makani.utils.params import ParamsBase
 
 

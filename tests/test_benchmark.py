@@ -23,7 +23,7 @@ sys.path.append(os.path.join(os.path.dirname(os.path.dirname(__file__)), "script
 
 from makani.benchmark import helpers as benchmark_utils
 from makani.utils.profiling import StepTimer
-from makani.utils.parse_dataset_metadata import parse_dataset_metadata
+from makani.data.parse_dataset_metadata import parse_dataset_metadata
 
 from .testutils import get_default_parameters
 

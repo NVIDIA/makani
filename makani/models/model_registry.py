@@ -32,7 +32,7 @@ from makani.utils.params import ParamsBase, ensure_resampled_shapes
 from makani.models import StepWrapper
 from makani.models import StochasticInterpolantWrapper
 from makani.models.stochastic_interpolant import interpolant_input_channels
-from makani.utils.dataloaders.data_helpers import get_data_normalization
+from makani.data.data_helpers import get_data_normalization
 
 
 def _construct_registry() -> dict:
@@ -163,7 +163,7 @@ def get_model(
     multistep : bool, optional
         Deprecated and without effect: the same wrapper serves single steps and
         rollouts, and the number of steps comes from the
-        :class:`~makani.utils.dataloaders.rollout.Rollout`. ``True`` warns.
+        :class:`~makani.data.rollout.Rollout`. ``True`` warns.
 
     Returns
     -------
@@ -249,7 +249,7 @@ def get_model(
 
         hydrostatic_balance_means = params.get("hydrostatic_balance_means_path", None)
         if hydrostatic_balance_means is not None:
-            from makani.utils.dataloaders.data_helpers import get_hydrostatic_balance_climatology
+            from makani.data.data_helpers import get_hydrostatic_balance_climatology
 
             hydrostatic_balance_means = get_hydrostatic_balance_climatology(params)
             model_kwargs["hydrostatic_balance_means"] = hydrostatic_balance_means

@@ -24,10 +24,10 @@ import torch
 
 from parameterized import parameterized
 
-import makani.utils.constants as const
-from makani.utils.losses.hydrostatic_loss import HydrostaticBalanceLoss
+import makani.models.constants as const
+from makani.losses.hydrostatic_loss import HydrostaticBalanceLoss
 from makani.models.parametrizations import ConstraintsWrapper
-from makani.utils.constraints import NonNegativeConstraint, HydrostaticBalanceProjection, get_matching_channels_pl
+from makani.models.constraints import NonNegativeConstraint, HydrostaticBalanceProjection, get_matching_channels_pl
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from .testutils import disable_tf32, set_seed, compare_tensors
@@ -369,7 +369,7 @@ class TestConstraints(unittest.TestCase):
             self.assertGreater(loss_pert, 1e3 * loss_bal)
 
     def _water_names(self):
-        from makani.utils.features import get_water_channels
+        from makani.data.features import get_water_channels
 
         return [self.channel_names[c] for c in get_water_channels(self.channel_names)]
 
@@ -470,7 +470,7 @@ class TestConstraints(unittest.TestCase):
 
 @parameterized_class(("device",), _devices)
 class TestNonNegativeConstraint(unittest.TestCase):
-    """Tests for NonNegativeConstraint in makani/utils/constraints.py.
+    """Tests for NonNegativeConstraint in makani/models/constraints.py.
 
     Convention: x_norm = (x_raw - bias) / scale, so physical zero sits at
     x_norm = -bias/scale.  In eval mode the constraint hard-clamps to guarantee
@@ -694,7 +694,7 @@ class TestNonNegativeConstraint(unittest.TestCase):
 
 @parameterized_class(("device",), _devices)
 class TestHydrostaticBalanceProjection(unittest.TestCase):
-    """Tests for HydrostaticBalanceProjection in makani/utils/constraints.py.
+    """Tests for HydrostaticBalanceProjection in makani/models/constraints.py.
 
     The layer takes a freely-predicted (T, Z) state and applies the minimum-norm
     correction onto the hydrostatic-balance manifold

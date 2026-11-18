@@ -23,9 +23,9 @@ from parameterized import parameterized
 import torch
 
 from makani.distributed import comm
-from makani.utils import driver
-from makani.utils import checkpoint_helpers
-from makani.utils import LossHandler
+from makani import driver
+from makani.training import checkpoint_helpers
+from makani.losses import LossHandler
 from makani.models import model_registry
 from makani.distributed.mappings import init_gradient_reduction_hooks
 from makani.distributed.mappings import reduce_from_parallel_region

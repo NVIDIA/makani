@@ -24,7 +24,7 @@ whole and every rank its shard of. Then the distributed process has to reproduce
 its samples and, for learnable noise, the gradients of its parameters once reduced as the trainers reduce them.
 
 The seeding itself is checked across all ranks, and the snapshot and restore of a
-:class:`~makani.models.noise_controller.NoiseController` on the shards.
+:class:`~makani.models.noise.controller.NoiseController` on the shards.
 """
 
 import contextlib
@@ -40,8 +40,8 @@ from parameterized import parameterized
 from makani.distributed.helpers import SUM, all_reduce_mean, get_sharing
 from makani.distributed import comm
 from makani.models.noise import DiffusionNoiseS2, IsotropicGaussianRandomFieldS2, noise_base_seed
-from makani.models.noise_controller import NoiseController
-from makani.utils.checkpoint_helpers import gather_noise_rng_state, scatter_noise_rng_state
+from makani.models.noise.controller import NoiseController
+from makani.training.checkpoint_helpers import gather_noise_rng_state, scatter_noise_rng_state
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 from .distributed_helpers import _gather_helper, _init_grid, _split_helper, reduce_success, teardown_comms

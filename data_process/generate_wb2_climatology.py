@@ -24,7 +24,7 @@ from tqdm import tqdm
 
 from mpi4py import MPI
 
-from makani.utils.dataloaders.wb2_helpers import split_convert_channel_names, gcs_storage_options
+from makani.data.wb2_helpers import split_convert_channel_names, gcs_storage_options
 
 
 def generate_wb2_climatology(
@@ -64,7 +64,7 @@ def generate_wb2_climatology(
         Name of the file the climatology data will be written to. Only channels present from the metadatas channels list will be
         used and written in the correct order. If a channel which is present in the metadata file is not found in the climatology dataset,
         default values for that channel will be written. The translation of channel names between Weatherbench 2 and Makani convention is automatically
-        performed by the code. The details for this can be found in makani/utils/dataloaders/wb2_helpers.py
+        performed by the code. The details for this can be found in makani/data/wb2_helpers.py
     verbose : bool
         Flag to print verbose output.
     """

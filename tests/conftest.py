@@ -48,7 +48,7 @@ import pytest
 def reset_dynamo():
     """Clear the dynamo compile cache before every test.
 
-    ``LossHandler`` compiles each loss (``makani/utils/loss.py``), and dynamo keys its
+    ``LossHandler`` compiles each loss (``makani/losses/handler.py``), and dynamo keys its
     cache of compiled variants on the *code object* -- e.g. ``LpLoss.forward`` -- which
     every ``LpLoss`` instance in the process shares. Tests that build a fresh trainer or
     loss per parameterization therefore each add a cache entry to the same code object:

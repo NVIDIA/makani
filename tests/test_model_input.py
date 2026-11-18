@@ -28,12 +28,12 @@ import torch.nn as nn
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 from makani.models.model_input import INPUT_NOISE, FlatInputAdapter, InputNoise, ModelInput
-from makani.models.noise_controller import NoiseController
+from makani.models.noise.controller import NoiseController
 from makani.models.preprocessor import HistoryStats, Preprocessor2D
 from makani.models.stepper import StepWrapper
-from makani.utils.checkpoint_helpers import upgrade_state_dict
-from makani.utils.driver import Driver
-from makani.utils.dataloaders.batch import ZENITH
+from makani.training.checkpoint_helpers import upgrade_state_dict
+from makani.driver import Driver
+from makani.data.batch import ZENITH
 from makani.utils.functions import flatten_history
 
 from .testutils import compare_tensors, get_default_parameters, set_seed

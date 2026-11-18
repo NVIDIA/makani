@@ -20,7 +20,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import amp
 
-import makani.utils.constants as const
+import makani.models.constants as const
 
 
 class _HydrostaticBalanceWrapper(nn.Module):
@@ -30,7 +30,7 @@ class _HydrostaticBalanceWrapper(nn.Module):
         self.use_moist_air_formula = use_moist_air_formula
 
         # we need the matching routine:
-        from makani.utils.constraints import get_matching_channels_pl
+        from makani.models.constraints import get_matching_channels_pl
 
         # set up indices
         self.z_idx, self.t_idx, self.pressures = get_matching_channels_pl(channel_names, "z", "t", p_min, p_max)
@@ -264,7 +264,7 @@ class ConstraintsWrapper(nn.Module):
         Constraint specifications. Each entry needs a ``"type"`` key and an
         optional ``"options"`` dict forwarded to that constraint. Supported are
         ``"hydrostatic_balance"`` (:class:`_HydrostaticBalanceWrapper`) and
-        ``"nonnegative"`` (:class:`~makani.utils.constraints.NonNegativeConstraint`,
+        ``"nonnegative"`` (:class:`~makani.models.constraints.NonNegativeConstraint`,
         whose ``names_to_clamp`` default to the water channels).
     channel_names : list of str
         Names of the output channels, used to locate the variables each
@@ -340,8 +340,8 @@ class ConstraintsWrapper(nn.Module):
 
             options = dict(constraint.get("options", {}))
             if constraint["type"] == "nonnegative":
-                from makani.utils.constraints import NonNegativeConstraint
-                from makani.utils.features import get_water_channels
+                from makani.models.constraints import NonNegativeConstraint
+                from makani.data.features import get_water_channels
 
                 names_to_clamp = options.pop("names_to_clamp", [names[c] for c in get_water_channels(names)])
                 self.constraint_list.append(
@@ -355,7 +355,7 @@ class ConstraintsWrapper(nn.Module):
         The noise processes of the wrapped model.
 
         Its noise is driven as if it were not wrapped, see
-        :class:`~makani.models.noise_controller.NoiseController`.
+        :class:`~makani.models.noise.controller.NoiseController`.
 
         Returns
         -------

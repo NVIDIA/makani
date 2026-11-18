@@ -22,7 +22,7 @@ from makani.utils.grids import GridQuadrature, grid_to_quadrature_rule
 from makani.distributed.mappings import copy_to_parallel_region
 
 from makani.models.preprocessor_helpers import get_bias_correction, get_static_features
-from makani.utils.dataloaders.batch import ZENITH
+from makani.data.batch import ZENITH
 
 
 def model_dynamic_features(params):
@@ -274,7 +274,7 @@ class Preprocessor2D(nn.Module):
 
     The preprocessor keeps no state between steps: the input window and its
     dynamic features come from a
-    :class:`~makani.utils.dataloaders.rollout.Rollout`, which also slides the
+    :class:`~makani.data.rollout.Rollout`, which also slides the
     window forward, and the history statistics of a step are returned to the
     caller rather than stored.
 

@@ -26,8 +26,8 @@ import torch.nn as nn
 
 from makani.distributed.helpers import MODEL_GROUPS, get_sharing
 from makani.models import model_registry
-from makani.utils import checkpoint_helpers
-from makani.utils import LossHandler
+from makani.training import checkpoint_helpers
+from makani.losses import LossHandler
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from .testutils import disable_tf32, set_seed, get_default_parameters, compare_tensors, single_step_rollout
