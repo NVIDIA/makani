@@ -55,7 +55,7 @@ from makani.data.parse_dataset_metadata import parse_dataset_metadata
 from makani.utils.profiling import Timer
 from makani.distributed.helpers import count_parameters
 
-from makani import Trainer, EnsembleTrainer
+from makani.training import Trainer, EnsembleTrainer
 from makani.inference.inferencer import Inferencer
 
 

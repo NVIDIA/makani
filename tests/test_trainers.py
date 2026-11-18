@@ -27,7 +27,7 @@ from parameterized import parameterized
 from makani.utils.functions import flatten_history
 import torch
 
-from makani import Trainer, EnsembleTrainer, StochasticTrainer, AutoencoderTrainer
+from makani.training import Trainer, EnsembleTrainer, StochasticTrainer, AutoencoderTrainer
 from makani.distributed import comm
 from makani.data.batch import TARGET, batch_to_device
 

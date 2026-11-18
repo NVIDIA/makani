@@ -32,7 +32,7 @@ from makani.utils import argument_parser
 from makani.utils.argument_parser import arguments_to_params
 
 # import trainer
-from makani import StochasticTrainer
+from makani.training import StochasticTrainer
 
 if __name__ == "__main__":
     parser = argument_parser.get_default_argument_parser()

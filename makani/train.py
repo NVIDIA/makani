@@ -32,7 +32,7 @@ from makani.utils.argument_parser import arguments_to_params
 from makani.utils import profiling
 
 # import trainer
-from makani import Trainer
+from makani.training import Trainer
 
 if __name__ == "__main__":
     parser = argument_parser.get_default_argument_parser()

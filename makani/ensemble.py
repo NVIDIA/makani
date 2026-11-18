@@ -32,7 +32,7 @@ from makani.utils import profiling
 
 # import trainer
 from makani.data.parse_dataset_metadata import parse_dataset_metadata
-from makani import EnsembleTrainer
+from makani.training import EnsembleTrainer
 
 if __name__ == "__main__":
     parser = argument_parser.get_default_argument_parser()
