@@ -24,7 +24,7 @@ from makani.utils import logging_utils
 from makani.utils.YParams import YParams
 
 # distributed computing stuff
-from makani.utils import comm
+from makani.distributed import comm
 
 # import trainer
 from makani.utils import argument_parser

@@ -22,7 +22,7 @@ import torch
 import torch.nn as nn
 import torch.distributed as dist
 
-from makani.utils import comm
+from makani.distributed import comm
 from makani.utils.driver import Driver
 from makani.utils.dataloader import get_dataloader
 from makani.utils.dataloaders.batch import INPUT

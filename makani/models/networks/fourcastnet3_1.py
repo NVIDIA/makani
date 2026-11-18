@@ -43,7 +43,7 @@ import torch_harmonics.distributed as thd
 from makani.models.common.distributed.mlp import DistributedMLP
 
 # more distributed stuff
-from makani.utils import comm
+from makani.distributed import comm
 from makani.utils.grids import sht_grid
 
 # for annotation of models

@@ -127,7 +127,7 @@ makani
 ├── docker                      # scripts for building a docker image for training
 ├── makani                      # Main directory containing the package
 │   ├── inference               # contains the inferencer
-│   ├── distributed             # communication for model parallelism: mappings, gradient reduction, halo exchange
+│   ├── distributed             # communication for model parallelism: comm, mappings, gradient reduction, halo exchange
 │   ├── networks                # networks, contains definitions of various ML models
 │   ├── third_party/climt       # third party modules
 │   │   └── zenith_angle.py     # computation of zenith angle
@@ -135,7 +135,6 @@ makani
 │   │   ├── dataloaders         # contains various dataloaders
 │   │   ├── metrics             # metrics folder contains routines for scoring and benchmarking.
 │   │   ├── ...
-│   │   ├── comm.py             # comms module for orthogonal communicator infrastructure
 │   │   ├── dataloader.py       # dataloader interface
 │   │   ├── metric.py           # centralized metrics handler
 │   │   ├── trainer_profile.py  # copy of trainer.py used for profiling

@@ -38,7 +38,7 @@ import torch.distributed as dist
 from parameterized import parameterized
 
 from makani.distributed.helpers import SUM, all_reduce_mean, get_sharing
-from makani.utils import comm
+from makani.distributed import comm
 from makani.models.noise import DiffusionNoiseS2, IsotropicGaussianRandomFieldS2, noise_base_seed
 from makani.models.noise_controller import NoiseController
 from makani.utils.checkpoint_helpers import gather_noise_rng_state, scatter_noise_rng_state

@@ -25,7 +25,7 @@ import h5py as h5
 # distributed computing stuff
 from torch import amp
 import torch.distributed as dist
-from makani.utils import comm
+from makani.distributed import comm
 from makani.utils.grids import sht_grid
 from makani.models.common import RealFFT1
 from makani.models.common.distributed.fft import DistributedRealFFT1

@@ -17,7 +17,7 @@ import torch
 import wandb
 from torch import nn
 import torch.distributed as dist
-from makani.utils import comm
+from makani.distributed import comm
 
 
 # standard torch normalization module base classes whose affine parameters

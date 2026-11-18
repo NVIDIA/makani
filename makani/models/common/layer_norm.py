@@ -23,8 +23,28 @@ from typing import Tuple, Optional
 # quadrature stuff
 from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature
 
-# we need the kernels
-from makani.models.common.distributed.layer_norm import _normalize_kernel, _normalize_transform_kernel
+
+@torch.compile
+def _normalize_transform_kernel(
+    x: torch.Tensor, mean: torch.Tensor, var: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor, eps: float
+) -> torch.Tensor:
+
+    # normalization
+    x = (x - mean) / torch.sqrt(var + eps)
+
+    # affine transformation
+    x = weight * x + bias
+
+    return x
+
+
+@torch.compile
+def _normalize_kernel(x: torch.Tensor, mean: torch.Tensor, var: torch.Tensor, eps: float) -> torch.Tensor:
+
+    # normalization
+    x = (x - mean) / torch.sqrt(var + eps)
+
+    return x
 
 
 class GeometricInstanceNormS2(nn.Module):

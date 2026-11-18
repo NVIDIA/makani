@@ -42,7 +42,7 @@ import torch
 import torch.nn as nn
 from parameterized import parameterized
 
-from makani.utils import comm
+from makani.distributed import comm
 from makani.distributed.mappings import init_gradient_reduction_hooks
 from makani.utils.dataloaders.batch import TARGET, batch_to_device
 

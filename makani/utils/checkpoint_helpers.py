@@ -29,7 +29,7 @@ import torch.nn as nn
 import torch.distributed as dist
 from torch.optim import Optimizer
 
-from makani.utils import comm
+from makani.distributed import comm
 from makani.distributed.helpers import gather_uneven
 
 from torch_harmonics.distributed import split_tensor_along_dim
@@ -615,35 +615,11 @@ def upgrade_checkpoint(checkpoint: Dict[str, Any], model: nn.Module, optimizer: 
             upgrade_optimizer_state_dict(optimizer, checkpoint["optimizer_state_dict"])
 
 
-def flatten_biases(state_dict, keys) -> None:
-    r"""Flatten the biases of earlier versions kept as ``(1, C, 1, 1)`` to ``(C,)``, in place, where they are so."""
-    for key in keys:
-        bias = state_dict.get(key, None)
-        if (bias is not None) and (bias.dim() == 4):
-            state_dict[key] = bias.reshape(-1)
-
-
-def upgrade_mlp_state_dict(state_dict, prefix: str = "") -> None:
-    r"""
-    Upgrade the keys of an MLP of an earlier version in place, for ``MLP`` and ``DistributedMLP`` alike.
-
-    The serial MLP kept its layers in a sequence, ``fwd.0`` and ``fwd.3``, now ``fc1`` and ``fc2``, and the
-    distributed one kept the biases of the nchw format as ``(1, C, 1, 1)``. Either may be restored into either.
-    """
-    renames = {prefix + "fwd.0.": prefix + "fc1.", prefix + "fwd.3.": prefix + "fc2."}
-    for key in list(state_dict.keys()):
-        for old, new in renames.items():
-            if key.startswith(old):
-                state_dict[new + key[len(old) :]] = state_dict.pop(key)
-                break
-    flatten_biases(state_dict, [prefix + "fc1.bias", prefix + "fc2.bias"])
-
-
 def upgrade_optimizer_state_dict(optimizer: Optimizer, optimizer_state_dict) -> None:
     r"""
     Upgrade the state of an optimizer of an earlier version in place, to the parameters as they are now.
 
-    The moments of a bias kept as ``(1, C, 1, 1)`` by earlier versions, see :func:`flatten_biases`, are
+    The moments of a bias kept as ``(1, C, 1, 1)`` by earlier versions, see :func:`~makani.models.common.mlp.flatten_biases`, are
     flattened as the bias is. The saved states are matched to the parameters of ``optimizer`` in the
     order torch.optim packs them, as :func:`scatter_optimizer_state_dict` does.
     """

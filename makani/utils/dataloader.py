@@ -22,7 +22,7 @@ from torch.utils.data import DataLoader
 
 # distributed stuff
 import torch.distributed as dist
-from makani.utils import comm
+from makani.distributed import comm
 
 from makani.utils.dataloaders.data_helpers import get_data_normalization
 

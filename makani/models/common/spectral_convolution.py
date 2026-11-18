@@ -20,7 +20,7 @@ import math
 from torch import amp
 
 # import convenience functions for factorized tensors
-from makani.utils import comm
+from makani.distributed import comm
 from makani.models.common import ComplexReLU
 from makani.models.common.contractions import (
     _contract_dense_pytorch,

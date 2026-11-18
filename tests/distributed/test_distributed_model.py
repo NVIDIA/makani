@@ -22,7 +22,7 @@ from parameterized import parameterized
 
 import torch
 
-from makani.utils import comm
+from makani.distributed import comm
 from makani.utils import driver
 from makani.utils import checkpoint_helpers
 from makani.utils import LossHandler

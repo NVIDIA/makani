@@ -37,7 +37,7 @@ from makani.models.common.distributed.fft import DistributedRealFFT2, Distribute
 from makani.models.common.distributed.mlp import DistributedMLP, DistributedEncoderDecoder
 
 # more distributed stuff
-from makani.utils import comm
+from makani.distributed import comm
 from makani.utils.grids import sht_grid
 
 # layer normalization

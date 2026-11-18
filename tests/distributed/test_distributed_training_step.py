@@ -21,7 +21,7 @@ import torch
 import torch.distributed as dist
 
 from makani.distributed.helpers import get_sharing
-from makani.utils import comm
+from makani.distributed import comm
 from makani.utils import driver
 from makani.utils import checkpoint_helpers
 from makani.models import model_registry

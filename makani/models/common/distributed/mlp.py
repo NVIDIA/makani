@@ -21,8 +21,8 @@ import torch
 import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
 
-from makani.utils import comm
-from makani.utils.checkpoint_helpers import upgrade_mlp_state_dict
+from makani.distributed import comm
+from makani.models.common.mlp import upgrade_mlp_state_dict
 from makani.models.common.distributed.matmul import DistributedMatmul
 
 # transformer engine is an optional dependency: it is only used for the
@@ -308,7 +308,7 @@ class DistributedMLP(nn.Module):
     def upgrade_state_dict(state_dict, prefix=""):
         r"""
         Upgrade a state dict of an earlier version in place, of a serial or a distributed MLP; see
-        :func:`~makani.utils.checkpoint_helpers.upgrade_mlp_state_dict`.
+        :func:`~makani.models.common.mlp.upgrade_mlp_state_dict`.
         """
         upgrade_mlp_state_dict(state_dict, prefix)
 

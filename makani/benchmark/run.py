@@ -46,14 +46,14 @@ import torch
 import torch.distributed as dist
 
 from makani.benchmark import helpers as benchmark_utils
-from makani.utils import comm
+from makani.distributed import comm
 from makani.utils.checkpoint_helpers import set_checkpoint_paths
 from makani.utils import argument_parser
 from makani.utils import logging_utils
 from makani.utils.YParams import YParams
 from makani.utils.parse_dataset_metada import parse_dataset_metadata
 from makani.utils.profiling import Timer
-from makani.models.helpers import count_parameters
+from makani.distributed.helpers import count_parameters
 
 from makani import Trainer, EnsembleTrainer
 from makani.utils.inference.inferencer import Inferencer

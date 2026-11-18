@@ -21,7 +21,7 @@ from parameterized import parameterized
 import numpy as np
 import torch
 
-from makani.utils import comm
+from makani.distributed import comm
 from makani.utils.inference.rollout_buffer import SpectrumAverageBuffer, ZonalSpectrumAverageBuffer
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))

@@ -30,7 +30,7 @@ from torch import amp
 import torch_harmonics as th
 import torch_harmonics.distributed as thd
 
-from makani.utils import comm
+from makani.distributed import comm
 from makani.utils.grids import sht_grid
 from torch_harmonics.distributed import split_tensor_along_dim
 

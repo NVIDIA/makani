@@ -19,7 +19,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from makani.utils import comm
+from makani.distributed import comm
 from makani.distributed.mappings import reduce_from_parallel_region, copy_to_parallel_region
 
 # transformer engine is an optional dependency: it is only used for the

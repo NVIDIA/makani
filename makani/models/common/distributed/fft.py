@@ -19,7 +19,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-from makani.utils import comm
+from makani.distributed import comm
 from makani.utils.functions import contiguous_complex_safe
 from torch_harmonics.distributed import compute_split_shapes
 from torch_harmonics.distributed import distributed_transpose_azimuth as distributed_transpose_w

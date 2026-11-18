@@ -13,5 +13,5 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Communication for model parallelism: the autograd mappings between parallel regions, gradient
-reduction and parameter sharing, and halo exchanges."""
+"""Communication for model parallelism: the communicator and its process groups (``comm``), the autograd
+mappings between parallel regions, gradient reduction and parameter sharing, and halo exchanges."""

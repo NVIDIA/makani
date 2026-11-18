@@ -22,7 +22,7 @@ import torch
 import wandb
 
 # distributed computing stuff
-from makani.utils import comm
+from makani.distributed import comm
 
 # loss stuff
 from makani.utils.dataloaders.data_helpers import get_data_normalization

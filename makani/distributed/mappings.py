@@ -33,6 +33,8 @@ from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 
 # import config
 from makani.distributed.config import config
+from makani.distributed import comm
+from makani.distributed.helpers import count_parameters, get_reduction_plan
 
 
 class _DistributedTranspose(torch.autograd.Function):
@@ -505,9 +507,3 @@ def init_gradient_reduction_hooks(
     model.register_comm_hook(state=None, hook=reduction_comm_hook)
 
     return model
-
-
-# deferred to avoid circular imports with makani.utils
-from makani.utils import comm
-from makani.models.helpers import count_parameters
-from makani.distributed.helpers import get_reduction_plan

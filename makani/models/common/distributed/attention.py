@@ -18,7 +18,7 @@
 import torch.nn as nn
 import torch.nn.functional as F
 
-from makani.utils import comm
+from makani.distributed import comm
 from makani.models.common.distributed.matmul import DistributedMatmul
 
 

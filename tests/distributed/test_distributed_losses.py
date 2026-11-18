@@ -22,7 +22,7 @@ from parameterized import parameterized
 import torch
 import torch.distributed as dist
 
-from makani.utils import comm
+from makani.distributed import comm
 
 from makani.utils.grids import GridQuadrature
 from makani.utils.losses import (

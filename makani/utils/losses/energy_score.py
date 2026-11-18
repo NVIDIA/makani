@@ -20,7 +20,7 @@ import torch
 from torch import amp
 
 from makani.utils.losses.base_loss import GeometricBaseLoss, SpectralBaseLoss, LossType, abs_pow
-from makani.utils import comm
+from makani.distributed import comm
 
 # distributed stuff
 from torch_harmonics.distributed import split_tensor_along_dim

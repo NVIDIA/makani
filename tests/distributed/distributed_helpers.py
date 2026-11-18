@@ -20,7 +20,7 @@ import tempfile
 import torch
 import torch.distributed as dist
 
-from makani.utils import comm
+from makani.distributed import comm
 
 import torch_harmonics.distributed as thd
 from torch_harmonics.distributed import split_tensor_along_dim
@@ -300,7 +300,7 @@ def teardown_comms():
     Mirrors ``torch_harmonics``'s own distributed-test teardown exactly
     (``tests/testutils.py::teardown_distributed_context``): a barrier, then
     ``thd.finalize()``, then ``dist.destroy_process_group()`` (here via
-    ``comm.cleanup()``, which also resets ``makani.utils.comm``'s
+    ``comm.cleanup()``, which also resets ``makani.distributed.comm``'s
     ``DistributedManager`` singleton).
 
     Without the barrier, cleanup falls to physicsnemo's

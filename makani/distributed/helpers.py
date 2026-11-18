@@ -18,7 +18,7 @@ from typing import Dict, Tuple
 import torch
 import torch.distributed as dist
 from torch_harmonics.distributed.primitives import _gather
-from makani.utils import comm
+from makani.distributed import comm
 
 
 # How the gradient of a parameter is reduced over a model-parallel group it is shared over, see get_sharing.
@@ -185,6 +185,38 @@ def barrier(device):
         return
     device_ids = [device.index] if device.type == "cuda" else None
     dist.barrier(device_ids=device_ids)
+
+
+def count_parameters(model, device):
+    """Counts model parameters"""
+
+    with torch.no_grad():
+        total_stats = torch.zeros(2, dtype=torch.long, device=device)
+        local_bytes = 0
+        for p in model.parameters():
+            if not p.requires_grad:
+                continue
+
+            # make sure complex weight tensors are accounted for correctly
+            pview = torch.view_as_real(p) if p.is_complex() else p
+            pstats = torch.tensor([pview.numel(), pview.nbytes], dtype=torch.long, device=device)
+            local_bytes += pview.nbytes
+
+            # if the weight is split, then we need to reduce
+            if hasattr(p, "sharded_dims_mp"):
+                for group in p.sharded_dims_mp:
+                    if (group is not None) and (comm.get_size(group) > 1):
+                        dist.all_reduce(pstats, group=comm.get_group(group))
+
+            # sum the total stats
+            total_stats += pstats
+
+    # transfer to cpu
+    total_stats_arr = total_stats.cpu().numpy()
+    total_count = total_stats_arr[0]
+    total_bytes = total_stats_arr[1]
+
+    return total_count, total_bytes, local_bytes
 
 
 def sync_params(model, mode="broadcast"):
