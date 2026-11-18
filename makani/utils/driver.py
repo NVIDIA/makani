@@ -37,7 +37,7 @@ import wandb
 from wandb.sdk.lib.runid import generate_id as generate_run_id
 
 # makani dependencies
-from makani.utils.YParams import YParams
+from makani.utils.params import YParams
 from makani.utils.features import get_auxiliary_channels, is_dynamic_aux_channel, is_static_aux_channel
 from makani.utils.grid_types import DEFAULT_GRID_TYPE
 from makani.distributed import comm

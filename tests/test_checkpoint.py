@@ -327,7 +327,7 @@ class TestLoadCheckpoint(unittest.TestCase):
         not actually help on this torch version and such checkpoints need the env escape
         hatch instead.
         """
-        from makani.utils.YParams import ParamsBase
+        from makani.utils.params import ParamsBase
 
         params = ParamsBase()
         params.update_params({"N_in_channels": 3, "nettype": "sfno"})

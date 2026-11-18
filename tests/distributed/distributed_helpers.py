@@ -26,7 +26,7 @@ import torch_harmonics.distributed as thd
 from torch_harmonics.distributed import split_tensor_along_dim
 from torch_harmonics.distributed.primitives import _gather
 
-from makani.utils.YParams import ParamsBase
+from makani.utils.params import ParamsBase
 
 H5_PATH = "fields"
 NUM_CHANNELS = 5

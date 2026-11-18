@@ -23,11 +23,11 @@ from makani.utils.profiling import Timer
 from makani.utils.checkpoint_helpers import setup_training_run
 from makani.utils import profiling
 from makani.utils import logging_utils
-from makani.utils.YParams import YParams
+from makani.utils.params import YParams
 
 # distributed computing stuff
 from makani.distributed import comm
-from makani.utils.parse_dataset_metada import parse_dataset_metadata
+from makani.utils.parse_dataset_metadata import parse_dataset_metadata
 from makani.utils import argument_parser
 from makani.utils.argument_parser import arguments_to_params
 

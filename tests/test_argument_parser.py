@@ -17,7 +17,7 @@
 import unittest
 
 from makani.utils.argument_parser import arguments_to_params, get_default_argument_parser
-from makani.utils.YParams import ParamsBase
+from makani.utils.params import ParamsBase
 
 
 class TestArgumentsToParams(unittest.TestCase):

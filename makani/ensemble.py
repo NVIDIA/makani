@@ -21,7 +21,7 @@ from functools import partial
 # utilities
 from makani.utils.profiling import Timer
 from makani.utils import logging_utils
-from makani.utils.YParams import YParams
+from makani.utils.params import YParams
 
 # distributed computing stuff
 from makani.distributed import comm
@@ -31,7 +31,7 @@ from makani.utils.argument_parser import arguments_to_params
 from makani.utils import profiling
 
 # import trainer
-from makani.utils.parse_dataset_metada import parse_dataset_metadata
+from makani.utils.parse_dataset_metadata import parse_dataset_metadata
 from makani import EnsembleTrainer
 
 if __name__ == "__main__":
