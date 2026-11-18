@@ -151,10 +151,10 @@ class SpectralConv(nn.Module):
     ----------
     forward_transform : torch.nn.Module
         Grid-to-spectral transform, :class:`~makani.models.common.fft.RealFFT2` or
-        :class:`~makani.mpu.fft.DistributedRealFFT2`.
+        :class:`~makani.models.common.distributed.fft.DistributedRealFFT2`.
     inverse_transform : torch.nn.Module
         Spectral-to-grid transform, :class:`~makani.models.common.fft.InverseRealFFT2`
-        or :class:`~makani.mpu.fft.DistributedInverseRealFFT2`. May target a
+        or :class:`~makani.models.common.distributed.fft.DistributedInverseRealFFT2`. May target a
         different resolution than ``forward_transform``, in which case the residual
         is resampled accordingly.
     in_channels : int

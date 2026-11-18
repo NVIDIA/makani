@@ -18,7 +18,7 @@ from typing import Optional, Tuple
 import torch
 
 from makani.utils import comm
-from makani.mpu.mappings import scatter_to_parallel_region, reduce_from_parallel_region, distributed_transpose
+from makani.distributed.mappings import scatter_to_parallel_region, reduce_from_parallel_region, distributed_transpose
 from torch_harmonics.distributed import split_tensor_along_dim
 
 from makani.utils.losses import CRPSLoss, LossType

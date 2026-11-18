@@ -22,8 +22,8 @@ from makani.utils import comm
 
 # distributed stuff
 from torch_harmonics.distributed import split_tensor_along_dim
-from makani.mpu.mappings import scatter_to_parallel_region, reduce_from_parallel_region
-from makani.mpu.mappings import distributed_transpose
+from makani.distributed.mappings import scatter_to_parallel_region, reduce_from_parallel_region
+from makani.distributed.mappings import distributed_transpose
 
 
 # negative log likelihood score, assuming the input ensemble is gaussian distributed

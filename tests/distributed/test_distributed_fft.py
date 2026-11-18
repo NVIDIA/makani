@@ -20,7 +20,7 @@ from parameterized import parameterized
 
 import torch
 from makani.models.common import RealFFT1, InverseRealFFT1, RealFFT2, InverseRealFFT2, RealFFT3, InverseRealFFT3
-from makani.mpu.fft import (
+from makani.models.common.distributed.fft import (
     DistributedRealFFT1,
     DistributedInverseRealFFT1,
     DistributedRealFFT2,

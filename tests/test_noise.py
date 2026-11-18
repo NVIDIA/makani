@@ -21,7 +21,7 @@ from parameterized import parameterized, parameterized_class
 import numpy as np
 import torch
 
-from makani.mpu.helpers import AVG, MODEL_GROUPS, get_sharing
+from makani.distributed.helpers import AVG, MODEL_GROUPS, get_sharing
 from makani.models.noise import (
     toep,
     IsotropicGaussianRandomFieldS2,
@@ -1076,7 +1076,7 @@ class TestLearnableNoiseAnnotations(unittest.TestCase):
     The model-parallel annotations of the learnable noise parameters.
 
     Over each model-parallel group, a parameter is either sharded, each rank holding its part, or shared, its
-    gradient summed or averaged over the ranks, see :func:`~makani.mpu.helpers.get_sharing`; never both, and never
+    gradient summed or averaged over the ranks, see :func:`~makani.distributed.helpers.get_sharing`; never both, and never
     neither. The distributed test checks the gradients themselves.
     """
 

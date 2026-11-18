@@ -40,7 +40,7 @@ import torch_harmonics.distributed as thd
 
 # get pre-formulated layers
 # from makani.models.common import GeometricInstanceNormS2
-from makani.mpu.layers import DistributedMLP
+from makani.models.common.distributed.mlp import DistributedMLP
 
 # more distributed stuff
 from makani.utils import comm
@@ -102,14 +102,14 @@ def _get_norm_layer_handle(
     """
     # pick norm layer
     if normalization_layer == "layer_norm":
-        from makani.mpu.layer_norm import DistributedLayerNorm
+        from makani.models.common.distributed.layer_norm import DistributedLayerNorm
 
         norm_layer_handle = partial(
             DistributedLayerNorm, normalized_shape=(embed_dim), elementwise_affine=True, eps=1e-6
         )
     elif normalization_layer == "instance_norm":
         if comm.get_size("spatial") > 1:
-            from makani.mpu.layer_norm import DistributedInstanceNorm2d
+            from makani.models.common.distributed.layer_norm import DistributedInstanceNorm2d
 
             norm_layer_handle = partial(DistributedInstanceNorm2d, num_features=embed_dim, eps=1e-6, affine=True)
         else:
@@ -118,7 +118,7 @@ def _get_norm_layer_handle(
             )
     elif normalization_layer == "instance_norm_s2":
         if comm.get_size("spatial") > 1:
-            from makani.mpu.layer_norm import DistributedGeometricInstanceNormS2
+            from makani.models.common.distributed.layer_norm import DistributedGeometricInstanceNormS2
 
             norm_layer_handle = DistributedGeometricInstanceNormS2
         else:

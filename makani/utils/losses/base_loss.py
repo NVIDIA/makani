@@ -27,7 +27,7 @@ import torch_harmonics.distributed as thd
 from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature, compute_spherical_bandlimit, sht_grid
 from makani.utils import comm
 from makani.utils.features import get_wind_channels
-from makani.mpu.mappings import reduce_from_parallel_region
+from makani.distributed.mappings import reduce_from_parallel_region
 from torch_harmonics.distributed import split_tensor_along_dim
 
 

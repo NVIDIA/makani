@@ -18,7 +18,7 @@ import torch.nn as nn
 from typing import Optional
 
 from makani.utils import comm
-from .layers import EncoderDecoder
+from .mlp import EncoderDecoder
 
 
 class MLPImputation(nn.Module):

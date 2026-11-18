@@ -71,8 +71,8 @@ import torch.distributed as dist
 from torch_harmonics.distributed.primitives import get_group_neighbors
 
 # bridge so new-style autograd.Function (separate setup_context) works with
-# torch.amp.custom_fwd/custom_bwd; see makani/mpu/_amp_utils.py (pytorch#132388).
-from makani.mpu._amp_utils import _custom_setup_context
+# torch.amp.custom_fwd/custom_bwd; see makani/distributed/_amp_utils.py (pytorch#132388).
+from makani.distributed._amp_utils import _custom_setup_context
 
 
 def _p2p_exchange(send_prev, send_next, prev_rank, next_rank, recv_count_prev, recv_count_next, group):
@@ -142,7 +142,7 @@ def exchange_counts(send_count_prev, send_count_next, prev_rank, next_rank, grou
 
     Not differentiable -- this only ever carries plain counts. ``device``
     follows the same convention as the rest of the distributed stack (e.g.
-    ``makani.mpu.helpers.gather_uneven``'s size tensor): derived from a real
+    ``makani.distributed.helpers.gather_uneven``'s size tensor): derived from a real
     tensor already in hand -- there is no backend-inspection fallback here,
     so callers with no tensor yet (there are none left; mesh redistribution
     now runs lazily on first forward, once ``data`` exists) would need one.

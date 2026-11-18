@@ -14,20 +14,10 @@
 # limitations under the License.
 
 from .activations import ComplexReLU, ComplexActivation
-from .layers import (
-    DropPath,
-    LayerScale,
-    PatchEmbed2D,
-    PatchEmbed3D,
-    PatchRecovery2D,
-    PatchRecovery3D,
-    EncoderDecoder,
-    MLP,
-    UpSample3D,
-    DownSample3D,
-    UpSample2D,
-    DownSample2D,
-)
+from .regularization import DropPath, LayerScale
+from .patch import PatchEmbed2D, PatchEmbed3D, PatchRecovery2D, PatchRecovery3D
+from .mlp import EncoderDecoder, MLP
+from .resample import UpSample3D, DownSample3D, UpSample2D, DownSample2D
 from .fft import RealFFT1, InverseRealFFT1, RealFFT2, InverseRealFFT2, RealFFT3, InverseRealFFT3
 from .imputation import MLPImputation, ConstantImputation
 from .layer_norm import GeometricInstanceNormS2

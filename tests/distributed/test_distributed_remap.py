@@ -24,7 +24,7 @@ import torch
 from torch_harmonics.distributed import compute_split_shapes
 
 from makani.utils.remap import ConservativeRemap, _TargetGrid
-from makani.mpu.halo import owner_rank
+from makani.distributed.halo import owner_rank
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 

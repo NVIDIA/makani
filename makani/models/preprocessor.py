@@ -19,7 +19,7 @@ import torch
 import torch.nn as nn
 
 from makani.utils.grids import GridQuadrature, grid_to_quadrature_rule
-from makani.mpu.mappings import copy_to_parallel_region
+from makani.distributed.mappings import copy_to_parallel_region
 
 from makani.models.preprocessor_helpers import get_bias_correction, get_static_features
 from makani.utils.dataloaders.batch import ZENITH

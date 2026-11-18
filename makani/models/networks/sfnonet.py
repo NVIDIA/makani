@@ -33,15 +33,19 @@ import torch_harmonics.distributed as thd
 
 # wrap fft, to unify interface to spectral transforms
 from makani.models.common import RealFFT2, InverseRealFFT2, GeometricInstanceNormS2
-from makani.mpu.fft import DistributedRealFFT2, DistributedInverseRealFFT2
-from makani.mpu.layers import DistributedMLP, DistributedEncoderDecoder
+from makani.models.common.distributed.fft import DistributedRealFFT2, DistributedInverseRealFFT2
+from makani.models.common.distributed.mlp import DistributedMLP, DistributedEncoderDecoder
 
 # more distributed stuff
 from makani.utils import comm
 from makani.utils.grids import sht_grid
 
 # layer normalization
-from makani.mpu.layer_norm import DistributedInstanceNorm2d, DistributedLayerNorm, DistributedGeometricInstanceNormS2
+from makani.models.common.distributed.layer_norm import (
+    DistributedInstanceNorm2d,
+    DistributedLayerNorm,
+    DistributedGeometricInstanceNormS2,
+)
 
 # for annotation of models
 from dataclasses import dataclass
