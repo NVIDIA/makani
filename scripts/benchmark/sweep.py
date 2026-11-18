@@ -20,7 +20,7 @@
 This is a convenience generator, not a runner: it prints commands and exits, so
 the decomposition still comes from whatever launches the runs. Pipe it to a
 shell, paste the lines into a job script, or ignore it entirely and prescribe
-the decomposition yourself -- ``makani/benchmark.py`` takes it from the CLI or
+the decomposition yourself -- ``makani.benchmark`` takes it from the CLI or
 from the ``MAKANI_*_PARALLEL_SIZE`` environment variables either way.
 
     python scripts/benchmark/sweep.py --gpus 8 --ensemble-size 4 \\

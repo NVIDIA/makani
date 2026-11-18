@@ -30,7 +30,7 @@ import xskillscore as xs
 
 from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature
 from makani.utils import MetricsHandler
-from makani.utils.metrics.functions import (
+from makani.utils.metrics.geometric_metrics import (
     GeometricL1,
     GeometricRMSE,
     GeometricACC,

@@ -13,29 +13,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Measurement and bookkeeping helpers for the benchmark driver (``makani/benchmark.py``).
+"""Bookkeeping helpers for the benchmark driver (``makani.benchmark.run``).
 
-Three separate concerns live here:
+Two separate concerns live here:
 
-1. :class:`StepTimer` -- per-step wall time, recorded with CUDA events so the
-   measurement is not distorted by the asynchronous launch queue. It is
-   constructed (disabled) by every :class:`~makani.utils.driver.Driver`, so the
-   trainers can call ``begin_step``/``end_step`` unconditionally and pay nothing
-   outside a benchmark run.
-
-2. Provenance -- what was actually run: the decomposition ``comm`` built, the
+1. Provenance -- what was actually run: the decomposition ``comm`` built, the
    config file and config line, the software/hardware environment.
 
-3. Comparability -- a hash over the parts of the resolved configuration that
+2. Comparability -- a hash over the parts of the resolved configuration that
    have to match before two step times mean the same thing. Deliberately
    *excludes* the decomposition and the world size, since those are the axes a
    benchmark suite varies.
+
+The step times themselves are taken by :class:`makani.utils.profiling.StepTimer`.
 """
 
 import os
 import re
 import json
-import time
 import datetime
 import platform
 import socket
@@ -50,79 +45,6 @@ import torch
 import torch.distributed as dist
 
 from makani.utils import comm
-
-
-class StepTimer:
-    """Records the wall time of individual training/inference steps.
-
-    On CUDA the timing is taken with events recorded into the stream rather than
-    with a host-side clock: a host clock around an asynchronous step measures
-    launch time, not execution time, and would only become correct by inserting
-    a synchronization per step -- which itself perturbs what is being measured.
-    Events are read out once, at collection time, after a single synchronize.
-
-    ``warmup_steps`` leading steps are recorded but dropped from the statistics.
-    They cover cudnn/cublas autotuning, NCCL buffer allocation, the allocator
-    reaching steady state, and (with ``--jit_mode=inductor``) compilation.
-
-    When ``enabled`` is False every method is a no-op, so the calls can sit
-    unconditionally in the training loops.
-    """
-
-    def __init__(self, enabled: bool = False, warmup_steps: int = 0, label: str = "step"):
-        self.enabled = enabled
-        self.warmup_steps = warmup_steps
-        self.label = label
-        self.use_cuda_events = enabled and torch.cuda.is_available()
-        self.reset()
-
-    def reset(self):
-        self._events = []
-        self._host_times_ms = []
-        self._open = None
-
-    @property
-    def num_steps(self) -> int:
-        return len(self._events) if self.use_cuda_events else len(self._host_times_ms)
-
-    def begin_step(self):
-        if not self.enabled:
-            return
-        if self._open is not None:
-            raise RuntimeError("StepTimer.begin_step() called twice without an intervening end_step()")
-        if self.use_cuda_events:
-            start = torch.cuda.Event(enable_timing=True)
-            start.record()
-            self._open = start
-        else:
-            self._open = time.perf_counter_ns()
-
-    def end_step(self):
-        if not self.enabled:
-            return
-        if self._open is None:
-            raise RuntimeError("StepTimer.end_step() called without a matching begin_step()")
-        if self.use_cuda_events:
-            stop = torch.cuda.Event(enable_timing=True)
-            stop.record()
-            self._events.append((self._open, stop))
-        else:
-            self._host_times_ms.append((time.perf_counter_ns() - self._open) * 1e-6)
-        self._open = None
-
-    def timings_ms(self, include_warmup: bool = False) -> List[float]:
-        """All recorded step times in milliseconds, warmup dropped by default."""
-        if self.use_cuda_events:
-            if self._events:
-                torch.cuda.synchronize()
-            times = [start.elapsed_time(stop) for start, stop in self._events]
-        else:
-            times = list(self._host_times_ms)
-
-        if not include_warmup:
-            times = times[self.warmup_steps :]
-
-        return times
 
 
 def summarize_timings(times_ms: Sequence[float]) -> Dict[str, Any]:
