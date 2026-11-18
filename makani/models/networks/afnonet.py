@@ -67,7 +67,7 @@ class Mlp(nn.Module):
     Two-layer channels-last feed-forward block.
 
     The MLP used inside :class:`Block`. Simpler than
-    :class:`~makani.models.common.layers.MLP`: linear layers only, no
+    :class:`~makani.models.common.mlp.MLP`: linear layers only, no
     model-parallel or TransformerEngine paths.
 
     Parameters

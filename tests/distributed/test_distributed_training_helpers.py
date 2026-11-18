@@ -20,8 +20,8 @@ import torch.nn as nn
 import torch.distributed as dist
 
 from makani.utils import comm
-from makani.mpu.helpers import AVG, SUM, get_sharing, sync_params
-from makani.mpu.mappings import init_gradient_reduction_hooks
+from makani.distributed.helpers import AVG, SUM, get_sharing, sync_params
+from makani.distributed.mappings import init_gradient_reduction_hooks
 
 from .distributed_helpers import _init_grid, reduce_success, sync_and_barrier, teardown_comms
 

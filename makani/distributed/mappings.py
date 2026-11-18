@@ -25,14 +25,14 @@ from torch_harmonics.distributed.primitives import (
 )
 
 # bridge so new-style autograd.Function (separate setup_context) works with
-# torch.amp.custom_fwd/custom_bwd; see makani/mpu/_amp_utils.py (pytorch#132388).
-from makani.mpu._amp_utils import _custom_setup_context
+# torch.amp.custom_fwd/custom_bwd; see makani/distributed/_amp_utils.py (pytorch#132388).
+from makani.distributed._amp_utils import _custom_setup_context
 
 # torch utils
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 
 # import config
-from makani.mpu.config import config
+from makani.distributed.config import config
 
 
 class _DistributedTranspose(torch.autograd.Function):
@@ -347,7 +347,7 @@ def init_gradient_reduction_hooks(
     enough once model parallelism is in play: a parameter shared over a model
     group has to be reduced over it as well, while a sharded parameter must not
     be. This function reads the ``is_shared_mp`` annotation each layer stamps
-    on its parameters, see :func:`~makani.mpu.helpers.get_sharing`, and
+    on its parameters, see :func:`~makani.distributed.helpers.get_sharing`, and
     installs a communication hook that reduces each gradient over the groups it
     is shared over, with the reduction of its annotation: a sum over ranks that
     split the computation, e.g. over the grid, and an average over ranks that
@@ -355,7 +355,7 @@ def init_gradient_reduction_hooks(
     ranks. Every reduction is a sum, after the gradient is scaled by the inverse
     sizes of the groups it is averaged over, so that a gradient shared over the
     whole model is reduced in a single collective over all ranks, see
-    :func:`~makani.mpu.helpers.get_reduction_plan`. Without model parallelism,
+    :func:`~makani.distributed.helpers.get_reduction_plan`. Without model parallelism,
     plain DDP is used.
 
     Parameters
@@ -363,7 +363,7 @@ def init_gradient_reduction_hooks(
     model : torch.nn.Module
         Model to wrap. Parameters without an ``is_shared_mp`` annotation are
         shared over the whole model group, see
-        :data:`~makani.mpu.helpers.DEFAULT_SHARING`.
+        :data:`~makani.distributed.helpers.DEFAULT_SHARING`.
     device : torch.device
         Device the model lives on.
     reduction_buffer_count : int, optional
@@ -381,7 +381,7 @@ def init_gradient_reduction_hooks(
         Passed to DDP, by default ``False``.
     verbose : bool, optional
         Log the sharing modes and hook setup. Defaults to the debug setting in
-        the mpu config.
+        the makani.distributed config.
 
     Returns
     -------
@@ -393,7 +393,7 @@ def init_gradient_reduction_hooks(
     ------
     ValueError
         If the annotation of a parameter is invalid, see
-        :func:`~makani.mpu.helpers.get_sharing`.
+        :func:`~makani.distributed.helpers.get_sharing`.
     """
     # early exit if we are not in a distributed setting:
     if not dist.is_initialized():
@@ -510,4 +510,4 @@ def init_gradient_reduction_hooks(
 # deferred to avoid circular imports with makani.utils
 from makani.utils import comm
 from makani.models.helpers import count_parameters
-from makani.mpu.helpers import get_reduction_plan
+from makani.distributed.helpers import get_reduction_plan

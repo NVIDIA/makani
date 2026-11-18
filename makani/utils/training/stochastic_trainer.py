@@ -45,12 +45,12 @@ from makani.models.stochastic_interpolant import interpolant_config
 from makani.utils import comm
 from makani.utils.precision import AutocastManager
 
-from makani.mpu.mappings import init_gradient_reduction_hooks
-from makani.mpu.helpers import sync_params, gather_uneven, barrier
+from makani.distributed.mappings import init_gradient_reduction_hooks
+from makani.distributed.helpers import sync_params, gather_uneven, barrier
 
 # for counting model parameters
 from makani.models.helpers import count_parameters
-from makani.mpu.mappings import reduce_from_parallel_region
+from makani.distributed.mappings import reduce_from_parallel_region
 
 # checkpoint helpers
 

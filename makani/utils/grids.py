@@ -30,7 +30,7 @@ from torch_harmonics.quadrature import legendre_gauss_weights, clenshaw_curtiss_
 
 from makani.utils import comm
 from torch_harmonics.distributed import compute_split_shapes, split_tensor_along_dim
-from makani.mpu.mappings import reduce_from_parallel_region
+from makani.distributed.mappings import reduce_from_parallel_region
 
 
 def grid_to_quadrature_rule(grid_type):
@@ -274,7 +274,7 @@ class BandLimitMask(torch.nn.Module):
             self.register_buffer("mask", mask, persistent=False)
 
             if comm.get_size("spatial") > 1:
-                from makani.mpu.fft import DistributedRealFFT1, DistributedInverseRealFFT1
+                from makani.models.common.distributed.fft import DistributedRealFFT1, DistributedInverseRealFFT1
 
                 self.forward_transform = DistributedRealFFT1(img_shape[1], lmax=self.lmax, mmax=self.lmax).float()
                 self.inverse_transform = DistributedInverseRealFFT1(

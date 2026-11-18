@@ -67,14 +67,14 @@ import torch.nn as nn
 import torch_harmonics.distributed as thd
 from torch_harmonics.distributed import compute_split_shapes
 
-from makani.mpu.halo import (
+from makani.distributed.halo import (
     azimuthal_halo_exchange,
     exchange_counts,
     neighbor_ranks,
     owner_rank,
     redistribute_indexed,
 )
-from makani.mpu.mappings import copy_to_parallel_region, reduce_from_parallel_region
+from makani.distributed.mappings import copy_to_parallel_region, reduce_from_parallel_region
 from makani.utils import comm
 
 
@@ -332,7 +332,7 @@ def _redistribute_mesh_cells(
 
     # this rank's own coordinate metadata, placed on the caller's device --
     # following the same convention as the rest of the distributed stack
-    # (e.g. makani.mpu.helpers.gather_uneven's size tensor): derive device
+    # (e.g. makani.distributed.helpers.gather_uneven's size tensor): derive device
     # from a real tensor already in hand, never inspect the backend. row/col
     # travel as float64 columns of the same stacked tensor (simplest way to
     # keep one P2P schedule for all five coordinate arrays at once) and get
@@ -465,7 +465,7 @@ class ConservativeRemap(nn.Module):
     a small, exactly-computed number of boundary source rows/columns from the
     immediate "h"/"w" neighbour, fetched via a point-to-point halo exchange
     (:func:`torch_harmonics.distributed.polar_halo_exchange` for "h",
-    :func:`makani.mpu.halo.azimuthal_halo_exchange` for "w") each forward call.
+    :func:`makani.distributed.halo.azimuthal_halo_exchange` for "w") each forward call.
 
     For a **mesh** source, a cell's contribution is a crisp point-in-box test,
     not an interpolation with reach, so there is nothing to fetch as a halo:
@@ -497,8 +497,8 @@ class ConservativeRemap(nn.Module):
     all, this is unaffected: no communication, same computation as the
     single-process case.
 
-    The reduce is :func:`~makani.mpu.mappings.reduce_from_parallel_region`
-    immediately followed by :func:`~makani.mpu.mappings.copy_to_parallel_region`,
+    The reduce is :func:`~makani.distributed.mappings.reduce_from_parallel_region`
+    immediately followed by :func:`~makani.distributed.mappings.copy_to_parallel_region`,
     not `reduce_from_parallel_region` alone. That pairing matters: each "w"
     rank applies a *different* downstream computation to the shared reduced
     value (a different longitude weight matrix, or a different division, and
@@ -510,7 +510,7 @@ class ConservativeRemap(nn.Module):
     makes the composition sum in *both* directions, which is what a value
     combined via true distinct-per-rank contributions and then consumed
     differently by every rank actually needs -- the same composition
-    :mod:`makani.mpu.layer_norm` relies on for its distributed mean/var.
+    :mod:`makani.models.common.distributed.layer_norm` relies on for its distributed mean/var.
     """
 
     def __init__(self, target_shape: Tuple[int, int]):
@@ -803,7 +803,7 @@ class ConservativeRemap(nn.Module):
                 # summing grad_output across ranks too -- which is exactly
                 # what following the reduce with copy_to_parallel_region does
                 # (its backward is itself a sum-all-reduce), the same
-                # reduce-then-copy composition makani.mpu.layer_norm already
+                # reduce-then-copy composition makani.models.common.distributed.layer_norm already
                 # relies on for its distributed mean/var
                 local = out[..., self.halo_lon : out.shape[-1] - self.halo_lon] if self.halo_lon > 0 else out
                 local_sum = local.sum(dim=-1, keepdim=True)
@@ -873,7 +873,7 @@ class ConservativeRemap(nn.Module):
             # summing across ranks too -- following the reduce with
             # copy_to_parallel_region (whose backward is itself a
             # sum-all-reduce) does that, the same composition
-            # makani.mpu.layer_norm relies on for its distributed mean/var
+            # makani.models.common.distributed.layer_norm relies on for its distributed mean/var
             n_lon = self.target_shape[1]
             primary = torch.as_tensor(
                 [row * n_lon for row in self.pole_rows.tolist()], dtype=torch.int64, device=flat.device

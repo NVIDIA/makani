@@ -18,10 +18,10 @@ import os
 
 class _DistributedConfig:
     """
-    Module-level configuration for makani.mpu.
+    Module-level configuration for makani.distributed.
     Env vars are used as defaults but can be overridden programmatically, e.g.:
 
-        from makani.mpu.config import config
+        from makani.distributed.config import config
         config.debug = True
     """
 

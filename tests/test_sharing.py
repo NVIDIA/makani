@@ -26,16 +26,12 @@ from parameterized import parameterized
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
-from makani.mpu.helpers import AVG, DEFAULT_SHARING, MODEL_GROUPS, SUM, get_reduction_plan, get_sharing
-from makani.mpu.layer_norm import DistributedGeometricInstanceNormS2, DistributedInstanceNorm2d
-from makani.mpu.layers import (
-    DistributedEncoderDecoder,
-    DistributedMatmul,
-    DistributedMLP,
-    DistributedPatchEmbed,
-    MultiHeadAttention,
-    StochasticMLP,
-)
+from makani.distributed.helpers import AVG, DEFAULT_SHARING, MODEL_GROUPS, SUM, get_reduction_plan, get_sharing
+from makani.models.common.distributed.layer_norm import DistributedGeometricInstanceNormS2, DistributedInstanceNorm2d
+from makani.models.common.distributed.matmul import DistributedMatmul
+from makani.models.common.distributed.mlp import DistributedEncoderDecoder, DistributedMLP, StochasticMLP
+from makani.models.common.distributed.patch import DistributedPatchEmbed
+from makani.models.common.distributed.attention import MultiHeadAttention
 
 
 def _param(sharing=None, sharded=None):
@@ -80,7 +76,7 @@ class TestGetSharing(unittest.TestCase):
         sizes["spatial"] = sizes["h"] * sizes["w"]
         sizes["model"] = sizes["spatial"] * sizes["matmul"]
         sizes["world"] = sizes["model"] * sizes["data"]
-        with mock.patch("makani.mpu.helpers.comm.get_size", side_effect=lambda name: sizes[name]):
+        with mock.patch("makani.distributed.helpers.comm.get_size", side_effect=lambda name: sizes[name]):
             return get_reduction_plan(_param(sharing), data=data)
 
     def test_averages_are_sums_of_scaled_gradients(self):

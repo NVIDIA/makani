@@ -23,19 +23,13 @@ from parameterized import parameterized, parameterized_class
 import torch
 
 from makani.models.networks.pangu import EarthAttention3D
-from makani.models.common.layers import (
-    SeededDropout2d,
-    LayerScale,
-    UpSample2D,
-    DownSample2D,
-    UpSample3D,
-    DownSample3D,
-    EncoderDecoder,
-    MLP,
-)
+from makani.models.common.regularization import SeededDropout2d, LayerScale
+from makani.models.common.resample import UpSample2D, DownSample2D, UpSample3D, DownSample3D
+from makani.models.common.mlp import EncoderDecoder, MLP
 from makani.models.common.imputation import MLPImputation, ConstantImputation
 from makani.models.common.pos_embedding import LearnablePositionEmbedding
-from makani.mpu.layers import DistributedEncoderDecoder, DistributedMatmul, DistributedMLP, StochasticMLP
+from makani.models.common.distributed.matmul import DistributedMatmul
+from makani.models.common.distributed.mlp import DistributedEncoderDecoder, DistributedMLP, StochasticMLP
 from makani.models import model_registry
 from makani.utils.checkpoint_helpers import CHECKPOINT_FORMAT_VERSION, upgrade_state_dict
 from makani.utils.driver import Driver
@@ -902,7 +896,7 @@ class TestLearnablePositionEmbedding(unittest.TestCase):
 
 
 class TestStochasticMLP(unittest.TestCase):
-    """Tests for the variational StochasticMLP (mpu/layers.py).
+    """Tests for the variational StochasticMLP (models/common/distributed/mlp.py).
 
     The stochastic weight is  weight = scale * exp(log_std) * eps + mean,  eps ~ N(0, 1),
     so the std is parametrized in log space (see issue #98): log_std is initialized to 0

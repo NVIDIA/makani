@@ -27,8 +27,8 @@ from makani.utils import driver
 from makani.utils import checkpoint_helpers
 from makani.utils import LossHandler
 from makani.models import model_registry
-from makani.mpu.mappings import init_gradient_reduction_hooks
-from makani.mpu.mappings import reduce_from_parallel_region
+from makani.distributed.mappings import init_gradient_reduction_hooks
+from makani.distributed.mappings import reduce_from_parallel_region
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 from .distributed_helpers import (
@@ -47,7 +47,7 @@ from ..testutils import disable_tf32, set_seed, compare_tensors, single_step_rol
 
 
 def _count_distributed_modules(model):
-    # the distributed layers of makani.mpu and torch_harmonics.distributed all carry the prefix
+    # the distributed layers of makani.models.common.distributed and torch_harmonics.distributed all carry the prefix
     return sum(type(module).__name__.startswith("Distributed") for module in model.modules())
 
 

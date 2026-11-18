@@ -43,7 +43,7 @@ import torch.nn as nn
 from parameterized import parameterized
 
 from makani.utils import comm
-from makani.mpu.mappings import init_gradient_reduction_hooks
+from makani.distributed.mappings import init_gradient_reduction_hooks
 from makani.utils.dataloaders.batch import TARGET, batch_to_device
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))

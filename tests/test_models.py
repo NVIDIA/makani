@@ -24,7 +24,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from makani.mpu.helpers import MODEL_GROUPS, get_sharing
+from makani.distributed.helpers import MODEL_GROUPS, get_sharing
 from makani.models import model_registry
 from makani.utils import checkpoint_helpers
 from makani.utils import LossHandler
@@ -71,7 +71,7 @@ class TestModels(unittest.TestCase):
     @parameterized.expand(model_registry.list_models(), skip_on_empty=True)
     def test_every_parameter_is_shared_or_sharded_over_each_model_group(self, nettype):
         """
-        The model-parallel annotations of every parameter, see :func:`~makani.mpu.helpers.get_sharing`.
+        The model-parallel annotations of every parameter, see :func:`~makani.distributed.helpers.get_sharing`.
 
         Over each model-parallel group, a parameter is either sharded, each rank holding its part, or shared, its
         gradient summed or averaged over the ranks; never both, and never neither, which would leave the replicas

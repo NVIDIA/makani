@@ -28,10 +28,10 @@ import torch.distributed as dist
 from makani.utils import comm
 from makani.utils.grids import sht_grid
 from makani.models.common import RealFFT1
-from makani.mpu.fft import DistributedRealFFT1
+from makani.models.common.distributed.fft import DistributedRealFFT1
 from torch_harmonics.distributed import compute_split_shapes, split_tensor_along_dim
-from makani.mpu.mappings import reduce_from_parallel_region
-from makani.mpu.helpers import barrier
+from makani.distributed.mappings import reduce_from_parallel_region
+from makani.distributed.helpers import barrier
 
 # get torch_harmonics for spectra
 import torch_harmonics as th

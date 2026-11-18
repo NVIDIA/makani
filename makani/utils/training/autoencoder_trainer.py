@@ -42,8 +42,8 @@ from makani.models import model_registry
 from makani.utils import comm
 from makani.utils.precision import AutocastManager
 
-from makani.mpu.mappings import init_gradient_reduction_hooks
-from makani.mpu.helpers import sync_params, gather_uneven, barrier
+from makani.distributed.mappings import init_gradient_reduction_hooks
+from makani.distributed.helpers import sync_params, gather_uneven, barrier
 
 # for counting model parameters
 from makani.models.helpers import count_parameters

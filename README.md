@@ -127,7 +127,7 @@ makani
 ├── docker                      # scripts for building a docker image for training
 ├── makani                      # Main directory containing the package
 │   ├── inference               # contains the inferencer
-│   ├── mpu                     # utilities for model parallelism
+│   ├── distributed             # communication for model parallelism: mappings, gradient reduction, halo exchange
 │   ├── networks                # networks, contains definitions of various ML models
 │   ├── third_party/climt       # third party modules
 │   │   └── zenith_angle.py     # computation of zenith angle

@@ -31,14 +31,18 @@ import torch_harmonics.distributed as thd
 
 # get pre-formulated layers
 from makani.models.common import GeometricInstanceNormS2
-from makani.mpu.layers import DistributedMLP
+from makani.models.common.distributed.mlp import DistributedMLP
 
 # more distributed stuff
 from makani.utils import comm
 from makani.utils.grids import sht_grid
 
 # layer normalization
-from makani.mpu.layer_norm import DistributedInstanceNorm2d, DistributedLayerNorm, DistributedGeometricInstanceNormS2
+from makani.models.common.distributed.layer_norm import (
+    DistributedInstanceNorm2d,
+    DistributedLayerNorm,
+    DistributedGeometricInstanceNormS2,
+)
 
 
 # heuristic for finding theta_cutoff

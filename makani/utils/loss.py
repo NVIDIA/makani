@@ -22,7 +22,7 @@ from torch import nn
 from makani.utils import comm
 
 from makani.utils.dataloaders.data_helpers import get_data_normalization, get_time_diff_stds
-from makani.mpu.mappings import gather_from_parallel_region, reduce_from_parallel_region
+from makani.distributed.mappings import gather_from_parallel_region, reduce_from_parallel_region
 from makani.utils.missing_data import fill_missing, missing_values
 
 from .losses import LossType, GeometricLpLoss, SpectralLpLoss, SpectralH1Loss, SpectralAMSELoss

@@ -40,8 +40,8 @@ from makani.utils.metrics.geometric_metrics import (
 )
 import torch.distributed as dist
 from torch_harmonics.distributed import compute_split_shapes
-from makani.mpu.mappings import gather_from_parallel_region, reduce_from_parallel_region
-from makani.mpu.helpers import barrier
+from makani.distributed.mappings import gather_from_parallel_region, reduce_from_parallel_region
+from makani.distributed.helpers import barrier
 
 
 class MetricRollout:

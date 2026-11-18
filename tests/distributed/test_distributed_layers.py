@@ -35,11 +35,11 @@ from makani.utils import checkpoint_helpers
 
 
 # distributed mlp + transformer engine availability flag
-from makani.mpu.layers import DistributedMLP, _TE_AVAILABLE
+from makani.models.common.distributed.mlp import DistributedMLP, _TE_AVAILABLE
 
 # layer norm imports
 from makani.models.common.layer_norm import GeometricInstanceNormS2
-from makani.mpu.layer_norm import DistributedGeometricInstanceNormS2, DistributedInstanceNorm2d
+from makani.models.common.distributed.layer_norm import DistributedGeometricInstanceNormS2, DistributedInstanceNorm2d
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 from .distributed_helpers import _init_grid, _split_helper, _gather_helper, reduce_success, teardown_comms
@@ -287,7 +287,7 @@ class TestDistributedLayers(unittest.TestCase):
         them, lmax over h and mmax over w, so every rank holds its own block of it.
         """
         from makani.models.common import SpectralConv, RealFFT2, InverseRealFFT2
-        from makani.mpu.fft import DistributedRealFFT2, DistributedInverseRealFFT2
+        from makani.models.common.distributed.fft import DistributedRealFFT2, DistributedInverseRealFFT2
 
         B, C = batch_size, num_chan
 
@@ -858,7 +858,7 @@ class TestDistributedLayers(unittest.TestCase):
         the matching columns of the output projection; the gradients of the q/k norms, which act on every head, are
         summed over the matmul ranks. The attention does not split the tokens, so the spatial ranks compute the same.
         """
-        from makani.mpu.layers import MultiHeadAttention
+        from makani.models.common.distributed.attention import MultiHeadAttention
 
         msize, mrank = comm.get_size("matmul"), comm.get_rank("matmul")
         if num_heads % msize != 0:
@@ -938,7 +938,7 @@ class TestDistributedLayers(unittest.TestCase):
 
     def test_attention_has_no_redundant_biases(self):
         """A bias of the keys adds the same to every logit of a query, which the softmax removes."""
-        from makani.mpu.layers import MultiHeadAttention
+        from makani.models.common.distributed.attention import MultiHeadAttention
 
         with comm.serial():
             plain = MultiHeadAttention(16, num_heads=4, qkv_bias=True, qk_norm=False)

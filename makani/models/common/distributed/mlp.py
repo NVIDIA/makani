@@ -13,258 +13,29 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Tensor-parallel channel MLPs: the encoder/decoder, the MLP and the stochastic MLP."""
+
 import math
+
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
-from makani.utils import comm
 
-# parallel helpers
-from torch_harmonics.distributed import compute_split_shapes
+from makani.utils import comm
 from makani.utils.checkpoint_helpers import upgrade_mlp_state_dict
-from makani.mpu.mappings import reduce_from_parallel_region
-from makani.mpu.mappings import gather_from_parallel_region
-from makani.mpu.mappings import copy_to_parallel_region
+from makani.models.common.distributed.matmul import DistributedMatmul
 
 # transformer engine is an optional dependency: it is only used for the
 # (optional) FP8/FP4 path and must not be required for import. availability is
 # checked without importing it; the module is imported lazily where used.
-from makani.utils.te_helpers import TE_AVAILABLE as _TE_AVAILABLE, get_te
-
-
-class DistributedMatmul(nn.Module):
-    r"""Megatron-style tensor-parallel matmul over a single feature-parallel group.
-
-    The legacy 2D (fin x fout) decomposition has been retired in favor of a 1D
-    column/row fork-join over a single comm group (``comm_name``, "matmul" by
-    default):
-
-    - ``parallel_mode="column"`` shards the OUTPUT dimension. The input is
-      replicated across the group (``copy_to_parallel_region``: identity in the
-      forward, all-reduce in the backward) and there is NO output reduction, so
-      the result is sharded along the output dimension.
-    - ``parallel_mode="row"`` shards the INPUT dimension. The input is assumed to
-      be sharded (e.g. the sharded hidden produced by a preceding column layer),
-      and the partial outputs are all-reduced (``reduce_from_parallel_region``)
-      into a replicated full output. For a row layer the bias is replicated and
-      added AFTER the reduction.
-
-    Pairing a column layer with a row layer is what makes this cheap: the
-    intermediate stays sharded and only one all-reduce is needed for the pair,
-    rather than one per layer.
-
-    Parameters
-    ----------
-    inp_dim : int
-        Global input feature dimension. For ``"row"`` mode this is sharded
-        across the group, so it must be divisible by the group size.
-    out_dim : int
-        Global output feature dimension. For ``"column"`` mode this is sharded
-        across the group, so it must be divisible by the group size.
-    input_format : str, optional
-        ``"nchw"`` (default) for ``(B, C, H, W)`` inputs, or ``"traditional"``
-        for channels-last inputs.
-    comm_name : str, optional
-        Name of the communicator group to shard over, by default ``"matmul"``.
-    parallel_mode : str, optional
-        ``"column"`` (default) or ``"row"``; see above.
-    bias : bool, optional
-        Whether to add a bias, by default ``True``.
-    use_te : bool, optional
-        Use a TransformerEngine linear for the local GEMM, enabling the FP8/FP4
-        path. Falls back to the standard path if TransformerEngine is not
-        installed. By default ``False``.
-
-    Raises
-    ------
-    ValueError
-        If ``parallel_mode`` is neither ``"column"`` nor ``"row"``, or if the
-        sharded dimension is not divisible by the group size.
-    """
-
-    def __init__(
-        self, inp_dim, out_dim, input_format="nchw", comm_name="matmul", parallel_mode="column", bias=True, use_te=False
-    ):
-        super(DistributedMatmul, self).__init__()
-
-        if parallel_mode not in ["column", "row"]:
-            raise ValueError(f"Error, parallel_mode {parallel_mode} not supported (use 'column' or 'row').")
-
-        if input_format not in ["nchw", "traditional"]:
-            raise NotImplementedError(f"Error, input format {input_format} not supported.")
-
-        self.comm_name = comm_name
-        self.parallel_mode = parallel_mode
-        self.input_format = input_format
-
-        # only use transformer engine if it was requested and is actually available
-        self.use_te = use_te and _TE_AVAILABLE
-        if use_te and not _TE_AVAILABLE:
-            import warnings
-
-            warnings.warn(
-                "use_te=True was requested but transformer_engine is not installed; falling back to the standard matmul."
-            )
-
-        comm_size = comm.get_size(comm_name)
-
-        # column shards the output dim, row shards the input dim
-        if parallel_mode == "column":
-            if out_dim % comm_size != 0:
-                raise ValueError(
-                    f"the output feature dim ({out_dim}) has to be evenly divisible by the matmul comm dim ({comm_size})"
-                )
-            out_dim_local = out_dim // comm_size
-            inp_dim_local = inp_dim
-        else:
-            if inp_dim % comm_size != 0:
-                raise ValueError(
-                    f"the input feature dim ({inp_dim}) has to be evenly divisible by the matmul comm dim ({comm_size})"
-                )
-            out_dim_local = out_dim
-            inp_dim_local = inp_dim // comm_size
-
-        # the dimension that is sharded over the matmul group (None for the
-        # replicated dimension) - used for checkpoint gather/scatter only
-        weight_inp_shard = None if parallel_mode == "column" else comm_name
-        weight_out_shard = comm_name if parallel_mode == "column" else None
-
-        # weight. transformer engine keeps the (2D) weight inside a te.Linear and
-        # performs the local matmul in FP8/FP4; the tensor-parallel communication
-        # (copy/reduce, see forward) and the gradient reduction stay in makani, so
-        # te.Linear is used purely as a local GEMM (no tp_group). The bias is
-        # always owned here (te.Linear bias=False) so the row-parallel bias can be
-        # added AFTER the all-reduce, matching the native path.
-        if self.use_te:
-            te = get_te()
-            self.te_linear = te.Linear(inp_dim_local, out_dim_local, bias=False)
-            # te weight is always 2D (out_local, in_local) regardless of input_format
-            self.weight.is_shared_mp = {"spatial": "sum"}
-            self.weight.sharded_dims_mp = [weight_out_shard, weight_inp_shard]
-        elif input_format == "nchw":
-            self.weight = nn.Parameter(torch.ones(out_dim_local, inp_dim_local, 1, 1))
-            self.weight.is_shared_mp = {"spatial": "sum"}
-            self.weight.sharded_dims_mp = [weight_out_shard, weight_inp_shard, None, None]
-            self.matmul_handle = F.conv2d
-        else:  # traditional
-            self.weight = nn.Parameter(torch.ones(out_dim_local, inp_dim_local))
-            self.weight.is_shared_mp = {"spatial": "sum"}
-            self.weight.sharded_dims_mp = [weight_out_shard, weight_inp_shard]
-            self.matmul_handle = F.linear
-
-        # bias
-        self.bias = None
-        if bias:
-            # a column bias is sharded over the (sharded) output dim, a row bias
-            # is replicated over the matmul group: it is added after the all-reduce,
-            # which every matmul rank computes alike, so its gradient is averaged
-            bias_shard = comm_name if parallel_mode == "column" else None
-            # 1-D in either format, as nn.Conv2d and nn.Linear keep it, so that a checkpoint is the same as that
-            # of the serial layer
-            # a row bias is added after the reduction, which every matmul rank computes alike
-            bias_sharing = {"spatial": "sum"} if parallel_mode == "column" else {"spatial": "sum", "matmul": "avg"}
-            self.bias = nn.Parameter(torch.zeros(out_dim_local))
-            self.bias.is_shared_mp = bias_sharing
-            self.bias.sharded_dims_mp = [bias_shard]
-
-    @staticmethod
-    def upgrade_state_dict(state_dict, prefix=""):
-        r"""
-        Upgrade a state dict of an earlier version in place: the bias was kept as ``(1, C, 1, 1)`` in the nchw format.
-
-        Parameters
-        ----------
-        state_dict : dict
-            A state dict holding the layer.
-        prefix : str, optional
-            The prefix of the keys of the layer.
-        """
-        key = prefix + "bias"
-        if (key in state_dict) and (state_dict[key] is not None) and (state_dict[key].dim() == 4):
-            state_dict[key] = state_dict[key].reshape(-1)
-
-    @property
-    def weight(self):
-        r"""
-        The local weight shard, regardless of which backend holds it.
-
-        TransformerEngine's linear owns its weight internally; exposing it under
-        the same attribute name keeps external initialization, the model-parallel
-        annotations, and the gradient reduction hook uniform across both paths.
-
-        Returns
-        -------
-        torch.nn.Parameter
-            The local weight shard.
-
-        Raises
-        ------
-        AttributeError
-            If the native weight is not registered yet. This must be
-            ``AttributeError`` specifically: ``register_parameter`` probes
-            ``hasattr(self, "weight")`` while registering, and ``hasattr`` only
-            swallows that exception type.
-        """
-        # te.Linear owns the weight in the TE path; expose it through the same
-        # attribute so external init / annotation / the gradient hook are uniform.
-        # raise AttributeError (not KeyError) when the native weight is not yet
-        # registered: register_parameter() probes hasattr(self, "weight") while
-        # registering, and hasattr only swallows AttributeError.
-        if self.use_te:
-            return self.te_linear.weight
-        weight = self._parameters.get("weight")
-        if weight is None:
-            raise AttributeError("weight")
-        return weight
-
-    def _local_matmul(self, x):
-        if self.use_te:
-            # te.Linear operates on the last (channel) dim; for nchw we transpose
-            # to channels-last around the GEMM
-            if self.input_format == "nchw":
-                x = self.te_linear(x.permute(0, 2, 3, 1).contiguous())
-                return x.permute(0, 3, 1, 2).contiguous()
-            return self.te_linear(x)
-        return self.matmul_handle(x, self.weight, bias=None)
-
-    def forward(self, x):
-        r"""
-        Apply the tensor-parallel matmul.
-
-        Parameters
-        ----------
-        x : torch.Tensor
-            For ``"column"`` mode, a replicated tensor with the full
-            ``inp_dim``. For ``"row"`` mode, a tensor already sharded along the
-            input dimension, typically the output of a preceding column layer.
-
-        Returns
-        -------
-        torch.Tensor
-            For ``"column"`` mode, sharded along the output dimension. For
-            ``"row"`` mode, replicated with the full ``out_dim``.
-        """
-        if self.parallel_mode == "column":
-            # replicated input -> sharded output, no output reduction
-            x = copy_to_parallel_region(x, self.comm_name)
-            x = self._local_matmul(x)
-        else:
-            # sharded input -> reduced (replicated) output
-            x = self._local_matmul(x)
-            x = reduce_from_parallel_region(x, self.comm_name)
-
-        if self.bias is not None:
-            x = x + (self.bias.reshape(1, -1, 1, 1) if self.input_format == "nchw" else self.bias)
-
-        return x
+from makani.utils.te_helpers import TE_AVAILABLE as _TE_AVAILABLE
 
 
 # distributed encoder/decoder
 class DistributedEncoderDecoder(nn.Module):
     r"""
     Tensor-parallel counterpart of
-    :class:`~makani.models.common.layers.EncoderDecoder`.
+    :class:`~makani.models.common.mlp.EncoderDecoder`.
 
     A stack of :class:`DistributedMatmul` layers with activations in between,
     arranged so the chain consumes a replicated input and produces a replicated
@@ -278,7 +49,7 @@ class DistributedEncoderDecoder(nn.Module):
     requirement below.
 
     The layers are those of the serial
-    :class:`~makani.models.common.layers.EncoderDecoder`, with the same
+    :class:`~makani.models.common.mlp.EncoderDecoder`, with the same
     parameter names and shapes, so that a checkpoint of one restores into the
     other.
 
@@ -286,7 +57,7 @@ class DistributedEncoderDecoder(nn.Module):
     ----------
     num_layers : int
         Number of hidden layers before the output layer, as in
-        :class:`~makani.models.common.layers.EncoderDecoder`, so ``num_layers + 1``
+        :class:`~makani.models.common.mlp.EncoderDecoder`, so ``num_layers + 1``
         matmuls. Must be odd when the communicator group is larger than one.
     input_dim : int
         Number of input features.
@@ -405,10 +176,9 @@ class DistributedEncoderDecoder(nn.Module):
         return self.fwd(x)
 
 
-# more complicated layers
 class DistributedMLP(nn.Module):
     r"""
-    Tensor-parallel counterpart of :class:`~makani.models.common.layers.MLP`.
+    Tensor-parallel counterpart of :class:`~makani.models.common.mlp.MLP`.
 
     Two-layer feed-forward block in which the hidden dimension is sharded across
     the communicator group: the first matmul is column-parallel and the second
@@ -862,287 +632,3 @@ class StochasticMLP(nn.Module):
             return self.checkpoint_forward(x)
         else:
             return self.fwd(x)
-
-
-class DistributedPatchEmbed(nn.Module):
-    r"""
-    Patch embedding with the spatial grid sharded across ranks.
-
-    Distributed counterpart of
-    :class:`~makani.models.common.layers.PatchEmbed2D`. The image is sharded
-    along its width across the spatial group and each rank embeds the slice it
-    owns. Because patch embedding is a strided convolution whose stride equals
-    its kernel, patches never straddle a shard boundary, so no halo exchange is
-    needed. The projection weights are replicated across the spatial group and
-    their gradients reduced over it.
-
-    Parameters
-    ----------
-    img_size : (int, int), optional
-        Global image size, by default ``(224, 224)``. The patched width must be
-        divisible by the spatial group size.
-    patch_size : (int, int), optional
-        Patch size, by default ``(16, 16)``.
-    in_chans : int, optional
-        Number of input channels, by default ``3``.
-    embed_dim : int, optional
-        Global dimension of each output token, by default ``768``. Sharded over
-        the matmul group when the output is matmul-parallel, in which case it
-        must be divisible by that group's size.
-    input_is_matmul_parallel : bool, optional
-        Whether the input arrives sharded along channels over the matmul group,
-        in which case it is gathered first. By default ``False``.
-    output_is_matmul_parallel : bool, optional
-        Whether to leave the output sharded along the embedding dimension, by
-        default ``False``.
-
-    Raises
-    ------
-    ValueError
-        If the patched width is not divisible by the spatial group size, or if
-        ``embed_dim`` is not divisible by the matmul group size when the output
-        is matmul-parallel.
-
-    See Also
-    --------
-    makani.models.common.layers.PatchEmbed2D : the single-rank version.
-    """
-
-    def __init__(
-        self,
-        img_size=(224, 224),
-        patch_size=(16, 16),
-        in_chans=3,
-        embed_dim=768,
-        input_is_matmul_parallel=False,
-        output_is_matmul_parallel=True,
-    ):
-        super().__init__()
-
-        # store params
-        self.input_parallel = input_is_matmul_parallel
-        self.output_parallel = output_is_matmul_parallel
-
-        # get comm sizes:
-        matmul_comm_size = comm.get_size("matmul")
-        spatial_comm_size = comm.get_size("spatial")
-
-        # compute parameters
-        if (img_size[1] // patch_size[1]) % spatial_comm_size != 0:
-            raise ValueError(
-                f"the spatial comm size ({spatial_comm_size}) must evenly divide patched W ({img_size[1] // patch_size[1]})"
-            )
-        num_patches = ((img_size[1] // patch_size[1]) // spatial_comm_size) * (img_size[0] // patch_size[0])
-        self.img_size = (img_size[0], img_size[1] // spatial_comm_size)
-        self.patch_size = patch_size
-        self.num_patches = num_patches
-
-        # get effective embedding size:
-        if self.output_parallel:
-            if embed_dim % matmul_comm_size != 0:
-                raise ValueError(
-                    f"the embed_dim ({embed_dim}) needs to be divisible by matmul_parallel_size ({matmul_comm_size})"
-                )
-            out_chans_local = embed_dim // matmul_comm_size
-        else:
-            out_chans_local = embed_dim
-
-        # the weights of this layer are shared across the spatial ranks
-        self.proj = nn.Conv2d(in_chans, out_chans_local, kernel_size=patch_size, stride=patch_size)
-
-        # shared over the spatial ranks, each embedding its part of the grid; split over matmul if the output is,
-        # else every matmul rank computes the same
-        if self.output_parallel:
-            sharing, sharded = {"spatial": "sum"}, "matmul"
-        else:
-            sharing, sharded = {"spatial": "sum", "matmul": "avg"}, None
-        self.proj.weight.is_shared_mp = dict(sharing)
-        self.proj.weight.sharded_dims_mp = [sharded, None, None, None]
-        self.proj.bias.is_shared_mp = dict(sharing)
-        self.proj.bias.sharded_dims_mp = [sharded]
-
-        # gather shapes
-        self.gather_shapes = compute_split_shapes(in_chans, comm.get_size("matmul"))
-
-    def forward(self, x):
-        r"""
-        Embed this rank's slice of the image into patch tokens.
-
-        Parameters
-        ----------
-        x : torch.Tensor
-            Input of shape ``(B, in_chans, H, W_local)``, where ``W_local`` is
-            this rank's share of the width. Gathered along channels first if the
-            input is matmul-parallel.
-
-        Returns
-        -------
-        torch.Tensor
-            Tokens of shape ``(B, embed_dim_local, num_patches)``, where
-            ``embed_dim_local`` is the full ``embed_dim`` unless the output is
-            matmul-parallel.
-        """
-        if self.input_parallel:
-            x = gather_from_parallel_region(x, 1, self.gather_shapes, "matmul")
-
-        if self.output_parallel:
-            x = copy_to_parallel_region(x, "matmul")
-
-        B, C, H, W = x.shape
-        torch._check(H == self.img_size[0], lambda: f"Input image height {H} doesn't match model {self.img_size[0]}.")
-        torch._check(W == self.img_size[1], lambda: f"Input image width {W} doesn't match model {self.img_size[1]}.")
-        # new: B, C, H*W
-        x = self.proj(x).flatten(2)
-        return x
-
-
-class MultiHeadAttention(nn.Module):
-    r"""
-    Multi-head self-attention, with the heads split over the matmul ranks under model parallelism.
-
-    Projects the tokens to queries, keys and values, normalizes queries and keys
-    with ``qk_norm``, applies scaled dot-product attention per head, and
-    projects the concatenated heads back:
-
-    .. math::
-        \mathrm{Attention}(Q, K, V) =
-        \mathrm{softmax}\!\left(\frac{Q K^\top}{\sqrt{d_h}}\right) V
-
-    Heads are independent by construction, which makes them the natural unit
-    to split: with a ``comm_name`` group of more than one rank, the query, key
-    and value projections are column-parallel :class:`DistributedMatmul`
-    layers, each rank computing its heads end to end, and the output projection
-    is row-parallel, reducing the concatenated heads to a replicated result, so
-    the layer costs a single all-reduce. Without, they are
-    :class:`torch.nn.Linear` layers. Either way the parameters have the same
-    names and full shapes, and every projection keeps its heads in order, so a
-    checkpoint restores across any decomposition.
-
-    Biases that cannot affect the result are left out. A bias of the keys adds
-    :math:`q \cdot b_k` to every logit of a query, which the softmax removes, so
-    the keys have no bias without ``qk_norm``; with it, the normalization of
-    the keys has no bias, for the same reason, while the key projection has one
-    with ``qkv_bias``, as it acts before the normalization.
-
-    Parameters
-    ----------
-    dim : int
-        Feature dimension. Must be divisible by ``num_heads``.
-    num_heads : int, optional
-        Number of attention heads, by default ``8``. Must be divisible by the
-        size of the ``comm_name`` group.
-    qkv_bias : bool, optional
-        Whether the query, key and value projections carry biases, by default
-        ``False``; see above for the keys.
-    qk_norm : bool, optional
-        Normalize queries and keys before the attention product, by default
-        ``False``. Stabilizes training by bounding the logits.
-    attn_drop_rate : float, optional
-        Dropout probability on the attention weights in training, by default ``0.0``.
-    proj_drop_rate : float, optional
-        Dropout probability after the output projection, by default ``0.0``.
-    norm_layer : callable, optional
-        Normalization used for ``qk_norm``, called with the head dimension, by
-        default :class:`torch.nn.LayerNorm`.
-    comm_name : str, optional
-        Group to split the heads over, by default ``"matmul"``.
-    use_te : bool, optional
-        Use TransformerEngine linears for the split projections, by default ``False``.
-
-    Raises
-    ------
-    ValueError
-        If ``dim`` is not divisible by ``num_heads``, or ``num_heads`` not by
-        the size of the ``comm_name`` group.
-    """
-
-    def __init__(
-        self,
-        dim,
-        num_heads=8,
-        qkv_bias=False,
-        qk_norm=False,
-        attn_drop_rate=0.0,
-        proj_drop_rate=0.0,
-        norm_layer=nn.LayerNorm,
-        comm_name="matmul",
-        use_te=False,
-    ):
-        super().__init__()
-
-        if dim % num_heads != 0:
-            raise ValueError(f"dim {dim} should be divisible by num_heads {num_heads}")
-        comm_size = comm.get_size(comm_name)
-        if num_heads % comm_size != 0:
-            raise ValueError(f"heads ({num_heads}) are not evenly split across model ranks ({comm_size})")
-
-        self.num_heads = num_heads
-        self.num_heads_local = num_heads // comm_size
-        self.head_dim = dim // num_heads
-        self.attn_drop_rate = attn_drop_rate
-
-        def projection(bias, parallel_mode):
-            if comm_size > 1:
-                return DistributedMatmul(
-                    dim, dim, "traditional", comm_name=comm_name, parallel_mode=parallel_mode, bias=bias, use_te=use_te
-                )
-            linear = nn.Linear(dim, dim, bias=bias)
-            for param in linear.parameters():
-                param.is_shared_mp = {"spatial": "sum", "matmul": "avg"}
-            return linear
-
-        # the heads of this rank, from the queries, keys and values
-        self.q = projection(qkv_bias, "column")
-        self.k = projection(qkv_bias and qk_norm, "column")
-        self.v = projection(qkv_bias, "column")
-
-        if qk_norm:
-            self.q_norm = norm_layer(self.head_dim)
-            self.k_norm = norm_layer(self.head_dim)
-            if getattr(self.k_norm, "bias", None) is not None:
-                self.k_norm.register_parameter("bias", None)
-            # the norms act on every head, and the heads are split over matmul, so each matmul rank holds the
-            # contribution of its heads to their gradients; as for the other layers, the spatial ranks would each
-            # hold that of their part of the grid
-            for norm in (self.q_norm, self.k_norm):
-                for param in norm.parameters():
-                    param.is_shared_mp = {"spatial": "sum", "matmul": "sum"}
-        else:
-            self.q_norm = nn.Identity()
-            self.k_norm = nn.Identity()
-
-        # the heads back to the features, reduced over the ranks of the heads
-        self.proj = projection(True, "row")
-        self.proj_drop = nn.Dropout(proj_drop_rate) if proj_drop_rate > 0.0 else nn.Identity()
-
-    def _heads(self, x, projection):
-        # (B, N, dim) -> (B, heads, N, head_dim), the heads of this rank
-        B, N, _ = x.shape
-        return projection(x).reshape(B, N, self.num_heads_local, self.head_dim).transpose(1, 2)
-
-    def forward(self, x):
-        r"""
-        Apply multi-head self-attention.
-
-        Parameters
-        ----------
-        x : torch.Tensor
-            Token tensor of shape ``(B, N, dim)``, replicated over the ranks of
-            the heads.
-
-        Returns
-        -------
-        torch.Tensor
-            Tensor of shape ``(B, N, dim)``, replicated as the input.
-        """
-        B, N, _ = x.shape
-
-        q = self.q_norm(self._heads(x, self.q))
-        k = self.k_norm(self._heads(x, self.k))
-        v = self._heads(x, self.v)
-
-        x = F.scaled_dot_product_attention(q, k, v, dropout_p=self.attn_drop_rate if self.training else 0.0)
-
-        # the heads of this rank side by side, then reduced over the ranks by the row-parallel projection
-        x = x.transpose(1, 2).reshape(B, N, self.num_heads_local * self.head_dim)
-        return self.proj_drop(self.proj(x))

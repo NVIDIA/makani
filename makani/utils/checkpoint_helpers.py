@@ -30,7 +30,7 @@ import torch.distributed as dist
 from torch.optim import Optimizer
 
 from makani.utils import comm
-from makani.mpu.helpers import gather_uneven
+from makani.distributed.helpers import gather_uneven
 
 from torch_harmonics.distributed import split_tensor_along_dim
 
@@ -667,7 +667,7 @@ def upgrade_state_dict(model: nn.Module, state_dict, prefix: str = "") -> None:
     Upgrade a state dict of an earlier version of a model to the current one, in place.
 
     Every module of the model that defines a static ``upgrade_state_dict(state_dict, prefix)``
-    upgrades its own keys, e.g. :class:`~makani.models.common.layers.MLP` the names of its layers.
+    upgrades its own keys, e.g. :class:`~makani.models.common.mlp.MLP` the names of its layers.
     Upgrading is idempotent. A restore calls it through :func:`upgrade_checkpoint`, for checkpoints
     of an earlier format version only.
 

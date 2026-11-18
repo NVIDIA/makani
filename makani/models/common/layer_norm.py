@@ -24,7 +24,7 @@ from typing import Tuple, Optional
 from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature
 
 # we need the kernels
-from makani.mpu.layer_norm import _normalize_kernel, _normalize_transform_kernel
+from makani.models.common.distributed.layer_norm import _normalize_kernel, _normalize_transform_kernel
 
 
 class GeometricInstanceNormS2(nn.Module):

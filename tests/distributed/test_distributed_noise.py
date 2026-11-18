@@ -37,7 +37,7 @@ import torch
 import torch.distributed as dist
 from parameterized import parameterized
 
-from makani.mpu.helpers import SUM, all_reduce_mean, get_sharing
+from makani.distributed.helpers import SUM, all_reduce_mean, get_sharing
 from makani.utils import comm
 from makani.models.noise import DiffusionNoiseS2, IsotropicGaussianRandomFieldS2, noise_base_seed
 from makani.models.noise_controller import NoiseController
@@ -168,7 +168,7 @@ class TestDistributedNoise(unittest.TestCase):
         The gradient of a parameter as the trainers reduce it, gathered over the groups it is sharded over.
 
         Summed or averaged over the groups it is shared over, as its annotation says, see
-        :func:`~makani.mpu.helpers.get_sharing`, which refuses a parameter shared over a group it is sharded over.
+        :func:`~makani.distributed.helpers.get_sharing`, which refuses a parameter shared over a group it is sharded over.
         """
         grad = param.grad.clone()
         for group, reduction in get_sharing(param).items():
