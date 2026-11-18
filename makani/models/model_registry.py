@@ -28,7 +28,7 @@ from functools import partial
 import torch
 import torch.nn as nn
 
-from makani.utils.YParams import ParamsBase, ensure_resampled_shapes
+from makani.utils.params import ParamsBase, ensure_resampled_shapes
 from makani.models import StepWrapper
 from makani.models import StochasticInterpolantWrapper
 from makani.models.stochastic_interpolant import interpolant_input_channels

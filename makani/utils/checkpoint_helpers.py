@@ -58,9 +58,17 @@ def _register_checkpoint_safe_globals():
         return
 
     # imported lazily to avoid a circular import through makani.utils
-    from makani.utils.YParams import ParamsBase, YParams
+    from makani.utils.params import ParamsBase, YParams
 
-    torch.serialization.add_safe_globals([ParamsBase, YParams])
+    # also under their module before it was renamed, makani.utils.YParams, for the checkpoints that pickled them
+    torch.serialization.add_safe_globals(
+        [
+            ParamsBase,
+            YParams,
+            (ParamsBase, "makani.utils.YParams.ParamsBase"),
+            (YParams, "makani.utils.YParams.YParams"),
+        ]
+    )
 
     _safe_globals_registered = True
 

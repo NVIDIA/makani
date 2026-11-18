@@ -50,8 +50,8 @@ from makani.distributed import comm
 from makani.utils.checkpoint_helpers import set_checkpoint_paths
 from makani.utils import argument_parser
 from makani.utils import logging_utils
-from makani.utils.YParams import YParams
-from makani.utils.parse_dataset_metada import parse_dataset_metadata
+from makani.utils.params import YParams
+from makani.utils.parse_dataset_metadata import parse_dataset_metadata
 from makani.utils.profiling import Timer
 from makani.distributed.helpers import count_parameters
 

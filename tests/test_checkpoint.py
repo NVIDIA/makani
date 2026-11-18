@@ -327,7 +327,7 @@ class TestLoadCheckpoint(unittest.TestCase):
         not actually help on this torch version and such checkpoints need the env escape
         hatch instead.
         """
-        from makani.utils.YParams import ParamsBase
+        from makani.utils.params import ParamsBase
 
         params = ParamsBase()
         params.update_params({"N_in_channels": 3, "nettype": "sfno"})
@@ -337,6 +337,43 @@ class TestLoadCheckpoint(unittest.TestCase):
 
         self.assertEqual(checkpoint["params"].N_in_channels, 3)
         self.assertEqual(checkpoint["params"].nettype, "sfno")
+
+    def test_loads_params_under_legacy_module(self):
+        """Params pickled under ``makani.utils.YParams``, the module before the rename, still load."""
+        import sys
+        import zipfile
+        from makani.utils import params as params_module
+        from makani.utils.params import ParamsBase, YParams
+
+        params = ParamsBase()
+        params.update_params({"N_in_channels": 3})
+        # a YParams without its yaml file: the state a pickle carries is that of ParamsBase
+        yparams = YParams.__new__(YParams)
+        ParamsBase.__init__(yparams)
+        yparams.update_params({"nettype": "sfno"})
+
+        # pickle both classes under their old module, as checkpoints written before the rename did
+        sys.modules["makani.utils.YParams"] = params_module
+        try:
+            for cls in (ParamsBase, YParams):
+                cls.__module__ = "makani.utils.YParams"
+            torch.save({"model_state": OrderedDict(), "params": params, "yparams": yparams}, self.path)
+        finally:
+            for cls in (ParamsBase, YParams):
+                cls.__module__ = "makani.utils.params"
+            del sys.modules["makani.utils.YParams"]
+
+        with zipfile.ZipFile(self.path) as archive:
+            pickled = [archive.read(name) for name in archive.namelist() if name.endswith("data.pkl")][0]
+        self.assertIn(b"makani.utils.YParams", pickled)
+        self.assertNotIn(b"makani.utils.params", pickled)
+
+        checkpoint = load_checkpoint(self.path)
+
+        self.assertIsInstance(checkpoint["params"], ParamsBase)
+        self.assertIsInstance(checkpoint["yparams"], YParams)
+        self.assertEqual(checkpoint["params"].N_in_channels, 3)
+        self.assertEqual(checkpoint["yparams"].nettype, "sfno")
 
     def test_rejects_object_outside_allowlist(self):
         torch.save({"model_state": OrderedDict(), "payload": UnsupportedPayload()}, self.path)

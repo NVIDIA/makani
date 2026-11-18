@@ -19,8 +19,6 @@ import torch.nn as nn
 import torch.amp as amp
 from torch.utils.checkpoint import checkpoint
 
-from functools import partial
-
 # helpers
 from makani.models.common import DropPath, LayerScale, MLP, EncoderDecoder, spectral_conv_s2
 from makani.utils.features import get_water_channels, get_channel_groups
@@ -31,8 +29,8 @@ import torch_harmonics as th
 import torch_harmonics.distributed as thd
 
 # get pre-formulated layers
-# from makani.models.common import GeometricInstanceNormS2
 from makani.models.common.distributed.mlp import DistributedMLP
+from makani.models.common.norm_layers import get_norm_layer_handle
 
 # more distributed stuff
 from makani.distributed import comm
@@ -50,60 +48,6 @@ def _compute_cutoff_radius(nlat, kernel_shape, basis_type):
     theta_cutoff_factor = {"piecewise linear": 0.5, "morlet": 0.5, "harmonic": 0.5, "zernike": math.sqrt(2.0)}
 
     return (kernel_shape[0] + 1) * theta_cutoff_factor[basis_type] * math.pi / float(nlat - 1)
-
-
-@torch.compiler.disable(recursive=True)
-def _get_norm_layer_handle(
-    h,
-    w,
-    embed_dim,
-    normalization_layer="none",
-    sht_grid_type="legendre-gauss",
-):
-    """
-    get the handle for ionitializing normalization layers
-    """
-    # pick norm layer
-    if normalization_layer == "layer_norm":
-        from makani.models.common.distributed.layer_norm import DistributedLayerNorm
-
-        norm_layer_handle = partial(
-            DistributedLayerNorm, normalized_shape=(embed_dim), elementwise_affine=True, eps=1e-6
-        )
-    elif normalization_layer == "instance_norm":
-        if comm.get_size("spatial") > 1:
-            from makani.models.common.distributed.layer_norm import DistributedInstanceNorm2d
-
-            norm_layer_handle = partial(DistributedInstanceNorm2d, num_features=embed_dim, eps=1e-6, affine=True)
-        else:
-            norm_layer_handle = partial(
-                nn.InstanceNorm2d, num_features=embed_dim, eps=1e-6, affine=True, track_running_stats=False
-            )
-    elif normalization_layer == "instance_norm_s2":
-        if comm.get_size("spatial") > 1:
-            from makani.models.common.distributed.layer_norm import DistributedGeometricInstanceNormS2
-
-            norm_layer_handle = DistributedGeometricInstanceNormS2
-        else:
-            from makani.models.common import GeometricInstanceNormS2
-
-            norm_layer_handle = GeometricInstanceNormS2
-        norm_layer_handle = partial(
-            norm_layer_handle,
-            img_shape=(h, w),
-            crop_shape=(h, w),
-            crop_offset=(0, 0),
-            grid_type=sht_grid_type,
-            num_features=embed_dim,
-            eps=1e-6,
-            affine=True,
-        )
-    elif normalization_layer == "none":
-        norm_layer_handle = nn.Identity
-    else:
-        raise NotImplementedError(f"Error, normalization {normalization_layer} not implemented.")
-
-    return norm_layer_handle
 
 
 class DiscreteContinuousEncoder(nn.Module):
@@ -563,7 +507,7 @@ class NeuralOperatorBlock(nn.Module):
             raise ValueError(f"Unknown convolution type {conv_type}")
 
         # get normalization layer handles and instances
-        norm_layer_handle = _get_norm_layer_handle(
+        norm_layer_handle = get_norm_layer_handle(
             self.inp_shape[0],
             self.inp_shape[1],
             inp_chans,
