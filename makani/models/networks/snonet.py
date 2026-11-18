@@ -782,7 +782,6 @@ class SphericalNeuralOperatorNet(nn.Module):
         self.sht = sht_handle(sht_grid((self.h, self.w), sht_grid_type), lmax=modes_lat, mmax=modes_lon).float()
         self.isht = isht_handle(sht_grid((self.h, self.w), sht_grid_type), lmax=modes_lat, mmax=modes_lon).float()
 
-    @torch.compiler.disable(recursive=True)
     def _forward_features(self, x):
         for blk in self.blocks:
             if self.checkpointing_level >= 3:
