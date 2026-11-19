@@ -196,7 +196,6 @@ class TestDistributedMetricHandler(unittest.TestCase):
             spread_var_names=self.params.channel_names,
             ssr_var_names=self.params.channel_names,
             rh_var_names=self.params.channel_names,
-            wb2_compatible=False,
         )
         metric_handler_local.initialize_buffers()
         metric_handler_local.zero_buffers()
@@ -284,7 +283,6 @@ class TestDistributedMetricHandler(unittest.TestCase):
             spread_var_names=self.params.channel_names,
             ssr_var_names=self.params.channel_names,
             rh_var_names=self.params.channel_names,
-            wb2_compatible=False,
         )
         metric_handler_dist.initialize_buffers()
         metric_handler_dist.zero_buffers()

@@ -16,7 +16,7 @@
 import json
 import numpy as np
 
-from makani.data.grid_types import expected_latitudes, verify_grid_type
+from makani.data.grid_types import canonical_grid_type, expected_latitudes, verify_grid_type
 
 
 def parse_dataset_metadata(metadata_json_path, params):
@@ -40,10 +40,10 @@ def parse_dataset_metadata(metadata_json_path, params):
             raise ValueError(
                 f"{metadata_json_path} does not declare coords.grid_type. It is required: the quadrature "
                 "weights follow from it, so a dataset that does not say what grid it is on cannot be area "
-                "averaged correctly. Add one of 'equiangular', 'legendre-gauss', 'clenshaw-curtiss', "
-                "'weatherbench2' or 'euclidean'; see makani/datasets/examples/metadata.json."
+                "averaged correctly. Add a regular grid of torch-harmonics, such as 'equiangular' or "
+                "'legendre-gauss', or 'euclidean'; see makani/datasets/examples/metadata.json."
             )
-        params["data_grid_type"] = metadata["coords"]["grid_type"]
+        params["data_grid_type"] = canonical_grid_type(metadata["coords"]["grid_type"], source=metadata_json_path)
 
         if ("lat" in metadata["coords"]) and ("lon" in metadata["coords"]):
             params["lat"] = metadata["coords"]["lat"]

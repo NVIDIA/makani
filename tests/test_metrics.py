@@ -28,7 +28,7 @@ import torch
 import xarray as xr
 import xskillscore as xs
 
-from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature
+from makani.utils.grids import GridQuadrature, make_grid
 from makani.metrics import MetricsHandler
 from makani.metrics.geometric_metrics import (
     GeometricL1,
@@ -59,8 +59,7 @@ _deterministic_metrics_params = [
     ("equiangular", *(1, 10, 17, 32)),
     ("equiangular", *(4, 21, 17, 32)),
     ("equiangular", *(8, 21, 17, 32)),
-    ("clenshaw-curtiss", *(1, 10, 17, 32)),
-    ("clenshaw-curtiss", *(4, 21, 17, 32)),
+    ("lobatto", *(4, 21, 17, 32)),
     ("legendre-gauss", *(1, 10, 17, 32)),
     ("legendre-gauss", *(4, 21, 17, 32)),
 ]
@@ -71,8 +70,6 @@ _probabilistic_metrics_params = [
     ("equiangular", *(1, 1, 10, 17, 32)),
     ("equiangular", *(1, 21, 10, 17, 32)),
     ("equiangular", *(4, 16, 21, 17, 32)),
-    ("clenshaw-curtiss", *(1, 21, 10, 17, 32)),
-    ("clenshaw-curtiss", *(4, 16, 21, 17, 32)),
     ("legendre-gauss", *(1, 21, 10, 17, 32)),
     ("legendre-gauss", *(4, 16, 21, 17, 32)),
 ]
@@ -81,10 +78,6 @@ _probabilistic_metrics_params = [
 _wb2_metrics_params = [
     ("equiangular", *(1, 21, 10, 17, 32)),
     ("equiangular", *(4, 16, 21, 17, 32)),
-    ("clenshaw-curtiss", *(1, 21, 10, 17, 32)),
-    ("clenshaw-curtiss", *(4, 16, 21, 17, 32)),
-    ("weatherbench2", *(1, 21, 10, 17, 32)),
-    ("weatherbench2", *(4, 16, 21, 17, 32)),
 ]
 
 _deterministic_metric_aggregation_params = [
@@ -225,8 +218,7 @@ class TestMetrics(unittest.TestCase):
 
     @parameterized.expand(_deterministic_metrics_params, skip_on_empty=True)
     def test_weight_normalization(self, grid_type, batch_size, num_channels, nlat, nlon):
-        quadrature_type = grid_to_quadrature_rule(grid_type)
-        quad = GridQuadrature(quadrature_type, img_shape=(nlat, nlon), normalize=True).to(self.device)
+        quad = GridQuadrature(make_grid((nlat, nlon), grid_type), normalize=True).to(self.device)
         flat_vector = torch.ones(batch_size, num_channels, nlat, nlon, device=self.device)
         integral = torch.mean(quad(flat_vector)).item()
 
@@ -1299,7 +1291,6 @@ class TestMetricsHandler(unittest.TestCase):
             spread_var_names=self.params.channel_names,
             ssr_var_names=self.params.channel_names,
             rh_var_names=self.params.channel_names,
-            wb2_compatible=False,
         )
         metric_handler.initialize_buffers()
         metric_handler.zero_buffers()
@@ -1379,7 +1370,6 @@ class TestMetricsHandler(unittest.TestCase):
             spread_var_names=self.params.channel_names,
             ssr_var_names=self.params.channel_names,
             rh_var_names=self.params.channel_names,
-            wb2_compatible=False,
         )
         metric_handler.initialize_buffers()
         metric_handler.zero_buffers()
@@ -1396,7 +1386,6 @@ class TestMetricsHandler(unittest.TestCase):
             spread_var_names=self.params.channel_names,
             ssr_var_names=self.params.channel_names,
             rh_var_names=self.params.channel_names,
-            wb2_compatible=False,
         )
         metric_handler_split.initialize_buffers()
         metric_handler_split.zero_buffers()
@@ -1554,7 +1543,6 @@ class TestMetricsHandler(unittest.TestCase):
             spread_var_names=self.params.channel_names,
             ssr_var_names=self.params.channel_names,
             rh_var_names=self.params.channel_names,
-            wb2_compatible=False,
         )
         metric_handler.initialize_buffers()
         metric_handler.zero_buffers()
@@ -1571,7 +1559,6 @@ class TestMetricsHandler(unittest.TestCase):
             spread_var_names=self.params.channel_names,
             ssr_var_names=self.params.channel_names,
             rh_var_names=self.params.channel_names,
-            wb2_compatible=False,
         )
         metric_handler_split.initialize_buffers()
         metric_handler_split.zero_buffers()
@@ -1717,7 +1704,6 @@ class TestMetricsHandler(unittest.TestCase):
             spread_var_names=names,
             ssr_var_names=names,
             rh_var_names=names,
-            wb2_compatible=False,
             compile=compile,
         )
         handler.initialize_buffers()
@@ -1818,7 +1804,6 @@ class TestMetricsHandler(unittest.TestCase):
                 spread_var_names=self.params.channel_names,
                 ssr_var_names=self.params.channel_names,
                 rh_var_names=self.params.channel_names,
-                wb2_compatible=False,
                 compile=compile,
             )
             handler.initialize_buffers()
@@ -1881,7 +1866,6 @@ class TestMetricsHandler(unittest.TestCase):
             spread_var_names=self.params.channel_names,
             ssr_var_names=self.params.channel_names,
             rh_var_names=self.params.channel_names,
-            wb2_compatible=False,
         )
         handler_unweighted.initialize_buffers()
         handler_unweighted.zero_buffers()
@@ -1898,7 +1882,6 @@ class TestMetricsHandler(unittest.TestCase):
             spread_var_names=self.params.channel_names,
             ssr_var_names=self.params.channel_names,
             rh_var_names=self.params.channel_names,
-            wb2_compatible=False,
         )
         handler_unit_weights.initialize_buffers()
         handler_unit_weights.zero_buffers()

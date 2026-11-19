@@ -30,7 +30,8 @@ from makani.datasets.parallel import get_comm, init_torch_distributed, shutdown_
 
 import torch
 import torch.distributed as dist
-from makani.utils.grids import GridQuadrature
+from makani.utils.grids import GridQuadrature, make_grid
+from makani.data.grid_types import canonical_grid_type
 
 from makani.datasets.helpers import DistributedProgressBar
 
@@ -264,7 +265,6 @@ def compute_stats(
     output_path: str,
     metadata_file: str,
     dt: int,
-    quadrature_rule: str,
     wind_angle_aware: bool,
     fail_on_nan: bool = False,
     batch_size: Optional[int] = 16,
@@ -304,8 +304,6 @@ def compute_stats(
         The length of the channel names has to match dimension -3 (or dimension 1, which is the same) of the dataset.
     dt : int
         The temporal difference for which the temporal means and standard deviations should be computed. Note that this is in units of dhours (see metadata file),
-    quadrature_rule : str
-        Which spherical quadrature rule to use for the spatial averages. Supported are "naive", "clenshaw-curtiss" and "legendre-gauss".
     wind_angle_aware : bool
         If this flag is set to true, then wind channels will be grouped together (all u and v channels, e.g. u500 and v500, u10m and v10m, etc) and
         instead of computing stadard deviation component-wise, the standard deviation will be computed for the magnitude. This ensures that the direction of the
@@ -336,6 +334,7 @@ def compute_stats(
     num_samples = None
     wind_channels = None
     channel_names = None
+    grid_type = None
     combined_file = None
     if comm_rank == 0:
         if os.path.isdir(input_path):
@@ -364,10 +363,12 @@ def compute_stats(
 
         # read channel names
         channel_names = metadata["coords"]["channel"]
+        grid_type = canonical_grid_type(metadata["coords"]["grid_type"], source=metadata_file)
 
     # communicate important information
     combined_file = comm.bcast(combined_file, root=0)
     channel_names = comm.bcast(channel_names, root=0)
+    grid_type = comm.bcast(grid_type, root=0)
     filelist = comm.bcast(filelist, root=0)
     num_samples = comm.bcast(num_samples, root=0)
     data_shape = comm.bcast(data_shape, root=0)
@@ -384,7 +385,7 @@ def compute_stats(
     # quadrature:
     # we normalize the quadrature rule to 4pi
     quadrature = GridQuadrature(
-        quadrature_rule, (height, width), crop_shape=None, crop_offset=(0, 0), normalize=False
+        make_grid((height, width), grid_type), crop_shape=None, crop_offset=(0, 0), normalize=False
     ).to(device)
 
     if comm_rank == 0:
@@ -591,7 +592,6 @@ def main(args):
         output_path=args.output_path,
         metadata_file=args.metadata_file,
         dt=args.dt,
-        quadrature_rule=args.quadrature_rule,
         wind_angle_aware=args.wind_angle_aware,
         fail_on_nan=args.fail_on_nan,
         batch_size=args.batch_size,
@@ -613,13 +613,6 @@ if __name__ == "__main__":
     parser.add_argument("--metadata_file", type=str, help="File containing dataset metadata.", required=True)
     parser.add_argument("--output_path", type=str, help="Directory for saving stats files.", required=True)
     parser.add_argument("--reduction_group_size", type=int, default=8, help="Size of collective reduction groups.")
-    parser.add_argument(
-        "--quadrature_rule",
-        type=str,
-        default="naive",
-        choices=["naive", "clenshaw-curtiss", "legendre-gauss"],
-        help="Specify quadrature_rule for spatial averages.",
-    )
     parser.add_argument("--dt", type=int, default=1, help="Step size for which time difference stats will be computed.")
     parser.add_argument(
         "--wind_angle_aware",

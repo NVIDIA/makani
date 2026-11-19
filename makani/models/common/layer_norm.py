@@ -21,7 +21,7 @@ from torch import amp
 from typing import Tuple, Optional
 
 # quadrature stuff
-from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature
+from makani.utils.grids import GridQuadrature, make_grid
 
 
 @torch.compile
@@ -82,9 +82,8 @@ class GeometricInstanceNormS2(nn.Module):
     crop_offset : (int, int)
         Offset of that sub-region within the full grid.
     grid_type : str
-        Grid the input lives on (e.g. ``"equiangular"``, ``"legendre-gauss"``);
-        determines the quadrature rule via
-        :func:`~makani.utils.grids.grid_to_quadrature_rule`.
+        Grid the input lives on (e.g. ``"equiangular"``, ``"legendre-gauss"``),
+        whose quadrature weights the statistics take, see :func:`~makani.utils.grids.make_grid`.
     num_features : int
         Number of channels. Only used to size the affine parameters.
     eps : float, optional
@@ -120,13 +119,9 @@ class GeometricInstanceNormS2(nn.Module):
             self.weight = nn.Parameter(torch.ones(num_features))
             self.bias = nn.Parameter(torch.zeros(num_features))
 
-        # set up quadrature rule:
-        quadrature_rule = grid_to_quadrature_rule(grid_type)
-
         # we only need the weights
         self.quadrature = GridQuadrature(
-            quadrature_rule,
-            img_shape=img_shape,
+            make_grid(img_shape, grid_type),
             crop_shape=crop_shape,
             crop_offset=crop_offset,
             normalize=True,

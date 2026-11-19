@@ -225,7 +225,6 @@ mpirun -n 8 python -m makani.datasets.compute_stats \
   --metadata_file /mnt/era5/metadata.json \
   --output_path /mnt/era5/stats/train \
   --dt 1 \
-  --quadrature_rule legendre-gauss \
   --batch_size 16 \
   --reduction_group_size 8 \
   --wind_angle_aware \
@@ -237,11 +236,12 @@ Key flags:
 - `--metadata_file`: matches the dataset/VDS (channels/lat/lon/dhours must align).
 - `--output_path`: directory where the `.npy` outputs are written.
 - `--dt`: time-step (in units of `dhours`) for difference stats.
-- `--quadrature_rule`: spatial weighting (`naive`, `clenshaw-curtiss`, `legendre-gauss`).
 - `--wind_angle_aware`: treat paired wind components as magnitudes for mean/std. This conserves the angle of the wind vector and just normalizes its magnitudes.
 - `--fail_on_nan`: abort if NaNs appear instead of masking them. This should not be used when computing stats for fields with missing numbers such as `sst`.
 - `--batch_size`: samples per read; tune for memory.
 - `--reduction_group_size`: size of the groups of the parallel reduction (performance tuning). It is clamped to the largest divisor of the number of ranks that does not exceed it, so the default of 8 works on any number of ranks, also on one.
+
+The spatial averages take the quadrature weights of the dataset's grid, the `coords.grid_type` of its metadata file.
 
 ### Time invariant fields
 

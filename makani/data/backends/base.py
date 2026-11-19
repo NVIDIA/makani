@@ -127,8 +127,8 @@ class GridSpec(NamedTuple):
     Attributes
     ----------
     kind : str
-        Grid type in makani's vocabulary -- ``"equiangular"``,
-        ``"legendre-gauss"``, ``"clenshaw-curtiss"`` -- or ``"unstructured"``
+        Grid type in makani's vocabulary -- a regular grid of torch-harmonics
+        such as ``"equiangular"`` or ``"legendre-gauss"`` -- or ``"unstructured"``
         for a mesh with no tensor product structure. This is what a run means by
         ``data_grid_type``, and what tells the downstream converter what it has
         been handed.

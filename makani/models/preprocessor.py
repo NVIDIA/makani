@@ -18,7 +18,7 @@ from typing import Dict, NamedTuple, Optional
 import torch
 import torch.nn as nn
 
-from makani.utils.grids import GridQuadrature, grid_to_quadrature_rule
+from makani.utils.grids import GridQuadrature, make_grid
 from makani.distributed.mappings import copy_to_parallel_region
 
 from makani.models.preprocessor_helpers import get_bias_correction, get_static_features
@@ -87,8 +87,7 @@ class HistoryNormalization(nn.Module):
         self.register_buffer("history_normalization_weights", history_normalization_weights, persistent=False)
         if self.history_normalization_mode != "none":
             self.quadrature = GridQuadrature(
-                grid_to_quadrature_rule(params.model_grid_type),
-                img_shape=img_shape_resampled,
+                make_grid(img_shape_resampled, params.model_grid_type),
                 crop_shape=None,
                 crop_offset=(0, 0),
                 normalize=True,

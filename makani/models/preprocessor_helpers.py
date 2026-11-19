@@ -182,20 +182,18 @@ def get_static_features(params):
     normalizer = None
     if normalize_static_features:
         from makani.data.grid_types import DEFAULT_GRID_TYPE
-        from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature
+        from makani.utils.grids import GridQuadrature, make_grid
 
-        # params restored from a checkpoint written before the grid type became
-        # required may not carry one; a fresh run always does
-        quadrature_rule = grid_to_quadrature_rule(params.get("data_grid_type", DEFAULT_GRID_TYPE))
         crop_shape = [
             params.get("img_crop_shape_x", params.img_shape_x),
             params.get("img_crop_shape_y", params.img_shape_y),
         ]
         crop_offset = [params.get("img_crop_offset_x", 0), params.get("img_crop_offset_y", 0)]
 
+        # params restored from a checkpoint written before the grid type became
+        # required may not carry one; a fresh run always does
         quadrature = GridQuadrature(
-            quadrature_rule,
-            img_shape=(params.img_shape_x, params.img_shape_y),
+            make_grid((params.img_shape_x, params.img_shape_y), params.get("data_grid_type", DEFAULT_GRID_TYPE)),
             crop_shape=crop_shape,
             crop_offset=crop_offset,
             normalize=True,

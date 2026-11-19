@@ -269,7 +269,6 @@ class MetricsHandler:
         ssr_var_names=["u10m", "t2m", "sp", "sst", "u500", "z500", "q500", "q50"],
         rh_var_names=[],
         mask_target_nan=True,
-        wb2_compatible=False,
         compile=True,
     ):
 
@@ -335,15 +334,6 @@ class MetricsHandler:
 
         # mask nan
         self.mask_target_nan = mask_target_nan
-
-        # enable overwriting this with weatherbench2 compatible metrics
-        if wb2_compatible:
-            if grid_type == "equiangular":
-                grid_type = "weatherbench2"
-            else:
-                raise ValueError(
-                    f"weatherbench2 compatibility only supported on equiangular grids. Got {grid_type} instead"
-                )
 
         # set up handles
         self.metric_handles = []

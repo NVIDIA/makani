@@ -25,7 +25,7 @@ from makani.distributed import comm
 from makani.distributed.mappings import gather_from_parallel_region, copy_to_parallel_region
 
 # quadrature stuff
-from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature
+from makani.utils.grids import GridQuadrature, make_grid
 
 # the normalization kernels of the serial layers
 from makani.models.common.layer_norm import _normalize_kernel, _normalize_transform_kernel
@@ -167,13 +167,9 @@ class DistributedGeometricInstanceNormS2(DistributedInstanceNorm2d):
     ):
         super().__init__(num_features, eps, affine)
 
-        # set up quadrature rule:
-        quadrature_rule = grid_to_quadrature_rule(grid_type)
-
         # we only need the weights
         quad_weight = GridQuadrature(
-            quadrature_rule,
-            img_shape=img_shape,
+            make_grid(img_shape, grid_type),
             crop_shape=crop_shape,
             crop_offset=crop_offset,
             normalize=True,

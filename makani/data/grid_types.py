@@ -26,24 +26,42 @@ Everything that only needs to *name* or *check* a grid imports from here;
 between grids, which do need torch.
 """
 
+import logging
+
 import numpy as np
-from torch_harmonics.quadrature import legendre_gauss_weights
+import torch_harmonics as th
 
 
-#: how close a stored latitude has to be to the one the grid type implies, in
-#: degrees. Coordinates are usually float32 and metadata is sometimes rounded,
-#: while the grids differ by a whole node spacing, so this is loose enough to
-#: accept honest data and far tighter than the difference it has to catch.
 GRID_TYPE_TOLERANCE_DEGREES = 1e-3
 
-#: the grid a dataset is assumed to be on when nothing declares one. Only the
-#: synthetic loader gets here: a real dataset has to say, and is checked.
 DEFAULT_GRID_TYPE = "equiangular"
 
-#: grid types whose nodes are equally spaced in latitude, poles included. They
-#: differ from each other only in how they *weight* those nodes, so coordinates
-#: cannot tell them apart -- only a Gauss grid has different nodes.
-EQUALLY_SPACED_GRIDS = ("equiangular", "clenshaw-curtiss", "weatherbench2")
+#: Grid types that datasets written before makani 0.4 may declare, and the grid they are on. They
+#: named a quadrature rule on equally spaced latitudes rather than a grid; the quadrature now
+#: follows from the grid.
+LEGACY_GRID_TYPES = {"clenshaw-curtiss": "equiangular", "weatherbench2": "equiangular"}
+
+
+def canonical_grid_type(grid_type, source="the dataset"):
+    """The grid type to use for one a dataset declares, translating the legacy names."""
+    if grid_type in LEGACY_GRID_TYPES:
+        logging.getLogger(__name__).warning(
+            f"{source} declares grid_type '{grid_type}', which names a quadrature rule rather than a grid; "
+            f"reading it as '{LEGACY_GRID_TYPES[grid_type]}', whose quadrature weights the losses and metrics use."
+        )
+        return LEGACY_GRID_TYPES[grid_type]
+    return grid_type
+
+
+def _latitudes_of(grid_type, nlat):
+    """The latitudes of a regular grid of torch-harmonics, in degrees, ascending, or None for another grid type."""
+    try:
+        grid = th.as_grid(grid_type, nlat=nlat, nlon=1)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(grid, th.RegularGridS2):
+        return None
+    return np.sort(90.0 - np.degrees(np.asarray(grid.colats, dtype=np.float64)))
 
 
 def expected_latitudes(grid_type, nlat):
@@ -52,34 +70,29 @@ def expected_latitudes(grid_type, nlat):
     Returns None for a grid that is not on the sphere, where there is nothing to
     check.
     """
-    if grid_type in EQUALLY_SPACED_GRIDS:
-        return np.linspace(-90.0, 90.0, nlat, endpoint=True)
-
-    if grid_type == "legendre-gauss":
-        cost, _ = legendre_gauss_weights(nlat, -1, 1)
-        return np.sort(np.degrees(np.arccos(np.asarray(cost)) - np.pi / 2.0))
-
     if grid_type == "euclidean":
         return None
 
-    raise NotImplementedError(f"Grid type {grid_type} has no known latitudes")
+    latitudes = _latitudes_of(grid_type, nlat)
+    if latitudes is None:
+        raise NotImplementedError(f"Grid type {grid_type} has no known latitudes")
+    return latitudes
 
 
 def matching_grid_types(latitudes, tolerance=GRID_TYPE_TOLERANCE_DEGREES):
     """Every known grid type whose nodes sit where these latitudes do.
 
-    More than one is the normal answer, not a failure to decide: equiangular,
-    Clenshaw-Curtiss and WeatherBench2 all use equally spaced nodes and differ
-    only in their weights, so no coordinate can separate them. What coordinates
-    *can* separate is a Gauss grid from the rest, which is the confusion worth
-    catching, since it moves every node.
+    More than one is a possible answer: grids that place their nodes alike and
+    differ only in their weights cannot be told apart by coordinates. What
+    coordinates *can* separate is, for example, a Gauss grid from an equiangular
+    one, which is the confusion worth catching, since it moves every node.
 
     Returns an empty list when the latitudes are no known grid at all.
     """
     actual = np.sort(np.asarray(latitudes, dtype=np.float64))
     matches = []
-    for candidate in EQUALLY_SPACED_GRIDS + ("legendre-gauss",):
-        expected = expected_latitudes(candidate, len(actual))
+    for candidate in th.grid_types():
+        expected = _latitudes_of(candidate, len(actual))
         if expected is not None and np.allclose(actual, expected, atol=tolerance, rtol=0.0):
             matches.append(candidate)
     return matches
@@ -98,11 +111,10 @@ def verify_grid_type(grid_type, latitudes, source="the dataset", tolerance=GRID_
     north to south and the quadrature routines produce them south to north, so
     what is compared is the distribution of nodes.
 
-    What this cannot catch is a run declaring one equally spaced grid where
-    another was meant -- equiangular, Clenshaw-Curtiss and WeatherBench2 share
-    their nodes and differ only in weights, so the coordinates hold no evidence
-    either way. A Gauss grid moves every node, which is the confusion that is
-    both catchable and worth catching.
+    What this cannot catch is a run declaring one grid where another with the
+    same nodes was meant, as the coordinates hold no evidence either way. A
+    Gauss grid moves every node, which is the confusion that is both catchable
+    and worth catching.
     """
     expected = expected_latitudes(grid_type, len(latitudes))
     if expected is None:

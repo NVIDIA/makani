@@ -28,7 +28,7 @@ from parameterized import parameterized
 
 import torch
 
-from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature
+from makani.utils.grids import GridQuadrature, make_grid
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from .testutils import disable_tf32, init_hdf5_dataset, H5_PATH, IMG_SIZE_H, IMG_SIZE_W, compare_arrays
@@ -1453,8 +1453,7 @@ class TestGetStats(unittest.TestCase):
             )
 
         # Create quadrature rule
-        quadrature_rule = grid_to_quadrature_rule("equiangular")
-        quadrature = GridQuadrature(quadrature_rule, (IMG_SIZE_H, IMG_SIZE_W), normalize=False)
+        quadrature = GridQuadrature(make_grid((IMG_SIZE_H, IMG_SIZE_W), "equiangular"), normalize=False)
 
         # Get stats using get_file_stats
         stats = None
