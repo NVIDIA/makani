@@ -33,7 +33,7 @@ from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from .testutils import disable_tf32, init_hdf5_dataset, H5_PATH, IMG_SIZE_H, IMG_SIZE_W, compare_arrays
 from makani.datasets.date_range import add_date_range_arguments, date_range_from_args, parse_date, yearly_sample_times
-from makani.datasets.convert_era5_to_makani_input import _batched, _create_output_file, _write_missing
+from makani.datasets.convert_era5 import _batched, _create_output_file, _write_missing
 from makani.datasets.sources import InvariantSource, Source
 
 
@@ -1136,14 +1136,14 @@ class TestH5Convert(unittest.TestCase):
             ("1MB", True, (6, 64, 128, 5)),
         ]
     )
-    def test_h5_convert(self, chunksize, transpose, expected_chunks):
-        from makani.datasets.h5_convert import h5_convert
+    def test_rechunk(self, chunksize, transpose, expected_chunks):
+        from makani.datasets.rechunk_dataset import rechunk
 
         output_path = os.path.join(self.tmpdir.name, f"converted_{chunksize}_{transpose}")
         os.makedirs(output_path)
 
         # batchsize 3 over 8 samples exercises the partial last batch
-        h5_convert(
+        rechunk(
             self.train_path,
             output_path,
             chunksize=chunksize,
@@ -1191,7 +1191,7 @@ class TestH5Convert(unittest.TestCase):
         ]
     )
     def test_chunk_shape_from_bytes(self, shape, itemsize, target_bytes, expected):
-        from makani.datasets.h5_convert import _chunk_shape_from_bytes
+        from makani.datasets.rechunk_dataset import _chunk_shape_from_bytes
 
         chunks = _chunk_shape_from_bytes(shape, itemsize, target_bytes)
         self.assertEqual(chunks, expected)
@@ -1446,10 +1446,10 @@ class TestGetStats(unittest.TestCase):
 
 # conversion scripts, with the extras each needs to be importable at all
 _CONVERTERS = [
-    ("makani.datasets.convert_era5_to_makani_input", ["h5py"]),
+    ("makani.datasets.convert_era5", ["h5py"]),
     ("makani.datasets.sources.ncar", ["h5py"]),
     ("makani.datasets.sources.wb2", ["xarray", "h5py"]),
-    ("makani.datasets.convert_era5_invariants_to_makani_input", ["h5py"]),
+    ("makani.datasets.convert_era5_invariants", ["h5py"]),
     ("makani.datasets.convert_makani_output_to_wb2", ["xarray", "dask", "h5py"]),
     ("makani.datasets.generate_wb2_climatology", ["xarray", "h5py"]),
 ]
@@ -1569,10 +1569,10 @@ class TestYearlySampleTimes(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# ERA5 converter and its sources: makani/datasets/convert_era5_to_makani_input.py, makani/datasets/sources/
+# ERA5 converter and its sources: makani/datasets/convert_era5.py, makani/datasets/sources/
 # ---------------------------------------------------------------------------
 #
-# Tests for ``makani/datasets/convert_era5_to_makani_input.py`` and its sources.
+# Tests for ``makani/datasets/convert_era5.py`` and its sources.
 #
 # Everything but the last suite runs without MPI and without network access: the
 # output file helpers write serial files, the NCAR source reads from a stand-in
@@ -1851,7 +1851,7 @@ class TestConvert(unittest.TestCase):
         self._tmpdir.cleanup()
 
     def test_yearly_files(self):
-        from makani.datasets.convert_era5_to_makani_input import convert
+        from makani.datasets.convert_era5 import convert
 
         convert(_FakeSource, self._tmpdir.name, self.metadata_file, _utc(2022, 12, 31, 6), _utc(2023, 1, 1, 12))
 
@@ -1876,7 +1876,7 @@ class TestConvert(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Invariant converter and its sources: makani/datasets/convert_era5_invariants_to_makani_input.py
+# Invariant converter and its sources: makani/datasets/convert_era5_invariants.py
 # ---------------------------------------------------------------------------
 #
 # The time invariant counterpart of the suites above. It is serial throughout, so
@@ -1897,7 +1897,7 @@ class _InvariantOutputFileCase(unittest.TestCase):
     channels = ["z", "lsm", "not_a_variable"]
 
     def setUp(self):
-        from makani.datasets.convert_era5_invariants_to_makani_input import _create_output_file
+        from makani.datasets.convert_era5_invariants import _create_output_file
 
         self._tmpdir = tempfile.TemporaryDirectory()
         self.out = _create_output_file(
@@ -1920,7 +1920,7 @@ class TestInvariantOutputFile(_InvariantOutputFileCase):
         self.assertTrue(np.all(np.isnan(self.out["fields"][...])))
 
     def test_write_missing_touches_only_the_given_channels(self):
-        from makani.datasets.convert_era5_invariants_to_makani_input import _write_missing
+        from makani.datasets.convert_era5_invariants import _write_missing
 
         self.out["fields"][...] = 1.0
         _write_missing(self.out, "fields", [0, 2])
@@ -2078,7 +2078,7 @@ class TestConvertInvariants(unittest.TestCase):
         self._tmpdir.cleanup()
 
     def _convert(self, **options):
-        from makani.datasets.convert_era5_invariants_to_makani_input import convert
+        from makani.datasets.convert_era5_invariants import convert
 
         convert(_FakeInvariantSource, self.output_file, self.metadata_file, ["z", "lsm", "slt"], **options)
 
@@ -2107,7 +2107,7 @@ class TestConvertInvariants(unittest.TestCase):
             self.assertEqual(f["fields"].shape, (3, len(_LAT), len(_LON)))
 
     def test_failed_conversion_leaves_no_file_behind(self):
-        from makani.datasets.convert_era5_invariants_to_makani_input import convert
+        from makani.datasets.convert_era5_invariants import convert
 
         _FailingInvariantSource.closed = False
         with self.assertRaises(FileNotFoundError):
@@ -2122,7 +2122,7 @@ class TestConvertInvariants(unittest.TestCase):
             self.assertTrue(np.all(f["fields"][1] == 1))
 
     def test_command_line_defaults_to_all_invariants(self):
-        from makani.datasets.convert_era5_invariants_to_makani_input import build_parser
+        from makani.datasets.convert_era5_invariants import build_parser
         from makani.data.ncar_helpers import invariant_variables
 
         args = build_parser().parse_args(["ncar", "--output_file", "out.h5", "--metadata_file", "m.json"])

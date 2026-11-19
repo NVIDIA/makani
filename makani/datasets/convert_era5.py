@@ -108,9 +108,9 @@ def convert(
 
     The archive specific reading is delegated to a :class:`makani.datasets.sources.Source`;
     this routine owns the output files, the date range and the distribution of
-    work. It supports distributed processing via mpi4py: the source groups the
-    samples of each year into units that must stay on one rank, and the units are
-    handed out to the ranks in contiguous runs.
+    work. It runs serially, or in parallel under mpirun where mpi4py is installed, see
+    :mod:`makani.datasets.parallel`: the source groups the samples of each year into units
+    that must stay on one rank, and the units are handed out to the ranks in contiguous runs.
 
     Parameters
     ----------

@@ -49,7 +49,7 @@ def convert(
     This function reads all files from the input_path and generates a WB2 compatible output file which
     is stored as specified in output_file.
 
-    This routine supports distributed processing via mpi4py.
+    It runs serially, or in parallel under mpirun where mpi4py is installed, see :mod:`makani.datasets.parallel`.
     ...
 
     Parameters

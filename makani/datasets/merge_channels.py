@@ -38,7 +38,7 @@ def transfer_channels(
     This function reads corresponding channels from the input_file and copies them to the corresponding slot
     in the output file.
 
-    This routine supports distributed processing via mpi4py.
+    It runs serially, or in parallel under mpirun where mpi4py is installed, see :mod:`makani.datasets.parallel`.
     ...
 
     Parameters
@@ -165,7 +165,9 @@ def main(args):
 if __name__ == "__main__":
 
     # argparse
-    parser = ap.ArgumentParser()
+    parser = ap.ArgumentParser(
+        description="Copy channels from one makani dataset file into another, into the slots of the same channels."
+    )
     parser.add_argument("--input_file", type=str, help="makani input file", required=True)
     parser.add_argument("--output_file", type=str, help="File to which channels will be written", required=True)
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size for writing chunks")

@@ -214,7 +214,7 @@ def compute_histograms(
 
     All histograms are weighted by spherical quadrature weights.
 
-    This routine supports distributed processing via mpi4py.
+    It runs serially, or in parallel under mpirun where mpi4py is installed, see :mod:`makani.datasets.parallel`.
     ...
 
     Parameters

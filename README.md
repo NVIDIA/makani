@@ -213,17 +213,21 @@ The package `makani.datasets` contains a collection of scripts in order to modif
 #### Core Data Processing
 * `annotate_dataset.py` - Adds metadata annotations to HDF5 files including timestamps, latitude/longitude coordinates, and channel names. Ensures uniform time information across datasets by converting to UTC timezone.
 * `concatenate_dataset.py` - Creates virtual HDF5 datasets by combining multiple year files into a single dataset without physical copying, reducing disk overhead.
-* `h5_convert.py` - Reformats HDF5 files to enable compression and chunking. Supports various compression modes (LZF, GZIP, SZIP, scale-offset) and chunking strategies for optimized storage and access.
-* `convert_era5_to_makani_input.py` - Converts ERA5 to Makani-compatible HDF5 format, one file per year over a given date range, serially or in parallel with MPI. The source is chosen by subcommand: `wb2` reads WeatherBench2/ARCO-ERA5 zarr stores, handling channel name translation and data restructuring; `ncar` streams NSF NCAR ERA5 (RDA dataset d633000, on the public `s3://nsf-ncar-era5` bucket) with optional local caching, reconstructing total precipitation as the sum of large-scale and convective precipitation. The sources live in `sources/`.
-Statistics and Analysis
+* `merge_channels.py` - Copies channels from one Makani dataset into another, e.g. channels which are present in Copernicus ERA5 but not on ARCO-ERA5 (such as 10m wind speeds).
+* `rechunk_dataset.py` - Rewrites HDF5 files with new chunking and compression. Supports various compression modes (LZF, GZIP, SZIP, scale-offset) and chunking strategies for optimized storage and access.
+* `convert_era5.py` - Converts ERA5 to Makani-compatible HDF5 format, one file per year over a given date range, serially or in parallel with MPI. The source is chosen by subcommand: `wb2` reads WeatherBench2/ARCO-ERA5 zarr stores, handling channel name translation and data restructuring; `ncar` streams NSF NCAR ERA5 (RDA dataset d633000, on the public `s3://nsf-ncar-era5` bucket) with optional local caching, reconstructing total precipitation as the sum of large-scale and convective precipitation. The sources live in `sources/`.
+* `convert_era5_invariants.py` - The counterpart of `convert_era5.py` for time invariant fields such as orography or the land-sea mask, written into a single file.
+
+#### Statistics and Analysis
 * `compute_stats.py` - Computes comprehensive statistics from datasets including global means, standard deviations, min/max values, time means, and time-difference statistics. Runs serially, or in parallel with MPI.
 * `compute_histograms.py` - Generates histograms from dataset distributions, useful for data analysis and validation. Runs serially, or in parallel with MPI.
+* `compute_spectra.py` - Computes the mean power spectra of each channel over a dataset. Runs serially, or in parallel with MPI.
+* `compute_hydrostatic_balance_climatology.py` - Computes the climatology for the hydrostatic balance constraint. Runs serially, or in parallel with MPI.
 * `postprocess_stats.py` - Post-processes computed statistics by correcting water channel minima to exactly 0.0 and clamping standard deviations to prevent numerical issues.
 
 #### WeatherBench2 Integration
 * `generate_wb2_climatology.py` - Generates WeatherBench2-compatible climatology data and ground profile masks from ERA5 data (1990-2019 averages). Creates HDF5 datasets with user-specified channel selection and ordering.
 * `convert_makani_output_to_wb2.py` - Converts Makani inference outputs to WeatherBench2 format for evaluation and comparison with other models.
-* `merge_wb2_dataset.py` - Transfers specific channels between Makani HDF5 files. This can be used for channels which are present in Copernicus ERA5 but not on ARCO-ERA5 (such as 10m wind speeds).
 * `makani/data/wb2_helpers.py` - Utility functions for WeatherBench2 integration, including channel name translation between Makani and WeatherBench2 conventions for both surface and atmospheric variables.
 
 This collection of scripts provides a complete pipeline for data preprocessing, statistical analysis, and WeatherBench2 compatibility for weather forecasting models.

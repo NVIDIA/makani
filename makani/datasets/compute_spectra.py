@@ -129,9 +129,9 @@ def compute_power_spectra(
 
     This function reads data from input_path and computes power spectra
     for all variables in the dataset. This is done globally, meaning averaged over space and time.
-    Those will be stored in file power_spectra.npy.
+    They are stored as power_spectra_means.npy and power_spectra_stds.npy.
 
-    This routine supports distributed processing via mpi4py. For numerically safe reductions, it uses parallel Welford variance computation.
+    It runs serially, or in parallel under mpirun where mpi4py is installed, see :mod:`makani.datasets.parallel`. For numerically safe reductions, it uses parallel Welford variance computation.
 
     ...
 
@@ -155,7 +155,7 @@ def compute_power_spectra(
         Batch size in which the samples are processed. This does not have any effect on the statistics (besides small numerical changes because of order of operations), but
         is merely a performance setting. Bigger batches are more efficient but require more memory.
     reduction_group_size : int
-        Reduction group size for the parallel Welford reduction. Th MPI world communicator is partitioned accordingly. Changing this value impacts performance but not numerical accuracy.
+        Reduction group size for the parallel Welford reduction, clamped to a divisor of the number of ranks. The ranks are partitioned accordingly. Changing this value impacts performance but not numerical accuracy.
     """
 
     # disable gradients globally

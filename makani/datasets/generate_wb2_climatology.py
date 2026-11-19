@@ -41,7 +41,7 @@ def generate_wb2_climatology(
     This function can extract that masks from the corresponding WB2 climatology file stored on GCS and brings it into a format which can be used in
     makani.
 
-    This routine supports distributed processing via mpi4py.
+    It runs serially, or in parallel under mpirun where mpi4py is installed, see :mod:`makani.datasets.parallel`.
 
     ...
 
