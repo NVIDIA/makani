@@ -236,6 +236,123 @@ class TestGetStaticFeatures(unittest.TestCase):
             get_static_features(self.params)
 
 
+class TestStaticFeatureOptions(unittest.TestCase):
+    """
+    The options of the static features beyond their selection: the grid coordinates of the data's
+    latitudes and longitudes, converted to the model grid, the area-weighted normalization, and the
+    Copernicus embedding.
+    """
+
+    def setUp(self):
+        set_seed(333)
+        self.params = get_default_parameters()
+        self.params.img_shape_x = IMG_H
+        self.params.img_shape_y = IMG_W
+        self.lat = np.linspace(90.0, -90.0, IMG_H)
+        self.lon = np.linspace(0.0, 360.0, IMG_W, endpoint=False)
+        self._tmpdir = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def _quadrature(self):
+        from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature
+
+        return GridQuadrature(
+            grid_to_quadrature_rule(self.params.data_grid_type), img_shape=(IMG_H, IMG_W), normalize=True
+        )
+
+    def _assert_normalized(self, out):
+        # area-weighted mean zero and variance one, per channel
+        quadrature = self._quadrature()
+        mean = quadrature(out)
+        var = quadrature(torch.square(out - mean.reshape(1, -1, 1, 1)))
+        torch.testing.assert_close(mean, torch.zeros_like(mean), atol=1e-5, rtol=0.0)
+        torch.testing.assert_close(var, torch.ones_like(var), atol=1e-4, rtol=0.0)
+
+    def test_grid_of_the_data_coordinates(self):
+        self.params.add_grid = True
+        self.params.gridtype = "raw"
+        self.params.lat = self.lat
+        self.params.lon = self.lon
+        self.params.model_grid_type = self.params.data_grid_type
+
+        out = get_static_features(self.params)
+
+        lat = torch.deg2rad(torch.as_tensor(self.lat, dtype=torch.float32))
+        lon = torch.deg2rad(torch.as_tensor(self.lon, dtype=torch.float32))
+        torch.testing.assert_close(out[0, 0], lat.reshape(-1, 1).expand(IMG_H, IMG_W))
+        torch.testing.assert_close(out[0, 1], lon.reshape(1, -1).expand(IMG_H, IMG_W))
+
+    def test_grid_converted_to_the_model_grid(self):
+        # the Legendre-Gauss latitudes of the model grid lie strictly between the poles of the data grid
+        self.params.add_grid = True
+        self.params.gridtype = "raw"
+        self.params.lat = self.lat
+        self.params.lon = self.lon
+        self.params.data_grid_type = "equiangular"
+        self.params.model_grid_type = "legendre-gauss"
+
+        out = get_static_features(self.params)
+
+        lat = out[0, 0, :, 0]
+        self.assertEqual(lat.shape, (IMG_H,))
+        self.assertTrue(torch.all(lat.abs() < torch.pi / 2))
+        self.assertTrue(torch.all(torch.diff(lat) != 0.0))
+        # symmetric about the equator
+        torch.testing.assert_close(torch.sort(lat).values, -torch.sort(-lat).values.flip(0))
+        torch.testing.assert_close(out[0, 1, 0], torch.deg2rad(torch.as_tensor(self.lon, dtype=torch.float32)))
+
+    def test_normalized_grid(self):
+        self.params.add_grid = True
+        self.params.normalize_static_features = True
+
+        self._assert_normalized(get_static_features(self.params))
+
+    def test_normalized_invariant(self):
+        path = os.path.join(self._tmpdir.name, "invariants.h5")
+        z = np.random.default_rng(333).normal(size=(IMG_H, IMG_W)) * 1000.0 + 500.0
+        _write_invariants_file(path, [z], ["z"])
+        self.params.invariants_path = path
+        self.params.invariants = [{"channel": "z", "encoding": "normalize"}]
+        self.params.normalize_static_features = True
+
+        self._assert_normalized(get_static_features(self.params))
+
+    def _write_copernicus(self):
+        emb = np.random.default_rng(333).uniform(-3.0, 5.0, size=(IMG_H, IMG_W, 8)).astype(np.float32)
+        self.params.add_copernicus_emb = True
+        self.params.copernicus_emb_path = os.path.join(self._tmpdir.name, "copernicus.npy")
+        np.save(self.params.copernicus_emb_path, emb)
+        return torch.as_tensor(emb)
+
+    def test_copernicus_embedding(self):
+        emb = self._write_copernicus()
+
+        out = get_static_features(self.params)
+
+        # channels first, standardized over all of the embedding
+        self.assertEqual(tuple(out.shape), (1, 8, IMG_H, IMG_W))
+        expected = torch.permute(emb, (2, 0, 1)).unsqueeze(0)
+        expected = (expected - expected.mean()) / (expected.std() + 1e-6)
+        torch.testing.assert_close(out, expected)
+
+    def test_normalized_copernicus_embedding(self):
+        self._write_copernicus()
+        self.params.normalize_static_features = True
+
+        self._assert_normalized(get_static_features(self.params))
+
+    def test_copernicus_embedding_follows_the_grid(self):
+        self._write_copernicus()
+        self.params.add_grid = True
+
+        out = get_static_features(self.params)
+
+        # four sinusoidal grid channels, then the eight of the embedding
+        self.assertEqual(out.shape[1], 4 + 8)
+
+
 # ===========================================================================
 # 3. Invariants read from an invariants file
 # ===========================================================================

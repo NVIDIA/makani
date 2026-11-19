@@ -195,7 +195,7 @@ def get_static_features(params):
 
         quadrature = GridQuadrature(
             quadrature_rule,
-            img_shape=params.img_shape,
+            img_shape=(params.img_shape_x, params.img_shape_y),
             crop_shape=crop_shape,
             crop_offset=crop_offset,
             normalize=True,

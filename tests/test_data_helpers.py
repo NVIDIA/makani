@@ -14,6 +14,8 @@
 # limitations under the License.
 
 import datetime as dt
+import os
+import tempfile
 import time
 import unittest
 
@@ -24,6 +26,8 @@ from makani.data.data_helpers import (
     get_lat_lon_grid,
     get_data_normalization,
     get_time_diff_stds,
+    get_psd_stats,
+    get_hydrostatic_balance_climatology,
     get_climatology,
     get_timestamp,
     as_utc,
@@ -35,7 +39,6 @@ from makani.data.data_helpers import (
 )
 
 import sys
-import os
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from .testutils import set_seed, get_default_parameters, compare_arrays, local_timezone as _local_timezone
@@ -163,6 +166,115 @@ class TestGetDataNormalization(unittest.TestCase):
 
         # the loss indexes the flattened array with out_channels, so it has to be long enough
         self.assertGreater(len(time_diff_stds.flatten()), max(self.params.out_channels))
+
+
+class TestStatisticsFromFiles(unittest.TestCase):
+    """
+    The normalization and the other statistics read from the .npy files of a dataset: per
+    normalization mode, and per channel when the mode is a dict of channel names.
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.params = get_default_parameters()
+        C = len(self.params.channel_names)
+        self.params.data_channel_names = list(self.params.channel_names)
+        rng = np.random.default_rng(333)
+        self.stats = {
+            "min_path": rng.uniform(-10.0, -1.0, (1, C, 1, 1)),
+            "max_path": rng.uniform(1.0, 10.0, (1, C, 1, 1)),
+            "global_means_path": rng.normal(size=(1, C, 1, 1)),
+            "global_stds_path": rng.uniform(0.5, 2.0, (1, C, 1, 1)),
+        }
+        for key, array in self.stats.items():
+            path = os.path.join(self.tmpdir.name, f"{key}.npy")
+            np.save(path, array)
+            self.params[key] = path
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def _save(self, name, array):
+        path = os.path.join(self.tmpdir.name, name)
+        np.save(path, array)
+        return path
+
+    def test_minmax(self):
+        self.params.normalization = "minmax"
+        bias, scale = get_data_normalization(self.params)
+        np.testing.assert_array_equal(bias, self.stats["min_path"])
+        np.testing.assert_array_equal(scale, self.stats["max_path"] - self.stats["min_path"])
+
+    def test_zscore(self):
+        self.params.normalization = "zscore"
+        bias, scale = get_data_normalization(self.params)
+        np.testing.assert_array_equal(bias, self.stats["global_means_path"])
+        np.testing.assert_array_equal(scale, self.stats["global_stds_path"])
+
+    def test_per_channel(self):
+        # the channels named minmax take the min and the range, all others the mean and the std
+        names = self.params.data_channel_names
+        self.params.normalization = {names[1]: "minmax", names[3]: "zscore"}
+
+        bias, scale = get_data_normalization(self.params)
+
+        for c in range(len(names)):
+            with self.subTest(channel=names[c]):
+                if c == 1:
+                    np.testing.assert_array_equal(bias[:, c], self.stats["min_path"][:, c])
+                    np.testing.assert_array_equal(
+                        scale[:, c], self.stats["max_path"][:, c] - self.stats["min_path"][:, c]
+                    )
+                else:
+                    np.testing.assert_array_equal(bias[:, c], self.stats["global_means_path"][:, c])
+                    np.testing.assert_array_equal(scale[:, c], self.stats["global_stds_path"][:, c])
+
+    def test_per_channel_unknown_mode_raises(self):
+        self.params.normalization = {self.params.data_channel_names[0]: "robust"}
+        with self.assertRaisesRegex(ValueError, "Unknown normalization mode robust"):
+            get_data_normalization(self.params)
+
+    def test_time_diff_stds(self):
+        stds = np.full((1, len(self.params.channel_names), 1, 1), 0.5)
+        self.params.time_diff_stds_path = self._save("time_diff_stds.npy", stds)
+        np.testing.assert_array_equal(get_time_diff_stds(self.params), stds)
+
+    def test_time_diff_stds_need_a_path(self):
+        with self.assertRaisesRegex(ValueError, "time_diff_std_path not defined"):
+            get_time_diff_stds(self.params)
+
+    def test_psd_stats_are_sliced_to_the_output_channels(self):
+        C = len(self.params.channel_names)
+        means = np.arange(C * 3, dtype=np.float64).reshape(1, C, 3)
+        self.params.psd_means_path = self._save("psd_means.npy", means)
+        self.params.psd_stds_path = self._save("psd_stds.npy", 2.0 * means)
+        self.params.out_channels = [0, 3]
+
+        psd_means, psd_stds = get_psd_stats(self.params)
+
+        np.testing.assert_array_equal(psd_means, means[..., [0, 3], :])
+        np.testing.assert_array_equal(psd_stds, 2.0 * means[..., [0, 3], :])
+
+    def test_psd_stats_without_out_channels_keep_all(self):
+        C = len(self.params.channel_names)
+        means = np.ones((1, C, 3))
+        self.params.psd_means_path = self._save("psd_means.npy", means)
+        self.params.psd_stds_path = self._save("psd_stds.npy", means)
+        del self.params.out_channels
+
+        psd_means, _ = get_psd_stats(self.params)
+
+        self.assertEqual(psd_means.shape, (1, C, 3))
+
+    def test_psd_stats_need_both_paths(self):
+        self.params.psd_means_path = self._save("psd_means.npy", np.ones(3))
+        with self.assertRaisesRegex(ValueError, "psd_means_path or psd_stds_path not defined"):
+            get_psd_stats(self.params)
+
+    def test_hydrostatic_balance_climatology(self):
+        clim = np.arange(6.0).reshape(1, 6, 1, 1)
+        self.params.hydrostatic_balance_means_path = self._save("hb.npy", clim)
+        np.testing.assert_array_equal(get_hydrostatic_balance_climatology(self.params), clim)
 
 
 # ===========================================================================
