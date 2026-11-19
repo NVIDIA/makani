@@ -19,8 +19,6 @@ are built from, the steppers, the model registry entry points and PhysicsNeMo
 compatibility, and loading parameters that predate the resampled shapes.
 """
 
-import importlib.util
-import json
 import os
 import shutil
 import tempfile
@@ -40,7 +38,6 @@ from makani.driver.model_package import (
     LocalPackage,
     ModelWrapper,
     load_model_package,
-    load_time_loop,
     save_model_package,
 )
 from makani.models.model_input import INPUT_NOISE
@@ -51,9 +48,6 @@ from makani.data.rollout import Rollout
 from .testutils import set_seed, get_default_parameters, compare_tensors, NUM_CHANNELS, IMG_SIZE_H, IMG_SIZE_W
 from makani.utils.params import ParamsBase, ensure_resampled_shapes
 from makani.models import model_registry
-
-# earth2mip is optional; load_time_loop builds one of its TimeLoops
-_have_earth2mip = importlib.util.find_spec("earth2mip") is not None
 
 # ---------------------------------------------------------------------------
 # Model packages: makani.driver.model_package
@@ -543,7 +537,6 @@ class TestLoadModelPackage(_ModelPackageTestBase):
         files = os.listdir(self.pkgdir.name)
         for fname in [
             "config.json",
-            "metadata.json",
             LocalPackage.MEANS_FILE,
             LocalPackage.STDS_FILE,
             LocalPackage.MINS_FILE,
@@ -614,30 +607,6 @@ class TestLoadModelPackage(_ModelPackageTestBase):
             out_loaded = loaded(x, times)
 
         self.assertTrue(compare_tensors("load_model_package_multistep", out_loaded, out_ref, shape_check=True))
-
-    @unittest.skipUnless(_have_earth2mip, "earth2mip is not installed")
-    def test_load_time_loop(self):
-        from earth2mip.networks import Inference
-
-        time_loop = load_time_loop(self.package, device="cpu")
-
-        self.assertIsInstance(time_loop, Inference)
-        self.assertEqual(list(time_loop.channel_names), self.params.data_channel_names)
-        self.assertEqual(time_loop.n_history, self.params.n_history)
-        # the model step is dt data steps of dhours each
-        self.assertEqual(time_loop.time_step, dt.timedelta(hours=self.params.dt * self.params.dhours))
-
-    @unittest.skipUnless(_have_earth2mip, "earth2mip is not installed")
-    def test_load_time_loop_rejects_unequal_channels(self):
-        # the time loop feeds the output back in, so it needs the same channels in and out
-        with open(self.package.get("config.json")) as f:
-            config = json.load(f)
-        config["out_channels"] = config["out_channels"][:-1]
-        with open(self.package.get("config.json"), "w") as f:
-            json.dump(config, f)
-
-        with self.assertRaises(NotImplementedError):
-            load_time_loop(self.package, device="cpu")
 
 
 # ---------------------------------------------------------------------------
@@ -1076,22 +1045,6 @@ class TestResampledShapeFallback(unittest.TestCase):
         out = model.predict(inp, {}).flatten(1, 2)
         self.assertEqual(out.shape, (1, params.N_out_channels, params.img_shape_x, params.img_shape_y))
         self.assertTrue(torch.isfinite(out).all())
-
-
-class TestLegacyEntrypoint(unittest.TestCase):
-    """Model packages written before makani 0.4 record ``makani.models.model_package:load_time_loop``."""
-
-    def test_legacy_entrypoint_resolves(self):
-        import importlib
-        from makani.driver import model_package
-
-        module_name, attribute = "makani.models.model_package:load_time_loop".split(":")
-        self.assertIs(getattr(importlib.import_module(module_name), attribute), model_package.load_time_loop)
-
-    def test_new_packages_record_the_current_module(self):
-        from makani.driver import model_package
-
-        self.assertEqual(model_package.LocalPackage.THIS_MODULE, model_package.__name__)
 
 
 if __name__ == "__main__":

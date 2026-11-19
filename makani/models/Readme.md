@@ -33,7 +33,6 @@ makani
 │   ├── constraints.py              # constraints on the output channels of a network
 │   ├── helpers.py                  # helper functions
 │   ├── model_input.py              # ModelInput, the input of a network, and FlatInputAdapter: input noise and packing for flat networks
-│   ├── model_package.py            # entry point of model packages written before 0.4; the model package is makani.driver.model_package
 │   ├── model_registry.py           # model registry with get_model routine that takes care of wrapping the model
 │   ├── noise                       # noise on the sphere
 │   │   ├── processes.py            # noise processes: white, diffusion and dummy noise
@@ -98,4 +97,4 @@ A model package exposes the same controller as `ModelWrapper.noise`. A rollout o
 
 ### Model packages
 
-Model packages are used for seamless inference outside of this repository. They define a flexible interface which takes care of normalization, dynamic features such as the cosine of the solar zenith angle, static features etc. Model packages seemlessly integrate with [earth2mip](https://github.com/NVIDIA/earth2mip).
+Model packages are used for seamless inference outside of this repository. They define a flexible interface which takes care of normalization, dynamic features such as the cosine of the solar zenith angle, static features etc. Model packages are how [Earth2Studio](https://github.com/NVIDIA/earth2studio) runs makani models.
