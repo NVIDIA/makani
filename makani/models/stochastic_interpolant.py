@@ -43,6 +43,7 @@ from makani.models.stepper import StepWrapper
 from makani.distributed import comm
 from makani.data.rollout import Rollout
 from makani.data.grid_types import DEFAULT_GRID_TYPE
+from makani.utils.grids import sht_grid
 
 # the configuration of the interpolant and its defaults, see interpolant_config
 _DEFAULTS = {
@@ -333,13 +334,12 @@ class StochasticInterpolantWrapper(StepWrapper):
         # transforms the coefficients drawn from the keys to white noise on the grid of the model; its own
         # generators are not used
         self.path_field = IsotropicGaussianRandomFieldS2(
-            tuple(self.preprocessor.img_shape_resampled),
+            sht_grid(tuple(self.preprocessor.img_shape_resampled), params.get("model_grid_type", DEFAULT_GRID_TYPE)),
             params.batch_size,
             params.N_out_channels,
             num_time_steps=1,
             sigma=1.0,
             alpha=0.0,
-            grid_type=params.get("model_grid_type", DEFAULT_GRID_TYPE),
         )
         # the shard of the spectral coefficients this rank draws, as the model is laid out when it is built
         self._spatial_rank = comm.get_rank("spatial")

@@ -231,7 +231,7 @@ class TestMetrics(unittest.TestCase):
 
         # rmse handle
         rmse_func = GeometricRMSE(
-            grid_type, img_shape=(nlat, nlon), normalize=True, channel_reduction="none", batch_reduction="none"
+            grid=make_grid((nlat, nlon), grid_type), normalize=True, channel_reduction="none", batch_reduction="none"
         ).to(self.device)
 
         # generate toy data
@@ -252,7 +252,7 @@ class TestMetrics(unittest.TestCase):
 
         # l1 handle
         l1_func = GeometricL1(
-            grid_type, img_shape=(nlat, nlon), normalize=True, channel_reduction="mean", batch_reduction="mean"
+            grid=make_grid((nlat, nlon), grid_type), normalize=True, channel_reduction="mean", batch_reduction="mean"
         ).to(self.device)
 
         # generate toy data
@@ -273,8 +273,7 @@ class TestMetrics(unittest.TestCase):
 
         # ACC handle
         acc_func = GeometricACC(
-            grid_type,
-            img_shape=(nlat, nlon),
+            grid=make_grid((nlat, nlon), grid_type),
             normalize=True,
             channel_reduction="none",
             batch_reduction="mean",
@@ -307,8 +306,7 @@ class TestMetrics(unittest.TestCase):
 
         # ACC handle
         acc_func = GeometricACC(
-            grid_type,
-            img_shape=(nlat, nlon),
+            grid=make_grid((nlat, nlon), grid_type),
             normalize=True,
             channel_reduction="none",
             batch_reduction="mean",
@@ -344,8 +342,7 @@ class TestMetrics(unittest.TestCase):
 
         # CRPS handle
         crps_func = GeometricCRPS(
-            grid_type=grid_type,
-            img_shape=(nlat, nlon),
+            grid=make_grid((nlat, nlon), grid_type),
             crop_shape=(nlat, nlon),
             crop_offset=(0, 0),
             crps_type="cdf",
@@ -370,8 +367,7 @@ class TestMetrics(unittest.TestCase):
 
     def _skillspread_crps(self, nlat, nlon):
         return GeometricCRPS(
-            grid_type="equiangular",
-            img_shape=(nlat, nlon),
+            grid=make_grid((nlat, nlon), "equiangular"),
             crop_shape=(nlat, nlon),
             crop_offset=(0, 0),
             crps_type="skillspread",
@@ -441,7 +437,7 @@ class TestMetrics(unittest.TestCase):
                     self.assertFalse(crps_func.uses_pairs(bound + 1))
 
         cdf_func = GeometricCRPS(
-            grid_type="equiangular", img_shape=(17, 32), crop_shape=(17, 32), crop_offset=(0, 0), crps_type="cdf"
+            grid=make_grid((17, 32), "equiangular"), crop_shape=(17, 32), crop_offset=(0, 0), crps_type="cdf"
         )
         self.assertFalse(cdf_func.uses_pairs(4))
 
@@ -556,8 +552,7 @@ class TestMetrics(unittest.TestCase):
     ):
         # Rank histogram Handle
         rankhist_handle = GeometricRankHistogram(
-            grid_type=grid_type,
-            img_shape=(nlat, nlon),
+            grid=make_grid((nlat, nlon), grid_type),
             crop_shape=(nlat, nlon),
             crop_offset=(0, 0),
             normalize=True,
@@ -622,8 +617,7 @@ class TestMetrics(unittest.TestCase):
 
     def _rank_histogram_handle(self, nlat, nlon, batch_reduction):
         return GeometricRankHistogram(
-            grid_type="equiangular",
-            img_shape=(nlat, nlon),
+            grid=make_grid((nlat, nlon), "equiangular"),
             crop_shape=(nlat, nlon),
             crop_offset=(0, 0),
             normalize=True,
@@ -754,8 +748,7 @@ class TestMetrics(unittest.TestCase):
 
         metric_handle = {"acc": GeometricACC, "ssr": GeometricSSR, "spread": GeometricSpread}[metric_name]
         metric_func = metric_handle(
-            "equiangular",
-            img_shape=(nlat, nlon),
+            grid=make_grid((nlat, nlon), "equiangular"),
             crop_shape=(nlat, nlon),
             crop_offset=(0, 0),
             normalize=True,
@@ -817,7 +810,7 @@ class TestMetricsAggregation(unittest.TestCase):
 
         # metric handle
         metric_func = metric_handle(
-            grid_type, img_shape=(nlat, nlon), normalize=True, channel_reduction=cred, batch_reduction=bred
+            grid=make_grid((nlat, nlon), grid_type), normalize=True, channel_reduction=cred, batch_reduction=bred
         ).to(self.device)
 
         # input and target:
@@ -872,7 +865,7 @@ class TestMetricsAggregation(unittest.TestCase):
 
         # metric handle
         metric_func = metric_handle(
-            grid_type, img_shape=(nlat, nlon), normalize=True, channel_reduction=cred, batch_reduction=bred
+            grid=make_grid((nlat, nlon), grid_type), normalize=True, channel_reduction=cred, batch_reduction=bred
         ).to(self.device)
 
         # input and target
@@ -930,7 +923,7 @@ class TestMetricsAggregation(unittest.TestCase):
 
         # instantiate metric
         metric_func = metric_handle(
-            grid_type, img_shape=(nlat, nlon), normalize=True, channel_reduction=cred, batch_reduction=bred
+            grid=make_grid((nlat, nlon), grid_type), normalize=True, channel_reduction=cred, batch_reduction=bred
         ).to(self.device)
 
         # prediction and target with random values
@@ -1025,8 +1018,7 @@ class TestMetricsAggregation(unittest.TestCase):
 
         # metric handle
         metric_func = metric_handle(
-            grid_type=grid_type,
-            img_shape=(nlat, nlon),
+            grid=make_grid((nlat, nlon), grid_type),
             crop_shape=(nlat, nlon),
             crop_offset=(0, 0),
             crps_type="skillspread",
@@ -1087,8 +1079,7 @@ class TestMetricsAggregation(unittest.TestCase):
         batch_size_nsteps = num_rollout_steps * batch_size
 
         metric_func = metric_handle(
-            grid_type=grid_type,
-            img_shape=(nlat, nlon),
+            grid=make_grid((nlat, nlon), grid_type),
             crop_shape=(nlat, nlon),
             crop_offset=(0, 0),
             crps_type="skillspread",
@@ -1147,8 +1138,7 @@ class TestMetricsAggregation(unittest.TestCase):
 
         # metric handle
         metric_func = metric_handle(
-            grid_type=grid_type,
-            img_shape=(nlat, nlon),
+            grid=make_grid((nlat, nlon), grid_type),
             crop_shape=(nlat, nlon),
             crop_offset=(0, 0),
             crps_type="skillspread",
@@ -1985,11 +1975,10 @@ class ComparetMetricsWB2(unittest.TestCase):
 
         # CRPS handle
         crps_func = GeometricCRPS(
-            img_shape=(nlat, nlon),
+            grid=make_grid((nlat, nlon), grid_type),
             crop_shape=(nlat, nlon),
             crop_offset=(0, 0),
             channel_names=[],
-            grid_type=grid_type,
             crps_type="skillspread",
             channel_reduction="none",
             batch_reduction="none",
@@ -2030,11 +2019,10 @@ class ComparetMetricsWB2(unittest.TestCase):
 
         # CRPS handle
         ssr_func = GeometricSSR(
-            img_shape=(nlat, nlon),
+            grid=make_grid((nlat, nlon), grid_type),
             crop_shape=(nlat, nlon),
             crop_offset=(0, 0),
             channel_names=[],
-            grid_type=grid_type,
             channel_reduction="none",
             batch_reduction="none",
         ).to(self.device)

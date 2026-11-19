@@ -25,6 +25,7 @@ import torch
 from parameterized import parameterized
 
 import makani.models.constants as const
+from makani.utils.grids import make_grid
 from makani.losses.hydrostatic_loss import HydrostaticBalanceLoss
 from makani.models.parametrizations import ConstraintsWrapper
 from makani.models.constraints import NonNegativeConstraint, HydrostaticBalanceProjection, get_matching_channels_pl
@@ -65,11 +66,10 @@ class TestConstraints(unittest.TestCase):
     def test_hydrostatic_balance_loss(self, _name, use_moist_air_formula):
         # loss
         hbloss = HydrostaticBalanceLoss(
-            img_shape=self.img_shape,
+            grid=make_grid(self.img_shape, "equiangular"),
             crop_shape=self.crop_shape,
             crop_offset=self.crop_offset,
             channel_names=self.channel_names,
-            grid_type="equiangular",
             bias=self.bias,
             scale=self.scale,
             p_min=50,
@@ -87,11 +87,10 @@ class TestConstraints(unittest.TestCase):
     def test_hydrostatic_balance_constraint_wrapper_era5(self, _name, use_moist_air_formula):
         # loss
         hbloss = HydrostaticBalanceLoss(
-            img_shape=self.img_shape,
+            grid=make_grid(self.img_shape, "equiangular"),
             crop_shape=self.crop_shape,
             crop_offset=self.crop_offset,
             channel_names=self.channel_names,
-            grid_type="equiangular",
             bias=self.bias,
             scale=self.scale,
             p_min=50,
@@ -152,11 +151,10 @@ class TestConstraints(unittest.TestCase):
     def test_hydrostatic_balance_constraint_wrapper_random(self, _name, use_moist_air_formula):
         # loss
         hbloss = HydrostaticBalanceLoss(
-            img_shape=self.img_shape,
+            grid=make_grid(self.img_shape, "equiangular"),
             crop_shape=self.crop_shape,
             crop_offset=self.crop_offset,
             channel_names=self.channel_names,
-            grid_type="equiangular",
             bias=self.bias,
             scale=self.scale,
             p_min=50,
@@ -320,11 +318,10 @@ class TestConstraints(unittest.TestCase):
         ident_scale = torch.ones(1, C, 1, 1, dtype=torch.float32)
 
         hbloss = HydrostaticBalanceLoss(
-            img_shape=img_shape,
+            grid=make_grid(img_shape, "equiangular"),
             crop_shape=crop_shape,
             crop_offset=crop_offset,
             channel_names=self.channel_names,
-            grid_type="equiangular",
             bias=ident_bias,
             scale=ident_scale,
             p_min=50,
@@ -439,11 +436,10 @@ class TestConstraints(unittest.TestCase):
 
         with self.subTest("hydrostatic balance loss"):
             hbloss = HydrostaticBalanceLoss(
-                img_shape=self.img_shape,
+                grid=make_grid(self.img_shape, "equiangular"),
                 crop_shape=self.crop_shape,
                 crop_offset=self.crop_offset,
                 channel_names=self.channel_names,
-                grid_type="equiangular",
                 bias=self.bias,
                 scale=self.scale,
                 **hb_options,

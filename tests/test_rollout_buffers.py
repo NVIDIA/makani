@@ -33,7 +33,7 @@ from makani.inference.rollout_buffer import (
     ZonalSpectrumAverageBuffer,
 )
 from makani.data.data_helpers import get_lat_lon_grid
-from makani.utils.grids import sht_grid
+from makani.utils.grids import make_grid, sht_grid
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from .testutils import (
@@ -670,9 +670,8 @@ class TestSpectrumAverageBufferUnit(unittest.TestCase):
         return SpectrumAverageBuffer(
             num_rollout_steps=num_rollout_steps,
             rollout_dt=6,
-            img_shape=(self.nlat, self.nlon),
+            grid=make_grid((self.nlat, self.nlon), self.grid),
             ensemble_size=ensemble_size,
-            grid_type=self.grid,
             channel_names=channel_names,
             device="cpu",
             scale=scale,
@@ -861,9 +860,8 @@ class TestZonalSpectrumAverageBufferUnit(unittest.TestCase):
         return ZonalSpectrumAverageBuffer(
             num_rollout_steps=num_rollout_steps,
             rollout_dt=6,
-            img_shape=(nlat, nlon),
+            grid=make_grid((nlat, nlon), "equiangular"),
             ensemble_size=ensemble_size,
-            grid_type="equiangular",
             channel_names=channel_names,
             lat_lon=self._lat_lon(nlat, nlon),
             device="cpu",

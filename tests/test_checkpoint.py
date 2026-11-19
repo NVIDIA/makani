@@ -51,6 +51,7 @@ from makani.driver.checkpoint import (
     setup_training_run,
 )
 from makani.models.common import MLP
+from makani.utils.grids import make_grid
 from makani.driver.base import Driver
 from .testutils import disable_tf32, set_seed, get_default_parameters, compare_arrays
 
@@ -756,7 +757,7 @@ class TestCheckpointFormat(unittest.TestCase):
         from makani.models.noise import IsotropicGaussianRandomFieldS2
         from makani.models.noise.controller import NoiseController
 
-        noise = NoiseController({"white": IsotropicGaussianRandomFieldS2((8, 16), 1, 1)})
+        noise = NoiseController({"white": IsotropicGaussianRandomFieldS2(make_grid((8, 16), "equiangular"), 1, 1)})
         noise.advance(replace_state=True)
         before = noise.get_rng_state()["white"][0]
         Driver._restore_noise_rng_state({"model_state": {}}, noise)
@@ -794,7 +795,9 @@ class TestRunStateRoundTrip(unittest.TestCase):
         loss = _StatefulLoss()
         optimizer = torch.optim.AdamW(model.parameters(), lr=1e-2)
         scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.5)
-        noise = NoiseController({"white": IsotropicGaussianRandomFieldS2((8, 16), 1, 1, seed=seed)})
+        noise = NoiseController(
+            {"white": IsotropicGaussianRandomFieldS2(make_grid((8, 16), "equiangular"), 1, 1, seed=seed)}
+        )
         return model, loss, optimizer, scheduler, noise
 
     def _train_a_little(self, model, optimizer, scheduler):

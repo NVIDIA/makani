@@ -25,6 +25,7 @@ import torch
 from parameterized import parameterized
 import torch.nn as nn
 
+from makani.utils.grids import make_grid
 from makani.models.noise import DiffusionNoiseS2, IsotropicGaussianRandomFieldS2
 from makani.models.noise.controller import NoiseController, NoiseSnapshot, run_eager
 from makani.models.parametrizations import ConstraintsWrapper
@@ -51,12 +52,19 @@ _B, _C, _T = 2, 1, 1
 
 def _white(batch_size=_B, seed=333, learnable=False):
     return IsotropicGaussianRandomFieldS2(
-        img_shape=(_H, _W), batch_size=batch_size, num_channels=_C, num_time_steps=_T, seed=seed, learnable=learnable
+        grid=make_grid((_H, _W), "equiangular"),
+        batch_size=batch_size,
+        num_channels=_C,
+        num_time_steps=_T,
+        seed=seed,
+        learnable=learnable,
     )
 
 
 def _diffusion(batch_size=_B, seed=333):
-    return DiffusionNoiseS2(img_shape=(_H, _W), batch_size=batch_size, num_channels=_C, num_time_steps=_T, seed=seed)
+    return DiffusionNoiseS2(
+        grid=make_grid((_H, _W), "equiangular"), batch_size=batch_size, num_channels=_C, num_time_steps=_T, seed=seed
+    )
 
 
 def _samples(controller):
@@ -167,7 +175,7 @@ class TestNoiseController(unittest.TestCase):
             {
                 "white": _white(seed=7),
                 "diffusion": DiffusionNoiseS2(
-                    img_shape=(_H, _W), batch_size=_B, num_channels=_C + 1, num_time_steps=_T
+                    grid=make_grid((_H, _W), "equiangular"), batch_size=_B, num_channels=_C + 1, num_time_steps=_T
                 ),
             }
         )
@@ -273,7 +281,11 @@ class TestSeedingOverRanks(unittest.TestCase):
         samples = []
         for ensemble in (0, 1):
             process = IsotropicGaussianRandomFieldS2(
-                img_shape=(_H, _W), batch_size=_B, num_channels=_C, reflect=(ensemble == 0), centered=True
+                grid=make_grid((_H, _W), "equiangular"),
+                batch_size=_B,
+                num_channels=_C,
+                reflect=(ensemble == 0),
+                centered=True,
             )
             samples.append(self._sample_after_set_rng(process, ensemble=ensemble))
         self.assertTrue(torch.equal(samples[0], -samples[1]))
@@ -371,7 +383,12 @@ class _LatentNoiseNet(nn.Module):
         self.net = _TinyNet(in_chans, out_chans, hidden=hidden)
         # isotropic: the parameters enter in the draw; diffusion: they enter the state, in the update
         self.latent_noise = process(
-            img_shape=(_H, _W), batch_size=_B, num_channels=hidden, num_time_steps=1, seed=4242, learnable=True
+            grid=make_grid((_H, _W), "equiangular"),
+            batch_size=_B,
+            num_channels=hidden,
+            num_time_steps=1,
+            seed=4242,
+            learnable=True,
         )
 
     def noise_processes(self):

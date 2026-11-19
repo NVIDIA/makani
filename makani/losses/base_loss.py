@@ -24,7 +24,7 @@ import torch.nn as nn
 import torch_harmonics as th
 import torch_harmonics.distributed as thd
 
-from makani.utils.grids import GridQuadrature, make_grid, spherical_bandlimit, sht_grid
+from makani.utils.grids import GridQuadrature, spherical_bandlimit
 from makani.distributed import comm
 from makani.data.features import get_wind_channels
 from makani.distributed.mappings import reduce_from_parallel_region
@@ -315,23 +315,23 @@ class GeometricBaseLoss(nn.Module, metaclass=ABCMeta):
 
     def __init__(
         self,
-        img_shape: Tuple[int, int],
+        grid,
         crop_shape: Tuple[int, int],
         crop_offset: Tuple[int, int],
         channel_names: List[str],
-        grid_type: str,
         spatial_distributed: Optional[bool] = False,
     ):
         super().__init__()
 
-        self.img_shape = img_shape
+        self.grid = grid
+        self.img_shape = tuple(grid.shape)
         self.crop_shape = crop_shape
         self.crop_offset = crop_offset
         self.channel_names = channel_names
         self.spatial_distributed = comm.is_distributed("spatial") and spatial_distributed
 
         self.quadrature = GridQuadrature(
-            make_grid(self.img_shape, grid_type),
+            grid,
             crop_shape=self.crop_shape,
             crop_offset=self.crop_offset,
             normalize=True,
@@ -366,24 +366,23 @@ class SpectralBaseLoss(nn.Module, metaclass=ABCMeta):
 
     def __init__(
         self,
-        img_shape: Tuple[int, int],
+        grid,
         crop_shape: Tuple[int, int],
         crop_offset: Tuple[int, int],
         channel_names: List[str],
-        grid_type: str,
         lmax: Optional[int] = None,
         spatial_distributed: Optional[bool] = False,
     ):
         super().__init__()
 
-        self.img_shape = img_shape
+        self.grid = grid
+        self.img_shape = tuple(grid.shape)
         self.crop_shape = crop_shape
         self.crop_offset = crop_offset
         self.channel_names = channel_names
         self.spatial_distributed = comm.is_distributed("spatial") and spatial_distributed
 
         # clamp lmax/mmax to the grid's spherical bandlimit
-        grid = sht_grid(img_shape, grid_type)
         bandlimit = spherical_bandlimit(grid)
         if lmax is None or lmax > bandlimit:
             lmax = bandlimit
@@ -471,17 +470,17 @@ class VortDivBaseLoss(nn.Module, metaclass=ABCMeta):
 
     def __init__(
         self,
-        img_shape: Tuple[int, int],
+        grid,
         crop_shape: Tuple[int, int],
         crop_offset: Tuple[int, int],
         channel_names: List[str],
-        grid_type: str,
         lmax: Optional[int] = None,
         spatial_distributed: Optional[bool] = False,
     ):
         super().__init__()
 
-        self.img_shape = img_shape
+        self.grid = grid
+        self.img_shape = tuple(grid.shape)
         self.crop_shape = crop_shape
         self.crop_offset = crop_offset
         self.channel_names = channel_names
@@ -496,14 +495,14 @@ class VortDivBaseLoss(nn.Module, metaclass=ABCMeta):
                 polar_group = None if (comm.get_size("h") == 1) else comm.get_group("h")
                 azimuth_group = None if (comm.get_size("w") == 1) else comm.get_group("w")
                 thd.init(polar_group, azimuth_group)
-            self.vsht = thd.DistributedRealVectorSHT(sht_grid(img_shape, grid_type), lmax=lmax, mmax=lmax)
+            self.vsht = thd.DistributedRealVectorSHT(grid, lmax=lmax, mmax=lmax)
             self.isht = thd.DistributedInverseRealVectorSHT(self.vsht.grid, lmax=lmax, mmax=lmax)
         else:
-            self.vsht = th.RealVectorSHT(sht_grid(img_shape, grid_type), lmax=lmax, mmax=lmax)
+            self.vsht = th.RealVectorSHT(grid, lmax=lmax, mmax=lmax)
             self.isht = th.InverseRealVectorSHT(self.vsht.grid, lmax=lmax, mmax=lmax)
 
         self.quadrature = GridQuadrature(
-            make_grid(self.img_shape, grid_type),
+            grid,
             crop_shape=self.crop_shape,
             crop_offset=self.crop_offset,
             normalize=True,
@@ -553,17 +552,17 @@ class GradientBaseLoss(nn.Module, metaclass=ABCMeta):
 
     def __init__(
         self,
-        img_shape: Tuple[int, int],
+        grid,
         crop_shape: Tuple[int, int],
         crop_offset: Tuple[int, int],
         channel_names: List[str],
-        grid_type: str,
         lmax: Optional[int] = None,
         spatial_distributed: Optional[bool] = False,
     ):
         super().__init__()
 
-        self.img_shape = img_shape
+        self.grid = grid
+        self.img_shape = tuple(grid.shape)
         self.crop_shape = crop_shape
         self.crop_offset = crop_offset
         self.channel_names = channel_names
@@ -574,14 +573,14 @@ class GradientBaseLoss(nn.Module, metaclass=ABCMeta):
                 polar_group = None if (comm.get_size("h") == 1) else comm.get_group("h")
                 azimuth_group = None if (comm.get_size("w") == 1) else comm.get_group("w")
                 thd.init(polar_group, azimuth_group)
-            self.sht = thd.DistributedRealSHT(sht_grid(img_shape, grid_type), lmax=lmax, mmax=lmax)
+            self.sht = thd.DistributedRealSHT(grid, lmax=lmax, mmax=lmax)
             self.ivsht = thd.DistributedInverseRealVectorSHT(self.sht.grid, lmax=lmax, mmax=lmax)
         else:
-            self.sht = th.RealSHT(sht_grid(img_shape, grid_type), lmax=lmax, mmax=lmax)
+            self.sht = th.RealSHT(grid, lmax=lmax, mmax=lmax)
             self.ivsht = th.InverseRealVectorSHT(self.sht.grid, lmax=lmax, mmax=lmax)
 
         self.quadrature = GridQuadrature(
-            make_grid(self.img_shape, grid_type),
+            grid,
             crop_shape=self.crop_shape,
             crop_offset=self.crop_offset,
             normalize=True,

@@ -38,6 +38,7 @@ from makani.data.batch import (
 )
 from makani.data.rollout import Rollout
 from makani.data.grid_types import DEFAULT_GRID_TYPE
+from makani.utils.grids import make_grid, sht_grid
 from makani.data.data_helpers import get_date_from_timestamp, get_data_normalization, get_climatology
 from makani.utils.params import YParams
 
@@ -161,7 +162,7 @@ class Inferencer(Driver):
             )
 
             # we need grid quadrature as well in this case
-            from makani.utils.grids import GridQuadrature, make_grid
+            from makani.utils.grids import GridQuadrature
 
             self.quadrature = GridQuadrature(
                 make_grid(self.mask_dataset.img_shape, params.get("model_grid_type", DEFAULT_GRID_TYPE)),
@@ -463,9 +464,8 @@ class Inferencer(Driver):
             spectrum_buffer = SpectrumAverageBuffer(
                 num_rollout_steps=rollout_steps,
                 rollout_dt=self.params.dt * dhours,
-                img_shape=img_shape,
+                grid=sht_grid(img_shape, self.params.get("model_grid_type", DEFAULT_GRID_TYPE)),
                 ensemble_size=self.params.local_ensemble_size,
-                grid_type=self.params.get("model_grid_type", DEFAULT_GRID_TYPE),
                 channel_names=self.params.channel_names,
                 device=self.device,
                 scale=scale,
@@ -483,9 +483,8 @@ class Inferencer(Driver):
             zonal_spectrum_buffer = ZonalSpectrumAverageBuffer(
                 num_rollout_steps=rollout_steps,
                 rollout_dt=self.params.dt * dhours,
-                img_shape=img_shape,
+                grid=make_grid(img_shape, self.params.get("model_grid_type", DEFAULT_GRID_TYPE)),
                 ensemble_size=self.params.local_ensemble_size,
-                grid_type=self.params.get("model_grid_type", DEFAULT_GRID_TYPE),
                 channel_names=self.params.channel_names,
                 lat_lon=(self.params.lat, self.params.lon),
                 device=self.device,

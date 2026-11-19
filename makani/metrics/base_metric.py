@@ -21,7 +21,7 @@ import torch
 import torch.nn as nn
 
 from makani.losses.base_loss import LossType
-from makani.utils.grids import GridQuadrature, make_grid
+from makani.utils.grids import GridQuadrature
 from makani.distributed import comm
 
 
@@ -72,8 +72,7 @@ class GeometricBaseMetric(nn.Module, metaclass=ABCMeta):
 
     def __init__(
         self,
-        grid_type: str,
-        img_shape: Tuple[int, int],
+        grid,
         crop_shape: Optional[Tuple[int, int]] = None,
         crop_offset: Optional[Tuple[int, int]] = (0, 0),
         normalize: Optional[bool] = True,
@@ -83,7 +82,8 @@ class GeometricBaseMetric(nn.Module, metaclass=ABCMeta):
     ):
         super().__init__()
 
-        self.img_shape = img_shape
+        self.grid = grid
+        self.img_shape = tuple(grid.shape)
         self.crop_shape = crop_shape
         self.crop_offset = crop_offset
         self.spatial_distributed = comm.is_distributed("spatial") and spatial_distributed
@@ -92,7 +92,7 @@ class GeometricBaseMetric(nn.Module, metaclass=ABCMeta):
 
         # get the quadrature
         self.quadrature = GridQuadrature(
-            make_grid(self.img_shape, grid_type),
+            grid,
             crop_shape=self.crop_shape,
             crop_offset=self.crop_offset,
             normalize=normalize,

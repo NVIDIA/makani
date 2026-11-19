@@ -237,11 +237,10 @@ class TestDistributedLoss(unittest.TestCase):
         if loss_type != "nll":
             # local loss
             loss_fn_local = CRPSLoss(
-                img_shape=(H, W),
+                grid=make_grid((H, W), "equiangular"),
                 crop_shape=None,
                 crop_offset=(0, 0),
                 channel_names=(),
-                grid_type="equiangular",
                 crps_type=loss_type,
                 eps=1.0e-5,
                 spatial_distributed=False,
@@ -251,11 +250,10 @@ class TestDistributedLoss(unittest.TestCase):
 
             # distributed loss
             loss_fn_dist = CRPSLoss(
-                img_shape=(H, W),
+                grid=make_grid((H, W), "equiangular"),
                 crop_shape=None,
                 crop_offset=(0, 0),
                 channel_names=(),
-                grid_type="equiangular",
                 crps_type=loss_type,
                 eps=1.0e-5,
                 spatial_distributed=(comm.is_distributed("spatial") and (comm.get_size("spatial") > 1)),
@@ -265,11 +263,10 @@ class TestDistributedLoss(unittest.TestCase):
         else:
             # local loss
             loss_fn_local = EnsembleNLLLoss(
-                img_shape=(H, W),
+                grid=make_grid((H, W), "equiangular"),
                 crop_shape=None,
                 crop_offset=(0, 0),
                 channel_names=(),
-                grid_type="equiangular",
                 spatial_distributed=False,
                 ensemble_distributed=False,
                 eps=1.0e-5,
@@ -277,11 +274,10 @@ class TestDistributedLoss(unittest.TestCase):
 
             # distributed loss
             loss_fn_dist = EnsembleNLLLoss(
-                img_shape=(H, W),
+                grid=make_grid((H, W), "equiangular"),
                 crop_shape=None,
                 crop_offset=(0, 0),
                 channel_names=(),
-                grid_type="equiangular",
                 spatial_distributed=(comm.is_distributed("spatial") and (comm.get_size("spatial") > 1)),
                 ensemble_distributed=(comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1)),
                 eps=1.0e-5,
@@ -393,11 +389,10 @@ class TestDistributedLoss(unittest.TestCase):
 
         loss_cls = {"CRPSLoss": CRPSLoss, "GradientCRPSLoss": GradientCRPSLoss}[loss_name]
         loss_args = {
-            "img_shape": (H, W),
+            "grid": make_grid((H, W), "equiangular"),
             "crop_shape": None,
             "crop_offset": (0, 0),
             "channel_names": (),
-            "grid_type": "equiangular",
             "crps_type": loss_type,
             "eps": 1.0e-5,
             "ensemble_weights": None,
@@ -493,11 +488,10 @@ class TestDistributedLoss(unittest.TestCase):
 
         # local loss
         loss_fn_local = SpectralCRPSLoss(
-            img_shape=(H, W),
+            grid=make_grid((H, W), "equiangular"),
             crop_shape=None,
             crop_offset=(0, 0),
             channel_names=(),
-            grid_type="equiangular",
             crps_type=loss_type,
             spatial_distributed=False,
             ensemble_distributed=False,
@@ -508,11 +502,10 @@ class TestDistributedLoss(unittest.TestCase):
 
         # distributed loss
         loss_fn_dist = SpectralCRPSLoss(
-            img_shape=(H, W),
+            grid=make_grid((H, W), "equiangular"),
             crop_shape=None,
             crop_offset=(0, 0),
             channel_names=(),
-            grid_type="equiangular",
             crps_type=loss_type,
             spatial_distributed=(comm.is_distributed("spatial") and (comm.get_size("spatial") > 1)),
             ensemble_distributed=(comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1)),
@@ -623,11 +616,10 @@ class TestDistributedLoss(unittest.TestCase):
 
         # local loss
         loss_fn_local = LpEnergyScoreLoss(
-            img_shape=(H, W),
+            grid=make_grid((H, W), "equiangular"),
             crop_shape=(H, W),
             crop_offset=(0, 0),
             channel_names=tuple(),
-            grid_type="equiangular",
             alpha=1.0,
             beta=beta,
             p=p,
@@ -640,11 +632,10 @@ class TestDistributedLoss(unittest.TestCase):
 
         # distributed loss
         loss_fn_dist = LpEnergyScoreLoss(
-            img_shape=(H, W),
+            grid=make_grid((H, W), "equiangular"),
             crop_shape=None,
             crop_offset=(0, 0),
             channel_names=(),
-            grid_type="equiangular",
             alpha=1.0,
             beta=beta,
             p=p,
@@ -745,11 +736,10 @@ class TestDistributedLoss(unittest.TestCase):
 
         def make_loss(distributed):
             return GaussianMMDLoss(
-                img_shape=(H, W),
+                grid=make_grid((H, W), "equiangular"),
                 crop_shape=(H, W),
                 crop_offset=(0, 0),
                 channel_names=tuple(f"c{c}" for c in range(C)),
-                grid_type="equiangular",
                 sigma=1.0,
                 alpha=1.0,
                 beta=2.0,
@@ -829,9 +819,7 @@ class TestDistributedLoss(unittest.TestCase):
         prd_full = torch.randn((B, C, H, W), dtype=torch.float32, device=self.device)
         tar_full = torch.randn((B, C, H, W), dtype=torch.float32, device=self.device)
 
-        loss_args = dict(
-            img_shape=(H, W), crop_shape=None, crop_offset=(0, 0), channel_names=(), grid_type="equiangular"
-        )
+        loss_args = dict(grid=make_grid((H, W), "equiangular"), crop_shape=None, crop_offset=(0, 0), channel_names=())
         loss_args.update(loss_kwargs)
 
         # local loss
@@ -924,11 +912,10 @@ class TestDistributedLoss(unittest.TestCase):
 
         # local loss
         loss_fn_local = SpectralL2EnergyScoreLoss(
-            img_shape=(H, W),
+            grid=make_grid((H, W), "equiangular"),
             crop_shape=None,
             crop_offset=(0, 0),
             channel_names=(),
-            grid_type="equiangular",
             alpha=1.0,
             eps=1.0e-3,
             spatial_distributed=False,
@@ -938,11 +925,10 @@ class TestDistributedLoss(unittest.TestCase):
 
         # distributed loss
         loss_fn_dist = SpectralL2EnergyScoreLoss(
-            img_shape=(H, W),
+            grid=make_grid((H, W), "equiangular"),
             crop_shape=None,
             crop_offset=(0, 0),
             channel_names=(),
-            grid_type="equiangular",
             alpha=1.0,
             eps=1.0e-3,
             spatial_distributed=(comm.is_distributed("spatial") and (comm.get_size("spatial") > 1)),
@@ -1034,11 +1020,10 @@ class TestDistributedLoss(unittest.TestCase):
 
         # local loss
         loss_fn_local = SobolevEnergyScoreLoss(
-            img_shape=(H, W),
+            grid=make_grid((H, W), "equiangular"),
             crop_shape=None,
             crop_offset=(0, 0),
             channel_names=(),
-            grid_type="equiangular",
             spatial_distributed=False,
             ensemble_distributed=False,
             ensemble_weights=None,
@@ -1051,11 +1036,10 @@ class TestDistributedLoss(unittest.TestCase):
 
         # distributed loss
         loss_fn_dist = SobolevEnergyScoreLoss(
-            img_shape=(H, W),
+            grid=make_grid((H, W), "equiangular"),
             crop_shape=None,
             crop_offset=(0, 0),
             channel_names=(),
-            grid_type="equiangular",
             spatial_distributed=(comm.is_distributed("spatial") and (comm.get_size("spatial") > 1)),
             ensemble_distributed=(comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1)),
             ensemble_weights=None,
@@ -1162,11 +1146,10 @@ class TestDistributedLoss(unittest.TestCase):
 
         # local loss
         loss_fn_local = CoherenceRegularization(
-            img_shape=(H, W),
+            grid=make_grid((H, W), "equiangular"),
             crop_shape=None,
             crop_offset=(0, 0),
             channel_names=(),
-            grid_type="equiangular",
             lmin=lmin,
             ensemble_coherence_weight=ens_coh_weight,
             eps=1.0e-3,
@@ -1177,11 +1160,10 @@ class TestDistributedLoss(unittest.TestCase):
 
         # distributed loss
         loss_fn_dist = CoherenceRegularization(
-            img_shape=(H, W),
+            grid=make_grid((H, W), "equiangular"),
             crop_shape=None,
             crop_offset=(0, 0),
             channel_names=(),
-            grid_type="equiangular",
             lmin=lmin,
             ensemble_coherence_weight=ens_coh_weight,
             eps=1.0e-3,
@@ -1287,11 +1269,10 @@ class TestDistributedLoss(unittest.TestCase):
 
         # local loss
         loss_fn_local = SpectralCoherenceLoss(
-            img_shape=(H, W),
+            grid=make_grid((H, W), "equiangular"),
             crop_shape=None,
             crop_offset=(0, 0),
             channel_names=(),
-            grid_type="equiangular",
             relative=relative,
             channel_reduction=False,
             eps=1.0e-3,
@@ -1302,11 +1283,10 @@ class TestDistributedLoss(unittest.TestCase):
 
         # distributed loss
         loss_fn_dist = SpectralCoherenceLoss(
-            img_shape=(H, W),
+            grid=make_grid((H, W), "equiangular"),
             crop_shape=None,
             crop_offset=(0, 0),
             channel_names=(),
-            grid_type="equiangular",
             relative=relative,
             channel_reduction=False,
             eps=1.0e-3,

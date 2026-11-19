@@ -22,15 +22,14 @@ from makani.distributed.mappings import scatter_to_parallel_region, reduce_from_
 from torch_harmonics.distributed import split_tensor_along_dim
 
 from makani.losses import CRPSLoss, LossType
-from makani.utils.grids import GridQuadrature, make_grid
+from makani.utils.grids import GridQuadrature
 from makani.metrics.base_metric import _sanitize_shapes, _welford_reduction_helper, GeometricBaseMetric
 
 
 class GeometricL1(GeometricBaseMetric):
     def __init__(
         self,
-        grid_type: str,
-        img_shape: Tuple[int, int],
+        grid,
         crop_shape: Optional[Tuple[int, int]] = None,
         crop_offset: Optional[Tuple[int, int]] = (0, 0),
         normalize: Optional[bool] = False,
@@ -40,8 +39,7 @@ class GeometricL1(GeometricBaseMetric):
         **kwargs,
     ):
         super().__init__(
-            grid_type=grid_type,
-            img_shape=img_shape,
+            grid=grid,
             crop_shape=crop_shape,
             crop_offset=crop_offset,
             normalize=normalize,
@@ -74,8 +72,7 @@ class GeometricL1(GeometricBaseMetric):
 class GeometricRMSE(GeometricBaseMetric):
     def __init__(
         self,
-        grid_type: str,
-        img_shape: Tuple[int, int],
+        grid,
         crop_shape: Optional[Tuple[int, int]] = None,
         crop_offset: Optional[Tuple[int, int]] = (0, 0),
         normalize: Optional[bool] = False,
@@ -85,8 +82,7 @@ class GeometricRMSE(GeometricBaseMetric):
         **kwargs,
     ):
         super().__init__(
-            grid_type=grid_type,
-            img_shape=img_shape,
+            grid=grid,
             crop_shape=crop_shape,
             crop_offset=crop_offset,
             normalize=normalize,
@@ -135,8 +131,7 @@ class GeometricRMSE(GeometricBaseMetric):
 class GeometricACC(GeometricBaseMetric):
     def __init__(
         self,
-        grid_type: str,
-        img_shape: Tuple[int, int],
+        grid,
         crop_shape: Optional[Tuple[int, int]] = None,
         crop_offset: Optional[Tuple[int, int]] = (0, 0),
         normalize: Optional[bool] = False,
@@ -149,8 +144,7 @@ class GeometricACC(GeometricBaseMetric):
         **kwargs,
     ):
         super().__init__(
-            grid_type=grid_type,
-            img_shape=img_shape,
+            grid=grid,
             crop_shape=crop_shape,
             crop_offset=crop_offset,
             normalize=normalize,
@@ -224,8 +218,7 @@ class GeometricACC(GeometricBaseMetric):
 class GeometricSpread(GeometricBaseMetric):
     def __init__(
         self,
-        grid_type: str,
-        img_shape: Tuple[int, int],
+        grid,
         crop_shape: Optional[Tuple[int, int]] = None,
         crop_offset: Optional[Tuple[int, int]] = (0, 0),
         normalize: Optional[bool] = False,
@@ -236,8 +229,7 @@ class GeometricSpread(GeometricBaseMetric):
     ):
 
         super().__init__(
-            grid_type=grid_type,
-            img_shape=img_shape,
+            grid=grid,
             crop_shape=crop_shape,
             crop_offset=crop_offset,
             normalize=normalize,
@@ -330,8 +322,7 @@ class GeometricSpread(GeometricBaseMetric):
 class GeometricSSR(GeometricBaseMetric):
     def __init__(
         self,
-        grid_type: str,
-        img_shape: Tuple[int, int],
+        grid,
         crop_shape: Optional[Tuple[int, int]] = None,
         crop_offset: Optional[Tuple[int, int]] = (0, 0),
         normalize: Optional[bool] = False,
@@ -343,8 +334,7 @@ class GeometricSSR(GeometricBaseMetric):
         **kwargs,
     ):
         super().__init__(
-            grid_type=grid_type,
-            img_shape=img_shape,
+            grid=grid,
             crop_shape=crop_shape,
             crop_offset=crop_offset,
             normalize=normalize,
@@ -453,8 +443,7 @@ class GeometricCRPS(torch.nn.Module):
 
     def __init__(
         self,
-        grid_type: str,
-        img_shape: Tuple[int, int],
+        grid,
         crop_shape: Tuple[int, int],
         crop_offset: Tuple[int, int],
         crps_type: Optional[str] = "skillspread",
@@ -468,11 +457,10 @@ class GeometricCRPS(torch.nn.Module):
         super().__init__()
 
         self.metric_func = CRPSLoss(
-            img_shape=img_shape,
+            grid=grid,
             crop_shape=crop_shape,
             crop_offset=crop_offset,
             channel_names=[],
-            grid_type=grid_type,
             crps_type=crps_type,
             spatial_distributed=spatial_distributed,
             ensemble_distributed=ensemble_distributed,
@@ -488,7 +476,7 @@ class GeometricCRPS(torch.nn.Module):
         self.pairwise = (crps_type == "skillspread") and (ensemble_weights is None)
 
         self.quadrature = GridQuadrature(
-            make_grid(img_shape, grid_type),
+            grid,
             crop_shape=crop_shape,
             crop_offset=crop_offset,
             normalize=True,
@@ -635,8 +623,7 @@ class GeometricCRPS(torch.nn.Module):
 class GeometricRankHistogram(GeometricBaseMetric):
     def __init__(
         self,
-        grid_type: str,
-        img_shape: Tuple[int, int],
+        grid,
         crop_shape: Tuple[int, int],
         crop_offset: Tuple[int, int],
         normalize: Optional[bool] = False,
@@ -647,8 +634,7 @@ class GeometricRankHistogram(GeometricBaseMetric):
         **kwargs,
     ):
         super().__init__(
-            grid_type=grid_type,
-            img_shape=img_shape,
+            grid=grid,
             crop_shape=crop_shape,
             crop_offset=crop_offset,
             normalize=normalize,

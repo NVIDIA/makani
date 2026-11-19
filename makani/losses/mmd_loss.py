@@ -36,11 +36,10 @@ class GaussianMMDLoss(GeometricBaseLoss):
 
     def __init__(
         self,
-        img_shape: Tuple[int, int],
+        grid,
         crop_shape: Tuple[int, int],
         crop_offset: Tuple[int, int],
         channel_names: List[str],
-        grid_type: str,
         spatial_distributed: Optional[bool] = False,
         ensemble_distributed: Optional[bool] = False,
         ensemble_weights: Optional[torch.Tensor] = None,
@@ -52,11 +51,10 @@ class GaussianMMDLoss(GeometricBaseLoss):
     ):
 
         super().__init__(
-            img_shape=img_shape,
+            grid=grid,
             crop_shape=crop_shape,
             crop_offset=crop_offset,
             channel_names=channel_names,
-            grid_type=grid_type,
             spatial_distributed=spatial_distributed,
         )
 

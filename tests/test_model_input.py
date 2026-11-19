@@ -27,6 +27,7 @@ import torch.nn as nn
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
+from makani.utils.grids import make_grid
 from makani.models.model_input import INPUT_NOISE, FlatInputAdapter, InputNoise, ModelInput
 from makani.models.noise.controller import NoiseController
 from makani.models.preprocessor import HistoryStats, Preprocessor2D
@@ -62,7 +63,7 @@ def _constant_noise(adapter, params, channels):
     from makani.models.noise import DummyNoiseS2
 
     adapter.input_noise.process = DummyNoiseS2(
-        img_shape=[params.img_shape_x, params.img_shape_y],
+        grid=make_grid([params.img_shape_x, params.img_shape_y], "equiangular"),
         batch_size=params.batch_size,
         num_channels=channels,
         num_time_steps=params.n_history + 1,
@@ -296,7 +297,12 @@ class TestInputNoise(_Inputs, unittest.TestCase):
         layer = InputNoise.from_params(_params(input_noise={"type": "white", "mode": "concatenate", "n_channels": 1}))
         seed, reflect = noise_base_seed()
         reference = IsotropicGaussianRandomFieldS2(
-            img_shape=(self.H, self.W), batch_size=1, num_channels=1, num_time_steps=1, seed=seed, reflect=reflect
+            grid=make_grid((self.H, self.W), "equiangular"),
+            batch_size=1,
+            num_channels=1,
+            num_time_steps=1,
+            seed=seed,
+            reflect=reflect,
         )
         samples = []
         for process in (layer.process, reference):
