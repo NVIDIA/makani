@@ -41,7 +41,7 @@ from makani.data.ncar_helpers import (
     resolve_accumulation_segments,
     to_ncar_hours,
 )
-from data_process.sources import InvariantSource, Sample, Source, Unit
+from makani.datasets.sources import InvariantSource, Sample, Source, Unit
 
 
 class NcarStore(object):
@@ -371,7 +371,7 @@ class NcarSource(Source):
     Parameters
     ----------
     metadata : Dict
-        Dataset metadata, see :class:`data_process.sources.Source`.
+        Dataset metadata, see :class:`makani.datasets.sources.Source`.
     comm_rank : int
         MPI rank, used to restrict informational output to rank 0.
     bucket : str
@@ -522,7 +522,7 @@ class NcarInvariantSource(InvariantSource):
     Parameters
     ----------
     metadata : Dict
-        Invariant metadata, see :class:`data_process.sources.InvariantSource`.
+        Invariant metadata, see :class:`makani.datasets.sources.InvariantSource`.
     bucket : str
         Name of the S3 bucket holding the NCAR ERA5 data.
     skip_missing_channels : bool

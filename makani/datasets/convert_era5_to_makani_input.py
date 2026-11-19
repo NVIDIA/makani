@@ -16,7 +16,6 @@
 from typing import Callable, Dict, Optional
 from itertools import islice
 import os
-import sys
 import json
 import time
 import functools
@@ -25,10 +24,9 @@ import h5py as h5
 import datetime as dt
 import argparse as ap
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from makani.data.ncar_helpers import NCAR_ERA5_BUCKET
-from data_process.date_range import add_date_range_arguments, date_range_from_args, yearly_sample_times
-from data_process.sources import Source
+from makani.datasets.date_range import add_date_range_arguments, date_range_from_args, yearly_sample_times
+from makani.datasets.sources import Source
 
 
 def _batched(items, size):
@@ -106,7 +104,7 @@ def convert(
 ):
     """Convert ERA5 from one of the supported archives to makani format, one file per year.
 
-    The archive specific reading is delegated to a :class:`data_process.sources.Source`;
+    The archive specific reading is delegated to a :class:`makani.datasets.sources.Source`;
     this routine owns the output files, the date range and the distribution of
     work. It supports distributed processing via mpi4py: the source groups the
     samples of each year into units that must stay on one rank, and the units are
@@ -143,7 +141,7 @@ def convert(
 
     # imported here so that the helpers above can be used and tested without MPI
     from mpi4py import MPI
-    from data_process.data_process_helpers import DistributedProgressBar
+    from makani.datasets.helpers import DistributedProgressBar
 
     # get comm ranks and size
     comm = MPI.COMM_WORLD.Dup()
@@ -248,7 +246,7 @@ def convert(
 def main(args):
     # backends are imported lazily, so that each only needs its own dependencies
     if args.source == "wb2":
-        from data_process.sources.wb2 import Wb2Source
+        from makani.datasets.sources.wb2 import Wb2Source
 
         make_source = functools.partial(
             Wb2Source,
@@ -259,7 +257,7 @@ def main(args):
             impute_missing_timestamps=args.impute_missing_timestamps,
         )
     elif args.source == "ncar":
-        from data_process.sources.ncar import NcarSource
+        from makani.datasets.sources.ncar import NcarSource
 
         make_source = functools.partial(
             NcarSource,

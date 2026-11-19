@@ -32,9 +32,9 @@ from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from .testutils import disable_tf32, init_hdf5_dataset, H5_PATH, IMG_SIZE_H, IMG_SIZE_W, compare_arrays
-from data_process.date_range import add_date_range_arguments, date_range_from_args, parse_date, yearly_sample_times
-from data_process.convert_era5_to_makani_input import _batched, _create_output_file, _write_missing
-from data_process.sources import InvariantSource, Source
+from makani.datasets.date_range import add_date_range_arguments, date_range_from_args, parse_date, yearly_sample_times
+from makani.datasets.convert_era5_to_makani_input import _batched, _create_output_file, _write_missing
+from makani.datasets.sources import InvariantSource, Source
 
 
 def _utc(year, month, day, hour=0):
@@ -72,7 +72,7 @@ class TestAnnotateDataset(unittest.TestCase):
 
     def test_annotate_dataset(self, verbose=False):
         # import necessary modules
-        from data_process.annotate_dataset import annotate
+        from makani.datasets.annotate_dataset import annotate
 
         # Load metadata
         with open(os.path.join(self.metadata_path, "data.json"), "r") as f:
@@ -185,7 +185,7 @@ class TestConcatenateDataset(unittest.TestCase):
     )
     def test_concatenate_dataset(self, dhoursrel):
         # import necessary modules
-        from data_process.concatenate_dataset import concatenate
+        from makani.datasets.concatenate_dataset import concatenate
 
         # Load metadata
         with open(os.path.join(self.metadata_path, "data.json"), "r") as f:
@@ -278,7 +278,7 @@ class TestConcatenateDataset(unittest.TestCase):
         Post-fix, the source slice is ``vsource[:ne_red*dhoursrel:dhoursrel]``,
         which is exactly ``ne_red`` elements regardless of divisibility.
         """
-        from data_process.concatenate_dataset import concatenate
+        from makani.datasets.concatenate_dataset import concatenate
 
         # Year 2017: 365 samples (non-leap, 365 % 5 == 0)  → no bug exposure.
         # Year 2020: 366 samples (leap year, 366 % 5 == 1) → triggers the bug.
@@ -507,7 +507,7 @@ class TestConcatenateDatasetChannelsAndTime(unittest.TestCase):
 
     @parameterized.expand([1, 5], skip_on_empty=False)
     def test_concatenate_time_and_channels(self, dhoursrel):
-        from data_process.concatenate_dataset import concatenate
+        from makani.datasets.concatenate_dataset import concatenate
 
         metadata = dict(
             dataset_name="testing_concat",
@@ -755,7 +755,7 @@ class TestConcatenateDatasetChannelsAndTime(unittest.TestCase):
         store data under a non-default key, and the virtual output exposes the
         same key (and only that key — the default ``"fields"`` should NOT exist).
         """
-        from data_process.concatenate_dataset import concatenate
+        from makani.datasets.concatenate_dataset import concatenate
 
         custom_key = "custom_data"
 
@@ -863,7 +863,7 @@ class TestConcatenateDatasetChannelsAndTime(unittest.TestCase):
         Comparison uses ``np.array_equal(equal_nan=True)`` instead of the
         ``compare_arrays`` helper, since ``np.allclose`` treats NaN != NaN.
         """
-        from data_process.concatenate_dataset import concatenate
+        from makani.datasets.concatenate_dataset import concatenate
 
         with (
             tempfile.TemporaryDirectory() as sub_a,
@@ -1009,7 +1009,7 @@ class TestConcatenateDatasetChannelsAndTime(unittest.TestCase):
         Parameterized over ``dhoursrel`` to catch off-by-one bugs in the
         ``h * dhours * dhoursrel`` derivation specifically.
         """
-        from data_process.concatenate_dataset import concatenate
+        from makani.datasets.concatenate_dataset import concatenate
 
         with (
             tempfile.TemporaryDirectory() as sub_a,
@@ -1137,7 +1137,7 @@ class TestH5Convert(unittest.TestCase):
         ]
     )
     def test_h5_convert(self, chunksize, transpose, expected_chunks):
-        from data_process.h5_convert import h5_convert
+        from makani.datasets.h5_convert import h5_convert
 
         output_path = os.path.join(self.tmpdir.name, f"converted_{chunksize}_{transpose}")
         os.makedirs(output_path)
@@ -1191,7 +1191,7 @@ class TestH5Convert(unittest.TestCase):
         ]
     )
     def test_chunk_shape_from_bytes(self, shape, itemsize, target_bytes, expected):
-        from data_process.h5_convert import _chunk_shape_from_bytes
+        from makani.datasets.h5_convert import _chunk_shape_from_bytes
 
         chunks = _chunk_shape_from_bytes(shape, itemsize, target_bytes)
         self.assertEqual(chunks, expected)
@@ -1235,7 +1235,7 @@ class TestGetStats(unittest.TestCase):
     @unittest.skipUnless(importlib.util.find_spec("mpi4py") is not None, "mpi4py needs to be installed for this test")
     def test_get_stats(self, batch_size, allow_nan, verbose=False):
         # import necessary modules
-        from data_process.get_stats import welford_combine, get_file_stats, mask_data
+        from makani.datasets.get_stats import welford_combine, get_file_stats, mask_data
 
         # Get list of files to process
         if allow_nan:
@@ -1337,18 +1337,18 @@ class TestGetStats(unittest.TestCase):
 
 # conversion scripts, with the extras each needs to be importable at all
 _CONVERTERS = [
-    ("data_process.convert_era5_to_makani_input", ["h5py"]),
-    ("data_process.sources.ncar", ["h5py"]),
-    ("data_process.sources.wb2", ["xarray", "h5py"]),
-    ("data_process.convert_era5_invariants_to_makani_input", ["h5py"]),
-    ("data_process.convert_makani_output_to_wb2", ["mpi4py", "xarray", "dask", "h5py"]),
-    ("data_process.generate_wb2_climatology", ["mpi4py", "xarray", "h5py"]),
+    ("makani.datasets.convert_era5_to_makani_input", ["h5py"]),
+    ("makani.datasets.sources.ncar", ["h5py"]),
+    ("makani.datasets.sources.wb2", ["xarray", "h5py"]),
+    ("makani.datasets.convert_era5_invariants_to_makani_input", ["h5py"]),
+    ("makani.datasets.convert_makani_output_to_wb2", ["mpi4py", "xarray", "dask", "h5py"]),
+    ("makani.datasets.generate_wb2_climatology", ["mpi4py", "xarray", "h5py"]),
 ]
 
 
 class TestConverterImports(unittest.TestCase):
     """
-    Import each conversion script in ``data_process``.
+    Import each conversion script in ``makani.datasets``.
 
     The converters are driven by MPI against multi terabyte archives and are not
     otherwise exercised by any test, so this is the only thing standing between a
@@ -1360,7 +1360,7 @@ class TestConverterImports(unittest.TestCase):
     the middle of a conversion loop is still invisible here.
 
     Each is skipped when its dependencies are missing, since ``mpi4py``,
-    ``xarray`` and ``dask`` live in the ``data_process`` extra rather than the
+    ``xarray`` and ``dask`` live in the ``datasets`` extra rather than the
     base install; that means these normally skip in CI and run in the container.
     """
 
@@ -1373,10 +1373,10 @@ class TestConverterImports(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Date ranges: data_process/date_range.py
+# Date ranges: makani/datasets/date_range.py
 # ---------------------------------------------------------------------------
 #
-# Unit tests for ``data_process.date_range``, which decides which samples go into
+# Unit tests for ``makani.datasets.date_range``, which decides which samples go into
 # each yearly file written by the Weatherbench and NCAR converters.
 #
 # Pure datetime arithmetic, so no MPI and no data are involved. What happens to
@@ -1461,10 +1461,10 @@ class TestYearlySampleTimes(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# ERA5 converter and its sources: data_process/convert_era5_to_makani_input.py, data_process/sources/
+# ERA5 converter and its sources: makani/datasets/convert_era5_to_makani_input.py, makani/datasets/sources/
 # ---------------------------------------------------------------------------
 #
-# Tests for ``data_process/convert_era5_to_makani_input.py`` and its sources.
+# Tests for ``makani/datasets/convert_era5_to_makani_input.py`` and its sources.
 #
 # Everything but the last suite runs without MPI and without network access: the
 # output file helpers write serial files, the NCAR source reads from a stand-in
@@ -1606,9 +1606,9 @@ class TestNcarSource(_OutputFileCase):
         super().tearDown()
 
     def _make(self, **options):
-        from data_process.sources.ncar import NcarSource
+        from makani.datasets.sources.ncar import NcarSource
 
-        with mock.patch("data_process.sources.ncar.NcarStore", lambda *args, **kwargs: self.store):
+        with mock.patch("makani.datasets.sources.ncar.NcarStore", lambda *args, **kwargs: self.store):
             return NcarSource(_metadata(self.channels), 0, skip_missing_channels=True, **options)
 
     def _fill(self, source):
@@ -1677,7 +1677,7 @@ class TestWb2Source(_OutputFileCase):
         data.to_zarr(self.store)
 
     def _make(self, **options):
-        from data_process.sources.wb2 import Wb2Source
+        from makani.datasets.sources.wb2 import Wb2Source
 
         return Wb2Source(_metadata(self.channels), 0, input_file=self.store, **options)
 
@@ -1748,7 +1748,7 @@ class TestConvert(unittest.TestCase):
         self._tmpdir.cleanup()
 
     def test_yearly_files(self):
-        from data_process.convert_era5_to_makani_input import convert
+        from makani.datasets.convert_era5_to_makani_input import convert
 
         convert(_FakeSource, self._tmpdir.name, self.metadata_file, _utc(2022, 12, 31, 6), _utc(2023, 1, 1, 12))
 
@@ -1773,7 +1773,7 @@ class TestConvert(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Invariant converter and its sources: data_process/convert_era5_invariants_to_makani_input.py
+# Invariant converter and its sources: makani/datasets/convert_era5_invariants_to_makani_input.py
 # ---------------------------------------------------------------------------
 #
 # The time invariant counterpart of the suites above. It is serial throughout, so
@@ -1794,7 +1794,7 @@ class _InvariantOutputFileCase(unittest.TestCase):
     channels = ["z", "lsm", "not_a_variable"]
 
     def setUp(self):
-        from data_process.convert_era5_invariants_to_makani_input import _create_output_file
+        from makani.datasets.convert_era5_invariants_to_makani_input import _create_output_file
 
         self._tmpdir = tempfile.TemporaryDirectory()
         self.out = _create_output_file(
@@ -1817,7 +1817,7 @@ class TestInvariantOutputFile(_InvariantOutputFileCase):
         self.assertTrue(np.all(np.isnan(self.out["fields"][...])))
 
     def test_write_missing_touches_only_the_given_channels(self):
-        from data_process.convert_era5_invariants_to_makani_input import _write_missing
+        from makani.datasets.convert_era5_invariants_to_makani_input import _write_missing
 
         self.out["fields"][...] = 1.0
         _write_missing(self.out, "fields", [0, 2])
@@ -1856,10 +1856,10 @@ class TestNcarInvariantSource(_InvariantOutputFileCase):
         super().tearDown()
 
     def _make(self, channels=None, **options):
-        from data_process.sources.ncar import NcarInvariantSource
+        from makani.datasets.sources.ncar import NcarInvariantSource
 
         channels = self.channels if channels is None else channels
-        with mock.patch("data_process.sources.ncar.NcarStore", lambda *args, **kwargs: self.store):
+        with mock.patch("makani.datasets.sources.ncar.NcarStore", lambda *args, **kwargs: self.store):
             return NcarInvariantSource(_invariant_metadata(channels), **options)
 
     def test_unknown_channel_fails_without_skipping(self):
@@ -1916,7 +1916,7 @@ class TestWb2InvariantSource(_InvariantOutputFileCase):
         data.to_zarr(self.store)
 
     def _make(self, **options):
-        from data_process.sources.wb2 import Wb2InvariantSource
+        from makani.datasets.sources.wb2 import Wb2InvariantSource
 
         return Wb2InvariantSource(_invariant_metadata(self.channels), input_file=self.store, **options)
 
@@ -1975,7 +1975,7 @@ class TestConvertInvariants(unittest.TestCase):
         self._tmpdir.cleanup()
 
     def _convert(self, **options):
-        from data_process.convert_era5_invariants_to_makani_input import convert
+        from makani.datasets.convert_era5_invariants_to_makani_input import convert
 
         convert(_FakeInvariantSource, self.output_file, self.metadata_file, ["z", "lsm", "slt"], **options)
 
@@ -2004,7 +2004,7 @@ class TestConvertInvariants(unittest.TestCase):
             self.assertEqual(f["fields"].shape, (3, len(_LAT), len(_LON)))
 
     def test_failed_conversion_leaves_no_file_behind(self):
-        from data_process.convert_era5_invariants_to_makani_input import convert
+        from makani.datasets.convert_era5_invariants_to_makani_input import convert
 
         _FailingInvariantSource.closed = False
         with self.assertRaises(FileNotFoundError):
@@ -2019,7 +2019,7 @@ class TestConvertInvariants(unittest.TestCase):
             self.assertTrue(np.all(f["fields"][1] == 1))
 
     def test_command_line_defaults_to_all_invariants(self):
-        from data_process.convert_era5_invariants_to_makani_input import build_parser
+        from makani.datasets.convert_era5_invariants_to_makani_input import build_parser
         from makani.data.ncar_helpers import invariant_variables
 
         args = build_parser().parse_args(["ncar", "--output_file", "out.h5", "--metadata_file", "m.json"])
@@ -2114,8 +2114,8 @@ class TestNcarVsArco(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        from data_process.sources.ncar import NcarSource
-        from data_process.sources.wb2 import Wb2Source
+        from makani.datasets.sources.ncar import NcarSource
+        from makani.datasets.sources.wb2 import Wb2Source
 
         cls._tmpdir = tempfile.TemporaryDirectory()
 

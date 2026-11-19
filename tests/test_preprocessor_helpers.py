@@ -243,7 +243,7 @@ _LSM = [{"channel": "lsm", "encoding": "onehot", "num_classes": 2, "rounding": "
 
 
 def _write_invariants_file(path, fields, channels, valid=None):
-    """An invariants file laid out like data_process/convert_era5_invariants_to_makani_input.py writes it."""
+    """An invariants file laid out like makani/datasets/convert_era5_invariants_to_makani_input.py writes it."""
     with h5py.File(path, "w") as f:
         f["fields"] = np.asarray(fields, dtype=np.float32)
         f["channel"] = np.array(channels, dtype="S")

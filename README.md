@@ -122,12 +122,11 @@ The project is structured as follows:
 makani
 ├── ...
 ├── config                      # configuration files, also known as recipes
-├── data_process                # data pre-processing such as computation of statistics
-├── datasets                    # dataset utility scripts
 ├── docker                      # scripts for building a docker image for training
 ├── makani                      # Main directory containing the package
 │   ├── benchmark               # step time on synthetic data: python -m makani.benchmark (run.py)
 │   ├── data                    # dataloaders, storage backends, batches and rollouts, normalization statistics
+│   ├── datasets                # building datasets: conversion, annotation, statistics; python -m makani.datasets.<script>
 │   ├── distributed             # communication for model parallelism: comm, mappings, gradient reduction, halo exchange
 │   ├── driver                  # what training and inference share: the Driver, checkpoints, model packages
 │   ├── inference               # the inferencer and rollout buffers; python -m makani.inference
@@ -195,7 +194,7 @@ Makani requires a metadata file named `data.json`, which describes important pro
 ```
 
 The ERA5 dataset can be downloaded [here](https://cds.climate.copernicus.eu/cdsapp#!/dataset/reanalysis-era5-single-levels?tab=overview).
-For details on obtaining datasets, converting them to Makani format, concatenating yearly files, and computing statistics, see the data processing guide in [`data_process/Readme.md`](data_process/Readme.md).
+For details on obtaining datasets, converting them to Makani format, concatenating yearly files, and computing statistics, see the data processing guide in [`makani/datasets/Readme.md`](makani/datasets/Readme.md).
 
 ### Checkpoints and restarting
 
@@ -209,7 +208,7 @@ By default, Makani will save out a model package when training starts. Model pac
 
 ### Data Processing Scripts Overview
 
-The folder `data_process` contains a collection of scripts in order to modify data input files or compute statistics on them.
+The package `makani.datasets` contains a collection of scripts in order to modify data input files or compute statistics on them. Each runs as `python -m makani.datasets.<script>`, e.g. `python -m makani.datasets.get_stats`, and their dependencies come with `pip install makani[datasets]`.
 
 #### Core Data Processing
 * `annotate_dataset.py` - Adds metadata annotations to HDF5 files including timestamps, latitude/longitude coordinates, and channel names. Ensures uniform time information across datasets by converting to UTC timezone.
@@ -225,7 +224,7 @@ Statistics and Analysis
 * `generate_wb2_climatology.py` - Generates WeatherBench2-compatible climatology data and ground profile masks from ERA5 data (1990-2019 averages). Creates HDF5 datasets with user-specified channel selection and ordering.
 * `convert_makani_output_to_wb2.py` - Converts Makani inference outputs to WeatherBench2 format for evaluation and comparison with other models.
 * `merge_wb2_dataset.py` - Transfers specific channels between Makani HDF5 files. This can be used for channels which are present in Copernicus ERA5 but not on ARCO-ERA5 (such as 10m wind speeds).
-* `wb2_helpers.py` - Utility functions for WeatherBench2 integration, including channel name translation between Makani and WeatherBench2 conventions for both surface and atmospheric variables.
+* `makani/data/wb2_helpers.py` - Utility functions for WeatherBench2 integration, including channel name translation between Makani and WeatherBench2 conventions for both surface and atmospheric variables.
 
 This collection of scripts provides a complete pipeline for data preprocessing, statistical analysis, and WeatherBench2 compatibility for weather forecasting models.
 

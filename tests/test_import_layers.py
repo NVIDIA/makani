@@ -32,7 +32,7 @@ LAYERS = [
     ("makani.metrics",),
     ("makani.driver",),
     ("makani.training", "makani.inference"),
-    ("makani",),  # the package itself, its entry scripts and the benchmark
+    ("makani",),  # the package itself, its entry scripts, the benchmark and the dataset tools
 ]
 
 

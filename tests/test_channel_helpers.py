@@ -328,7 +328,7 @@ class TestBuildChannelGroups(unittest.TestCase):
 #
 # Everything here is pure computation on names and datetimes, so no S3 access, no
 # MPI and no data fixtures are involved. The reads themselves live in
-# ``data_process/sources/ncar.py`` and are not covered.
+# ``makani/datasets/sources/ncar.py`` and are not covered.
 
 
 class TestBuildNcarChannelGroups(unittest.TestCase):
