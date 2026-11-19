@@ -208,7 +208,7 @@ By default, Makani will save out a model package when training starts. Model pac
 
 ### Data Processing Scripts Overview
 
-The package `makani.datasets` contains a collection of scripts in order to modify data input files or compute statistics on them. Each runs as `python -m makani.datasets.<script>`, e.g. `python -m makani.datasets.get_stats`, and their dependencies come with `pip install makani[datasets]`.
+The package `makani.datasets` contains a collection of scripts in order to modify data input files or compute statistics on them. Each runs as `python -m makani.datasets.<script>`, e.g. `python -m makani.datasets.get_stats`, and their dependencies come with `pip install makani[datasets]`. They run serially with plain `python`, and in parallel under `mpirun` with `pip install makani[datasets-mpi]`.
 
 #### Core Data Processing
 * `annotate_dataset.py` - Adds metadata annotations to HDF5 files including timestamps, latitude/longitude coordinates, and channel names. Ensures uniform time information across datasets by converting to UTC timezone.

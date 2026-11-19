@@ -15,13 +15,16 @@
 
 import math
 
-import mpi4py
-from mpi4py.util import dtlib
 from tqdm import tqdm
 import numpy as np
 
 import torch
 import torch.distributed as dist
+
+from makani.datasets.parallel import MPI, is_parallel
+
+if MPI is not None:
+    from mpi4py.util import dtlib
 
 
 def mask_data(data):
@@ -124,7 +127,7 @@ def binary_reduce(stats, group, device):
                 stats = welford_combine(stats, rstats)
 
         # wait for everyone being ready before doing the next epoch
-        dist.barrier(group=group, device_ids=[device.index])
+        dist.barrier(group=group, device_ids=[device.index] if device.type == "cuda" else None)
 
         # shrink the list
         if step < nsteps - 1:
@@ -206,15 +209,25 @@ def get_wind_channels(channel_names):
 
 
 class DistributedProgressBar(object):
+    """
+    A progress bar on rank 0 for the work of all ranks.
 
-    def __init__(self, num_entries: int, comm: mpi4py.MPI.Comm):
+    The ranks add what they did to a counter on rank 0, an MPI window; a single rank, also one
+    without MPI (:class:`~makani.datasets.parallel.SerialComm`), counts locally.
+    """
+
+    def __init__(self, num_entries: int, comm):
         self.comm = comm
 
-        datatype = mpi4py.MPI.INT64_T
-        np_dtype = dtlib.to_numpy_dtype(datatype)
-        itemsize = datatype.Get_size()
-        self.win = mpi4py.MPI.Win.Allocate(itemsize, comm=comm)
+        if is_parallel(comm):
+            datatype = MPI.INT64_T
+            np_dtype = dtlib.to_numpy_dtype(datatype)
+            self.win = MPI.Win.Allocate(datatype.Get_size(), comm=comm)
+        else:
+            np_dtype = np.int64
+            self.win = None
         self.counts = np.zeros([1], dtype=np_dtype)
+        self.local_count = 0
         self.comm.Barrier()
 
         if self.comm.Get_rank() == 0:
@@ -223,7 +236,8 @@ class DistributedProgressBar(object):
 
     def __del__(self):
         self.comm.Barrier()
-        self.win.Free()
+        if self.win is not None:
+            self.win.Free()
         if self.comm.Get_rank() == 0:
             self.pbar.close()
 
@@ -233,6 +247,9 @@ class DistributedProgressBar(object):
             self.pbar.refresh()
 
     def update_counter(self, count: int):
+        if self.win is None:
+            self.local_count += count
+            return
         self.counts[0] = count
         self.win.Lock(rank=0)
         self.win.Accumulate(self.counts, target_rank=0)
@@ -240,7 +257,9 @@ class DistributedProgressBar(object):
         self.win.Unlock(rank=0)
 
     def get_counter(self) -> int:
-        self.win.Lock(rank=0, lock_type=mpi4py.MPI.LOCK_SHARED)
+        if self.win is None:
+            return self.local_count
+        self.win.Lock(rank=0, lock_type=MPI.LOCK_SHARED)
         self.win.Get(self.counts, target_rank=0)
         self.win.Flush(rank=0)
         self.win.Unlock(rank=0)

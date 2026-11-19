@@ -16,6 +16,7 @@
 """
 Building makani datasets offline: converting ERA5, annotating and concatenating the files, and
 computing their statistics. Each script runs as ``python -m makani.datasets.<script>``; their
-dependencies come with ``pip install makani[datasets]``. Loading datasets is :mod:`makani.data`.
+dependencies come with ``pip install makani[datasets]``. MPI is optional, see
+:mod:`makani.datasets.parallel`. Loading datasets is :mod:`makani.data`.
 The package imports nothing itself.
 """

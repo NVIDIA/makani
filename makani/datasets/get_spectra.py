@@ -27,7 +27,7 @@ from bisect import bisect_right
 from glob import glob
 
 # MPI
-from mpi4py import MPI
+from makani.datasets.parallel import get_comm, local_device_index, reduction_mesh_shape
 
 import torch
 import torch.distributed as dist
@@ -162,16 +162,16 @@ def get_power_spectra(
     torch.set_grad_enabled(False)
 
     # get comm
-    comm = MPI.COMM_WORLD.Dup()
+    comm = get_comm()
     comm_rank = comm.Get_rank()
     comm_size = comm.Get_size()
-    comm_local_rank = comm_rank % torch.cuda.device_count()
+    comm_local_rank = local_device_index(comm)
 
     # set wireup parameters
     hostname = socket.gethostname()
     hostname = comm.bcast(hostname, root=0)
     os.environ["MASTER_ADDR"] = hostname
-    os.environ["MASTER_PORT"] = "29500"
+    os.environ.setdefault("MASTER_PORT", "29500")
     os.environ["RANK"] = str(comm_rank)
     os.environ["WORLD_SIZE"] = str(comm_size)
     os.environ["LOCAL_RANK"] = str(comm_local_rank)
@@ -183,11 +183,11 @@ def get_power_spectra(
         init_method="env://",
         world_size=comm_size,
         rank=comm_rank,
-        device_id=device,
+        device_id=device if device.type == "cuda" else None,
     )
     mesh = dist.init_device_mesh(
         device_type=device.type,
-        mesh_shape=[reduction_group_size, comm_size // reduction_group_size],
+        mesh_shape=reduction_mesh_shape(reduction_group_size, comm_size),
         mesh_dim_names=["reduction", "tree"],
     )
 
@@ -356,11 +356,8 @@ def get_power_spectra(
     comm.Barrier()
 
     # shut down pytorch comms
-    dist.barrier(device_ids=[device.index])
+    dist.barrier(device_ids=[device.index] if device.type == "cuda" else None)
     dist.destroy_process_group()
-
-    # close MPI
-    MPI.Finalize()
 
 
 def main(args):

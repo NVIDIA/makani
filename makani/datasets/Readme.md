@@ -2,6 +2,8 @@
 
 This package contains the scripts that build makani datasets: converting ERA5, annotating and concatenating the files, and computing their statistics. Each runs as a module, `python -m makani.datasets.<script>`, and their dependencies come with `pip install makani[datasets]`.
 
+MPI is optional. With plain `python` a script runs on a single rank, with any h5py. To run it in parallel, launch it with `mpirun` after `pip install makani[datasets-mpi]`; the scripts that write a shared file from several ranks (`convert_era5_to_makani_input`, `generate_wb2_climatology`, `merge_wb2_dataset`) then also need h5py built against parallel HDF5, and say so if it is not.
+
 ## Overview of processing
 
 ERA5 data is provided in .h5 file format. Often data for several years and several variables is split up into files for each respective year, then containing the data for all variables, all timepoints during that year and all spatial locations. Each h5 file represents a dataset that contains additional metadata relevant for the processing of the data.

@@ -26,7 +26,7 @@ import xarray as xr
 import dask.array as da
 
 # MPI
-from mpi4py import MPI
+from makani.datasets.parallel import get_comm
 
 from makani.data.data_helpers import get_date_from_timestamp
 
@@ -69,7 +69,7 @@ def convert(
     """
 
     # get comm ranks and size
-    comm = MPI.COMM_WORLD.Dup()
+    comm = get_comm()
     comm_rank = comm.Get_rank()
     comm_size = comm.Get_size()
 

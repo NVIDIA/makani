@@ -26,8 +26,7 @@ from bisect import bisect_right
 from tqdm import tqdm
 
 # MPI
-from mpi4py import MPI
-from mpi4py.util import dtlib
+from makani.datasets.parallel import MPI, get_comm
 
 # we need the parser
 import json
@@ -37,6 +36,12 @@ from makani.utils.grids import GridQuadrature
 
 
 def allgather_safe(comm, obj):
+
+    # a single rank gathers only its own object, without MPI
+    if comm.Get_size() == 1:
+        return [obj]
+
+    from mpi4py.util import dtlib
 
     # serialize the stuff
     fdata = pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL)
@@ -240,7 +245,7 @@ def get_histograms(
     """
 
     # get comm
-    comm = MPI.COMM_WORLD.Dup()
+    comm = get_comm()
     comm_rank = comm.Get_rank()
     comm_size = comm.Get_size()
 

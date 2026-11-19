@@ -1198,6 +1198,76 @@ class TestH5Convert(unittest.TestCase):
         self.assertLessEqual(np.prod(chunks) * itemsize, max(target_bytes, itemsize))
 
 
+class TestParallel(unittest.TestCase):
+    """The dataset scripts run on a single rank without MPI, and in parallel where it is available."""
+
+    def test_without_mpi4py_a_run_has_one_rank(self):
+        from makani.datasets import parallel
+
+        with mock.patch.object(parallel, "MPI", None):
+            comm = parallel.get_comm()
+
+        self.assertIsInstance(comm, parallel.SerialComm)
+        self.assertEqual((comm.Get_rank(), comm.Get_size()), (0, 1))
+        comm.Barrier()
+        self.assertEqual(comm.bcast({"a": 1}, root=0), {"a": 1})
+        self.assertEqual(comm.allgather(3), [3])
+        self.assertIs(comm.Dup(), comm)
+        self.assertFalse(parallel.is_parallel(comm))
+
+    def test_a_single_rank_writes_files_serially(self):
+        from makani.datasets.parallel import SerialComm, h5_kwargs
+
+        self.assertEqual(h5_kwargs(None), {})
+        self.assertEqual(h5_kwargs(SerialComm()), {})
+
+    def test_several_ranks_write_with_mpio(self):
+        from makani.datasets.parallel import h5_kwargs
+
+        comm = mock.Mock()
+        comm.Get_size.return_value = 2
+        if h5.get_config().mpi:
+            self.assertEqual(h5_kwargs(comm), {"driver": "mpio", "comm": comm})
+        else:
+            # several ranks cannot share a file through an h5py without parallel HDF5
+            with self.assertRaisesRegex(RuntimeError, "parallel HDF5"):
+                h5_kwargs(comm)
+
+    def test_device_without_gpus(self):
+        from makani.datasets.parallel import local_device_index
+
+        comm = mock.Mock()
+        comm.Get_rank.return_value = 5
+        with mock.patch("torch.cuda.device_count", return_value=0):
+            self.assertEqual(local_device_index(comm), 0)
+        with mock.patch("torch.cuda.device_count", return_value=4):
+            self.assertEqual(local_device_index(comm), 1)
+
+    @parameterized.expand([(8, 1, [1, 1]), (8, 4, [4, 1]), (8, 16, [8, 2]), (8, 12, [6, 2]), (2, 7, [1, 7])])
+    def test_reduction_mesh_shape(self, requested, world_size, expected):
+        from makani.datasets.parallel import reduction_mesh_shape
+
+        self.assertEqual(reduction_mesh_shape(requested, world_size), expected)
+
+    def test_progress_bar_on_one_rank(self):
+        from makani.datasets.helpers import DistributedProgressBar
+        from makani.datasets.parallel import SerialComm
+
+        progress = DistributedProgressBar(10, SerialComm())
+        progress.update_counter(3)
+        progress.update_counter(4)
+        self.assertEqual(progress.get_counter(), 7)
+        progress.update_progress()
+        self.assertEqual(progress.pbar.n, 7)
+        del progress
+
+    def test_allgather_on_one_rank(self):
+        from makani.datasets.get_histograms import allgather_safe
+        from makani.datasets.parallel import SerialComm
+
+        self.assertEqual(allgather_safe(SerialComm(), {"a": 1}), [{"a": 1}])
+
+
 class TestGetStats(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -1223,6 +1293,46 @@ class TestGetStats(unittest.TestCase):
     def tearDownClass(cls):
         cls.tmpdir.cleanup()
 
+    def test_script_runs_serially(self):
+        # the whole script with plain python: one rank, the default reduction group size, no MPI needed
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as output_path:
+            env = dict(os.environ, CUDA_VISIBLE_DEVICES="", MASTER_PORT="29531")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "makani.datasets.get_stats",
+                    "--input_path",
+                    self.train_path,
+                    "--metadata_file",
+                    os.path.join(self.metadata_path, "data.json"),
+                    "--output_path",
+                    output_path,
+                ],
+                capture_output=True,
+                text=True,
+                env=env,
+                cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr[-3000:])
+
+            # the extrema over all samples, which do not depend on the quadrature
+            data = np.concatenate(
+                [
+                    h5.File(os.path.join(self.train_path, f), "r")[H5_PATH][...]
+                    for f in sorted(os.listdir(self.train_path))
+                    if f.endswith(".h5")
+                ]
+            )
+            mins = np.load(os.path.join(output_path, "mins.npy"))
+            maxs = np.load(os.path.join(output_path, "maxs.npy"))
+            np.testing.assert_allclose(mins.reshape(-1), data.min(axis=(0, 2, 3)), rtol=1e-6)
+            np.testing.assert_allclose(maxs.reshape(-1), data.max(axis=(0, 2, 3)), rtol=1e-6)
+            for name in ["global_means.npy", "global_stds.npy", "time_means.npy", "time_diff_stds_dt1.npy"]:
+                self.assertTrue(np.all(np.isfinite(np.load(os.path.join(output_path, name)))), name)
+
     @parameterized.expand(
         [
             (8, False),
@@ -1232,7 +1342,6 @@ class TestGetStats(unittest.TestCase):
         ],
         skip_on_empty=False,
     )
-    @unittest.skipUnless(importlib.util.find_spec("mpi4py") is not None, "mpi4py needs to be installed for this test")
     def test_get_stats(self, batch_size, allow_nan, verbose=False):
         # import necessary modules
         from makani.datasets.get_stats import welford_combine, get_file_stats, mask_data
@@ -1341,8 +1450,8 @@ _CONVERTERS = [
     ("makani.datasets.sources.ncar", ["h5py"]),
     ("makani.datasets.sources.wb2", ["xarray", "h5py"]),
     ("makani.datasets.convert_era5_invariants_to_makani_input", ["h5py"]),
-    ("makani.datasets.convert_makani_output_to_wb2", ["mpi4py", "xarray", "dask", "h5py"]),
-    ("makani.datasets.generate_wb2_climatology", ["mpi4py", "xarray", "h5py"]),
+    ("makani.datasets.convert_makani_output_to_wb2", ["xarray", "dask", "h5py"]),
+    ("makani.datasets.generate_wb2_climatology", ["xarray", "h5py"]),
 ]
 
 
@@ -1350,7 +1459,7 @@ class TestConverterImports(unittest.TestCase):
     """
     Import each conversion script in ``makani.datasets``.
 
-    The converters are driven by MPI against multi terabyte archives and are not
+    The converters run against multi terabyte archives and are not
     otherwise exercised by any test, so this is the only thing standing between a
     rename here and a failure on a production run.
 
@@ -1359,9 +1468,8 @@ class TestConverterImports(unittest.TestCase):
     happens inside the functions -- a helper called with the wrong arguments in
     the middle of a conversion loop is still invisible here.
 
-    Each is skipped when its dependencies are missing, since ``mpi4py``,
-    ``xarray`` and ``dask`` live in the ``datasets`` extra rather than the
-    base install; that means these normally skip in CI and run in the container.
+    Each is skipped when its dependencies are missing, since ``xarray`` and
+    ``dask`` live in the ``datasets`` extra rather than the base install.
     """
 
     @parameterized.expand(_CONVERTERS)
@@ -1469,7 +1577,7 @@ class TestYearlySampleTimes(unittest.TestCase):
 # Everything but the last suite runs without MPI and without network access: the
 # output file helpers write serial files, the NCAR source reads from a stand-in
 # for its S3 store and the WB2 source from a small local zarr store. The full
-# conversion needs mpi4py and parallel HDF5 and is skipped where they are missing.
+# conversion runs serially, on a single rank without MPI.
 
 
 _LAT = [90.0, 0.0, -90.0]
@@ -1483,10 +1591,6 @@ def _metadata(channels):
 
 def _samples(start, num):
     return [(idx, start + dt.timedelta(hours=_DHOURS * idx)) for idx in range(num)]
-
-
-def _have_mpi_hdf5():
-    return importlib.util.find_spec("mpi4py") is not None and h5.get_config().mpi
 
 
 class _OutputFileCase(unittest.TestCase):
@@ -1732,7 +1836,6 @@ class _FakeSource(Source):
         return [len(self.channel_names) - 1]
 
 
-@unittest.skipUnless(_have_mpi_hdf5(), "needs mpi4py and h5py built with MPI")
 class TestConvert(unittest.TestCase):
     """A full conversion on a single rank across a year boundary, with a source that skips a channel."""
 

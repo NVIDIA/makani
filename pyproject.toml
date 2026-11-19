@@ -101,12 +101,18 @@ test = [
 ]
 
 datasets = [
-    "mpi4py",
     "xarray>=2025.1.0",
     "gcsfs",
     "s3fs",
     "dask",
     "tqdm",
+]
+
+# the dataset scripts in parallel, under mpirun; writing shared files from several ranks also needs
+# h5py built against parallel HDF5
+datasets-mpi = [
+    "makani[datasets]",
+    "mpi4py",
 ]
 
 vis = [
