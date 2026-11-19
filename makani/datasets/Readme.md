@@ -2,7 +2,15 @@
 
 This package contains the scripts that build makani datasets: converting ERA5, annotating and concatenating the files, and computing their statistics. Each runs as a module, `python -m makani.datasets.<script>`, and their dependencies come with `pip install makani[datasets]`.
 
-MPI is optional. With plain `python` a script runs on a single rank, with any h5py. To run it in parallel, launch it with `mpirun` after `pip install makani[datasets-mpi]`; the scripts that write a shared file from several ranks (`convert_era5_to_makani_input`, `generate_wb2_climatology`, `merge_wb2_dataset`) then also need h5py built against parallel HDF5, and say so if it is not.
+## Running the scripts
+
+MPI is optional:
+- **Serially**, with plain `python -m makani.datasets.<script>`: the script runs on a single rank and works with any h5py, including the pip wheels.
+- **In parallel**, under `mpirun -n <ranks> python -m makani.datasets.<script>`, after `pip install makani[datasets-mpi]`, which adds mpi4py. The scripts that write a shared file from several ranks, `convert_era5_to_makani_input`, `generate_wb2_climatology` and `merge_wb2_dataset`, then also need h5py built against parallel HDF5, and stop with a message saying so if it is not.
+
+The statistics scripts, `get_stats`, `get_spectra` and `get_hydrostatic_balance_climatology`, reduce with torch.distributed: over NCCL on GPUs, one per rank, and over gloo on CPUs, so they need no GPU. They listen on `MASTER_PORT`, 29500 unless set.
+
+The `mpirun -n 8` in the examples below can be dropped for a serial run.
 
 ## Overview of processing
 
@@ -88,7 +96,7 @@ data into Makani-compatible yearly `.h5` files.
    }
    ```
    A full example for a metadata file for a dataset which was used to train FourCastNet3 can be found under `examples/metadata.json`.
-2. Run the converter (MPI optional but recommended for speed):
+2. Run the converter, here on 8 ranks; without `mpirun -n 8` it runs serially, see [Running the scripts](#running-the-scripts):
    ```
    mpirun -n 8 python -m makani.datasets.convert_era5_to_makani_input wb2 \
      --input_file "gs://weatherbench2/datasets/era5/1959-2022-full_37-1h-0p25deg-chunk-1.zarr-v2" \
@@ -209,7 +217,7 @@ The script `get_stats.py` computes per-channel statistics for a Makani dataset (
 - `time_means.npy` (per-channel spatial climatology)
 - `time_diff_means_dt<dt>.npy`, `time_diff_stds_dt<dt>.npy` (per-channel deltas at step `dt`)
 
-Run (MPI recommended for speed; works on VDS or a directory of yearly `.h5`):
+Run, here on 8 ranks; without `mpirun -n 8` it runs serially, see [Running the scripts](#running-the-scripts). It works on a VDS or a directory of yearly `.h5`:
 ```
 mpirun -n 8 python -m makani.datasets.get_stats \
   --input_path /mnt/era5/makani_era5_train_vds.h5v \   # or a folder with .h5 files
@@ -232,7 +240,7 @@ Key flags:
 - `--wind_angle_aware`: treat paired wind components as magnitudes for mean/std. This conserves the angle of the wind vector and just normalizes its magnitudes.
 - `--fail_on_nan`: abort if NaNs appear instead of masking them. This should not be used when computing stats for fields with missing numbers such as `sst`.
 - `--batch_size`: samples per read; tune for memory.
-- `--reduction_group_size`: MPI all-reduce group size (performance tuning).
+- `--reduction_group_size`: size of the groups of the parallel reduction (performance tuning). It is clamped to the largest divisor of the number of ranks that does not exceed it, so the default of 8 works on any number of ranks, also on one.
 
 ### Time invariant fields
 
