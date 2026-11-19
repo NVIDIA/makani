@@ -26,10 +26,6 @@ RUN apt remove cmake -y && \
 # install mpi4py
 RUN pip install mpi4py
 
-# install onnx
-RUN pip install onnxruntime && \
-    if [ "$(uname -m)" = "x86_64" ]; then pip install onnxruntime-gpu; fi
-
 # hdf5 and h5py
 ENV HDF5_VERSION=2.0.0
 RUN cd /tmp && wget https://support.hdfgroup.org/releases/hdf5/v2_0/v2_0_0/downloads/hdf5-${HDF5_VERSION}.tar.gz && \

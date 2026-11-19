@@ -30,7 +30,7 @@ def drop_path(x: torch.Tensor, drop_prob: float = 0.0, training: bool = False) -
     changing the layer and argument names to 'drop path' rather than mix DropConnect as a layer name and use
     'survival rate' as the argument.
     """
-    if drop_prob == 0.0 or not training:
+    if (drop_prob is None) or (drop_prob == 0.0) or (not training):
         return x
     keep_prob = 1.0 - drop_prob
     shape = (x.shape[0],) + (1,) * (x.ndim - 1)  # work with diff dim tensors, not just 2d ConvNets

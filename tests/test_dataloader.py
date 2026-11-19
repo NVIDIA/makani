@@ -1965,7 +1965,7 @@ class TestLoaderParity(unittest.TestCase):
             return
 
         # the zenith angle of every step belongs to that step's time
-        from makani.third_party.climt.zenith_angle_v2 import cos_zenith_angle
+        from makani.third_party.climt.zenith_angle import cos_zenith_angle
         from makani.data.data_helpers import get_date_from_timestamp
 
         sides = [(INPUT_DYNAMIC_FEATURES, INPUT_TIMESTAMP)]

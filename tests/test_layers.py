@@ -23,7 +23,7 @@ from parameterized import parameterized, parameterized_class
 import torch
 
 from makani.models.networks.pangu import EarthAttention3D
-from makani.models.common.regularization import SeededDropout2d, LayerScale
+from makani.models.common.regularization import DropPath, SeededDropout2d, LayerScale
 from makani.models.common.resample import UpSample2D, DownSample2D, UpSample3D, DownSample3D
 from makani.models.common.mlp import EncoderDecoder, MLP
 from makani.models.common.imputation import MLPImputation, ConstantImputation
@@ -364,6 +364,39 @@ class TestLayers(unittest.TestCase):
 
 
 # ===========================================================================
+class TestDropPath(unittest.TestCase):
+    """Stochastic depth: whole samples of the residual branch are dropped in training, and the rest rescaled."""
+
+    def setUp(self):
+        set_seed(333)
+        self.x = torch.randn(4000, 3, 4, 8)
+
+    def test_identity_in_eval(self):
+        layer = DropPath(0.5).eval()
+        self.assertTrue(torch.equal(layer(self.x), self.x))
+
+    def test_identity_without_a_rate(self):
+        for rate in (None, 0.0):
+            with self.subTest(rate=rate):
+                layer = DropPath(rate).train()
+                self.assertTrue(torch.equal(layer(self.x), self.x))
+
+    def test_drops_whole_samples(self):
+        p = 0.25
+        out = DropPath(p).train()(self.x)
+
+        # each sample is either dropped entirely or kept, scaled by 1 / (1 - p)
+        dropped = (out == 0.0).flatten(1).all(dim=1)
+        kept = torch.isclose(out, self.x / (1.0 - p)).flatten(1).all(dim=1)
+        self.assertTrue(torch.all(dropped ^ kept))
+        self.assertAlmostEqual(dropped.float().mean().item(), p, delta=0.03)
+
+    def test_preserves_the_mean(self):
+        x = torch.ones(20000, 2)
+        out = DropPath(0.5).train()(x)
+        self.assertAlmostEqual(out.mean().item(), 1.0, delta=0.03)
+
+
 class TestMLPImputation(unittest.TestCase):
     """Tests for MLPImputation in makani.models.common.imputation.
 

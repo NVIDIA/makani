@@ -18,8 +18,7 @@ import unittest
 
 import numpy as np
 
-from makani.third_party.climt import zenith_angle as v1
-from makani.third_party.climt import zenith_angle_v2 as v2
+from makani.third_party.climt import zenith_angle
 
 from .testutils import compare_arrays
 
@@ -45,144 +44,89 @@ def _sample_grid(step=5.0):
     return np.meshgrid(lon, lat)  # lon_grid, lat_grid, both [H, W]
 
 
-def _jc_from_time(mod, time):
-    """Julian centuries since 2000 computed via the given module's `_days_from_2000`.
-
-    Mirrors v2's internal recipe (float32 divisor) so we feed the jc-taking v2
-    helpers an input consistent with how they would normally be called.
-    """
-    return mod._days_from_2000(time) / np.float32(36525.0)
-
-
-def _wrapped_angle_diff(a, b):
-    """|a - b| wrapped into [-π, π] for angular quantities."""
-    return np.angle(np.exp(1j * (a.astype(np.float64) - b.astype(np.float64))))
-
-
 class TestDaysFrom2000(unittest.TestCase):
-    """Both versions expose the same API and should agree exactly."""
+    """Days since 2000-01-01 12:00 UTC, the epoch of the expansions."""
 
-    def test_matches(self, atol=0.0, rtol=0.0, verbose=False):
-        t = _sample_times()
-        a = v1._days_from_2000(t)
-        b = v2._days_from_2000(t)
-        self.assertTrue(compare_arrays("days_from_2000", a, b, atol=atol, rtol=rtol, verbose=verbose))
-        self.assertEqual(a.dtype, np.float32)
-        self.assertEqual(b.dtype, np.float32)
-
-
-class TestObliquityStar(unittest.TestCase):
-    """Both versions take julian centuries and should agree exactly."""
-
-    def test_matches(self, atol=0.0, rtol=0.0, verbose=False):
-        t = _sample_times()
-        jc = _jc_from_time(v2, t)  # either module works; they're equivalent here
-        a = v1._obliquity_star(jc)
-        b = v2._obliquity_star(jc)
-        self.assertTrue(compare_arrays("obliquity_star", a, b, atol=atol, rtol=rtol, verbose=verbose))
-
-
-class TestGreenwichMeanSiderealTime(unittest.TestCase):
-    """v1 takes `model_time`, v2 takes `jc`. Same math — compare with tolerance
-    because v1 computes jc in float64 internally while v2 uses float32."""
-
-    def test_matches(self, atol=1e-3, rtol=0.0, verbose=False):
-        t = _sample_times()
-        jc = _jc_from_time(v2, t)
-        a = v1._greenwich_mean_sidereal_time(t)
-        b = v2._greenwich_mean_sidereal_time(jc)
-        # GMST is an angle in [0, 2π); wrap the difference before comparing.
-        diff = _wrapped_angle_diff(a, b)
-        self.assertTrue(
-            compare_arrays("gmst (wrapped)", diff, np.zeros_like(diff), atol=atol, rtol=rtol, verbose=verbose)
+    def test_days(self):
+        t = np.asarray(
+            [
+                dt.datetime(2000, 1, 1, 12, 0, 0, tzinfo=dt.timezone.utc),
+                dt.datetime(2000, 1, 2, 12, 0, 0, tzinfo=dt.timezone.utc),
+                dt.datetime(1999, 12, 31, 0, 0, 0, tzinfo=dt.timezone.utc),
+                dt.datetime(2001, 1, 1, 12, 0, 0, tzinfo=dt.timezone.utc),
+            ]
         )
-
-
-class TestSunEclipticLongitude(unittest.TestCase):
-    """v1 takes `model_time`, v2 takes `jc`. Angular quantity — compare wrapped."""
-
-    def test_matches(self, atol=1e-4, rtol=0.0, verbose=False):
-        t = _sample_times()
-        jc = _jc_from_time(v2, t)
-        a = v1._sun_ecliptic_longitude(t)
-        b = v2._sun_ecliptic_longitude(jc)
-        diff = _wrapped_angle_diff(a, b)
-        self.assertTrue(
-            compare_arrays(
-                "sun_ecliptic_longitude (wrapped)", diff, np.zeros_like(diff), atol=atol, rtol=rtol, verbose=verbose
-            )
-        )
+        days = zenith_angle._days_from_2000(t)
+        self.assertEqual(days.dtype, np.float32)
+        # 2000 is a leap year: 366 days to 2001-01-01 12:00
+        np.testing.assert_array_equal(days, np.array([0.0, 1.0, -1.5, 366.0], dtype=np.float32))
 
 
 class TestCosZenithAngle(unittest.TestCase):
-    """Full public API: both versions accept (time, lon, lat) in degrees."""
+    """The public API: (time, lon, lat), the coordinates in degrees, give [T, H, W]."""
 
-    def test_grid_matches(self, atol=1e-4, rtol=1e-4, verbose=False):
+    def test_grid_shape(self):
         t = _sample_times()
         lon_grid, lat_grid = _sample_grid(step=5.0)
-        a = v1.cos_zenith_angle(t, lon_grid, lat_grid)
-        b = v2.cos_zenith_angle(t, lon_grid, lat_grid)
-        self.assertEqual(a.shape, b.shape)
-        self.assertTrue(compare_arrays("cos_zenith_angle grid", a, b, atol=atol, rtol=rtol, verbose=verbose))
+        self.assertEqual(zenith_angle.cos_zenith_angle(t, lon_grid, lat_grid).shape, (len(t),) + lon_grid.shape)
 
     def test_grid_values_in_range(self):
         """cos(zenith) must lie in [-1, 1]."""
         t = _sample_times()
         lon_grid, lat_grid = _sample_grid(step=10.0)
-        b = v2.cos_zenith_angle(t, lon_grid, lat_grid)
+        b = zenith_angle.cos_zenith_angle(t, lon_grid, lat_grid)
         self.assertTrue(np.all(np.abs(b) <= 1.0 + 1e-5))
 
     def test_cache_hit_gives_same_result(self, atol=1e-4, rtol=1e-4, verbose=False):
         """Second call with the same grid uses the identity cache — result
-        must still match the first call and v1."""
+        must match the first call bit for bit."""
         t = _sample_times()
         lon_grid, lat_grid = _sample_grid(step=10.0)
-        b1 = v2.cos_zenith_angle(t, lon_grid, lat_grid)
-        b2 = v2.cos_zenith_angle(t, lon_grid, lat_grid)  # cache hit
+        b1 = zenith_angle.cos_zenith_angle(t, lon_grid, lat_grid)
+        b2 = zenith_angle.cos_zenith_angle(t, lon_grid, lat_grid)  # cache hit
         # Cache hit must be bit-exact; this is not a tolerance-tunable check.
         self.assertTrue(compare_arrays("cache hit (bit-exact)", b1, b2, atol=0.0, rtol=0.0, verbose=verbose))
-        a = v1.cos_zenith_angle(t, lon_grid, lat_grid)
-        self.assertTrue(compare_arrays("cache hit vs v1", a, b2, atol=atol, rtol=rtol, verbose=verbose))
 
     def test_cache_invalidates_on_new_grid(self, atol=1e-4, rtol=1e-4, verbose=False):
         """Swapping in a different grid must not return stale cached values."""
         t = _sample_times()
         lon_a, lat_a = _sample_grid(step=10.0)
         lon_b, lat_b = _sample_grid(step=20.0)
-        ra = v2.cos_zenith_angle(t, lon_a, lat_a)
-        rb = v2.cos_zenith_angle(t, lon_b, lat_b)
+        ra = zenith_angle.cos_zenith_angle(t, lon_a, lat_a)
+        rb = zenith_angle.cos_zenith_angle(t, lon_b, lat_b)
         self.assertEqual(ra.shape, (len(t),) + lon_a.shape)
         self.assertEqual(rb.shape, (len(t),) + lon_b.shape)
-        # And the new call should match v1 on the same new grid.
-        rb_ref = v1.cos_zenith_angle(t, lon_b, lat_b)
+        # And the new call should match an uncached one on copies of the new grid.
+        rb_ref = zenith_angle.cos_zenith_angle(t, lon_b.copy(), lat_b.copy())
         self.assertTrue(compare_arrays("cache invalidated", rb, rb_ref, atol=atol, rtol=rtol, verbose=verbose))
 
     def test_single_time(self, atol=1e-4, rtol=1e-4, verbose=False):
         """Single timestamp (0-d array) should still produce a [1, H, W] result."""
         t = np.asarray(dt.datetime(2020, 6, 21, 12, 0, 0, tzinfo=dt.timezone.utc))
         lon_grid, lat_grid = _sample_grid(step=20.0)
-        a = v1.cos_zenith_angle(t, lon_grid, lat_grid)
-        b = v2.cos_zenith_angle(t, lon_grid, lat_grid)
-        self.assertEqual(b.shape, a.shape)
-        self.assertTrue(compare_arrays("single time", a, b, atol=atol, rtol=rtol, verbose=verbose))
+        b = zenith_angle.cos_zenith_angle(t, lon_grid, lat_grid)
+        self.assertEqual(b.shape, (1,) + lon_grid.shape)
+        reference = zenith_angle.cos_zenith_angle(np.atleast_1d(t), lon_grid.copy(), lat_grid.copy())
+        self.assertTrue(compare_arrays("single time", b, reference, atol=atol, rtol=rtol, verbose=verbose))
 
 
 class TestCosZenithAngleEdgeCases(unittest.TestCase):
-    """Edge cases around calendar boundaries and astronomical reference points."""
+    """
+    Edge cases around calendar boundaries and astronomical reference points: the result is
+    well formed there. Its values at these dates are anchored by the pvlib reference points below.
+    """
 
     def _cmp(self, msg, t, lon_grid, lat_grid, atol=1e-4, rtol=1e-4, verbose=False):
-        a = v1.cos_zenith_angle(t, lon_grid, lat_grid)
-        b = v2.cos_zenith_angle(t, lon_grid, lat_grid)
-        self.assertEqual(a.shape, b.shape)
-        self.assertTrue(compare_arrays(msg, a, b, atol=atol, rtol=rtol, verbose=verbose))
-        self.assertTrue(np.all(np.abs(b) <= 1.0 + 1e-5))
+        b = zenith_angle.cos_zenith_angle(t, lon_grid, lat_grid)
+        self.assertEqual(b.shape, (len(t),) + lon_grid.shape, msg)
+        self.assertTrue(np.all(np.isfinite(b)), msg)
+        self.assertTrue(np.all(np.abs(b) <= 1.0 + 1e-5), msg)
         return b
 
     def test_reference_epoch(self, atol=1e-4, rtol=1e-4, verbose=False):
         """2000-01-01 12:00 UTC is the reference epoch — days_from_2000 must be 0."""
         t = np.asarray([dt.datetime(2000, 1, 1, 12, 0, 0, tzinfo=dt.timezone.utc)])
-        self.assertEqual(float(v1._days_from_2000(t)[0]), 0.0)
-        self.assertEqual(float(v2._days_from_2000(t)[0]), 0.0)
+        self.assertEqual(float(zenith_angle._days_from_2000(t)[0]), 0.0)
         lon_grid, lat_grid = _sample_grid(step=20.0)
         self._cmp("reference_epoch", t, lon_grid, lat_grid, atol=atol, rtol=rtol, verbose=verbose)
 
@@ -290,21 +234,21 @@ class TestCosZenithAngleEdgeCases(unittest.TestCase):
         lat = np.array([[0.0, 30.0, -30.0, 60.0]])  # [1, 4]
         lon0 = np.zeros_like(lat)
         lon360 = np.full_like(lat, 360.0)
-        r0 = v2.cos_zenith_angle(t, lon0, lat)
-        r360 = v2.cos_zenith_angle(t, lon360, lat)
+        r0 = zenith_angle.cos_zenith_angle(t, lon0, lat)
+        r360 = zenith_angle.cos_zenith_angle(t, lon360, lat)
         self.assertTrue(compare_arrays("longitude wrap", r0, r360, atol=atol, rtol=rtol, verbose=verbose))
 
     def test_solstice_polar_day_night(self):
         """North pole at June solstice noon → sun up; at December solstice → sun down.
-        South pole is the mirror. This is a physics sanity check independent of v1."""
+        South pole is the mirror. This is a physics sanity check."""
         pole_lat = np.array([[89.9, -89.9]])  # [1, 2]
         lon = np.zeros_like(pole_lat)
 
         june = np.asarray([dt.datetime(2024, 6, 21, 12, 0, 0, tzinfo=dt.timezone.utc)])
         dec = np.asarray([dt.datetime(2024, 12, 21, 12, 0, 0, tzinfo=dt.timezone.utc)])
 
-        cz_june = v2.cos_zenith_angle(june, lon, pole_lat)[0, 0]  # [T, 1, 2]
-        cz_dec = v2.cos_zenith_angle(dec, lon, pole_lat)[0, 0]
+        cz_june = zenith_angle.cos_zenith_angle(june, lon, pole_lat)[0, 0]  # [T, 1, 2]
+        cz_dec = zenith_angle.cos_zenith_angle(dec, lon, pole_lat)[0, 0]
 
         # North pole in June → sun above horizon; in December → below.
         self.assertGreater(float(cz_june[0]), 0.0)  # N pole, June
@@ -321,7 +265,7 @@ class TestCosZenithAngleEdgeCases(unittest.TestCase):
         # Scan longitudes at equator; find the peak.
         lon = np.linspace(-180.0, 180.0, 361)[None, :]
         lat = np.zeros_like(lon)
-        cz = v2.cos_zenith_angle(t, lon, lat)[0, 0]
+        cz = zenith_angle.cos_zenith_angle(t, lon, lat)[0, 0]
         self.assertGreater(float(cz.max()), 0.995)
 
     def test_day_cycle_smoothness(self, atol=1e-4, rtol=1e-4, verbose=False):
@@ -331,40 +275,29 @@ class TestCosZenithAngleEdgeCases(unittest.TestCase):
         t = np.asarray([base + dt.timedelta(hours=h) for h in range(24)])
         lon = np.array([[0.0]])
         lat = np.array([[45.0]])
-        cz_v2 = v2.cos_zenith_angle(t, lon, lat).reshape(-1)
-        cz_v1 = v1.cos_zenith_angle(t, lon, lat).reshape(-1)
-        self.assertTrue(compare_arrays("day_cycle", cz_v1, cz_v2, atol=atol, rtol=rtol, verbose=verbose))
+        cz = zenith_angle.cos_zenith_angle(t, lon, lat).reshape(-1)
         # At 45°N the curve has one maximum per day; d/dh should change sign once
         # or twice (sunrise, sunset). Bound the largest hourly step to rule out
         # discontinuities from a calendar-boundary bug.
-        self.assertLess(float(np.max(np.abs(np.diff(cz_v2)))), 0.3)
+        self.assertLess(float(np.max(np.abs(np.diff(cz)))), 0.3)
 
 
-# NOAA Solar Position Calculator reference values:
-#   https://gml.noaa.gov/grad/solcalc/azel.html
+# External reference values: the cosine of the solar zenith angle from pvlib's NREL SPA
+# (no refraction), an ephemeris independent of makani's. scripts/generate_zenith_reference.py
+# prints them for the points below.
 #
-# To populate an entry: enter the (date, time, lat, lon) in the calculator
-# using the matching UTC offset, record the reported "Solar Zenith" angle
-# in degrees, and set:
-#   expected_cos_z = math.cos(math.radians(solar_zenith_deg))
-#
-# Datetimes are stored with their local tzinfo so the literal value matches
-# the human-readable label; Python's datetime arithmetic operates on
-# instants, so v2 sees identical input regardless of timezone representation.
-#
-# Entries with expected_cos_z=None are skipped — populate at your leisure.
 # The tolerance below (2e-3) covers float32 rounding and SPA-variant noise.
-# v2 uses Spencer-style polynomial reductions; pvlib uses full NREL SPA with
+# makani uses Spencer-style polynomial reductions; pvlib uses full NREL SPA with
 # more terms. The largest disagreements show up at low solar elevation,
 # where trig is most sensitive to tiny angular differences (~0.1° → ~1.5e-3
 # in cos_z). 2e-3 leaves headroom there while still catching any real bug:
-# v2 must agree with NREL SPA to within 0.2% of cos_z across the globe.
+# a date off by a day shifts cos_z by ~6e-3 at the moderate elevations of the
+# calendar-edge points, which is why those sit at 40° of latitude.
 _EDT = dt.timezone(dt.timedelta(hours=-4))  # US east coast, summer DST
 _JST = dt.timezone(dt.timedelta(hours=9))  # Japan, no DST
 _AEDT = dt.timezone(dt.timedelta(hours=11))  # Sydney, southern DST
-_NOAA_REFERENCE = [
-    # (datetime in local zone, lat, lon, expected_cos_z, label)
-    # Generated via tests/generate_zenith_reference.py (pvlib NREL SPA, no refraction).
+_REFERENCE_POINTS = [
+    # (datetime, lat, lon, expected_cos_z, label); datetimes in a local zone keep that zone
     (
         dt.datetime(2024, 6, 21, 12, 0, 0, tzinfo=dt.timezone.utc),
         23.44,
@@ -384,28 +317,43 @@ _NOAA_REFERENCE = [
     (dt.datetime(2024, 7, 4, 14, 0, 0, tzinfo=_EDT), 40.0, -75.0, 0.934621, "summer afternoon, eastern US"),
     (dt.datetime(2024, 1, 15, 15, 0, 0, tzinfo=_JST), 35.0, 139.0, 0.316050, "winter afternoon, tokyo"),
     (dt.datetime(2024, 11, 10, 11, 0, 0, tzinfo=_AEDT), -33.9, 151.2, 0.884919, "spring morning, sydney"),
+    # calendar edges, at moderate solar elevation
+    (dt.datetime(1950, 1, 1, 12, 0, 0, tzinfo=dt.timezone.utc), 40.0, 0.0, 0.453386, "1950, before the epoch"),
+    (dt.datetime(1980, 6, 21, 12, 0, 0, tzinfo=dt.timezone.utc), -40.0, 0.0, 0.447088, "june 1980, before the epoch"),
+    (dt.datetime(1999, 12, 31, 23, 59, 59, tzinfo=dt.timezone.utc), 40.0, 180.0, 0.452786, "last second before 2000"),
+    (dt.datetime(2000, 1, 1, 12, 0, 0, tzinfo=dt.timezone.utc), 40.0, 0.0, 0.453379, "the epoch, 2000-01-01 12:00"),
+    (
+        dt.datetime(2000, 2, 29, 15, 0, 0, tzinfo=dt.timezone.utc),
+        40.0,
+        0.0,
+        0.479044,
+        "feb 29 of the century leap year 2000",
+    ),
+    (dt.datetime(2023, 3, 1, 0, 0, 0, tzinfo=dt.timezone.utc), 40.0, 180.0, 0.670959, "march 1 after feb 28 of 2023"),
+    (dt.datetime(2024, 2, 29, 6, 0, 0, tzinfo=dt.timezone.utc), 40.0, 90.0, 0.670998, "feb 29 of the leap year 2024"),
+    (
+        dt.datetime(2024, 12, 31, 23, 59, 59, tzinfo=dt.timezone.utc),
+        40.0,
+        180.0,
+        0.453904,
+        "day 366 of the leap year 2024",
+    ),
+    (dt.datetime(2025, 1, 1, 12, 0, 0, tzinfo=dt.timezone.utc), 40.0, 0.0, 0.454551, "new year 2025"),
+    (dt.datetime(2100, 1, 1, 0, 0, 0, tzinfo=dt.timezone.utc), 40.0, 180.0, 0.453807, "new year 2100"),
+    (dt.datetime(2100, 6, 21, 12, 0, 0, tzinfo=dt.timezone.utc), -40.0, 0.0, 0.447263, "june solstice 2100"),
 ]
 
 
-@unittest.skipUnless(
-    any(e[3] is not None for e in _NOAA_REFERENCE),
-    "no NOAA reference values populated yet; see _NOAA_REFERENCE",
-)
 class TestExternalReferenceAnchors(unittest.TestCase):
-    """Anchor v2 against an independent ephemeris source (NOAA Solar Position
-    Calculator). Defeats shared-bug invisibility in the v1/v2 cross-checks
-    elsewhere in this file — if both versions share the same astronomical
-    reduction, only an external reference can flag a wrong answer."""
+    """Anchor the zenith angle against an independent ephemeris, pvlib's NREL SPA."""
 
-    def test_noaa_reference_values(self, atol=2e-3, rtol=0.0):
-        for t, lat, lon, expected, label in _NOAA_REFERENCE:
-            if expected is None:
-                continue
+    def test_reference_values(self, atol=2e-3, rtol=0.0):
+        for t, lat, lon, expected, label in _REFERENCE_POINTS:
             with self.subTest(label=label):
                 t_arr = np.asarray([t])
                 lon_arr = np.array([[float(lon)]])
                 lat_arr = np.array([[float(lat)]])
-                got = float(v2.cos_zenith_angle(t_arr, lon_arr, lat_arr).reshape(-1)[0])
+                got = float(zenith_angle.cos_zenith_angle(t_arr, lon_arr, lat_arr).reshape(-1)[0])
                 self.assertTrue(
                     abs(got - expected) <= atol + rtol * abs(expected),
                     f"{label}: cos_z={got}, expected {expected} (|Δ|={abs(got-expected):.2e}, atol={atol})",
@@ -414,8 +362,8 @@ class TestExternalReferenceAnchors(unittest.TestCase):
 
 class TestAnalyticalAnchors(unittest.TestCase):
     """Physics-only anchors that hold by construction — no external ephemeris
-    needed. These catch bugs that would slip past both v1/v2 cross-checks and
-    NOAA-reference checks (e.g. a sign-flipping bug that happens to preserve
+    needed. These catch bugs that would slip past the reference-value
+    checks (e.g. a sign-flipping bug that happens to preserve
     one specific reference value)."""
 
     def test_antipodal_symmetry(self):
@@ -433,8 +381,8 @@ class TestAnalyticalAnchors(unittest.TestCase):
         )
         lat = np.array([[10.0, -30.0, 45.0, -60.0]])
         lon = np.array([[0.0, 90.0, -45.0, 170.0]])
-        a = v2.cos_zenith_angle(t, lon, lat)
-        b = v2.cos_zenith_angle(t, lon + 180.0, -lat)
+        a = zenith_angle.cos_zenith_angle(t, lon, lat)
+        b = zenith_angle.cos_zenith_angle(t, lon + 180.0, -lat)
         self.assertTrue(compare_arrays("antipodal symmetry", a, -b, atol=1e-5, rtol=0.0))
 
     def test_subsolar_point_exists(self):
@@ -453,7 +401,7 @@ class TestAnalyticalAnchors(unittest.TestCase):
                 lon = np.linspace(-180.0, 180.0, 1441)[None, :]
                 lat = np.linspace(-25.0, 25.0, 201)[:, None]
                 lon_grid, lat_grid = np.broadcast_arrays(lon, lat)
-                cz = v2.cos_zenith_angle(t, lon_grid.copy(), lat_grid.copy())
+                cz = zenith_angle.cos_zenith_angle(t, lon_grid.copy(), lat_grid.copy())
                 self.assertGreater(float(cz.max()), 0.9995)
 
     def test_terminator_crossing(self):
@@ -465,7 +413,7 @@ class TestAnalyticalAnchors(unittest.TestCase):
         lon = np.linspace(-180.0, 180.0, 361)[None, :]
         lat = np.linspace(-90.0, 90.0, 181)[:, None]
         lon_grid, lat_grid = np.broadcast_arrays(lon, lat)
-        cz = v2.cos_zenith_angle(t, lon_grid.copy(), lat_grid.copy())[0]
+        cz = zenith_angle.cos_zenith_angle(t, lon_grid.copy(), lat_grid.copy())[0]
         self.assertGreater(float(cz.max()), 0.99)  # subsolar nearby
         self.assertLess(float(cz.min()), -0.99)  # antisolar nearby
         # Continuity: at least one zero-crossing per latitude band away from poles
@@ -477,8 +425,8 @@ class TestAnalyticalAnchors(unittest.TestCase):
 
 
 class TestTimezoneContract(unittest.TestCase):
-    """Pin down how v2.cos_zenith_angle handles naive datetimes, alternate
-    timezones, and numpy.datetime64. v2 is the production path."""
+    """Pin down how cos_zenith_angle handles naive datetimes, alternate
+    timezones, and numpy.datetime64."""
 
     def test_alternate_timezone_matches_utc(self):
         """Same instant expressed in UTC vs +09:00 must give identical cos_z.
@@ -488,8 +436,8 @@ class TestTimezoneContract(unittest.TestCase):
         tokyo = utc.astimezone(dt.timezone(dt.timedelta(hours=9)))
         self.assertEqual(utc, tokyo)
         lon_grid, lat_grid = _sample_grid(step=20.0)
-        a = v2.cos_zenith_angle(np.asarray([utc]), lon_grid, lat_grid)
-        b = v2.cos_zenith_angle(np.asarray([tokyo]), lon_grid, lat_grid)
+        a = zenith_angle.cos_zenith_angle(np.asarray([utc]), lon_grid, lat_grid)
+        b = zenith_angle.cos_zenith_angle(np.asarray([tokyo]), lon_grid, lat_grid)
         self.assertTrue(compare_arrays("tz-aware UTC vs +09:00", a, b, atol=0.0, rtol=0.0))
 
     def test_naive_datetime_contract(self):
@@ -499,9 +447,9 @@ class TestTimezoneContract(unittest.TestCase):
         aware = np.asarray([dt.datetime(2024, 6, 21, 12, 0, 0, tzinfo=dt.timezone.utc)])
         naive = np.asarray([dt.datetime(2024, 6, 21, 12, 0, 0)])
         lon_grid, lat_grid = _sample_grid(step=20.0)
-        aware_result = v2.cos_zenith_angle(aware, lon_grid, lat_grid)
+        aware_result = zenith_angle.cos_zenith_angle(aware, lon_grid, lat_grid)
         try:
-            naive_result = v2.cos_zenith_angle(naive, lon_grid, lat_grid)
+            naive_result = zenith_angle.cos_zenith_angle(naive, lon_grid, lat_grid)
         except TypeError:
             return  # clean rejection is acceptable
         self.assertTrue(compare_arrays("naive == UTC", aware_result, naive_result, atol=1e-6, rtol=0.0))
@@ -513,11 +461,11 @@ class TestTimezoneContract(unittest.TestCase):
         aware = np.asarray([dt.datetime(2024, 6, 21, 12, 0, 0, tzinfo=dt.timezone.utc)])
         dt64 = np.array(["2024-06-21T12:00:00"], dtype="datetime64[s]")
         lon_grid, lat_grid = _sample_grid(step=20.0)
-        a = v2.cos_zenith_angle(aware, lon_grid, lat_grid)
+        a = zenith_angle.cos_zenith_angle(aware, lon_grid, lat_grid)
         try:
-            b = v2.cos_zenith_angle(dt64, lon_grid, lat_grid)
+            b = zenith_angle.cos_zenith_angle(dt64, lon_grid, lat_grid)
         except TypeError:
-            self.skipTest("datetime64 input not supported by v2")
+            self.skipTest("datetime64 input not supported")
             return
         self.assertTrue(compare_arrays("datetime64 == aware UTC", a, b, atol=1e-6, rtol=0.0))
 
