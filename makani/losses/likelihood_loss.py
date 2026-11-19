@@ -119,11 +119,12 @@ class EnsembleNLLLoss(GeometricBaseLoss):
 
         likelihood = _log_likelihood_kernel(observations, forecasts, self.eps)
 
-        # perform spatial average of log likelihood score
+        # perform spatial average of log likelihood score, with the weights in the dtype of the score, float32 at least
+        quad_weight_split = self.quad_weight_split.to(dtype=torch.promote_types(likelihood.dtype, torch.float32))
         if spatial_weights is not None:
-            likelihood = torch.sum(likelihood * self.quad_weight_split * spatial_weights_split, dim=-1)
+            likelihood = torch.sum(likelihood * quad_weight_split * spatial_weights_split, dim=-1)
         else:
-            likelihood = torch.sum(likelihood * self.quad_weight_split, dim=-1)
+            likelihood = torch.sum(likelihood * quad_weight_split, dim=-1)
         if self.ensemble_distributed:
             likelihood = reduce_from_parallel_region(likelihood, "ensemble")
 

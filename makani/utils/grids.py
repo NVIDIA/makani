@@ -13,6 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
+from dataclasses import dataclass
+from typing import Tuple
+
 import torch
 
 import torch_harmonics as th
@@ -23,59 +27,97 @@ if not hasattr(th, "as_grid"):
         f"{getattr(th, '__version__', '?')} does not have; install the version pinned in pyproject.toml"
     )
 
-from torch_harmonics.quadrature import legendre_gauss_weights, clenshaw_curtiss_weights
+
+from torch_harmonics.quadrature import legendre_gauss_weights
 
 from makani.distributed import comm
 from torch_harmonics.distributed import compute_split_shapes
 from makani.distributed.mappings import reduce_from_parallel_region
 
 
-def grid_to_quadrature_rule(grid_type):
-
-    grid_to_quad_dict = {
-        "euclidean": "uniform",
-        "equiangular": "naive",
-        "legendre-gauss": "legendre-gauss",
-        "clenshaw-curtiss": "clenshaw-curtiss",
-        "weatherbench2": "weatherbench2",
-    }
-
-    if grid_type not in grid_to_quad_dict.keys():
-        raise NotImplementedError(f"Grid type {grid_type} does not have a quadrature rule")
-    else:
-        return grid_to_quad_dict[grid_type]
+#: The grid type of a field in the plane rather than on the sphere.
+PLANAR_GRID_TYPE = "euclidean"
 
 
-#: makani grid types the spherical harmonic transforms run on. The other grid
-#: types makani knows (clenshaw-curtiss, weatherbench2) only name a quadrature
-#: rule for losses and metrics, and euclidean is not on the sphere at all.
-SHT_GRID_TYPES = ("equiangular", "legendre-gauss")
+@dataclass(frozen=True)
+class PlanarGrid:
+    r"""
+    A regular grid in the plane, the ``euclidean`` grid type.
+
+    Not a grid on the sphere, so no spherical layer takes it. Its quadrature weights are uniform,
+    normalized to :math:`4\pi` like the weights of a grid on the sphere, so that a loss or a metric
+    reads the same on either.
+    """
+
+    nlat: int
+    nlon: int
+
+    @property
+    def shape(self) -> Tuple[int, int]:
+        return (self.nlat, self.nlon)
+
+    @property
+    def quad_weights(self) -> torch.Tensor:
+        return torch.full((self.nlat * self.nlon,), 4.0 * math.pi / (self.nlat * self.nlon), dtype=torch.float64)
 
 
-def sht_grid(img_shape, grid_type):
-    """The torch-harmonics grid descriptor for a field of this shape and grid type.
+def make_grid(img_shape: Tuple[int, int], grid_type: str):
+    """
+    The grid of a field of this shape and grid type.
 
-    torch-harmonics layers take a descriptor instead of ``(nlat, nlon, grid)``.
-    makani still passes the shape and the grid type name around, and converts
-    here, at the point where a layer is built.
+    A grid type names a regular grid of torch-harmonics, whose latitude rings all carry the same
+    number of longitudes (``equiangular``, ``legendre-gauss``, ``lobatto``, ``fejer1``,
+    ``trapezoidal``), or ``euclidean`` for a field in the plane. Other grids, such as HEALPix, are
+    refused, as makani supports none of them yet.
 
     Parameters
     ----------
     img_shape : (int, int)
         Global ``(nlat, nlon)`` of the field.
     grid_type : str
-        One of :data:`SHT_GRID_TYPES`.
+        The grid type.
+
+    Returns
+    -------
+    torch_harmonics.RegularGridS2 or PlanarGrid
+    """
+    nlat, nlon = (int(n) for n in img_shape)
+    if grid_type == PLANAR_GRID_TYPE:
+        return PlanarGrid(nlat, nlon)
+    if grid_type not in regular_grid_types():
+        raise ValueError(
+            f"Grid type {grid_type} is not supported; makani supports the regular grids of torch-harmonics, "
+            f"{', '.join(regular_grid_types())}, and {PLANAR_GRID_TYPE} for a field in the plane"
+        )
+    return th.as_grid(grid_type, nlat=nlat, nlon=nlon)
+
+
+def regular_grid_types() -> Tuple[str, ...]:
+    """The grid types of the regular grids of torch-harmonics, the grids on the sphere makani supports."""
+    types = []
+    pending = [th.RegularGridS2]
+    while pending:
+        cls = pending.pop()
+        pending.extend(cls.__subclasses__())
+        grid_type = getattr(cls, "grid_type", None)
+        if isinstance(grid_type, str) and grid_type in th.grid_types():
+            types.append(grid_type)
+    return tuple(t for t in th.grid_types() if t in types)
+
+
+def sht_grid(img_shape, grid_type):
+    """
+    The grid of a field on the sphere, for a spherical harmonic transform.
+
+    Like :func:`make_grid`, and refuses the plane, where there are no spherical harmonics.
 
     Returns
     -------
     torch_harmonics.RegularGridS2
     """
-    if grid_type not in SHT_GRID_TYPES:
-        raise NotImplementedError(
-            f"Grid type {grid_type} has no spherical harmonic transform; expected one of {SHT_GRID_TYPES}"
-        )
-    nlat, nlon = img_shape
-    return th.as_grid(grid_type, nlat=int(nlat), nlon=int(nlon))
+    if grid_type == PLANAR_GRID_TYPE:
+        raise ValueError(f"A field on a {PLANAR_GRID_TYPE} grid lies in the plane and has no spherical harmonics")
+    return make_grid(img_shape, grid_type)
 
 
 def compute_spherical_bandlimit(img_shape, grid_type):
@@ -138,48 +180,33 @@ class GridConverter(torch.nn.Module):
 
 
 class GridQuadrature(torch.nn.Module):
-    def __init__(
-        self, quadrature_rule, img_shape, crop_shape=None, crop_offset=(0, 0), normalize=False, distributed=False
-    ):
+    r"""
+    Integrates fields over (a crop of) a grid, with the quadrature weights of the grid.
+
+    The weights are those of the grid, :attr:`torch_harmonics.GridS2.quad_weights` on the sphere:
+    Clenshaw-Curtis on an equiangular grid, Gauss-Legendre on a Gaussian one, uniform in the plane.
+    They sum to :math:`4\pi`, or to one with ``normalize``.
+
+    Parameters
+    ----------
+    grid : torch_harmonics.RegularGridS2 or PlanarGrid
+        The global grid, see :func:`make_grid`.
+    crop_shape, crop_offset : (int, int), optional
+        The crop of the grid to integrate over; the whole grid by default.
+    normalize : bool, optional
+        Divide the weights by :math:`4\pi`.
+    distributed : bool, optional
+        Hold this rank's piece of the crop under spatial parallelism, and reduce over the ranks.
+    """
+
+    def __init__(self, grid, crop_shape=None, crop_offset=(0, 0), normalize=False, distributed=False):
         super().__init__()
 
         self.distributed = comm.is_distributed("spatial") and distributed
+        img_shape = grid.shape
         crop_shape = img_shape if crop_shape is None else crop_shape
 
-        if quadrature_rule == "naive":
-            jacobian = torch.clamp(torch.sin(torch.linspace(0, torch.pi, img_shape[0])), min=0.0)
-            dtheta = torch.pi / img_shape[0]
-            dlambda = 2 * torch.pi / img_shape[1]
-            dA = dlambda * dtheta
-            quad_weight = dA * jacobian.unsqueeze(1)
-            quad_weight = quad_weight.tile(1, img_shape[1])
-            # numerical precision can be an issue here, make sure it sums to 4pi:
-            quad_weight = quad_weight * (4.0 * torch.pi) / torch.sum(quad_weight)
-        elif quadrature_rule == "clenshaw-curtiss":
-            cost, weights = clenshaw_curtiss_weights(img_shape[0], -1, 1)
-            dlambda = 2 * torch.pi / img_shape[1]
-            quad_weight = dlambda * weights.unsqueeze(1)
-            quad_weight = quad_weight.tile(1, img_shape[1])
-        elif quadrature_rule == "legendre-gauss":
-            cost, weights = legendre_gauss_weights(img_shape[0], -1, 1)
-            dlambda = 2 * torch.pi / img_shape[1]
-            quad_weight = dlambda * weights.unsqueeze(1)
-            quad_weight = quad_weight.tile(1, img_shape[1])
-        elif quadrature_rule == "weatherbench2":
-            # compute the 'integrated area weight' that weatherbench2 uses
-            lats = torch.linspace(0, torch.pi, img_shape[0])
-            cell_bounds = torch.cat([torch.as_tensor([0]), (lats[:-1] + lats[1:]) / 2, torch.as_tensor([torch.pi])])
-            jacobian = torch.cos(cell_bounds[:-1]) - torch.cos(cell_bounds[1:])
-            dlambda = 2 * torch.pi / img_shape[1]
-            quad_weight = dlambda * jacobian.unsqueeze(1)
-            quad_weight = quad_weight.tile(1, img_shape[1])
-        elif quadrature_rule == "uniform":
-            quad_weight = torch.ones((img_shape[0],)).unsqueeze(1)
-            quad_weight = quad_weight.tile(1, img_shape[1])
-            # normalize to 4pi
-            quad_weight = 4.0 * torch.pi * quad_weight / torch.sum(quad_weight)
-        else:
-            raise ValueError(f"Unknown quadrature rule {quadrature_rule}")
+        quad_weight = grid.quad_weights.reshape(img_shape)
 
         # apply normalization
         if normalize:

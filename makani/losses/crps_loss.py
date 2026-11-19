@@ -380,11 +380,12 @@ class CRPSLoss(GeometricBaseLoss):
             else:
                 raise ValueError(f"Unknown CRPS crps_type {self.crps_type}")
 
-        # perform ensemble and spatial average of crps score
+        # perform ensemble and spatial average of crps score, with the weights in the dtype of the score, float32 at least
+        quad_weight_split = self.quad_weight_split.to(dtype=torch.promote_types(crps.dtype, torch.float32))
         if spatial_weights is not None:
-            crps = torch.sum(crps * self.quad_weight_split * spatial_weights_split, dim=-1)
+            crps = torch.sum(crps * quad_weight_split * spatial_weights_split, dim=-1)
         else:
-            crps = torch.sum(crps * self.quad_weight_split, dim=-1)
+            crps = torch.sum(crps * quad_weight_split, dim=-1)
 
         # since we split spatial dim into ensemble dim, we need to do an ensemble sum as well
         if self.ensemble_distributed:
@@ -783,11 +784,12 @@ class GradientCRPSLoss(GradientBaseLoss):
             else:
                 raise ValueError(f"Unknown CRPS crps_type {self.crps_type}")
 
-        # perform ensemble and spatial average of crps score
+        # perform ensemble and spatial average of crps score, with the weights in the dtype of the score, float32 at least
+        quad_weight_split = self.quad_weight_split.to(dtype=torch.promote_types(crps.dtype, torch.float32))
         if spatial_weights is not None:
-            crps = torch.sum(crps * self.quad_weight_split * spatial_weights_split, dim=-1)
+            crps = torch.sum(crps * quad_weight_split * spatial_weights_split, dim=-1)
         else:
-            crps = torch.sum(crps * self.quad_weight_split, dim=-1)
+            crps = torch.sum(crps * quad_weight_split, dim=-1)
 
         # since we split spatial dim into ensemble dim, we need to do an ensemble sum as well
         if self.ensemble_distributed:
@@ -965,11 +967,12 @@ class VortDivCRPSLoss(VortDivBaseLoss):
             else:
                 raise ValueError(f"Unknown CRPS crps_type {self.crps_type}")
 
-        # perform ensemble and spatial average of crps score
+        # perform ensemble and spatial average of crps score, with the weights in the dtype of the score, float32 at least
+        quad_weight_split = self.quad_weight_split.to(dtype=torch.promote_types(crps.dtype, torch.float32))
         if spatial_weights is not None:
-            crps = torch.sum(crps * self.quad_weight_split * spatial_weights_split, dim=-1)
+            crps = torch.sum(crps * quad_weight_split * spatial_weights_split, dim=-1)
         else:
-            crps = torch.sum(crps * self.quad_weight_split, dim=-1)
+            crps = torch.sum(crps * quad_weight_split, dim=-1)
 
         # since we split spatial dim into ensemble dim, we need to do an ensemble sum as well
         if self.ensemble_distributed:
@@ -1195,11 +1198,12 @@ class KernelScoreLoss(GeometricBaseLoss):
             else:
                 raise ValueError(f"Unknown CRPS crps_type {self.crps_type}")
 
-        # perform ensemble and spatial average of crps score
+        # perform ensemble and spatial average of crps score, with the weights in the dtype of the score, float32 at least
+        quad_weight_split = self.quad_weight_split.to(dtype=torch.promote_types(crps.dtype, torch.float32))
         if spatial_weights is not None:
-            crps = torch.sum(crps * self.quad_weight_split * spatial_weights_split, dim=-1)
+            crps = torch.sum(crps * quad_weight_split * spatial_weights_split, dim=-1)
         else:
-            crps = torch.sum(crps * self.quad_weight_split, dim=-1)
+            crps = torch.sum(crps * quad_weight_split, dim=-1)
 
         # since we split spatial dim into ensemble dim, we need to do an ensemble sum as well
         if self.ensemble_distributed:

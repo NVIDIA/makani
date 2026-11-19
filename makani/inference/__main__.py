@@ -107,9 +107,6 @@ if __name__ == "__main__":
         help="Dataloader that reads the initial conditions and the verification. Both read the same samples; DALI reads them in its own worker processes and hands them over on the GPU, and requires nvidia-dali.",
     )
     parser.add_argument(
-        "--wb2_compatible", action="store_true", help="Makes metrics and quadratures compatible with weatherbench2."
-    )
-    parser.add_argument(
         "--enable_gds",
         action="store_true",
         help="Enable GPUDirect Storage. Opens the output file with the HDF5 GDS driver (requires HDF5 built with the GDS VFD and a cuFile-compatible GPU buffer).",
@@ -262,7 +259,6 @@ if __name__ == "__main__":
                     start_date=args.start_date,
                     end_date=args.end_date,
                     date_step=args.date_step,
-                    wb2_compatible=args.wb2_compatible,
                     enable_odirect=params["enable_odirect"],
                     odirect_alignment=params["odirect_alignment"],
                     enable_gds=args.enable_gds,
@@ -284,7 +280,6 @@ if __name__ == "__main__":
                         start_date=args.start_date,
                         end_date=args.end_date,
                         date_step=args.date_step,
-                        wb2_compatible=args.wb2_compatible,
                         enable_odirect=params["enable_odirect"],
                         odirect_alignment=params["odirect_alignment"],
                         enable_gds=args.enable_gds,
@@ -303,7 +298,6 @@ if __name__ == "__main__":
             start_date=args.start_date,
             end_date=args.end_date,
             date_step=args.date_step,
-            wb2_compatible=args.wb2_compatible,
             enable_odirect=params["enable_odirect"],
             odirect_alignment=params["odirect_alignment"],
             enable_gds=args.enable_gds,

@@ -32,7 +32,8 @@ from makani.datasets.parallel import MPI, get_comm
 import json
 
 # we need that for quadrature
-from makani.utils.grids import GridQuadrature
+from makani.utils.grids import GridQuadrature, make_grid
+from makani.data.grid_types import canonical_grid_type
 
 
 def allgather_safe(comm, obj):
@@ -203,7 +204,6 @@ def compute_histograms(
     output_dir: str,
     stats_dir: str,
     metadata_file: str,
-    quadrature_rule: str,
     nbins: Optional[int] = 100,
     batch_size: Optional[int] = 16,
 ):
@@ -235,8 +235,6 @@ def compute_histograms(
         Example: coords = dict(lat=[-90.0, ..., 90.], lon=[0, ..., 360], channel=["t2m", "u500", "v500", ...])
         Note that the number of entries in coords["lat"] has to match dimension -2 of the dataset, and coords["lon"] dimension -1.
         The length of the channel names has to match dimension -3 (or dimension 1, which is the same) of the dataset.
-    quadrature_rule : str
-        Which spherical quadrature rule to use for the spatial averages. Supported are "naive", "clenshaw-curtiss" and "legendre-gauss".
     nbins : int
         Number of bins used for the histogram. If a number < 1 is specified, the number of bins is automatically computed based on the data.
     batch_size : int
@@ -254,6 +252,7 @@ def compute_histograms(
     data_shape = None
     num_samples = None
     wind_channels = None
+    grid_type = None
     norm = None
     bias = None
     if comm_rank == 0:
@@ -273,6 +272,7 @@ def compute_histograms(
             metadata = json.load(f)
 
         channel_names = metadata["coords"]["channel"]
+        grid_type = canonical_grid_type(metadata["coords"]["grid_type"], source=metadata_file)
         wind_channels = get_wind_channels(channel_names)
 
         if stats_dir is not None:
@@ -284,15 +284,11 @@ def compute_histograms(
     num_samples = comm.bcast(num_samples, root=0)
     data_shape = comm.bcast(data_shape, root=0)
     wind_channels = comm.bcast(wind_channels, root=0)
+    grid_type = comm.bcast(grid_type, root=0)
     if norm is not None:
         norm = comm.bcast(norm, root=0)
     if bias is not None:
         bias = comm.bcast(bias, root=0)
-
-    # DEBUG
-    filelist = filelist[:2]
-    num_samples = num_samples[:2]
-    # DEBUG
 
     # get file offsets
     num_samples_total = sum(num_samples)
@@ -301,7 +297,7 @@ def compute_histograms(
 
     # quadrature:
     quadrature_weights = (
-        GridQuadrature(quadrature_rule, (height, width), crop_shape=None, crop_offset=(0, 0), normalize=True)
+        GridQuadrature(make_grid((height, width), grid_type), crop_shape=None, crop_offset=(0, 0), normalize=True)
         .quad_weight.cpu()
         .numpy()
     )
@@ -463,7 +459,6 @@ def main(args):
         output_dir=args.output_dir,
         stats_dir=args.stats_dir,
         metadata_file=args.metadata_file,
-        quadrature_rule=args.quadrature_rule,
         nbins=args.nbins,
         batch_size=args.batch_size,
     )
@@ -478,13 +473,6 @@ if __name__ == "__main__":
     parser.add_argument("--metadata_file", type=str, help="File containing dataset metadata.", required=True)
     parser.add_argument("--output_dir", type=str, help="Directory for saving stats files.", required=True)
     parser.add_argument("--stats_dir", type=str, default=None, help="Directory with stats normalization files.")
-    parser.add_argument(
-        "--quadrature_rule",
-        type=str,
-        default="naive",
-        choices=["naive", "clenshaw-curtiss", "legendre-gauss"],
-        help="Specify quadrature_rule for spatial averages.",
-    )
     parser.add_argument("--nbins", type=int, default=100, help="Number of bins for histograms")
     parser.add_argument(
         "--batch_size",

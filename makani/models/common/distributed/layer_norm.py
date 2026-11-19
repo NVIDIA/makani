@@ -25,7 +25,7 @@ from makani.distributed import comm
 from makani.distributed.mappings import gather_from_parallel_region, copy_to_parallel_region
 
 # quadrature stuff
-from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature
+from makani.utils.grids import GridQuadrature, make_grid
 
 # the normalization kernels of the serial layers
 from makani.models.common.layer_norm import _normalize_kernel, _normalize_transform_kernel
@@ -167,13 +167,9 @@ class DistributedGeometricInstanceNormS2(DistributedInstanceNorm2d):
     ):
         super().__init__(num_features, eps, affine)
 
-        # set up quadrature rule:
-        quadrature_rule = grid_to_quadrature_rule(grid_type)
-
         # we only need the weights
         quad_weight = GridQuadrature(
-            quadrature_rule,
-            img_shape=img_shape,
+            make_grid(img_shape, grid_type),
             crop_shape=crop_shape,
             crop_offset=crop_offset,
             normalize=True,
@@ -188,13 +184,11 @@ class DistributedGeometricInstanceNormS2(DistributedInstanceNorm2d):
         # extract shapes
         B, C, _, _ = x.shape
 
-        # compute var, mean locally: those have the shapes [B, C]
-        count = torch.tile(torch.sum(self.quad_weight, dim=(-2, -1), keepdim=False), (B, C))
-        mean = torch.sum(x * self.quad_weight, dim=(-2, -1), keepdim=False) / count
-        var = (
-            torch.sum(torch.square(x - mean.reshape(B, C, 1, 1)) * self.quad_weight, dim=(-2, -1), keepdim=False)
-            / count
-        )
+        # compute var, mean locally: those have the shapes [B, C]; the weights in the dtype of x, as in the serial norm
+        quad_weight = self.quad_weight.to(dtype=x.dtype)
+        count = torch.tile(torch.sum(quad_weight, dim=(-2, -1), keepdim=False), (B, C))
+        mean = torch.sum(x * quad_weight, dim=(-2, -1), keepdim=False) / count
+        var = torch.sum(torch.square(x - mean.reshape(B, C, 1, 1)) * quad_weight, dim=(-2, -1), keepdim=False) / count
 
         # compute welford variance
         var, mean, _ = distributed_welford_variance(var, mean, count, "spatial")

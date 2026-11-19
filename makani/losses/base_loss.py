@@ -24,7 +24,7 @@ import torch.nn as nn
 import torch_harmonics as th
 import torch_harmonics.distributed as thd
 
-from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature, compute_spherical_bandlimit, sht_grid
+from makani.utils.grids import GridQuadrature, make_grid, compute_spherical_bandlimit, sht_grid
 from makani.distributed import comm
 from makani.data.features import get_wind_channels
 from makani.distributed.mappings import reduce_from_parallel_region
@@ -330,11 +330,8 @@ class GeometricBaseLoss(nn.Module, metaclass=ABCMeta):
         self.channel_names = channel_names
         self.spatial_distributed = comm.is_distributed("spatial") and spatial_distributed
 
-        # get the quadrature rule for the corresponding grid
-        quadrature_rule = grid_to_quadrature_rule(grid_type)
         self.quadrature = GridQuadrature(
-            quadrature_rule,
-            img_shape=self.img_shape,
+            make_grid(self.img_shape, grid_type),
             crop_shape=self.crop_shape,
             crop_offset=self.crop_offset,
             normalize=True,
@@ -504,11 +501,8 @@ class VortDivBaseLoss(nn.Module, metaclass=ABCMeta):
             self.vsht = th.RealVectorSHT(sht_grid(img_shape, grid_type), lmax=lmax, mmax=lmax)
             self.isht = th.InverseRealVectorSHT(self.vsht.grid, lmax=lmax, mmax=lmax)
 
-        # get the quadrature rule for the corresponding grid
-        quadrature_rule = grid_to_quadrature_rule(grid_type)
         self.quadrature = GridQuadrature(
-            quadrature_rule,
-            img_shape=self.img_shape,
+            make_grid(self.img_shape, grid_type),
             crop_shape=self.crop_shape,
             crop_offset=self.crop_offset,
             normalize=True,
@@ -585,11 +579,8 @@ class GradientBaseLoss(nn.Module, metaclass=ABCMeta):
             self.sht = th.RealSHT(sht_grid(img_shape, grid_type), lmax=lmax, mmax=lmax)
             self.ivsht = th.InverseRealVectorSHT(self.sht.grid, lmax=lmax, mmax=lmax)
 
-        # get the quadrature rule for the corresponding grid
-        quadrature_rule = grid_to_quadrature_rule(grid_type)
         self.quadrature = GridQuadrature(
-            quadrature_rule,
-            img_shape=self.img_shape,
+            make_grid(self.img_shape, grid_type),
             crop_shape=self.crop_shape,
             crop_offset=self.crop_offset,
             normalize=True,

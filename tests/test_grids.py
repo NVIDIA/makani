@@ -22,8 +22,10 @@ import numpy as np
 import torch
 from parameterized import parameterized
 
-from makani.data.grid_types import expected_latitudes, matching_grid_types, verify_grid_type
-from makani.utils.grids import grid_to_quadrature_rule, GridConverter, GridQuadrature, sht_grid
+import torch_harmonics as th
+
+from makani.data.grid_types import canonical_grid_type, expected_latitudes, matching_grid_types, verify_grid_type
+from makani.utils.grids import GridConverter, GridQuadrature, PlanarGrid, make_grid, regular_grid_types, sht_grid
 from makani.models.common.bandlimit import BandLimitMask
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
@@ -34,27 +36,42 @@ _H, _W = 64, 128
 
 
 # ---------------------------------------------------------------------------
-# grid_to_quadrature_rule
+# make_grid
 # ---------------------------------------------------------------------------
 
+#: every grid type makani builds a grid for
+_GRID_TYPES = ["equiangular", "legendre-gauss", "lobatto", "fejer1", "trapezoidal", "euclidean"]
 
-class TestGridToQuadratureRule(unittest.TestCase):
 
-    @parameterized.expand(
-        [
-            ("euclidean", "uniform"),
-            ("equiangular", "naive"),
-            ("legendre-gauss", "legendre-gauss"),
-            ("clenshaw-curtiss", "clenshaw-curtiss"),
-            ("weatherbench2", "weatherbench2"),
-        ]
-    )
-    def test_known_grid_types(self, grid_type, expected_rule):
-        self.assertEqual(grid_to_quadrature_rule(grid_type), expected_rule)
+class TestMakeGrid(unittest.TestCase):
+    """The grid types are the regular grids of torch-harmonics, and the plane."""
 
-    def test_unknown_grid_type_raises(self):
-        with self.assertRaises(NotImplementedError):
-            grid_to_quadrature_rule("unknown_grid")
+    def test_the_regular_grids_of_torch_harmonics(self):
+        self.assertEqual(
+            set(regular_grid_types()), {"equiangular", "legendre-gauss", "lobatto", "fejer1", "trapezoidal"}
+        )
+
+    @parameterized.expand([(t,) for t in _GRID_TYPES if t != "euclidean"])
+    def test_a_regular_grid_on_the_sphere(self, grid_type):
+        grid = make_grid((_H, _W), grid_type)
+        self.assertIsInstance(grid, th.RegularGridS2)
+        self.assertEqual(grid.grid_type, grid_type)
+        self.assertEqual(grid.shape, (_H, _W))
+        sgrid = sht_grid((_H, _W), grid_type)
+        self.assertEqual((type(sgrid), sgrid.shape), (type(grid), grid.shape))
+
+    def test_the_plane(self):
+        grid = make_grid((_H, _W), "euclidean")
+        self.assertEqual(grid, PlanarGrid(_H, _W))
+        self.assertEqual(grid.shape, (_H, _W))
+        with self.assertRaisesRegex(ValueError, "no spherical harmonics"):
+            sht_grid((_H, _W), "euclidean")
+
+    @parameterized.expand([("healpix",), ("clenshaw-curtiss",), ("weatherbench2",), ("cubed-sphere",)])
+    def test_other_grid_types_are_refused(self, grid_type):
+        # healpix is a grid of torch-harmonics, but not a regular one; the others name no grid
+        with self.assertRaisesRegex(ValueError, "not supported"):
+            make_grid((_H, _W), grid_type)
 
 
 # ---------------------------------------------------------------------------
@@ -136,84 +153,52 @@ class TestGridQuadrature(unittest.TestCase):
 
     # --- weight correctness --------------------------------------------------
 
-    @parameterized.expand(
-        [
-            ("naive",),
-            ("clenshaw-curtiss",),
-            ("legendre-gauss",),
-            ("weatherbench2",),
-            ("uniform",),
-        ]
-    )
-    def test_weights_sum_to_4pi(self, quadrature_rule):
+    @parameterized.expand([(t,) for t in _GRID_TYPES])
+    def test_weights_sum_to_4pi(self, grid_type):
         """Quadrature weights must integrate the constant function 1 to 4π (unit-sphere area)."""
-        gq = GridQuadrature(quadrature_rule, img_shape=(_H, _W))
+        gq = GridQuadrature(make_grid((_H, _W), grid_type))
         total = gq.quad_weight.sum().item()
         self.assertAlmostEqual(
             total,
             4.0 * math.pi,
             delta=1e-4,
-            msg=f"{quadrature_rule}: weights sum to {total:.6f}, expected 4π≈{4*math.pi:.6f}",
+            msg=f"{grid_type}: weights sum to {total:.6f}, expected 4π≈{4*math.pi:.6f}",
         )
 
-    @parameterized.expand(
-        [
-            ("naive",),
-            ("clenshaw-curtiss",),
-            ("legendre-gauss",),
-            ("weatherbench2",),
-            ("uniform",),
-        ]
-    )
-    def test_weights_sum_to_one_when_normalized(self, quadrature_rule):
+    @parameterized.expand([(t,) for t in _GRID_TYPES])
+    def test_weights_sum_to_one_when_normalized(self, grid_type):
         """With normalize=True the weights must sum to 1."""
-        gq = GridQuadrature(quadrature_rule, img_shape=(_H, _W), normalize=True)
+        gq = GridQuadrature(make_grid((_H, _W), grid_type), normalize=True)
         total = gq.quad_weight.sum().item()
         self.assertAlmostEqual(
             total,
             1.0,
             delta=1e-5,
-            msg=f"{quadrature_rule} normalized: weights sum to {total:.8f}, expected 1.0",
+            msg=f"{grid_type} normalized: weights sum to {total:.8f}, expected 1.0",
         )
 
-    @parameterized.expand(
-        [
-            ("naive",),
-            ("clenshaw-curtiss",),
-            ("legendre-gauss",),
-            ("weatherbench2",),
-            ("uniform",),
-        ]
-    )
-    def test_weights_all_non_negative(self, quadrature_rule):
+    @parameterized.expand([(t,) for t in _GRID_TYPES])
+    def test_weights_all_non_negative(self, grid_type):
         """All quadrature weights must be non-negative."""
-        gq = GridQuadrature(quadrature_rule, img_shape=(_H, _W))
+        gq = GridQuadrature(make_grid((_H, _W), grid_type))
         self.assertTrue(
             (gq.quad_weight >= 0).all(),
-            msg=f"{quadrature_rule}: negative weights found",
+            msg=f"{grid_type}: negative weights found",
         )
 
     # --- forward pass --------------------------------------------------------
 
-    @parameterized.expand(
-        [
-            ("naive",),
-            ("clenshaw-curtiss",),
-            ("legendre-gauss",),
-            ("weatherbench2",),
-            ("uniform",),
-        ]
-    )
-    def test_forward_constant_one_integrates_to_4pi(self, quadrature_rule, verbose=False):
-        """Integrating f≡1 over the sphere yields 4π for every quadrature rule."""
-        gq = GridQuadrature(quadrature_rule, img_shape=(_H, _W))
+    @parameterized.expand([(t,) for t in _GRID_TYPES])
+    def test_forward_constant_one_integrates_to_4pi(self, grid_type, verbose=False):
+        """Integrating f≡1 yields 4π on every grid."""
+        gq = GridQuadrature(make_grid((_H, _W), grid_type))
         B, C = 2, 3
         x = torch.ones(B, C, _H, _W)
         out = gq(x)
         expected = torch.full((B, C), 4.0 * math.pi)
         self.assertTrue(
             compare_tensors(
-                f"constant integral ({quadrature_rule})",
+                f"constant integral ({grid_type})",
                 out,
                 expected,
                 atol=1e-3,
@@ -224,14 +209,14 @@ class TestGridQuadrature(unittest.TestCase):
 
     def test_forward_output_shape(self):
         """forward() reduces the spatial (H, W) dims and returns (B, C)."""
-        gq = GridQuadrature("legendre-gauss", img_shape=(_H, _W))
+        gq = GridQuadrature(make_grid((_H, _W), "legendre-gauss"))
         x = torch.randn(4, 5, _H, _W)
         out = gq(x)
         self.assertEqual(out.shape, (4, 5))
 
     def test_forward_linearity(self, verbose=False):
         """forward() must be linear: Q(a*x + b*y) == a*Q(x) + b*Q(y)."""
-        gq = GridQuadrature("legendre-gauss", img_shape=(_H, _W))
+        gq = GridQuadrature(make_grid((_H, _W), "legendre-gauss"))
         set_seed(333)
         x = torch.randn(2, 3, _H, _W)
         y = torch.randn(2, 3, _H, _W)
@@ -242,17 +227,26 @@ class TestGridQuadrature(unittest.TestCase):
 
     # --- construction edge cases ---------------------------------------------
 
-    def test_unknown_rule_raises(self):
-        """An unknown quadrature rule raises ValueError."""
-        with self.assertRaises(ValueError):
-            GridQuadrature("unknown_rule", img_shape=(_H, _W))
+    @parameterized.expand([(t,) for t in _GRID_TYPES])
+    def test_the_weights_are_those_of_the_grid(self, grid_type):
+        grid = make_grid((_H, _W), grid_type)
+        gq = GridQuadrature(grid)
+        self.assertTrue(torch.equal(gq.quad_weight.reshape(-1), grid.quad_weights.reshape(-1).to(gq.quad_weight.dtype)))
+
+    @parameterized.expand([("equiangular",), ("legendre-gauss",)])
+    def test_smooth_fields_integrate_accurately(self, grid_type):
+        # the mean of cos^2 of the latitude over the sphere is 2/3; Clenshaw-Curtis and Gauss-Legendre get it to round-off
+        grid = make_grid((_H, _W), grid_type)
+        gq = GridQuadrature(grid, normalize=True)
+        lat = torch.pi / 2 - torch.as_tensor(grid.colats, dtype=torch.float64)
+        field = torch.cos(lat).square().reshape(1, 1, -1, 1).expand(1, 1, _H, _W)
+        self.assertAlmostEqual(gq(field).item(), 2.0 / 3.0, places=10)
 
     def test_crop_reduces_total_weight(self):
         """A spatially cropped quadrature has strictly less total weight than the full sphere."""
-        gq_full = GridQuadrature("legendre-gauss", img_shape=(_H, _W))
+        gq_full = GridQuadrature(make_grid((_H, _W), "legendre-gauss"))
         gq_crop = GridQuadrature(
-            "legendre-gauss",
-            img_shape=(_H, _W),
+            make_grid((_H, _W), "legendre-gauss"),
             crop_shape=(_H // 2, _W),
             crop_offset=(0, 0),
         )
@@ -263,10 +257,9 @@ class TestGridQuadrature(unittest.TestCase):
 
     def test_crop_shape_equals_img_shape_matches_full(self, verbose=False):
         """crop_shape == img_shape (with zero offset) is equivalent to no crop."""
-        gq_full = GridQuadrature("clenshaw-curtiss", img_shape=(_H, _W))
+        gq_full = GridQuadrature(make_grid((_H, _W), "equiangular"))
         gq_crop = GridQuadrature(
-            "clenshaw-curtiss",
-            img_shape=(_H, _W),
+            make_grid((_H, _W), "equiangular"),
             crop_shape=(_H, _W),
             crop_offset=(0, 0),
         )
@@ -290,17 +283,12 @@ class TestGridTypeVerification(unittest.TestCase):
         latitudes = expected_latitudes("equiangular", 5)
         self.assertTrue(np.allclose(latitudes, [-90.0, -45.0, 0.0, 45.0, 90.0]))
 
-    def test_the_equally_spaced_grids_share_their_nodes(self):
-        """Three grid types, one set of nodes.
-
-        Clenshaw-Curtiss and WeatherBench2 both sit on the equally spaced
-        latitudes and differ from equiangular only in how they weight them. So
-        no coordinate can separate the three, and anything claiming to identify
-        a grid from its latitudes has to say so rather than pick one.
-        """
+    def test_legacy_grid_types_are_read_as_equiangular(self):
+        # datasets written before makani 0.4 may declare a quadrature rule on equally spaced latitudes
         for grid_type in ("clenshaw-curtiss", "weatherbench2"):
-            with self.subTest(grid_type=grid_type):
-                self.assertTrue(np.allclose(expected_latitudes(grid_type, 9), expected_latitudes("equiangular", 9)))
+            with self.subTest(grid_type=grid_type), self.assertLogs("makani.data.grid_types", level="WARNING"):
+                self.assertEqual(canonical_grid_type(grid_type, source="data.json"), "equiangular")
+        self.assertEqual(canonical_grid_type("legendre-gauss"), "legendre-gauss")
 
     def test_gauss_nodes_are_not_the_equiangular_ones(self):
         # the premise of the whole check: the grids are distinguishable
@@ -322,12 +310,9 @@ class TestGridTypeVerification(unittest.TestCase):
         with self.assertRaises(NotImplementedError):
             expected_latitudes("cubed-sphere", 8)
 
-    def test_equally_spaced_nodes_match_every_grid_that_uses_them(self):
-        # all three, because the coordinates genuinely do not distinguish them
-        self.assertEqual(
-            matching_grid_types(expected_latitudes("equiangular", 24)),
-            ["equiangular", "clenshaw-curtiss", "weatherbench2"],
-        )
+    @parameterized.expand([(t,) for t in _GRID_TYPES if t != "euclidean"])
+    def test_each_grid_matches_only_its_own_nodes(self, grid_type):
+        self.assertEqual(matching_grid_types(expected_latitudes(grid_type, 24)), [grid_type])
 
     def test_gauss_nodes_match_only_the_gauss_grid(self):
         # the one separation coordinates can make, and the one worth making
@@ -337,7 +322,7 @@ class TestGridTypeVerification(unittest.TestCase):
         self.assertEqual(matching_grid_types(np.linspace(-30.0, 30.0, 12)), [])
 
     def test_a_truthful_declaration_passes(self):
-        for grid_type in ("equiangular", "legendre-gauss", "clenshaw-curtiss", "weatherbench2"):
+        for grid_type in regular_grid_types():
             with self.subTest(grid_type=grid_type):
                 verify_grid_type(grid_type, expected_latitudes(grid_type, 24))
 
@@ -354,16 +339,6 @@ class TestGridTypeVerification(unittest.TestCase):
         self.assertIn("data.json", message)
         self.assertIn("legendre-gauss", message)
         self.assertIn("equiangular", message)
-
-    def test_a_swap_within_the_equally_spaced_grids_cannot_be_caught(self):
-        """Stated as a test because it is a limit, not an oversight.
-
-        Declaring Clenshaw-Curtiss over equiangular nodes is accepted: the nodes
-        are identical and the coordinates hold no evidence either way. Only the
-        weights differ, and no dataset carries those.
-        """
-        verify_grid_type("clenshaw-curtiss", expected_latitudes("equiangular", 24))
-        verify_grid_type("equiangular", expected_latitudes("clenshaw-curtiss", 24))
 
     def test_float32_coordinates_still_verify(self):
         # coordinates come out of files as float32, so the tolerance has to

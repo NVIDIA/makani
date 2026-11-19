@@ -256,11 +256,10 @@ class TestStaticFeatureOptions(unittest.TestCase):
         self._tmpdir.cleanup()
 
     def _quadrature(self, crop_shape=None, crop_offset=(0, 0)):
-        from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature
+        from makani.utils.grids import GridQuadrature, make_grid
 
         return GridQuadrature(
-            grid_to_quadrature_rule(self.params.data_grid_type),
-            img_shape=(IMG_H, IMG_W),
+            make_grid((IMG_H, IMG_W), self.params.data_grid_type),
             crop_shape=crop_shape,
             crop_offset=crop_offset,
             normalize=True,

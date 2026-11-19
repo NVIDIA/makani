@@ -24,7 +24,7 @@ import torch.distributed as dist
 
 from makani.distributed import comm
 
-from makani.utils.grids import GridQuadrature
+from makani.utils.grids import GridQuadrature, make_grid
 from makani.losses import (
     CRPSLoss,
     GradientCRPSLoss,
@@ -142,31 +142,27 @@ class TestDistributedLoss(unittest.TestCase):
 
     @parameterized.expand(
         [
-            [64, 128, 32, 8, "naive", False, 1e-6],
-            [64, 128, 32, 8, "naive", True, 1e-6],
-            [65, 128, 32, 8, "naive", True, 1e-6],
-            [65, 128, 32, 8, "clenshaw-curtiss", False, 1e-6],
-            [65, 128, 32, 8, "clenshaw-curtiss", True, 1e-6],
+            [64, 128, 32, 8, "equiangular", False, 1e-6],
+            [64, 128, 32, 8, "equiangular", True, 1e-6],
+            [65, 128, 32, 8, "equiangular", True, 1e-6],
             [65, 128, 32, 8, "legendre-gauss", False, 1e-6],
             [65, 128, 32, 8, "legendre-gauss", True, 1e-6],
-            [65, 128, 32, 8, "weatherbench2", False, 1e-6],
-            [65, 128, 32, 8, "weatherbench2", True, 1e-6],
+            [65, 128, 32, 8, "lobatto", True, 1e-6],
+            [64, 128, 32, 8, "euclidean", True, 1e-6],
         ],
         skip_on_empty=True,
     )
-    def test_distributed_quadrature(self, nlat, nlon, batch_size, num_chan, quad_rule, normalize, tol, verbose=False):
+    def test_distributed_quadrature(self, nlat, nlon, batch_size, num_chan, grid_type, normalize, tol, verbose=False):
 
         # disable tf32 for deterministic comparison# disable tf32# disable tf32 for deterministic comparison# disable tf32
         disable_tf32()
 
         B, C, H, W = batch_size, num_chan, nlat, nlon
 
-        quad_local = GridQuadrature(
-            quadrature_rule=quad_rule, img_shape=(H, W), normalize=normalize, distributed=False
-        ).to(self.device)
-        quad_dist = GridQuadrature(
-            quadrature_rule=quad_rule, img_shape=(H, W), normalize=normalize, distributed=True
-        ).to(self.device)
+        quad_local = GridQuadrature(make_grid((H, W), grid_type), normalize=normalize, distributed=False).to(
+            self.device
+        )
+        quad_dist = GridQuadrature(make_grid((H, W), grid_type), normalize=normalize, distributed=True).to(self.device)
 
         # input
         inp_full = torch.randn((B, C, H, W), dtype=torch.float32, device=self.device)

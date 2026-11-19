@@ -22,7 +22,7 @@ from makani.distributed.mappings import scatter_to_parallel_region, reduce_from_
 from torch_harmonics.distributed import split_tensor_along_dim
 
 from makani.losses import CRPSLoss, LossType
-from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature
+from makani.utils.grids import GridQuadrature, make_grid
 from makani.metrics.base_metric import _sanitize_shapes, _welford_reduction_helper, GeometricBaseMetric
 
 
@@ -487,11 +487,8 @@ class GeometricCRPS(torch.nn.Module):
         # loss
         self.pairwise = (crps_type == "skillspread") and (ensemble_weights is None)
 
-        # get the quadrature
-        quadrature_rule = grid_to_quadrature_rule(grid_type)
         self.quadrature = GridQuadrature(
-            quadrature_rule,
-            img_shape=img_shape,
+            make_grid(img_shape, grid_type),
             crop_shape=crop_shape,
             crop_offset=crop_offset,
             normalize=True,

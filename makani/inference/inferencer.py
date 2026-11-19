@@ -160,12 +160,10 @@ class Inferencer(Driver):
             )
 
             # we need grid quadrature as well in this case
-            from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature
+            from makani.utils.grids import GridQuadrature, make_grid
 
-            quadrature_rule = grid_to_quadrature_rule(params.get("model_grid_type", "equiangular"))
             self.quadrature = GridQuadrature(
-                quadrature_rule,
-                img_shape=self.mask_dataset.img_shape,
+                make_grid(self.mask_dataset.img_shape, params.get("model_grid_type", "equiangular")),
                 crop_shape=self.mask_dataset.crop_size,
                 crop_offset=self.mask_dataset.crop_anchor,
                 normalize=True,
@@ -259,7 +257,6 @@ class Inferencer(Driver):
         bias_file: Optional[str] = None,
         spectrum_file: Optional[str] = None,
         zonal_spectrum_file: Optional[str] = None,
-        wb2_compatible: Optional[bool] = False,
         enable_odirect: bool = False,
         odirect_alignment: int = 0,
         enable_gds: bool = False,
@@ -293,7 +290,6 @@ class Inferencer(Driver):
             bias_file=bias_file,
             spectrum_file=spectrum_file,
             zonal_spectrum_file=zonal_spectrum_file,
-            wb2_compatible=wb2_compatible,
             enable_odirect=enable_odirect,
             odirect_alignment=odirect_alignment,
             enable_gds=enable_gds,
@@ -319,7 +315,6 @@ class Inferencer(Driver):
         bias_file: Optional[str] = None,
         spectrum_file: Optional[str] = None,
         zonal_spectrum_file: Optional[str] = None,
-        wb2_compatible: Optional[bool] = False,
         enable_odirect: bool = False,
         odirect_alignment: int = 0,
         enable_gds: bool = False,
@@ -343,7 +338,6 @@ class Inferencer(Driver):
             bias_file=bias_file,
             spectrum_file=spectrum_file,
             zonal_spectrum_file=zonal_spectrum_file,
-            wb2_compatible=wb2_compatible,
             enable_odirect=enable_odirect,
             odirect_alignment=odirect_alignment,
             enable_gds=enable_gds,
@@ -366,7 +360,6 @@ class Inferencer(Driver):
         bias_file: Optional[str] = None,
         spectrum_file: Optional[str] = None,
         zonal_spectrum_file: Optional[str] = None,
-        wb2_compatible: Optional[bool] = False,
         enable_odirect: bool = False,
         odirect_alignment: int = 0,
         enable_gds: bool = False,
@@ -394,7 +387,6 @@ class Inferencer(Driver):
                 spread_var_names=metric_channels,
                 ssr_var_names=metric_channels,
                 rh_var_names=metric_channels,
-                wb2_compatible=wb2_compatible,
             )
             metrics.initialize_buffers()
         else:
@@ -503,17 +495,6 @@ class Inferencer(Driver):
             )
         else:
             zonal_spectrum_buffer = None
-
-        # if wb2 compatibility enabled check if a mask was specified
-        if wb2_compatible and self.log_to_screen:
-            if self.mask_dataset is None:
-                self.logger.warning(
-                    "WeatherBench compatibility enabled but no mask specified. Results may differ, please specify a mask."
-                )
-            if self.climatology_dataset is None:
-                self.logger.warning(
-                    "WeatherBench compatibility enabled but no climatology specified. Results may differ, please specify a wb2-compatible climatology."
-                )
 
         logs = self._inference_indexlist(
             indices,
@@ -875,7 +856,6 @@ class Inferencer(Driver):
         start_date=None,
         end_date=None,
         date_step=1,
-        wb2_compatible=False,
         enable_odirect: bool = False,
         odirect_alignment: int = 0,
         enable_gds: bool = False,
@@ -945,7 +925,6 @@ class Inferencer(Driver):
             bias_file=bias_file,
             spectrum_file=spectrum_file,
             zonal_spectrum_file=zonal_spectrum_file,
-            wb2_compatible=wb2_compatible,
             enable_odirect=enable_odirect,
             odirect_alignment=odirect_alignment,
             enable_gds=enable_gds,

@@ -30,7 +30,8 @@ from makani.datasets.parallel import get_comm, init_torch_distributed, shutdown_
 
 import torch
 import torch.distributed as dist
-from makani.utils.grids import GridQuadrature
+from makani.utils.grids import GridQuadrature, make_grid
+from makani.data.grid_types import canonical_grid_type
 import makani.models.constants as const
 from makani.models.constraints import get_matching_channels_pl
 
@@ -173,7 +174,6 @@ def compute_hydrostatic_balance_climatology(
     input_path: str,
     output_path: str,
     metadata_file: str,
-    quadrature_rule: str,
     p_min: Optional[float] = None,
     p_max: Optional[float] = None,
     use_moist_air_formula: bool = False,
@@ -227,6 +227,7 @@ def compute_hydrostatic_balance_climatology(
     data_shape = None
     num_samples = None
     channel_names = None
+    grid_type = None
     combined_file = None
     if comm_rank == 0:
         if os.path.isdir(input_path):
@@ -253,10 +254,12 @@ def compute_hydrostatic_balance_climatology(
 
         # read channel names
         channel_names = metadata["coords"]["channel"]
+        grid_type = canonical_grid_type(metadata["coords"]["grid_type"], source=metadata_file)
 
     # communicate important information
     combined_file = comm.bcast(combined_file, root=0)
     channel_names = comm.bcast(channel_names, root=0)
+    grid_type = comm.bcast(grid_type, root=0)
     filelist = comm.bcast(filelist, root=0)
     num_samples = comm.bcast(num_samples, root=0)
     data_shape = comm.bcast(data_shape, root=0)
@@ -287,7 +290,7 @@ def compute_hydrostatic_balance_climatology(
 
     # quadrature: normalized to 4pi (we divide the integral by the valid area to obtain a mean)
     quadrature = GridQuadrature(
-        quadrature_rule, (height, width), crop_shape=None, crop_offset=(0, 0), normalize=False
+        make_grid((height, width), grid_type), crop_shape=None, crop_offset=(0, 0), normalize=False
     ).to(device)
 
     if comm_rank == 0:
@@ -431,7 +434,6 @@ def main(args):
         input_path=args.input_path,
         output_path=args.output_path,
         metadata_file=args.metadata_file,
-        quadrature_rule=args.quadrature_rule,
         p_min=args.p_min,
         p_max=args.p_max,
         use_moist_air_formula=args.use_moist_air_formula,
@@ -454,13 +456,6 @@ if __name__ == "__main__":
     parser.add_argument("--metadata_file", type=str, help="File containing dataset metadata.", required=True)
     parser.add_argument("--output_path", type=str, help="Directory for saving stats files.", required=True)
     parser.add_argument("--reduction_group_size", type=int, default=8, help="Size of collective reduction groups.")
-    parser.add_argument(
-        "--quadrature_rule",
-        type=str,
-        default="naive",
-        choices=["naive", "clenshaw-curtiss", "legendre-gauss"],
-        help="Specify quadrature_rule for spatial averages.",
-    )
     parser.add_argument(
         "--p_min",
         type=float,

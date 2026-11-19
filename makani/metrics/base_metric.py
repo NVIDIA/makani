@@ -21,7 +21,7 @@ import torch
 import torch.nn as nn
 
 from makani.losses.base_loss import LossType
-from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature
+from makani.utils.grids import GridQuadrature, make_grid
 from makani.distributed import comm
 
 
@@ -90,12 +90,9 @@ class GeometricBaseMetric(nn.Module, metaclass=ABCMeta):
         self.channel_reduction = channel_reduction
         self.batch_reduction = batch_reduction
 
-        quadrature_rule = grid_to_quadrature_rule(grid_type)
-
         # get the quadrature
         self.quadrature = GridQuadrature(
-            quadrature_rule,
-            img_shape=self.img_shape,
+            make_grid(self.img_shape, grid_type),
             crop_shape=self.crop_shape,
             crop_offset=self.crop_offset,
             normalize=normalize,

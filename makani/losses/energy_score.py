@@ -159,8 +159,8 @@ class LpEnergyScoreLoss(GeometricBaseLoss):
         #  ensemble size
         num_ensemble = forecasts.shape[0]
 
-        # the quadrature weights, and the spatial weights if given, of the local grid points
-        point_weight = self.quad_weight_split
+        # the quadrature weights, and the spatial weights if given, of the local grid points, in the work dtype
+        point_weight = self.quad_weight_split.to(dtype=forecasts.dtype)
         if spatial_weights is not None:
             point_weight = point_weight * spatial_weights_split
 
