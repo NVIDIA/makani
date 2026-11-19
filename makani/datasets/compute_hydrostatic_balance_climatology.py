@@ -16,7 +16,6 @@
 import os
 from typing import Optional
 import time
-import socket
 import json
 import numpy as np
 import h5py as h5
@@ -27,7 +26,7 @@ from bisect import bisect_right
 from glob import glob
 
 # MPI
-from makani.datasets.parallel import get_comm, local_device_index, reduction_mesh_shape
+from makani.datasets.parallel import get_comm, init_torch_distributed, shutdown_torch_distributed
 
 import torch
 import torch.distributed as dist
@@ -219,31 +218,9 @@ def compute_hydrostatic_balance_climatology(
     comm = get_comm()
     comm_rank = comm.Get_rank()
     comm_size = comm.Get_size()
-    comm_local_rank = local_device_index(comm)
 
-    # set wireup parameters
-    hostname = socket.gethostname()
-    hostname = comm.bcast(hostname, root=0)
-    os.environ["MASTER_ADDR"] = hostname
-    os.environ.setdefault("MASTER_PORT", "29500")
-    os.environ["RANK"] = str(comm_rank)
-    os.environ["WORLD_SIZE"] = str(comm_size)
-    os.environ["LOCAL_RANK"] = str(comm_local_rank)
-
-    # init torch distributed
-    device = torch.device(f"cuda:{comm_local_rank}") if torch.cuda.is_available() else torch.device("cpu")
-    dist.init_process_group(
-        backend="nccl" if torch.cuda.is_available() else "gloo",
-        init_method="env://",
-        world_size=comm_size,
-        rank=comm_rank,
-        device_id=device if device.type == "cuda" else None,
-    )
-    mesh = dist.init_device_mesh(
-        device_type=device.type,
-        mesh_shape=reduction_mesh_shape(reduction_group_size, comm_size),
-        mesh_dim_names=["reduction", "tree"],
-    )
+    # torch.distributed for the reductions
+    device, mesh = init_torch_distributed(comm, reduction_group_size)
 
     # get files
     filelist = None
@@ -446,8 +423,7 @@ def compute_hydrostatic_balance_climatology(
     comm.Barrier()
 
     # shut down pytorch comms
-    dist.barrier(device_ids=[device.index] if device.type == "cuda" else None)
-    dist.destroy_process_group()
+    shutdown_torch_distributed(device)
 
 
 def main(args):

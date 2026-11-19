@@ -23,7 +23,9 @@ one rank, see :func:`h5_kwargs`, so a serial run works with any h5py, including 
 are built without parallel HDF5.
 """
 
-from typing import Any, Dict, List, Optional
+import os
+import socket
+from typing import Any, Dict, List, Optional, Tuple
 
 from makani.distributed.launch import detect_launch
 
@@ -134,3 +136,62 @@ def reduction_mesh_shape(reduction_group_size: int, world_size: int) -> List[int
     """
     group = max(d for d in range(1, min(reduction_group_size, world_size) + 1) if world_size % d == 0)
     return [group, world_size // group]
+
+
+def init_torch_distributed(comm, reduction_group_size: int) -> Tuple[Any, Any]:
+    """
+    Wire torch.distributed up over the ranks of ``comm``, for the parallel reductions of the
+    statistics scripts.
+
+    The ranks meet at rank 0's host, on ``MASTER_PORT``, 29500 unless it is set, and reduce over
+    NCCL with one GPU per rank where there are GPUs, over gloo on the CPU otherwise. Also on a
+    single rank without MPI, so that the scripts run the same code either way.
+
+    Parameters
+    ----------
+    comm : mpi4py.MPI.Comm or SerialComm
+        The ranks, see :func:`get_comm`.
+    reduction_group_size : int
+        The requested size of the reduction groups, see :func:`reduction_mesh_shape`.
+
+    Returns
+    -------
+    device : torch.device
+        The device of this rank.
+    mesh : torch.distributed.DeviceMesh
+        The ``[reduction, tree]`` mesh of the reductions.
+    """
+    import torch
+    import torch.distributed as dist
+
+    rank, size = comm.Get_rank(), comm.Get_size()
+    local_rank = local_device_index(comm)
+
+    os.environ["MASTER_ADDR"] = comm.bcast(socket.gethostname(), root=0)
+    os.environ.setdefault("MASTER_PORT", "29500")
+    os.environ["RANK"] = str(rank)
+    os.environ["WORLD_SIZE"] = str(size)
+    os.environ["LOCAL_RANK"] = str(local_rank)
+
+    device = torch.device(f"cuda:{local_rank}") if torch.cuda.is_available() else torch.device("cpu")
+    dist.init_process_group(
+        backend="nccl" if device.type == "cuda" else "gloo",
+        init_method="env://",
+        world_size=size,
+        rank=rank,
+        device_id=device if device.type == "cuda" else None,
+    )
+    mesh = dist.init_device_mesh(
+        device_type=device.type,
+        mesh_shape=reduction_mesh_shape(reduction_group_size, size),
+        mesh_dim_names=["reduction", "tree"],
+    )
+    return device, mesh
+
+
+def shutdown_torch_distributed(device):
+    """Wait for all ranks, and take torch.distributed down again, see :func:`init_torch_distributed`."""
+    import torch.distributed as dist
+
+    dist.barrier(device_ids=[device.index] if device.type == "cuda" else None)
+    dist.destroy_process_group()
