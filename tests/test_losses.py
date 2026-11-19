@@ -24,11 +24,11 @@ import unittest
 import numpy as np
 import torch
 
-from makani.utils import LossHandler
+from makani.losses import LossHandler
 from makani.utils.grids import sht_grid
-from makani.utils.missing_data import fill_missing, missing_values, missing_weights
-from makani.utils.losses.base_loss import abs_pow
-from makani.utils.losses import (
+from makani.data.missing_data import fill_missing, missing_values, missing_weights
+from makani.losses.base_loss import abs_pow
+from makani.losses import (
     CRPSLoss,
     SpectralCRPSLoss,
     GradientCRPSLoss,
@@ -45,14 +45,14 @@ from makani.utils.losses import (
     LpEnergyScoreLoss,
     SpectralL2EnergyScoreLoss,
 )
-from makani.utils.losses.energy_score import (
+from makani.losses.energy_score import (
     SobolevEnergyScoreLoss,
     SpectralCoherenceLoss,
     CorrectedSpectralL2EnergyScoreLoss,
 )
-from makani.utils.losses.crps_loss import KernelScoreLoss
-from makani.utils.losses.base_loss import _compute_channel_weighting_helper, compute_alpha_per_step
-from makani.utils.losses.crps_loss import _crps_skillspread_kernel, _crps_gauss_kernel
+from makani.losses.crps_loss import KernelScoreLoss
+from makani.losses.base_loss import _compute_channel_weighting_helper, compute_alpha_per_step
+from makani.losses.crps_loss import _crps_skillspread_kernel, _crps_gauss_kernel
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from .testutils import disable_tf32, set_seed, get_default_parameters, compare_tensors, compare_arrays
@@ -361,7 +361,7 @@ class TestLossCommon(unittest.TestCase):
         """The losses assume finite inputs and contain no NaN handling of their own:
         a NaN in the prediction or the target makes the loss of that sample and
         channel NaN. Missing targets are taken care of before the losses, see
-        makani.utils.missing_data."""
+        makani.data.missing_data."""
         fn = self._make(name)
         for where in ["prediction", "target"]:
             with self.subTest(nan_in=where):
@@ -2270,7 +2270,7 @@ class TestSpectralCRPSLoss(unittest.TestCase):
     # ------ type property (line 393) ------
 
     def test_type_property(self):
-        from makani.utils.losses.base_loss import LossType
+        from makani.losses.base_loss import LossType
 
         fn = self._fn()
         self.assertEqual(fn.type, LossType.Probabilistic)

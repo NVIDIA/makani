@@ -26,7 +26,7 @@ import datetime as dt
 import argparse as ap
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from makani.utils.dataloaders.ncar_helpers import NCAR_ERA5_BUCKET
+from makani.data.ncar_helpers import NCAR_ERA5_BUCKET
 from data_process.date_range import add_date_range_arguments, date_range_from_args, yearly_sample_times
 from data_process.sources import Source
 

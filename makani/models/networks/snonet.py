@@ -21,7 +21,7 @@ from torch.utils.checkpoint import checkpoint
 
 # helpers
 from makani.models.common import DropPath, LayerScale, MLP, EncoderDecoder, spectral_conv_s2
-from makani.utils.features import get_water_channels
+from makani.data.features import get_water_channels
 
 # get spectral transforms and spherical convolutions from torch_harmonics
 import torch_harmonics as th

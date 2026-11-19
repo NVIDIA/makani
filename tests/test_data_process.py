@@ -665,7 +665,7 @@ class TestConcatenateDatasetChannelsAndTime(unittest.TestCase):
 
             # ----------------------------------------------------------------------
             # Loader-realistic access patterns. Mirrors `_get_data_h5` in
-            # makani/utils/dataloaders/backends/makani_concat.py.
+            # makani/data/backends/makani_concat.py.
             # ----------------------------------------------------------------------
 
             # Pattern 1: cropped spatial region with subsampling on both spatial dims.
@@ -1588,7 +1588,7 @@ class TestNcarSource(_OutputFileCase):
 
     def setUp(self):
         super().setUp()
-        from makani.utils.dataloaders.ncar_helpers import to_ncar_hours
+        from makani.data.ncar_helpers import to_ncar_hours
 
         # a surface file for t2m that only holds the first of the two days, so
         # that the second day exercises the missing timestep path
@@ -2020,7 +2020,7 @@ class TestConvertInvariants(unittest.TestCase):
 
     def test_command_line_defaults_to_all_invariants(self):
         from data_process.convert_era5_invariants_to_makani_input import build_parser
-        from makani.utils.dataloaders.ncar_helpers import invariant_variables
+        from makani.data.ncar_helpers import invariant_variables
 
         args = build_parser().parse_args(["ncar", "--output_file", "out.h5", "--metadata_file", "m.json"])
         self.assertEqual(args.channels, list(invariant_variables))

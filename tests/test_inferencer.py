@@ -30,15 +30,15 @@ import torch_harmonics as th
 from torch.utils.data import default_collate
 from parameterized import parameterized, parameterized_class
 
-from makani.utils.dataloader import get_dataloader
+from makani.data.dataloader import get_dataloader
 from makani.utils.grids import sht_grid
-from makani.utils.dataloaders.data_helpers import get_date_from_string
-from makani.utils.dataloaders.data_loader_dummy import DummyInferenceDataset
-from makani.utils.dataloaders.data_loader_multifiles import MultifilesDataset
-from makani.utils.dataloaders.batch import INPUT, INPUT_TIMESTAMP, TARGET, TARGET_TIMESTAMP
-from makani.utils.dataloaders.rollout import Rollout
+from makani.data.data_helpers import get_date_from_string
+from makani.data.data_loader_dummy import DummyInferenceDataset
+from makani.data.data_loader_multifiles import MultifilesDataset
+from makani.data.batch import INPUT, INPUT_TIMESTAMP, TARGET, TARGET_TIMESTAMP
+from makani.data.rollout import Rollout
 from makani.utils.functions import expand_ensemble
-from makani.utils.inference.inferencer import Inferencer
+from makani.inference.inferencer import Inferencer
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from .testutils import disable_tf32, set_seed, init_hdf5_dataset, H5_PATH
@@ -276,7 +276,7 @@ def _zonal_power_spectrum(fields, lat):
 @parameterized_class(("loader",), _LOADERS)
 class TestInferencerScoring(_InferencerTestCase):
     """
-    ``score_model``, the entry point of ``makani/inference.py``, over a short date range with every output it
+    ``score_model``, the entry point of ``makani/inference/__main__.py``, over a short date range with every output it
     can write. The outputs are checked against each other and against the raw data: the initial conditions
     in the rollout file against the data at their times, the spectra against the spectra of the rollout file's
     predictions and of the data at the lead times, and the logged scores against the metrics file.

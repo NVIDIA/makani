@@ -59,7 +59,7 @@ import numpy as np
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
-from makani.utils.dataloaders.backends import (
+from makani.data.backends import (
     ArcoWB2Backend,
     IconBackend,
     BackendMetadata,
@@ -68,12 +68,12 @@ from makani.utils.dataloaders.backends import (
     MakaniZarrBackend,
     get_backend,
 )
-from makani.utils.dataloaders.backends.base import GridSpec
-from makani.utils.dataloaders.backends.factory import detect_backend
-from makani.utils.dataloaders.backends.makani_hdf5 import contiguous_slices
-from makani.utils.dataloaders.backends.icon import date_of_file, survey_files, variable_of_file
-from makani.utils.dataloaders.backends.mesh import block_of_rank, coalesce_runs
-from makani.utils.grid_types import expected_latitudes
+from makani.data.backends.base import GridSpec
+from makani.data.backends.factory import detect_backend
+from makani.data.backends.makani_hdf5 import contiguous_slices
+from makani.data.backends.icon import date_of_file, survey_files, variable_of_file
+from makani.data.backends.mesh import block_of_rank, coalesce_runs
+from makani.data.grid_types import expected_latitudes
 
 from .testutils import (
     CHANNEL_NAMES,

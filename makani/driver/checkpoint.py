@@ -1,0 +1,725 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import os
+import logging
+import glob
+import re
+import zlib
+import pickle
+
+from collections import OrderedDict
+from typing import Any, Dict, List, Optional
+from warnings import warn
+
+import torch
+import torch.nn as nn
+import torch.distributed as dist
+from torch.optim import Optimizer
+
+from makani.distributed import comm
+from makani.distributed.helpers import gather_uneven
+
+from torch_harmonics.distributed import split_tensor_along_dim
+
+# escape hatch for loading legacy checkpoints which contain pickled objects that are not
+# on the allowlist below. Only set this for checkpoints from a trusted source: it restores
+# the unrestricted (arbitrary code execution) unpickler.
+UNSAFE_LOAD_ENV_VAR = "MAKANI_ALLOW_UNSAFE_CHECKPOINT_LOAD"
+
+_safe_globals_registered = False
+
+
+def _register_checkpoint_safe_globals():
+    """Allowlist the non-tensor types makani stores inside checkpoints.
+
+    ``torch.load(weights_only=True)`` uses a restricted unpickler which only knows about
+    tensors and a handful of builtin containers. Everything makani writes into a checkpoint
+    beyond that has to be declared here. Note that the sharding metadata (``sharded_dims_mp``)
+    attached to the checkpoint tensors needs no entry: it is a plain list of strings/None and
+    is restored through ``torch._tensor._rebuild_from_type_v2``, which the restricted
+    unpickler permits.
+    """
+
+    global _safe_globals_registered
+    if _safe_globals_registered:
+        return
+
+    # imported lazily to avoid a circular import through makani.utils
+    from makani.utils.params import ParamsBase, YParams
+
+    # also under their module before it was renamed, makani.utils.YParams, for the checkpoints that pickled them
+    torch.serialization.add_safe_globals(
+        [
+            ParamsBase,
+            YParams,
+            (ParamsBase, "makani.utils.YParams.ParamsBase"),
+            (YParams, "makani.utils.YParams.YParams"),
+        ]
+    )
+
+    _safe_globals_registered = True
+
+
+def load_checkpoint(checkpoint_fname: str, map_location: str = "cpu", mmap: bool = False) -> Dict[str, Any]:
+    """Load a makani checkpoint with the safe (``weights_only=True``) unpickler.
+
+    Parameters
+    ============
+    checkpoint_fname: str
+        Path of the checkpoint file to load
+    map_location: str
+        Device to map the storages to, forwarded to ``torch.load``
+    mmap: bool
+        Whether to memory-map the tensor storages instead of reading them eagerly
+
+    Returns
+    ========
+    Dict[str, Any]
+        The deserialized checkpoint dictionary
+    """
+
+    _register_checkpoint_safe_globals()
+
+    if os.environ.get(UNSAFE_LOAD_ENV_VAR, "0").lower() in ("1", "true", "yes"):
+        warn(
+            f"{UNSAFE_LOAD_ENV_VAR} is set, loading {checkpoint_fname} with the unrestricted unpickler. "
+            "This executes arbitrary code contained in the checkpoint file and should only be done for "
+            "checkpoints from a trusted source.",
+            RuntimeWarning,
+        )
+        return torch.load(checkpoint_fname, map_location=map_location, weights_only=False, mmap=mmap)
+
+    try:
+        return torch.load(checkpoint_fname, map_location=map_location, weights_only=True, mmap=mmap)
+    except pickle.UnpicklingError as err:
+        raise RuntimeError(
+            f"Checkpoint {checkpoint_fname} contains pickled objects which are not on the allowlist in "
+            f"{__name__}._register_checkpoint_safe_globals. If the type reported below is a legitimate "
+            "makani type, add it to that allowlist. If the checkpoint comes from a trusted source, loading "
+            f"can be forced by setting {UNSAFE_LOAD_ENV_VAR}=1, which disables the safety check entirely."
+        ) from err
+
+
+def get_latest_checkpoint_version(checkpoint_path, verbose: bool = True):
+    """Highest version among the checkpoints matching a path template, 0 if there are none.
+
+    A fresh run has nothing to match, so failing to detect a version is normal
+    rather than an error; ``verbose=False`` silences the notice for callers that
+    expect it.
+    """
+    pattern = checkpoint_path.format(mp_rank=0, checkpoint_version="*")
+    try:
+        # the newest match is the one whose version is current
+        newest = max(glob.glob(pattern), key=os.path.getmtime)
+        pathname, _ = os.path.splitext(newest)
+        latest_version = int(re.match(r"^.*?_v(\d{1,})$", pathname).groups()[0])
+    except:
+        # the pattern rather than the template: what was searched for, not what
+        # the caller happened to phrase it as
+        if verbose:
+            print(f"Could not identify version for checkpoint {pattern}. Skipping detection.")
+        latest_version = 0
+
+    return latest_version
+
+
+# the version of the checkpoint layout, bumped whenever an entry changes incompatibly; a checkpoint without a
+# format tag counts as version 0. Version 1 tags the checkpoint and adds the noise generators, noise_rng_state
+# The format version of the checkpoints the driver writes. A checkpoint of an earlier version is upgraded on restore,
+# see upgrade_checkpoint:
+#   1: the format tag.
+#   2: the MLPs keep their layers as fc1 and fc2, not in a sequence (fwd.0, fwd.3), and DistributedMatmul keeps a 1-D
+#      bias, not (1, C, 1, 1), as do the moments of the optimizer for it.
+#   3: the input noise of a model is kept by its input adapter, input_adapter.input_noise.process, not by its
+#      preprocessor, preprocessor.input_noise.
+CHECKPOINT_FORMAT_VERSION = 3
+
+
+def checkpoint_format_tag(checkpoint_mode: str) -> Dict[str, Any]:
+    """The format tag the driver writes into a checkpoint, see :func:`check_checkpoint_format`.
+
+    ``mode`` is the checkpoint mode it is written in, ``"legacy"`` (one file per model-parallel
+    rank, holding its shards) or ``"flexible"`` (one file, holding the gathered tensors), and
+    ``model_parallel_size`` the number of model-parallel ranks it was written from, which tells
+    whether a legacy checkpoint holds shards. ``makani_version`` is for diagnostics only.
+    """
+    from makani import __version__
+
+    return {
+        "mode": checkpoint_mode,
+        "version": CHECKPOINT_FORMAT_VERSION,
+        "model_parallel_size": comm.get_size("model"),
+        "makani_version": __version__,
+    }
+
+
+def check_checkpoint_format(checkpoint: Dict[str, Any], checkpoint_mode: str, strict: bool = True) -> Optional[str]:
+    """Check that a checkpoint can be restored in ``checkpoint_mode``, before anything is read from it.
+
+    A checkpoint written in the other mode is refused when that would load the wrong tensors: a
+    legacy checkpoint of a model-parallel run holds the shards of one rank per file, which a
+    flexible restore would take for whole tensors, and a flexible checkpoint holds whole tensors
+    in a single file, which a legacy restore into a model-parallel run would take for shards.
+    Without model parallelism on either side, the two hold the same and both restores work.
+
+    A checkpoint of a newer format version than this makani knows is refused if ``strict``;
+    otherwise a warning is returned. A checkpoint without a format tag, written before it was
+    introduced, cannot be checked: it is accepted, with a warning.
+
+    Returns
+    -------
+    str or None
+        A warning for the caller to log, or None.
+
+    Raises
+    ------
+    ValueError
+        If the checkpoint was written in the other mode and the tensors would not match, or is of
+        a newer format version and ``strict`` is set.
+    """
+    tag = checkpoint.get("checkpoint_format", None)
+    if tag is None:
+        return (
+            "The checkpoint has no format tag, so it was written before format version 1 and its mode cannot be "
+            f"checked: it is restored in {checkpoint_mode} mode as it is. Saving it again adds the tag"
+        )
+
+    version = tag.get("version", 0)
+    makani_version = tag.get("makani_version", "unknown")
+    warning = None
+    if version > CHECKPOINT_FORMAT_VERSION:
+        message = (
+            f"The checkpoint has format version {version} (written by makani {makani_version}), this makani reads "
+            f"up to version {CHECKPOINT_FORMAT_VERSION}"
+        )
+        if strict:
+            raise ValueError(message + ": update makani, or restore with strict_restore: False at your own risk")
+        warning = message + ": entries it does not know are ignored"
+
+    stored_mode = tag.get("mode", None)
+    if (stored_mode is not None) and (stored_mode != checkpoint_mode):
+        stored_split = tag.get("model_parallel_size", 1) > 1
+        current_split = comm.get_size("model") > 1
+        if (stored_mode == "legacy" and stored_split) or (stored_mode == "flexible" and current_split):
+            raise ValueError(
+                f"The checkpoint was written in {stored_mode} mode from {tag.get('model_parallel_size', 1)} "
+                f"model-parallel ranks, but is restored in {checkpoint_mode} mode into "
+                f"{comm.get_size('model')}: its tensors would be read as "
+                f"{'whole tensors' if stored_mode == 'legacy' else 'shards'}. Restore it with "
+                f"load_checkpoint: {stored_mode}"
+                + (
+                    ", or convert it to the flexible format with makani.convert_checkpoint"
+                    if stored_mode == "legacy"
+                    else ""
+                )
+            )
+
+    return warning
+
+
+def set_checkpoint_paths(params, checkpoint_dir: str) -> None:
+    """Points ``checkpoint_path`` and ``best_checkpoint_path`` at the checkpoint files in ``checkpoint_dir``."""
+    params["checkpoint_path"] = os.path.join(checkpoint_dir, "ckpt_mp{mp_rank}_v{checkpoint_version}.tar")
+    params["best_checkpoint_path"] = os.path.join(checkpoint_dir, "best_ckpt_mp{mp_rank}.tar")
+
+
+def setup_training_run(params, exp_dir: str) -> None:
+    """Sets up the directory of a training run and decides whether the run resumes.
+
+    The first rank creates ``exp_dir`` with its ``training_checkpoints`` and ``wandb`` directories.
+    Sets ``experiment_dir``, the checkpoint paths and ``resuming``, see :func:`run_has_checkpoint`.
+    """
+    if comm.get_world_rank() == 0:
+        logging.info(f"writing output to {exp_dir}")
+        os.makedirs(os.path.join(exp_dir, "training_checkpoints"), exist_ok=True)
+        os.makedirs(os.path.join(exp_dir, "wandb"), exist_ok=True)
+
+    params["experiment_dir"] = os.path.abspath(exp_dir)
+    set_checkpoint_paths(params, os.path.join(exp_dir, "training_checkpoints"))
+
+    # the run resumes if its directory already holds a checkpoint of it, written in the save mode
+    params["resuming"] = run_has_checkpoint(params)
+
+
+def run_has_checkpoint(params) -> bool:
+    """Whether the run directory holds a checkpoint of this run, so that the run resumes from it.
+
+    Looks for the files of the first checkpoint version in the mode the run saves its checkpoints
+    in, ``save_checkpoint``: every model-parallel rank's file in legacy mode, the single file in
+    flexible mode. ``load_checkpoint`` is the mode of a pretrained checkpoint to warm-start from,
+    and has nothing to say about the checkpoints of the run itself.
+    """
+    mode = params.get("save_checkpoint", "legacy")
+    if mode == "none":
+        has_checkpoint = False
+    elif mode == "legacy":
+        has_checkpoint = True
+        for rank in range(comm.get_size("model")):
+            if not os.path.isfile(params.checkpoint_path.format(mp_rank=rank, checkpoint_version=0)):
+                has_checkpoint = False
+                break
+    elif mode == "flexible":
+        has_checkpoint = os.path.isfile(params.checkpoint_path.format(mp_rank=0, checkpoint_version=0))
+    else:
+        raise ValueError(f"Unknown checkpoint mode {mode}.")
+
+    return has_checkpoint
+
+
+def supports_dataloader_state(dataloader: Any) -> bool:
+    """Whether the dataloader can capture and restore its state (only the DALI loaders can)."""
+    return (
+        (dataloader is not None)
+        and hasattr(dataloader, "state_dict")
+        and hasattr(dataloader, "load_state_dict")
+        and getattr(dataloader, "enable_checkpointing", False)
+    )
+
+
+def gather_dataloader_state_dict(dataloader: Any) -> Optional[List[Dict[str, Any]]]:
+    """Collect the dataloader state of every data-parallel rank.
+
+    The data pipeline is sharded over the ``data`` comm, so every rank in that comm holds a
+    different state, while checkpoint files are only written by rank 0 of that comm. The states
+    are therefore gathered into a list indexed by the rank within the ``data`` comm, which is
+    what ``scatter_dataloader_state_dict`` reverses on restore. In contrast to the model state,
+    the entries are opaque and independent of each other, so gathering is a plain collection of
+    per-rank objects and scattering is a plain index lookup - nothing is split or merged.
+
+    ..note::
+        This is a collective over the ``data`` comm, so it has to be called by all ranks, not
+        just by the rank which writes the checkpoint file. The states are plain (picklable)
+        python objects: ``all_gather_object`` stages them through a byte tensor on the comm's
+        default device itself, which for NCCL is the rank's current CUDA device.
+
+    Returns None if the dataloader does not support checkpointing.
+    """
+
+    if not supports_dataloader_state(dataloader):
+        return None
+
+    state_dict = dataloader.state_dict()
+
+    num_data_ranks = comm.get_size("data")
+    if num_data_ranks == 1:
+        return [state_dict]
+
+    state_dicts = [None for _ in range(num_data_ranks)]
+    dist.all_gather_object(state_dicts, state_dict, group=comm.get_group("data"))
+
+    return state_dicts
+
+
+def scatter_dataloader_state_dict(state_dicts: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Pick this rank's entry out of the list stored by ``gather_dataloader_state_dict``."""
+
+    num_data_ranks = comm.get_size("data")
+    if len(state_dicts) != num_data_ranks:
+        raise ValueError(
+            f"Error, the checkpoint stores dataloader state for {len(state_dicts)} data-parallel ranks "
+            f"but the current run has {num_data_ranks}. The data pipeline can only be restored into the "
+            "same data-parallel decomposition it was stored from."
+        )
+
+    return state_dicts[comm.get_rank("data")]
+
+
+def gather_noise_rng_state(noise: Any) -> Optional[Dict[str, Any]]:
+    """Collect the generator states of the noise of every rank, for the checkpoint.
+
+    Every spatial shard and data-parallel rank draws its own noise stream, see
+    :func:`~makani.models.noise.noise_base_seed`, and the checkpoint files are written by
+    one rank per model rank, or a single one, so the states of all ranks are gathered and
+    stored under their model and data-parallel ranks; :func:`scatter_noise_rng_state` picks a
+    rank's entry on restore. Only the generators are kept, see
+    :meth:`~makani.models.noise.controller.NoiseController.get_rng_state`, which are small.
+
+    ..note::
+        This is a collective over all ranks, so it has to be called by all of them, not just
+        by those which write checkpoint files.
+
+    Returns None for a model without noise.
+    """
+    if (noise is None) or not noise.is_stochastic:
+        return None
+
+    entry = ((comm.get_rank("model"), comm.get_rank("data")), noise.get_rng_state())
+    if dist.is_initialized() and (dist.get_world_size() > 1):
+        entries = [None for _ in range(dist.get_world_size())]
+        dist.all_gather_object(entries, entry)
+    else:
+        entries = [entry]
+
+    return {"layout": _comm_layout(), "states": dict(entries)}
+
+
+def _comm_layout() -> Dict[str, int]:
+    # the size of every comm group: the totals alone do not tell how the ranks split, e.g. two spatial ranks, which
+    # draw different noise, from two matmul ranks, which draw the same, or the ensemble from the batch ranks
+    return {name: comm.get_size(name) for name in comm.get_comm_names()}
+
+
+def scatter_noise_rng_state(stored: Dict[str, Any]) -> Dict[str, Any]:
+    """Pick this rank's generator states out of what ``gather_noise_rng_state`` stored.
+
+    Raises a ValueError if the checkpoint was written with another decomposition, in any comm
+    group: the streams of its ranks do not map onto the ranks of this run.
+    """
+    layout = _comm_layout()
+    if stored["layout"] != layout:
+        raise ValueError(
+            f"the checkpoint stores the noise generators of the decomposition {stored['layout']}, "
+            f"the current run has {layout}"
+        )
+    return stored["states"][(comm.get_rank("model"), comm.get_rank("data"))]
+
+
+def gather_model_state_dict(model: nn.Module, grads: Optional[bool] = False) -> OrderedDict:
+    # precondition: every rank in the model group must issue the SAME ordered
+    # sequence of gather_uneven calls, otherwise the all_gather inside
+    # gather_uneven deadlocks (600s NCCL timeout instead of a readable error).
+    if comm.get_size("model") > 1:
+        plan = [
+            f"{name}:{d}:{group}"
+            for name, param in model.named_parameters()
+            if hasattr(param, "sharded_dims_mp")
+            for d, group in enumerate(param.sharded_dims_mp)
+            if group is not None
+        ]
+        # deterministic hash (Python's hash() is per-process randomized)
+        sig = zlib.crc32(("|".join(plan)).encode())
+        device = next(model.parameters()).device
+        sig_t = torch.tensor([sig], dtype=torch.int64, device=device)
+        sig_list = [torch.empty_like(sig_t) for _ in range(comm.get_size("model"))]
+        dist.all_gather(sig_list, sig_t, group=comm.get_group("model"))
+        sigs = [int(s.item()) for s in sig_list]
+        if len(set(sigs)) != 1:
+            raise RuntimeError(
+                f"[rank {comm.get_world_rank()}] checkpoint gather plan mismatch "
+                f"across model group: per-rank crc32 = {sigs}. "
+                f"This rank's plan has {len(plan)} gather ops."
+            )
+
+    # create empty dict to hold the state
+    state_dict = OrderedDict()
+
+    # iterate over parameters and gather them from the ranks
+    for name, param in model.named_parameters():
+        weight = param.clone()
+        if hasattr(param, "sharded_dims_mp"):
+            # gather the weight across all sharded dimensions
+            for d, group in enumerate(param.sharded_dims_mp):
+                if group is not None:
+                    weight = gather_uneven(weight, d, group)
+
+        state_dict[name] = weight.cpu()
+
+        if grads:
+            if param.grad is not None:
+                grad = param.grad.clone()
+                if hasattr(param, "sharded_dims_mp"):
+                    for d, group in enumerate(param.sharded_dims_mp):
+                        if group is not None:
+                            grad = gather_uneven(grad, d, group)
+                grad = grad.cpu()
+            else:
+                grad = None
+
+            state_dict[name + ".grad"] = grad
+
+    return state_dict
+
+
+def scatter_model_state_dict(model: nn.Module, state_dict: OrderedDict, strict: Optional[bool] = True) -> OrderedDict():
+
+    # iterate over model parameters and split accordingly
+    for name, param in model.named_parameters():
+
+        # make sure that the parameter is in the state dict
+        if name in state_dict.keys():
+
+            # in this case, we need to distribute the weight
+            if hasattr(param, "sharded_dims_mp"):
+
+                # make a copy
+                weight = state_dict[name].clone()
+
+                # split if necessary
+                for d, group in enumerate(param.sharded_dims_mp):
+                    # continue if there is nothing to do
+                    if (group is None) or (comm.get_size(group) == 1):
+                        continue
+
+                    weight = split_tensor_along_dim(weight, dim=d, num_chunks=comm.get_size(group))[
+                        comm.get_rank(group)
+                    ]
+
+                # update state dict
+                state_dict[name] = weight
+
+        elif strict:
+            # TODO: maybe do at least a warning for non-strict mode
+            raise ValueError(f"Missing key {name}")
+
+    return state_dict
+
+
+def gather_optimizer_state_dict(model: nn.Module, optimizer: Optimizer) -> OrderedDict:
+
+    # if optimizer is SGD, we can just return the local dict:
+    if isinstance(optimizer, torch.optim.SGD):
+        return optimizer.state_dict()
+
+    # do sanity checks
+    if not (isinstance(optimizer, torch.optim.Adam) or isinstance(optimizer, torch.optim.AdamW)):
+        raise NotImplementedError("Error, only Adam and AdamW state can be stored in flexible format at the moment.")
+
+    # state dict:
+    state_dict = optimizer.state_dict()
+
+    # we need to copy the optimizer dict the hard way
+    optimizer_dict = OrderedDict()
+    optimizer_dict["param_groups"] = []
+    for pgroup in state_dict["param_groups"]:
+        pdict = {key: value for key, value in pgroup.items()}
+        optimizer_dict["param_groups"].append(pdict)
+
+    # The integer keys in state_dict["state"] follow torch.optim's own packing order:
+    # parameters are numbered group-by-group, in optimizer.param_groups order (deduplicated).
+    # We reconstruct the index -> param map from optimizer.param_groups so each state entry is
+    # paired with the parameter that actually owns it. This is correct for any number of param
+    # groups, unlike indexing by enumerate(model.parameters()), which only matches when there is
+    # a single group built directly from model.parameters().
+    optimizer_dict["state"] = {}
+    seen = set()
+    index = 0
+    for pgroup in optimizer.param_groups:
+        for param in pgroup["params"]:
+            if id(param) in seen:
+                continue
+            seen.add(id(param))
+
+            # params without optimizer state (e.g. never received a gradient) carry no state,
+            # but still consume an index so we stay aligned with the packing
+            if index not in state_dict["state"]:
+                index += 1
+                continue
+
+            pstate = state_dict["state"][index]
+            exp_avg = pstate["exp_avg"].clone()
+            exp_avg_sq = pstate["exp_avg_sq"].clone()
+
+            # if the parameter is sharded, gather its optimizer moments across all sharded dims
+            if hasattr(param, "sharded_dims_mp"):
+                for d, group in enumerate(param.sharded_dims_mp):
+                    if group is not None:
+                        exp_avg = gather_uneven(exp_avg, d, group)
+                        exp_avg_sq = gather_uneven(exp_avg_sq, d, group)
+
+            optimizer_dict["state"][index] = {
+                "step": pstate["step"].clone(),
+                "exp_avg": exp_avg,
+                "exp_avg_sq": exp_avg_sq,
+            }
+            index += 1
+
+    return optimizer_dict
+
+
+def scatter_optimizer_state_dict(
+    model: nn.Module, optimizer: Optimizer, optimizer_state_dict: OrderedDict
+) -> OrderedDict():
+
+    # some sanity checks
+    # if optimizer is SGD, we can just return the local dict:
+    if isinstance(optimizer, torch.optim.SGD):
+        return optimizer_state_dict
+
+    if not (isinstance(optimizer, torch.optim.Adam) or isinstance(optimizer, torch.optim.AdamW)):
+        raise NotImplementedError(
+            "Error, only Adam and AdamW state can be restored from flexible format at the moment."
+        )
+
+    # Reconstruct the index -> param map from optimizer.param_groups (matching torch.optim's
+    # packing order) so each saved state entry is split with the sharding of its true owner,
+    # for any number of parameter groups. See gather_optimizer_state_dict for details.
+    seen = set()
+    index = 0
+    for pgroup in optimizer.param_groups:
+        for param in pgroup["params"]:
+            if id(param) in seen:
+                continue
+            seen.add(id(param))
+
+            # in this case, we need to distribute the state
+            if (index in optimizer_state_dict["state"]) and hasattr(param, "sharded_dims_mp"):
+
+                # clone the state
+                exp_avg = optimizer_state_dict["state"][index]["exp_avg"].clone()
+                exp_avg_sq = optimizer_state_dict["state"][index]["exp_avg_sq"].clone()
+
+                for d, group in enumerate(param.sharded_dims_mp):
+                    # continue if there is nothing to do
+                    if (group is None) or (comm.get_size(group) == 1):
+                        continue
+
+                    exp_avg = split_tensor_along_dim(exp_avg, dim=d, num_chunks=comm.get_size(group))[
+                        comm.get_rank(group)
+                    ]
+                    exp_avg_sq = split_tensor_along_dim(exp_avg_sq, dim=d, num_chunks=comm.get_size(group))[
+                        comm.get_rank(group)
+                    ]
+
+                # update the state dict
+                optimizer_state_dict["state"][index]["exp_avg"] = exp_avg
+                optimizer_state_dict["state"][index]["exp_avg_sq"] = exp_avg_sq
+
+            index += 1
+
+    return optimizer_state_dict
+
+
+def checkpoint_format_version(checkpoint: Dict[str, Any]) -> int:
+    """The format version of a checkpoint, 0 for one written before the format tag, see :func:`checkpoint_format_tag`."""
+    tag = checkpoint.get("checkpoint_format", None)
+    return 0 if tag is None else tag.get("version", 0)
+
+
+def upgrade_checkpoint(checkpoint: Dict[str, Any], model: nn.Module, optimizer: Optional[Optimizer] = None) -> None:
+    r"""
+    Upgrade a checkpoint of an earlier format version to the current one, in place, before anything is restored.
+
+    Which upgrades apply is decided by the format version of the checkpoint, see :data:`CHECKPOINT_FORMAT_VERSION`;
+    one without a format tag is of version 0. A checkpoint of the current version is left as it is.
+
+    Parameters
+    ----------
+    checkpoint : dict
+        The checkpoint as loaded, with ``model_state`` keyed as the parameters of ``model``, i.e. with the prefix of
+        any wrapper of the model already prepended.
+    model : nn.Module
+        The model the checkpoint is restored into.
+    optimizer : torch.optim.Optimizer, optional
+        The optimizer whose state is restored from ``optimizer_state_dict``, if any.
+    """
+    # every upgrade acts on the keys and shapes of the earlier versions only, so the ones of all versions apply
+    version = checkpoint_format_version(checkpoint)
+    if version < CHECKPOINT_FORMAT_VERSION:
+        upgrade_state_dict(model, checkpoint["model_state"])
+        if (optimizer is not None) and ("optimizer_state_dict" in checkpoint):
+            upgrade_optimizer_state_dict(optimizer, checkpoint["optimizer_state_dict"])
+
+
+def upgrade_optimizer_state_dict(optimizer: Optimizer, optimizer_state_dict) -> None:
+    r"""
+    Upgrade the state of an optimizer of an earlier version in place, to the parameters as they are now.
+
+    The moments of a bias kept as ``(1, C, 1, 1)`` by earlier versions, see :func:`~makani.models.common.mlp.flatten_biases`, are
+    flattened as the bias is. The saved states are matched to the parameters of ``optimizer`` in the
+    order torch.optim packs them, as :func:`scatter_optimizer_state_dict` does.
+    """
+    states = optimizer_state_dict.get("state", {})
+    seen = set()
+    index = 0
+    for pgroup in optimizer.param_groups:
+        for param in pgroup["params"]:
+            if id(param) in seen:
+                continue
+            seen.add(id(param))
+            if (param.dim() == 1) and (index in states):
+                for name, value in states[index].items():
+                    if torch.is_tensor(value) and (value.dim() == 4) and (value.numel() == value.shape[1]):
+                        states[index][name] = value.reshape(-1)
+            index += 1
+
+
+def upgrade_state_dict(model: nn.Module, state_dict, prefix: str = "") -> None:
+    r"""
+    Upgrade a state dict of an earlier version of a model to the current one, in place.
+
+    Every module of the model that defines a static ``upgrade_state_dict(state_dict, prefix)``
+    upgrades its own keys, e.g. :class:`~makani.models.common.mlp.MLP` the names of its layers.
+    Upgrading is idempotent. A restore calls it through :func:`upgrade_checkpoint`, for checkpoints
+    of an earlier format version only.
+
+    Parameters
+    ----------
+    model : nn.Module
+        The model the state dict is for, as it is now.
+    state_dict : dict
+        The state dict, with the keys of ``model``.
+    prefix : str, optional
+        The prefix of the keys of ``model`` in ``state_dict``.
+    """
+    for name, module in model.named_modules():
+        upgrade = getattr(type(module), "upgrade_state_dict", None)
+        if upgrade is not None:
+            upgrade(state_dict, prefix + (name + "." if name else ""))
+
+
+def get_model_state_dict_prefix(model: nn.Module) -> str:
+    """Return the key prefix that the model's state_dict uses.
+
+    torch.compile wraps a model in OptimizedModule (keys gain ``_orig_mod.``),
+    and DDP wraps it in DistributedDataParallel (keys gain ``module.``).
+    These wrappers may be nested in any combination, so we walk the wrapper
+    chain and accumulate the prefix in order.
+    """
+    prefix = ""
+    m = model
+    while True:
+        if hasattr(m, "_orig_mod"):
+            prefix += "_orig_mod."
+            m = m._orig_mod
+        elif isinstance(m, nn.parallel.DistributedDataParallel):
+            prefix += "module."
+            m = m.module
+        else:
+            break
+    return prefix
+
+
+def prepend_prefix_to_state_dict(
+    state_dict: Dict[str, Any],
+    prefix: str,
+) -> None:
+    r"""Append the prefix to states in state_dict in place.
+
+    ..note::
+        Given a `state_dict` from a local model, a DP/DDP model can load it by applying
+        `prepend_prefix_to_state_dict(state_dict, "module.")` before calling
+        :meth:`torch.nn.Module.load_state_dict`.
+
+    Args:
+        state_dict (OrderedDict): a state-dict to be loaded to the model.
+        prefix (str): prefix.
+    """
+    keys = list(state_dict.keys())
+    for key in keys:
+        newkey = prefix + key
+        state_dict[newkey] = state_dict.pop(key)
+
+    # also strip the prefix in metadata if any.
+    if hasattr(state_dict, "_metadata"):
+        keys = list(state_dict._metadata.keys())
+        for key in keys:
+            # for the metadata dict, the key can be:
+            # '': for the DDP module, which we want to remove.
+            # 'module': for the actual model.
+            # 'module.xx.xx': for the rest.
+            if len(key) >= 0:
+                newkey = prefix + key
+                state_dict._metadata[newkey] = state_dict._metadata.pop(key)

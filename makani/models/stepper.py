@@ -26,8 +26,8 @@ from makani.models.model_input import (
     takes_model_input,
 )
 from makani.models.preprocessor import Preprocessor2D
-from makani.models.noise_controller import NoiseController
-from makani.utils.dataloaders.rollout import Rollout, RolloutStep
+from makani.models.noise.controller import NoiseController
+from makani.data.rollout import Rollout, RolloutStep
 
 
 def _assert_checkpoint_safe(module: nn.Module, noise: NoiseController):
@@ -79,7 +79,7 @@ class StepWrapper(nn.Module):
     gets the channel stack the
     :class:`~makani.models.model_input.FlatInputAdapter` packs from it.
 
-    ``forward`` takes a :class:`~makani.utils.dataloaders.rollout.Rollout` and
+    ``forward`` takes a :class:`~makani.data.rollout.Rollout` and
     runs the model over all of its steps; :meth:`steps` hands out the
     predictions one at a time instead, so that an evaluation can release each
     one before the next, rather than keep all lead times. The rollout carries the input
@@ -90,11 +90,11 @@ class StepWrapper(nn.Module):
     for the model package.
 
     The stochastic state of the model is driven through :attr:`noise`, a
-    :class:`~makani.models.noise_controller.NoiseController` over the noise
+    :class:`~makani.models.noise.controller.NoiseController` over the noise
     processes of the model: the input noise of the input adapter, and those the
     network lists through an optional ``noise_processes()`` method, e.g. for
     noise in its latent space. A rollout advances it before each step, see
-    :class:`~makani.utils.dataloaders.rollout.Rollout`; outside a rollout, the
+    :class:`~makani.data.rollout.Rollout`; outside a rollout, the
     caller advances it before :meth:`predict`. How the noise is used is up to
     the model, which draws from its processes where it uses them, at their
     current state, so that the draws stay in the autograd graph of learnable
@@ -139,7 +139,7 @@ class StepWrapper(nn.Module):
         Drives the noise processes of the model, the input noise and those the
         network lists through an optional ``noise_processes()``; a rollout of a
         stochastic model is made with ``Rollout(..., noise=model.noise)``. See
-        :mod:`~makani.models.noise_controller`.
+        :mod:`~makani.models.noise.controller`.
     """
 
     def __init__(self, params, model_handle):
@@ -179,7 +179,7 @@ class StepWrapper(nn.Module):
         Upgrade a state dict of an earlier version in place: the input noise was kept by the preprocessor.
 
         ``preprocessor.input_noise.*`` becomes ``input_adapter.input_noise.process.*``; see
-        :func:`~makani.utils.checkpoint_helpers.upgrade_checkpoint`.
+        :func:`~makani.driver.checkpoint.upgrade_checkpoint`.
         """
         old, new = prefix + "preprocessor.input_noise.", prefix + "input_adapter.input_noise.process."
         for key in [k for k in state_dict if k.startswith(old)]:
@@ -346,7 +346,7 @@ class StepWrapper(nn.Module):
         Parameters
         ----------
         step : RolloutStep
-            The step, as a :class:`~makani.utils.dataloaders.rollout.Rollout` hands it out.
+            The step, as a :class:`~makani.data.rollout.Rollout` hands it out.
         use_checkpoint : bool, optional
             Recompute the network in the backward pass instead of keeping its
             activations. By default ``False``.
@@ -386,7 +386,7 @@ class StepWrapper(nn.Module):
         Run the model over all steps of a rollout.
 
         Each prediction is fed back into the window of the next step, see
-        :class:`~makani.utils.dataloaders.rollout.Rollout`. In training mode,
+        :class:`~makani.data.rollout.Rollout`. In training mode,
         push-forward mode and rollout checkpointing apply if configured. For a
         single step outside a rollout, use :meth:`predict`; for the predictions
         one step at a time, use :meth:`steps`.
@@ -401,7 +401,7 @@ class StepWrapper(nn.Module):
         torch.Tensor
             The predictions, ``(B * E, n_steps, C_out, H, W)``, in data
             space, at the batch of the rollout with its ``E`` ensemble members
-            folded in; :meth:`~makani.utils.dataloaders.rollout.Rollout.unfold`
+            folded in; :meth:`~makani.data.rollout.Rollout.unfold`
             splits them out. Step ``k`` predicts target step ``k``.
 
         Raises
@@ -438,7 +438,7 @@ class StepWrapper(nn.Module):
         Raises
         ------
         TypeError
-            If ``rollout`` is not a :class:`~makani.utils.dataloaders.rollout.Rollout`.
+            If ``rollout`` is not a :class:`~makani.data.rollout.Rollout`.
         ValueError
             If the rollout has no steps, or does not drive the noise of this
             model, see :attr:`noise`.

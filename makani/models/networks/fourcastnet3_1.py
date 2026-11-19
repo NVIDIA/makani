@@ -29,8 +29,8 @@ from makani.models.common import (
     LearnablePositionEmbedding,
     MLPImputation,
 )
-from makani.utils.features import get_water_channels, get_channel_groups
-from makani.utils.constraints import NonNegativeConstraint
+from makani.data.features import get_water_channels, get_channel_groups
+from makani.models.constraints import NonNegativeConstraint
 from makani.utils.grids import compute_spherical_bandlimit
 
 # get spectral transforms and spherical convolutions from torch_harmonics

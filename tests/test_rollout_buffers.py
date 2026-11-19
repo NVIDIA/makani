@@ -25,14 +25,14 @@ from typing import Optional
 
 import torch_harmonics as th
 
-from makani.utils.inference.rollout_buffer import (
+from makani.inference.rollout_buffer import (
     MeanStdBuffer,
     RolloutBuffer,
     TemporalAverageBuffer,
     SpectrumAverageBuffer,
     ZonalSpectrumAverageBuffer,
 )
-from makani.utils.dataloaders.data_helpers import get_lat_lon_grid
+from makani.data.data_helpers import get_lat_lon_grid
 from makani.utils.grids import sht_grid
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))

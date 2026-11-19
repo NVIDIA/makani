@@ -17,13 +17,9 @@ import unittest
 import torch
 import torch.nn as nn
 
-from makani.utils.training.training_helpers import (
-    clip_grads,
-    _compute_total_grad_norm,
-    normalize_weights,
-    get_parameter_groups,
-    NonFiniteLossCheck,
-)
+from makani.training.training_helpers import clip_grads, _compute_total_grad_norm, normalize_weights, NonFiniteLossCheck
+
+from makani.driver.helpers import get_parameter_groups
 
 import sys
 import os

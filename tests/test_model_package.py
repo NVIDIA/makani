@@ -36,7 +36,7 @@ from importlib.metadata import entry_points
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
-from makani.models.model_package import (
+from makani.driver.model_package import (
     LocalPackage,
     ModelWrapper,
     load_model_package,
@@ -45,9 +45,9 @@ from makani.models.model_package import (
 )
 from makani.models.model_input import INPUT_NOISE
 from makani.models.stepper import StepWrapper
-from makani.utils.driver import Driver
-from makani.utils.dataloaders.batch import make_batch
-from makani.utils.dataloaders.rollout import Rollout
+from makani.driver.base import Driver
+from makani.data.batch import make_batch
+from makani.data.rollout import Rollout
 from .testutils import set_seed, get_default_parameters, compare_tensors, NUM_CHANNELS, IMG_SIZE_H, IMG_SIZE_W
 from makani.utils.params import ParamsBase, ensure_resampled_shapes
 from makani.models import model_registry
@@ -56,7 +56,7 @@ from makani.models import model_registry
 _have_earth2mip = importlib.util.find_spec("earth2mip") is not None
 
 # ---------------------------------------------------------------------------
-# Model packages: makani.models.model_package
+# Model packages: makani.driver.model_package
 # ---------------------------------------------------------------------------
 
 
@@ -1076,6 +1076,22 @@ class TestResampledShapeFallback(unittest.TestCase):
         out = model.predict(inp, {}).flatten(1, 2)
         self.assertEqual(out.shape, (1, params.N_out_channels, params.img_shape_x, params.img_shape_y))
         self.assertTrue(torch.isfinite(out).all())
+
+
+class TestLegacyEntrypoint(unittest.TestCase):
+    """Model packages written before makani 0.4 record ``makani.models.model_package:load_time_loop``."""
+
+    def test_legacy_entrypoint_resolves(self):
+        import importlib
+        from makani.driver import model_package
+
+        module_name, attribute = "makani.models.model_package:load_time_loop".split(":")
+        self.assertIs(getattr(importlib.import_module(module_name), attribute), model_package.load_time_loop)
+
+    def test_new_packages_record_the_current_module(self):
+        from makani.driver import model_package
+
+        self.assertEqual(model_package.LocalPackage.THIS_MODULE, model_package.__name__)
 
 
 if __name__ == "__main__":

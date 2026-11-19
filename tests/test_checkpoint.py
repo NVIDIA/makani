@@ -15,7 +15,7 @@
 
 """
 Non-distributed tests for checkpointing: the pure-Python helpers in
-``makani.utils.checkpoint_helpers``, and saving and restoring a model through
+``makani.driver.checkpoint``, and saving and restoring a model through
 the ``Driver`` end to end.
 
 The distributed gather/scatter round-trip is covered separately by
@@ -35,7 +35,7 @@ from parameterized import parameterized
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
-from makani.utils.checkpoint_helpers import (
+from makani.driver.checkpoint import (
     get_latest_checkpoint_version,
     get_model_state_dict_prefix,
     prepend_prefix_to_state_dict,
@@ -51,15 +51,15 @@ from makani.utils.checkpoint_helpers import (
     setup_training_run,
 )
 from makani.models.common import MLP
-from makani.utils.driver import Driver
+from makani.driver.base import Driver
 from .testutils import disable_tf32, set_seed, get_default_parameters, compare_arrays
 
 # ---------------------------------------------------------------------------
-# Checkpoint helpers: makani.utils.checkpoint_helpers
+# Checkpoint helpers: makani.driver.checkpoint
 # ---------------------------------------------------------------------------
 #
 # Non-distributed unit tests for the pure-Python helpers in
-# ``makani.utils.checkpoint_helpers``:
+# ``makani.driver.checkpoint``:
 #
 #   * ``get_latest_checkpoint_version``
 #   * ``get_model_state_dict_prefix``
@@ -716,7 +716,7 @@ class TestCheckpointFormat(unittest.TestCase):
 
     def test_flexible_refused_by_model_parallel_legacy_restore(self):
         checkpoint = {"checkpoint_format": checkpoint_format_tag("flexible")}
-        with mock.patch("makani.utils.checkpoint_helpers.comm.get_size", return_value=2):
+        with mock.patch("makani.driver.checkpoint.comm.get_size", return_value=2):
             with self.assertRaisesRegex(ValueError, "load_checkpoint: flexible"):
                 check_checkpoint_format(checkpoint, "legacy")
 
@@ -754,7 +754,7 @@ class TestCheckpointFormat(unittest.TestCase):
 
     def test_checkpoint_without_noise_generators_keeps_them(self):
         from makani.models.noise import IsotropicGaussianRandomFieldS2
-        from makani.models.noise_controller import NoiseController
+        from makani.models.noise.controller import NoiseController
 
         noise = NoiseController({"white": IsotropicGaussianRandomFieldS2((8, 16), 1, 1)})
         noise.advance(replace_state=True)
@@ -780,7 +780,7 @@ class TestRunHasCheckpoint(unittest.TestCase):
     def _resumes(self, save_mode, load_mode="legacy", model_size=2):
         self.params.save_checkpoint = save_mode
         self.params.load_checkpoint = load_mode
-        with mock.patch("makani.utils.checkpoint_helpers.comm.get_size", return_value=model_size):
+        with mock.patch("makani.driver.checkpoint.comm.get_size", return_value=model_size):
             return run_has_checkpoint(self.params)
 
     def test_fresh_directory(self):
@@ -810,7 +810,7 @@ class TestRunHasCheckpoint(unittest.TestCase):
     def test_setup_training_run(self):
         exp_dir = os.path.join(self.tmpdir_ctx.name, "run")
         self.params.save_checkpoint = "flexible"
-        with mock.patch("makani.utils.checkpoint_helpers.comm.get_world_rank", return_value=0):
+        with mock.patch("makani.driver.checkpoint.comm.get_world_rank", return_value=0):
             setup_training_run(self.params, exp_dir)
             self.assertTrue(os.path.isdir(os.path.join(exp_dir, "training_checkpoints")))
             self.assertTrue(os.path.isdir(os.path.join(exp_dir, "wandb")))

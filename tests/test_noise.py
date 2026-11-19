@@ -1185,8 +1185,8 @@ class TestNoiseBaseSeed(unittest.TestCase):
                             "data": ensemble_size * batch_size,
                         }
                         with (
-                            mock.patch("makani.models.noise.comm.get_rank", side_effect=ranks.get),
-                            mock.patch("makani.models.noise.comm.get_size", side_effect=sizes.get),
+                            mock.patch("makani.distributed.comm.get_rank", side_effect=ranks.get),
+                            mock.patch("makani.distributed.comm.get_size", side_effect=sizes.get),
                         ):
                             result[(s, m, e, b)] = noise_base_seed(centered, seed_offset=seed_offset)
         return result

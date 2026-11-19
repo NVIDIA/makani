@@ -27,9 +27,9 @@ from parameterized import parameterized
 from makani.utils.functions import flatten_history
 import torch
 
-from makani import Trainer, EnsembleTrainer, StochasticTrainer, AutoencoderTrainer
+from makani.training import Trainer, EnsembleTrainer, StochasticTrainer, AutoencoderTrainer
 from makani.distributed import comm
-from makani.utils.dataloaders.batch import TARGET, batch_to_device
+from makani.data.batch import TARGET, batch_to_device
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from .testutils import disable_tf32, set_seed, get_default_parameters, init_hdf5_dataset

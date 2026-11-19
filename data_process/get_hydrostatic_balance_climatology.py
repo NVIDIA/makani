@@ -33,8 +33,8 @@ from mpi4py import MPI
 import torch
 import torch.distributed as dist
 from makani.utils.grids import GridQuadrature
-import makani.utils.constants as const
-from makani.utils.constraints import get_matching_channels_pl
+import makani.models.constants as const
+from makani.models.constraints import get_matching_channels_pl
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from data_process.data_process_helpers import DistributedProgressBar

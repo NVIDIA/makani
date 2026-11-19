@@ -20,7 +20,7 @@ import unittest
 import torch
 from torch.utils.data import default_collate
 
-from makani.utils.dataloaders.batch import (
+from makani.data.batch import (
     INPUT,
     TARGET,
     INPUT_DYNAMIC_FEATURES,

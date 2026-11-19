@@ -15,7 +15,7 @@
 
 """Render a rollout of one ensemble member next to the observation as a gif or mp4.
 
-The prediction is a rollout file written by makani/inference.py with --output_file. The observation is read like the
+The prediction is a rollout file written by makani/inference/__main__.py with --output_file. The observation is read like the
 data loaders read it: a directory of per-year files, a single concatenated or virtual (.h5v) file, or a zarr store.
 Both are in physical units. The plotted field is a single channel or a combination of channels, using the ops of the
 online visualization (makani.utils.visualize.PLOT_OPS), and defaults to the 10m wind speed sqrt(u10m^2 + v10m^2).
@@ -52,7 +52,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 import imageio.v3 as iio  # noqa: E402
 import imageio_ffmpeg  # noqa: E402
 
-from makani.utils.dataloaders.backends import get_backend  # noqa: E402
+from makani.data.backends import get_backend  # noqa: E402
 from makani.utils.visualize import PLOT_OPS, _check_plot_item  # noqa: E402
 
 
@@ -385,7 +385,7 @@ def make_video(
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--prediction", required=True, help="rollout file written by makani/inference.py")
+    parser.add_argument("--prediction", required=True, help="rollout file written by makani/inference/__main__.py")
     parser.add_argument(
         "--observation",
         required=True,

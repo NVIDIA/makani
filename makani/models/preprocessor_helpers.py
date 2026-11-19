@@ -18,7 +18,7 @@ from functools import partial
 import numpy as np
 import torch
 
-from makani.utils.invariants import check_legacy_invariant_options, parse_invariant_features, read_invariants
+from makani.data.invariants import check_legacy_invariant_options, parse_invariant_features, read_invariants
 
 
 def get_bias_correction(params):
@@ -48,7 +48,7 @@ def get_bias_correction(params):
         If ``bias_correction`` is set but does not point at an existing file.
     """
     if params.get("bias_correction", None) is not None:
-        from makani.utils.auxiliary_fields import read_bias_correction
+        from makani.data.auxiliary_fields import read_bias_correction
 
         # set up sharding parameters
         start_x = params.get("img_local_offset_x", 0)
@@ -101,7 +101,7 @@ def _synthetic_invariant(params, num_channels: int, one_hot: bool = False) -> to
 
 
 def _read_invariant_features(params, path, features, normalizer) -> torch.Tensor:
-    """Read and encode the configured invariants, see :mod:`makani.utils.invariants`.
+    """Read and encode the configured invariants, see :mod:`makani.data.invariants`.
 
     Returns the full grid as ``(1, n_channels, H, W)``; sharding is up to the caller.
     """
@@ -161,7 +161,7 @@ def get_static_features(params):
     ----------
     params : ParamsBase
         Configuration. ``add_grid``, ``invariants`` (read from
-        ``invariants_path``, see :mod:`makani.utils.invariants`) and
+        ``invariants_path``, see :mod:`makani.data.invariants`) and
         ``add_copernicus_emb`` select which features are included, in that
         order; ``normalize_static_features`` enables area-weighted
         normalization; the ``img_local_*`` / ``img_crop_*`` keys and
@@ -181,7 +181,7 @@ def get_static_features(params):
     normalize_static_features = params.get("normalize_static_features", False)
     normalizer = None
     if normalize_static_features:
-        from makani.utils.grid_types import DEFAULT_GRID_TYPE
+        from makani.data.grid_types import DEFAULT_GRID_TYPE
         from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature
 
         # params restored from a checkpoint written before the grid type became
@@ -303,7 +303,7 @@ def get_static_features(params):
                 # eight embedding channels, per get_auxiliary_channels
                 emb = _synthetic_invariant(params, num_channels=8)
             else:
-                from makani.utils.auxiliary_fields import get_copernicus_emb
+                from makani.data.auxiliary_fields import get_copernicus_emb
 
                 if not os.path.isfile(copernicus_emb_path):
                     raise IOError(f"Specify a valid copernicus embedding path, got {copernicus_emb_path}")

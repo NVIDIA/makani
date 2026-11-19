@@ -29,10 +29,10 @@ import dask.array as da
 # MPI
 from mpi4py import MPI
 
-from makani.utils.dataloaders.data_helpers import get_date_from_timestamp
+from makani.data.data_helpers import get_date_from_timestamp
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from makani.utils.dataloaders.wb2_helpers import (
+from makani.data.wb2_helpers import (
     atmospheric_wb2_name,
     split_convert_channel_names,
     surface_wb2_name,

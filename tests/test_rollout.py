@@ -23,9 +23,9 @@ import torch.nn as nn
 from parameterized import parameterized
 
 from makani.models.stepper import StepWrapper
-from makani.models.noise_controller import NoiseController
+from makani.models.noise.controller import NoiseController
 from makani.models.model_input import INPUT_NOISE
-from makani.utils.dataloaders.batch import (
+from makani.data.batch import (
     INPUT,
     TARGET,
     INPUT_DYNAMIC_FEATURES,
@@ -35,7 +35,7 @@ from makani.utils.dataloaders.batch import (
     ZENITH,
     make_batch,
 )
-from makani.utils.dataloaders.rollout import Rollout
+from makani.data.rollout import Rollout
 from makani.utils.functions import expand_ensemble
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))

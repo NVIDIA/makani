@@ -29,7 +29,7 @@ from makani.models.common import MLP, DownSample3D, UpSample3D
 from makani.models.common import DropPath
 
 # features
-from makani.utils import features
+from makani.data import features
 
 # checkpointing
 from torch.utils.checkpoint import checkpoint

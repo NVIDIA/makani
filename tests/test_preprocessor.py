@@ -22,7 +22,7 @@ import unittest
 import torch
 
 from makani.models.preprocessor import Preprocessor2D
-from makani.utils.dataloaders.batch import ZENITH
+from makani.data.batch import ZENITH
 from makani.utils.functions import expand_history, flatten_history
 
 from .testutils import set_seed, get_default_parameters, compare_tensors, IMG_SIZE_H, IMG_SIZE_W

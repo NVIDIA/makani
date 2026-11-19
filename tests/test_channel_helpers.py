@@ -16,8 +16,8 @@
 """
 Unit tests for mapping makani channel names onto the data archives.
 
-Covers the channel name splitter in ``makani.utils.features``, the grouping in
-``makani.utils.dataloaders.channel_helpers`` that all readers share, and the
+Covers the channel name splitter in ``makani.data.features``, the grouping in
+``makani.data.channel_helpers`` that all readers share, and the
 per archive tables and conventions on top of it: NSF NCAR ERA5, WeatherBench2
 and ICON. Everything here is pure computation on names, attributes and
 datetimes, so no files, no network and no MPI are involved.
@@ -32,13 +32,13 @@ import numpy as np
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
-from makani.utils.features import get_channel_groups, split_channel_name
-from makani.utils.dataloaders.channel_helpers import (
+from makani.data.features import get_channel_groups, split_channel_name
+from makani.data.channel_helpers import (
     ChannelGroup,
     build_channel_groups,
     resolve_variable,
 )
-from makani.utils.dataloaders.ncar_helpers import (
+from makani.data.ncar_helpers import (
     ACCUM_INIT_HOURS,
     accumulated_variables as ncar_accumulated_variables,
     ACCUM_MAX_FORECAST_HOUR,
@@ -52,7 +52,7 @@ from makani.utils.dataloaders.ncar_helpers import (
     resolve_accumulation_segments,
     to_ncar_hours,
 )
-from makani.utils.dataloaders.wb2_helpers import (
+from makani.data.wb2_helpers import (
     Wb2Variable,
     surface_variables,
     atmospheric_variables,
@@ -63,7 +63,7 @@ from makani.utils.dataloaders.wb2_helpers import (
     split_convert_channel_names,
     build_wb2_channel_map,
 )
-from makani.utils.dataloaders.icon_helpers import (
+from makani.data.icon_helpers import (
     GRAVITY,
     IconVariable,
     accumulated_variables as icon_accumulated_variables,
@@ -83,10 +83,10 @@ def _utc(year, month, day, hour=0, minute=0, second=0):
 
 
 # ---------------------------------------------------------------------------
-# Channel name splitting: makani.utils.features
+# Channel name splitting: makani.data.features
 # ---------------------------------------------------------------------------
 #
-# Unit tests for the channel name classification in ``makani.utils.features``.
+# Unit tests for the channel name classification in ``makani.data.features``.
 #
 # ``split_channel_name`` is the single definition of how a channel name is split
 # into a variable prefix and a pressure level. Every data source reader goes
@@ -154,10 +154,10 @@ class TestGetChannelGroupsUsesTheSplitter(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Channel grouping: makani.utils.dataloaders.channel_helpers
+# Channel grouping: makani.data.channel_helpers
 # ---------------------------------------------------------------------------
 #
-# Unit tests for ``makani.utils.dataloaders.channel_helpers``, the channel
+# Unit tests for ``makani.data.channel_helpers``, the channel
 # grouping shared by the NCAR, WB2 and ICON readers.
 #
 # The distinction the tests care about most is alternatives versus components: a
@@ -318,10 +318,10 @@ class TestBuildChannelGroups(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# NSF NCAR ERA5: makani.utils.dataloaders.ncar_helpers
+# NSF NCAR ERA5: makani.data.ncar_helpers
 # ---------------------------------------------------------------------------
 #
-# Unit tests for ``makani.utils.dataloaders.ncar_helpers``, the channel mapping,
+# Unit tests for ``makani.data.ncar_helpers``, the channel mapping,
 # object key and accumulation window arithmetic behind the NSF NCAR ERA5 (RDA
 # d633000) converter. The channel name splitter it builds on is shared with the
 # other readers and is covered in the channel name splitting section above.
@@ -557,7 +557,7 @@ class TestToNcarHours(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# WeatherBench2: makani.utils.dataloaders.wb2_helpers
+# WeatherBench2: makani.data.wb2_helpers
 # ---------------------------------------------------------------------------
 
 
@@ -833,10 +833,10 @@ class TestSplitConvertChannelNames(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# ICON: makani.utils.dataloaders.icon_helpers
+# ICON: makani.data.icon_helpers
 # ---------------------------------------------------------------------------
 #
-# Unit tests for ``makani.utils.dataloaders.icon_helpers``: the decoding of ICON
+# Unit tests for ``makani.data.icon_helpers``: the decoding of ICON
 # netCDF conventions and the mapping from ICON variable names onto makani
 # channels.
 #
@@ -1051,7 +1051,7 @@ class TestDecodeTime(unittest.TestCase):
 
     def test_cf_reference_with_offset_is_converted(self):
         # a reference naming a local instant is moved to UTC, matching
-        # makani.utils.dataloaders.data_helpers.get_date_from_string
+        # makani.data.data_helpers.get_date_from_string
         self.assertEqual(decode_time([0], "hours since 2020-01-01 00:00:00 +2:00"), [_utc(2019, 12, 31, 22)])
         self.assertEqual(decode_time([0], "hours since 2020-01-01 00:00:00 -05:00"), [_utc(2020, 1, 1, 5)])
         self.assertEqual(decode_time([0], "hours since 2020-01-01 00:00:00 +0200"), [_utc(2019, 12, 31, 22)])

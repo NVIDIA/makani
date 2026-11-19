@@ -21,7 +21,7 @@ import numpy as np
 import torch
 
 from makani.models.preprocessor_helpers import get_bias_correction, get_static_features
-from makani.utils.features import get_auxiliary_channels, get_channel_groups, is_static_aux_channel
+from makani.data.features import get_auxiliary_channels, get_channel_groups, is_static_aux_channel
 
 import sys
 import os

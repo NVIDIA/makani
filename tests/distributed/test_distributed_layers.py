@@ -31,7 +31,7 @@ import torch_harmonics.distributed as thd
 
 from makani.distributed import comm
 from makani.utils.grids import sht_grid
-from makani.utils import checkpoint_helpers
+from makani.driver import checkpoint as checkpoint_helpers
 
 
 # distributed mlp + transformer engine availability flag

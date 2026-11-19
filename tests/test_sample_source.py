@@ -151,7 +151,7 @@ def _make_distinctive_zarr_wb2_dir(root):
     """Per-year WB2-layout zarr directory with distinctive-channel data."""
     import zarr
     import re
-    from makani.utils.dataloaders.wb2_helpers import atmospheric_wb2_name, surface_wb2_name
+    from makani.data.wb2_helpers import atmospheric_wb2_name, surface_wb2_name
 
     os.makedirs(root, exist_ok=True)
 
@@ -251,7 +251,7 @@ def _make_source(location, **overrides):
     from the location and opens its own handles on first read, so a single
     factory serves every suite.
     """
-    from makani.utils.dataloaders.sample_source import SampleSource
+    from makani.data.sample_source import SampleSource
 
     kw = _default_kwargs(location)
     kw.update(overrides)
@@ -869,7 +869,7 @@ class TestMakaniHDF5(_BaseESTests, unittest.TestCase):
 
     def _make_for_pickle(self, **overrides):
         """Main-process state: __init__ done, no file handles, no buffers."""
-        from makani.utils.dataloaders.sample_source import SampleSource
+        from makani.data.sample_source import SampleSource
 
         kw = _default_kwargs(self._train_path)
         kw["is_parallel"] = True  # buffers not yet allocated; __setstate__ will do it
@@ -910,7 +910,7 @@ class TestMakaniConcat(_BaseESTests, unittest.TestCase):
 
     def _make_for_pickle(self, **overrides):
         """Main-process state: __init__ done, no file handles, no buffers."""
-        from makani.utils.dataloaders.sample_source import SampleSource
+        from makani.data.sample_source import SampleSource
 
         kw = _default_kwargs(self._file)
         kw["is_parallel"] = True  # buffers not yet allocated; __setstate__ will do it
@@ -922,7 +922,7 @@ class TestMakaniConcat(_BaseESTests, unittest.TestCase):
             _make_source(os.path.join(self._tmpdir.name, "no_such.h5"))
 
     def test_s3_raises_not_implemented(self):
-        from makani.utils.dataloaders.sample_source import SampleSource
+        from makani.data.sample_source import SampleSource
 
         kw = _default_kwargs(self._file)
         kw["enable_s3"] = True
@@ -957,7 +957,7 @@ class TestMakaniZarr(_BaseESTests, unittest.TestCase):
         return _make_source(self._dc_path, **overrides)
 
     def _make_for_pickle(self, **overrides):
-        from makani.utils.dataloaders.sample_source import SampleSource
+        from makani.data.sample_source import SampleSource
 
         kw = _default_kwargs(self._train_path)
         kw["is_parallel"] = True
@@ -997,7 +997,7 @@ class TestArcoWB2(_BaseESTests, unittest.TestCase):
         return _make_source(self._dc_path, **kw)
 
     def _make_for_pickle(self, **overrides):
-        from makani.utils.dataloaders.sample_source import SampleSource
+        from makani.data.sample_source import SampleSource
 
         kw = _default_kwargs(self._train_path)
         kw["is_parallel"] = True
@@ -1042,7 +1042,7 @@ class TestOpenRetries(unittest.TestCase):
 
         # the retry notice goes to stdout, which is noise in a passing test
         with mock.patch.object(self.source.backend, "open", flaky):
-            with mock.patch("makani.utils.dataloaders.sample_source.time.sleep"):
+            with mock.patch("makani.data.sample_source.time.sleep"):
                 with contextlib.redirect_stdout(io.StringIO()):
                     yield attempts
 
@@ -1071,7 +1071,7 @@ class TestOpenRetries(unittest.TestCase):
     def test_the_happy_path_does_not_sleep(self):
         # every sample of every epoch goes through here, so a success must not
         # pay for the retry machinery
-        with mock.patch("makani.utils.dataloaders.sample_source.time.sleep") as sleep:
+        with mock.patch("makani.data.sample_source.time.sleep") as sleep:
             self.source._open_with_retries(0)
 
         sleep.assert_not_called()
@@ -1152,7 +1152,7 @@ class TestPartialYearTimestamps(unittest.TestCase):
     def test_naive_times_are_taken_as_utc(self):
         # the backends hand out aware datetimes, but a naive one must not pick up
         # the offset of whichever machine the training runs on
-        from makani.utils.dataloaders.data_helpers import get_seconds_from_times
+        from makani.data.data_helpers import get_seconds_from_times
 
         naive = [dt.datetime(_YEARS[0], 7, 1, 6)]
         expected = dt.datetime(_YEARS[0], 7, 1, 6, tzinfo=dt.timezone.utc).timestamp()

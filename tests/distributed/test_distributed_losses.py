@@ -25,7 +25,7 @@ import torch.distributed as dist
 from makani.distributed import comm
 
 from makani.utils.grids import GridQuadrature
-from makani.utils.losses import (
+from makani.losses import (
     CRPSLoss,
     GradientCRPSLoss,
     EnsembleNLLLoss,
@@ -38,8 +38,8 @@ from makani.utils.losses import (
     SobolevEnergyScoreLoss,
     CoherenceRegularization,
 )
-from makani.utils.losses.energy_score import SpectralCoherenceLoss
-from makani.utils.training.training_helpers import NonFiniteLossCheck
+from makani.losses.energy_score import SpectralCoherenceLoss
+from makani.training.training_helpers import NonFiniteLossCheck
 
 # Add parent directory to path for testutils import
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))

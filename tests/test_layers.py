@@ -31,8 +31,8 @@ from makani.models.common.pos_embedding import LearnablePositionEmbedding
 from makani.models.common.distributed.matmul import DistributedMatmul
 from makani.models.common.distributed.mlp import DistributedEncoderDecoder, DistributedMLP, StochasticMLP
 from makani.models import model_registry
-from makani.utils.checkpoint_helpers import CHECKPOINT_FORMAT_VERSION, upgrade_state_dict
-from makani.utils.driver import Driver
+from makani.driver.checkpoint import CHECKPOINT_FORMAT_VERSION, upgrade_state_dict
+from makani.driver.base import Driver
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from .testutils import disable_tf32, set_seed, get_default_parameters, compare_tensors

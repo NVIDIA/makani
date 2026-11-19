@@ -503,7 +503,7 @@ def init_wb2_zarr_dataset(
     Returns the same tuple as ``init_hdf5_dataset``/``init_zarr_dataset``
     (with ``concat_path=None``).
     """
-    from makani.utils.dataloaders.wb2_helpers import atmospheric_wb2_name, surface_wb2_name
+    from makani.data.wb2_helpers import atmospheric_wb2_name, surface_wb2_name
 
     if channel_names is None:
         channel_names = list(CHANNEL_NAMES)
@@ -610,8 +610,8 @@ def single_step_rollout(inp, dynamic_features=None, noise=None):
 
     For calling a wrapper through its ``forward``, e.g. under DDP, with a single step.
     """
-    from makani.utils.dataloaders.batch import INPUT, INPUT_DYNAMIC_FEATURES, INPUT_TIMESTAMP
-    from makani.utils.dataloaders.rollout import Rollout
+    from makani.data.batch import INPUT, INPUT_DYNAMIC_FEATURES, INPUT_TIMESTAMP
+    from makani.data.rollout import Rollout
 
     batch = {
         INPUT: inp,

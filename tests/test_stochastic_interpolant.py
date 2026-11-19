@@ -30,7 +30,7 @@ import torch
 import torch.nn as nn
 from parameterized import parameterized
 
-from makani.models.noise_controller import NoiseController
+from makani.models.noise.controller import NoiseController
 from makani.models.stochastic_interpolant import (
     PATH_NOISE,
     PathKeys,
@@ -38,8 +38,8 @@ from makani.models.stochastic_interpolant import (
     interpolant_config,
     interpolant_input_channels,
 )
-from makani.utils.dataloaders.batch import INPUT, TARGET, INPUT_DYNAMIC_FEATURES, TARGET_DYNAMIC_FEATURES, ZENITH
-from makani.utils.dataloaders.rollout import Rollout
+from makani.data.batch import INPUT, TARGET, INPUT_DYNAMIC_FEATURES, TARGET_DYNAMIC_FEATURES, ZENITH
+from makani.data.rollout import Rollout
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from .testutils import get_default_parameters, set_seed, compare_tensors, disable_tf32

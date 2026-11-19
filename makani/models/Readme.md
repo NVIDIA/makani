@@ -12,7 +12,11 @@ makani
 │   ├── common                      # folder containing common features used in the neworks
 │   │   ├── activations.py          # complex activation functions
 │   │   ├── contractions.py         # einsum wrappers for complex contractions
-│   │   ├── layers.py               # common layers such as MLPs and wrappers for FFTs
+│   │   ├── distributed             # the distributed versions of the layers: matmul, MLP, patch embedding, attention, norms, FFTs
+│   │   ├── mlp.py                  # encoder/decoder and MLP
+│   │   ├── patch.py                # patch embeddings and recoveries
+│   │   ├── regularization.py       # drop path, seeded dropout, layer scale
+│   │   ├── resample.py             # up- and downsampling
 │   │   └── spectral_convolution.py # spectral convolution layers for (S)FNO architectures
 │   ├── networks                    # contains the actual architectures
 │   │   ├── afnonet_v2.py           # optimized AFNO
@@ -25,12 +29,15 @@ makani
 │   │   ├── sfnonet.py              # implementation of (S)FNO
 │   │   ├── snonet.py               # spherical neural operator (FourCastNet 2)
 │   │   └── vit.py                  # implementation of a VIT
+│   ├── constants.py                # physical constants
+│   ├── constraints.py              # constraints on the output channels of a network
 │   ├── helpers.py                  # helper functions
 │   ├── model_input.py              # ModelInput, the input of a network, and FlatInputAdapter: input noise and packing for flat networks
-│   ├── model_package.py            # model package implementation
+│   ├── model_package.py            # entry point of model packages written before 0.4; the model package is makani.driver.model_package
 │   ├── model_registry.py           # model registry with get_model routine that takes care of wrapping the model
-│   ├── noise.py                    # noise processes on the sphere: white, diffusion and dummy noise
-│   ├── noise_controller.py         # NoiseController: advances, snapshots, restores and re-seeds the noise of a model
+│   ├── noise                       # noise on the sphere
+│   │   ├── processes.py            # noise processes: white, diffusion and dummy noise
+│   │   └── controller.py           # NoiseController: advances, snapshots, restores and re-seeds the noise of a model
 │   ├── preprocessor.py             # stateless preprocessor: history normalization, dynamic and static features, bias correction
 │   ├── stepper.py                  # StepWrapper: binds a network to its preprocessor and its input, runs a Rollout
 │   └── Readme.md                   # this file
@@ -77,7 +84,7 @@ Any other network is a flat network and gets a single channel stack, which the `
 The noise of a model is the model's own: the model owns its noise processes, so that their learnable parameters are trained and checkpointed with it, and draws from them where it uses them. Noise on the input is an `InputNoise` layer, which appends its draw as channels (`concatenate`) or adds it to selected channels of the state as a perturbation in data space (`perturb`); the `FlatInputAdapter` holds the one configured in `input_noise` for a flat network, and a network that takes a `ModelInput` builds its own, with `InputNoise.from_params(params)`. Noise in a latent space is drawn by the network wherever it needs it. Every process is listed through `noise_processes()`, and driven from outside only through `model.noise`, a `NoiseController`, which keeps its state consistent with the rollout:
 
 ```python
-from makani.utils.dataloaders.rollout import Rollout
+from makani.data.rollout import Rollout
 
 rollout = Rollout(batch, noise=model.noise)  # advances the noise before each step
 preds = model(rollout)

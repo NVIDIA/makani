@@ -14,7 +14,7 @@
 # limitations under the License.
 
 import torch
-from makani.utils.features import get_channel_groups
+from makani.data.features import get_channel_groups
 
 from makani.models.onnx_wrapper import OnnxWrapper
 

@@ -187,7 +187,7 @@ ignore = ["E711", "E712", "E722", "E741", "F841"]
 relative_files = true
 omit = [
     "makani/ensemble.py",
-    "makani/inference.py",
+    "makani/inference/__main__.py",
     "makani/train.py",
     "makani/train_autoencoder.py",
     "makani/train_stochastic.py",

@@ -30,7 +30,7 @@ import numpy as np
 import h5py as h5
 import warnings
 
-from makani.utils.dataloaders.ncar_helpers import (
+from makani.data.ncar_helpers import (
     NCAR_ERA5_BUCKET,
     accumulation_key,
     analysis_pl_key,
