@@ -25,7 +25,7 @@ from makani.distributed import comm
 from makani.distributed.mappings import gather_from_parallel_region, copy_to_parallel_region
 
 # quadrature stuff
-from makani.utils.grids import GridQuadrature, make_grid
+from makani.utils.grids import GridQuadrature
 
 # the normalization kernels of the serial layers
 from makani.models.common.layer_norm import _normalize_kernel, _normalize_transform_kernel
@@ -152,16 +152,18 @@ class DistributedInstanceNorm2d(nn.Module):
 
 class DistributedGeometricInstanceNormS2(DistributedInstanceNorm2d):
     """
-    Computes a distributed S2 weighted instance norm using Welford's online algorithm
+    Computes a distributed S2 weighted instance norm using Welford's online algorithm.
+
+    Takes the arguments of :class:`~makani.models.common.layer_norm.GeometricInstanceNormS2`; ``grid``
+    and ``crop_shape`` are global, each rank normalizes its own part of them.
     """
 
     def __init__(
         self,
-        img_shape: Tuple[int, int],
-        crop_shape: Tuple[int, int],
-        crop_offset: Tuple[int, int],
-        grid_type: str,
+        grid,
         num_features: int,
+        crop_shape: Optional[Tuple[int, int]] = None,
+        crop_offset: Tuple[int, int] = (0, 0),
         eps: Optional[float] = 1e-05,
         affine: Optional[bool] = False,
     ):
@@ -169,7 +171,7 @@ class DistributedGeometricInstanceNormS2(DistributedInstanceNorm2d):
 
         # we only need the weights
         quad_weight = GridQuadrature(
-            make_grid(img_shape, grid_type),
+            grid,
             crop_shape=crop_shape,
             crop_offset=crop_offset,
             normalize=True,

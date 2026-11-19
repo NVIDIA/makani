@@ -24,7 +24,7 @@ import torch.nn as nn
 import torch_harmonics as th
 import torch_harmonics.distributed as thd
 
-from makani.utils.grids import GridQuadrature, make_grid, compute_spherical_bandlimit, sht_grid
+from makani.utils.grids import GridQuadrature, make_grid, spherical_bandlimit, sht_grid
 from makani.distributed import comm
 from makani.data.features import get_wind_channels
 from makani.distributed.mappings import reduce_from_parallel_region
@@ -383,7 +383,8 @@ class SpectralBaseLoss(nn.Module, metaclass=ABCMeta):
         self.spatial_distributed = comm.is_distributed("spatial") and spatial_distributed
 
         # clamp lmax/mmax to the grid's spherical bandlimit
-        bandlimit = compute_spherical_bandlimit(img_shape, grid_type)
+        grid = sht_grid(img_shape, grid_type)
+        bandlimit = spherical_bandlimit(grid)
         if lmax is None or lmax > bandlimit:
             lmax = bandlimit
 
@@ -393,9 +394,9 @@ class SpectralBaseLoss(nn.Module, metaclass=ABCMeta):
                 polar_group = None if (comm.get_size("h") == 1) else comm.get_group("h")
                 azimuth_group = None if (comm.get_size("w") == 1) else comm.get_group("w")
                 thd.init(polar_group, azimuth_group)
-            self.sht = thd.DistributedRealSHT(sht_grid(img_shape, grid_type), lmax=lmax, mmax=lmax)
+            self.sht = thd.DistributedRealSHT(grid, lmax=lmax, mmax=lmax)
         else:
-            self.sht = th.RealSHT(sht_grid(img_shape, grid_type), lmax=lmax, mmax=lmax).float()
+            self.sht = th.RealSHT(grid, lmax=lmax, mmax=lmax).float()
 
         # get the local l weights
         l_weights = torch.ones(self.sht.lmax, dtype=torch.float32)

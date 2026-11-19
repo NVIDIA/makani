@@ -22,6 +22,8 @@ from parameterized import parameterized, parameterized_class
 
 import torch
 
+from makani.utils.grids import make_grid
+
 from makani.models.networks.pangu import EarthAttention3D
 from makani.models.common.regularization import DropPath, SeededDropout2d, LayerScale
 from makani.models.common.resample import UpSample2D, DownSample2D, UpSample3D, DownSample3D
@@ -789,7 +791,7 @@ class TestLearnablePositionEmbedding(unittest.TestCase):
         """forward() returns (1, C, H, W) regardless of embed_type — downstream
         code can treat the two modes identically at the call site."""
         emb = LearnablePositionEmbedding(
-            img_shape=(self.H, self.W),
+            grid=make_grid((self.H, self.W), "equiangular"),
             num_chans=self.C,
             embed_type=embed_type,
         )
@@ -802,7 +804,7 @@ class TestLearnablePositionEmbedding(unittest.TestCase):
         the mode (latitude-only embedding) and a contract regression here would
         silently inflate parameter count."""
         emb = LearnablePositionEmbedding(
-            img_shape=(self.H, self.W),
+            grid=make_grid((self.H, self.W), "equiangular"),
             num_chans=self.C,
             embed_type="lat",
         )
@@ -811,7 +813,7 @@ class TestLearnablePositionEmbedding(unittest.TestCase):
     def test_latlon_parameter_shape(self):
         """In 'latlon' mode every spatial position is its own free parameter."""
         emb = LearnablePositionEmbedding(
-            img_shape=(self.H, self.W),
+            grid=make_grid((self.H, self.W), "equiangular"),
             num_chans=self.C,
             embed_type="latlon",
         )
@@ -820,7 +822,7 @@ class TestLearnablePositionEmbedding(unittest.TestCase):
     def test_unknown_embed_type_raises(self):
         with self.assertRaises(ValueError):
             LearnablePositionEmbedding(
-                img_shape=(self.H, self.W),
+                grid=make_grid((self.H, self.W), "equiangular"),
                 num_chans=self.C,
                 embed_type="bogus",
             )
@@ -831,7 +833,7 @@ class TestLearnablePositionEmbedding(unittest.TestCase):
     def test_initial_values_zero(self, embed_type):
         """nn.Parameter(torch.zeros(...)) ⇒ initial output is all zeros."""
         emb = LearnablePositionEmbedding(
-            img_shape=(self.H, self.W),
+            grid=make_grid((self.H, self.W), "equiangular"),
             num_chans=self.C,
             embed_type=embed_type,
         )
@@ -845,7 +847,7 @@ class TestLearnablePositionEmbedding(unittest.TestCase):
         position in the same row must be exactly equal — the broadcast is the
         whole point of this mode."""
         emb = LearnablePositionEmbedding(
-            img_shape=(self.H, self.W),
+            grid=make_grid((self.H, self.W), "equiangular"),
             num_chans=self.C,
             embed_type="lat",
         )
@@ -872,7 +874,7 @@ class TestLearnablePositionEmbedding(unittest.TestCase):
         for randn). This is the negation of the 'lat' invariant and confirms
         the latlon mode actually has per-pixel freedom."""
         emb = LearnablePositionEmbedding(
-            img_shape=(self.H, self.W),
+            grid=make_grid((self.H, self.W), "equiangular"),
             num_chans=self.C,
             embed_type="latlon",
         )
@@ -893,7 +895,7 @@ class TestLearnablePositionEmbedding(unittest.TestCase):
     def test_parameter_is_learnable(self, embed_type):
         """position_embeddings is an nn.Parameter; gradient flows through .sum().backward()."""
         emb = LearnablePositionEmbedding(
-            img_shape=(self.H, self.W),
+            grid=make_grid((self.H, self.W), "equiangular"),
             num_chans=self.C,
             embed_type=embed_type,
         )
@@ -909,7 +911,7 @@ class TestLearnablePositionEmbedding(unittest.TestCase):
         only H is sharded. Distributed model-parallel code reads these
         attributes — a regression here silently breaks spatial parallelism."""
         emb = LearnablePositionEmbedding(
-            img_shape=(self.H, self.W),
+            grid=make_grid((self.H, self.W), "equiangular"),
             num_chans=self.C,
             embed_type="lat",
         )
@@ -920,7 +922,7 @@ class TestLearnablePositionEmbedding(unittest.TestCase):
         """In 'latlon' mode: both H and W get sharded across their respective
         spatial groups, and the embedding is only shared over matmul."""
         emb = LearnablePositionEmbedding(
-            img_shape=(self.H, self.W),
+            grid=make_grid((self.H, self.W), "equiangular"),
             num_chans=self.C,
             embed_type="latlon",
         )

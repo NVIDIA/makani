@@ -30,7 +30,7 @@ import torch_harmonics as th
 import torch_harmonics.distributed as thd
 
 from makani.distributed import comm
-from makani.utils.grids import sht_grid
+from makani.utils.grids import make_grid, sht_grid
 from makani.driver import checkpoint as checkpoint_helpers
 
 
@@ -291,10 +291,16 @@ class TestDistributedLayers(unittest.TestCase):
 
         B, C = batch_size, num_chan
 
-        forward_local = RealFFT2(nlat_in, nlon_in, lmax=lmax, mmax=mmax).to(self.device)
-        inverse_local = InverseRealFFT2(nlat_out, nlon_out, lmax=forward_local.lmax, mmax=forward_local.mmax)
-        forward_dist = DistributedRealFFT2(nlat_in, nlon_in, lmax=lmax, mmax=mmax).to(self.device)
-        inverse_dist = DistributedInverseRealFFT2(nlat_out, nlon_out, lmax=forward_dist.lmax, mmax=forward_dist.mmax)
+        forward_local = RealFFT2(make_grid((nlat_in, nlon_in), "euclidean"), lmax=lmax, mmax=mmax).to(self.device)
+        inverse_local = InverseRealFFT2(
+            make_grid((nlat_out, nlon_out), "euclidean"), lmax=forward_local.lmax, mmax=forward_local.mmax
+        )
+        forward_dist = DistributedRealFFT2(make_grid((nlat_in, nlon_in), "euclidean"), lmax=lmax, mmax=mmax).to(
+            self.device
+        )
+        inverse_dist = DistributedInverseRealFFT2(
+            make_grid((nlat_out, nlon_out), "euclidean"), lmax=forward_dist.lmax, mmax=forward_dist.mmax
+        )
 
         # the initialization scales each row of modes; with unit draws the weights are those scales, and
         # the distributed ones have to be the serial ones, split, whatever the split
@@ -974,10 +980,9 @@ class TestDistributedLayers(unittest.TestCase):
 
         # create local (serial) layer norm
         norm_local = GeometricInstanceNormS2(
-            img_shape=img_shape,
+            grid=make_grid(img_shape, grid_type),
             crop_shape=crop_shape,
             crop_offset=crop_offset,
-            grid_type=grid_type,
             num_features=C,
             eps=eps,
             affine=affine,
@@ -985,10 +990,9 @@ class TestDistributedLayers(unittest.TestCase):
 
         # create distributed layer norm
         norm_dist = DistributedGeometricInstanceNormS2(
-            img_shape=img_shape,
+            grid=make_grid(img_shape, grid_type),
             crop_shape=crop_shape,
             crop_offset=crop_offset,
-            grid_type=grid_type,
             num_features=C,
             eps=eps,
             affine=affine,

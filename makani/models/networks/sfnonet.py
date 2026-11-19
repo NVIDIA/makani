@@ -38,7 +38,7 @@ from makani.models.common.distributed.mlp import DistributedMLP, DistributedEnco
 
 # more distributed stuff
 from makani.distributed import comm
-from makani.utils.grids import sht_grid
+from makani.utils.grids import make_grid, sht_grid
 
 # layer normalization
 from makani.models.common.distributed.layer_norm import (
@@ -637,10 +637,17 @@ class SphericalFourierNeuralOperatorNet(nn.Module):
         self.h = int(self.inp_shape[0] // scale_factor)
         self.w = int(self.inp_shape[1] // scale_factor)
 
-        # initialize spectral transforms
-        self._init_spectral_transforms(
-            spectral_transform, model_grid_type, sht_grid_type, hard_thresholding_fraction, max_modes
+        # the grids of the input and the output, and that of the processor in between; the SHT needs
+        # them on the sphere, the FFT takes the plane as well
+        grid_handle = sht_grid if spectral_transform == "sht" else make_grid
+        self.inp_grid = grid_handle(self.inp_shape, model_grid_type)
+        self.out_grid = grid_handle(self.out_shape, model_grid_type)
+        self.internal_grid = grid_handle(
+            (self.h, self.w), sht_grid_type if spectral_transform == "sht" else model_grid_type
         )
+
+        # initialize spectral transforms
+        self._init_spectral_transforms(spectral_transform, hard_thresholding_fraction, max_modes)
 
         # determine activation function
         if activation_function == "relu":
@@ -695,31 +702,18 @@ class SphericalFourierNeuralOperatorNet(nn.Module):
             norm_layer_handle = (
                 DistributedGeometricInstanceNormS2 if comm.get_size("spatial") > 1 else GeometricInstanceNormS2
             )
+            # the processor's resolution with the quadrature of the model's grid type
             norm_layer_inp = partial(
                 norm_layer_handle,
-                img_shape=(self.h, self.w),
-                crop_shape=(self.h, self.w),
-                crop_offset=(0, 0),
-                grid_type=model_grid_type,
+                grid=make_grid((self.h, self.w), model_grid_type),
                 num_features=embed_dim,
                 eps=1e-6,
                 affine=True,
             )
             norm_layer_mid = norm_layer_inp
             norm_layer_out = partial(
-                norm_layer_handle,
-                img_shape=out_shape,
-                crop_shape=out_shape,
-                crop_offset=(0, 0),
-                grid_type=model_grid_type,
-                num_features=embed_dim,
-                eps=1e-6,
-                affine=True,
+                norm_layer_handle, grid=self.out_grid, num_features=embed_dim, eps=1e-6, affine=True
             )
-            # norm_layer_mid = partial(norm_layer_handle,
-            #                         img_shape=(self.h, self.w), crop_shape=(self.h, self.w), crop_offset=(0,0),
-            #                         grid_type=sht_grid_type, pole_mask=0,
-        #                         num_features=embed_dim, eps=1e-6, affine=True)
         elif normalization_layer == "none":
             norm_layer_out = norm_layer_mid = norm_layer_inp = nn.Identity
         else:
@@ -853,14 +847,12 @@ class SphericalFourierNeuralOperatorNet(nn.Module):
     def _init_spectral_transforms(
         self,
         spectral_transform="sht",
-        model_grid_type="equiangular",
-        sht_grid_type="legendre-gauss",
         hard_thresholding_fraction=1.0,
         max_modes=None,
     ):
         """
-        Initialize the spectral transforms based on the maximum number of modes to keep. Handles the computation
-        of local image shapes and domain parallelism, based on the
+        Initialize the spectral transforms on the model's grids, based on the maximum number of modes to keep.
+        Handles the computation of local image shapes and domain parallelism.
         """
 
         if max_modes is not None:
@@ -889,13 +881,10 @@ class SphericalFourierNeuralOperatorNet(nn.Module):
             # orders m >= lmax carry no spherical harmonic (m <= l < lmax), and torch-harmonics
             # refuses to keep them since 1.0; the planar FFT below has no such bound
             modes_lon = min(modes_lon, modes_lat)
-            grid_inp = sht_grid(self.inp_shape, model_grid_type)
-            grid_out = sht_grid(self.out_shape, model_grid_type)
-            grid_internal = sht_grid((self.h, self.w), sht_grid_type)
-            self.trans_down = sht_handle(grid_inp, lmax=modes_lat, mmax=modes_lon).float()
-            self.itrans_up = isht_handle(grid_out, lmax=modes_lat, mmax=modes_lon).float()
-            self.trans = sht_handle(grid_internal, lmax=modes_lat, mmax=modes_lon).float()
-            self.itrans = isht_handle(grid_internal, lmax=modes_lat, mmax=modes_lon).float()
+            self.trans_down = sht_handle(self.inp_grid, lmax=modes_lat, mmax=modes_lon).float()
+            self.itrans_up = isht_handle(self.out_grid, lmax=modes_lat, mmax=modes_lon).float()
+            self.trans = sht_handle(self.internal_grid, lmax=modes_lat, mmax=modes_lon).float()
+            self.itrans = isht_handle(self.internal_grid, lmax=modes_lat, mmax=modes_lon).float()
 
         elif spectral_transform == "fft":
             fft_handle = RealFFT2
@@ -905,10 +894,10 @@ class SphericalFourierNeuralOperatorNet(nn.Module):
                 fft_handle = DistributedRealFFT2
                 ifft_handle = DistributedInverseRealFFT2
 
-            self.trans_down = fft_handle(*self.inp_shape, lmax=modes_lat, mmax=modes_lon).float()
-            self.itrans_up = ifft_handle(*self.out_shape, lmax=modes_lat, mmax=modes_lon).float()
-            self.trans = fft_handle(self.h, self.w, lmax=modes_lat, mmax=modes_lon).float()
-            self.itrans = ifft_handle(self.h, self.w, lmax=modes_lat, mmax=modes_lon).float()
+            self.trans_down = fft_handle(self.inp_grid, lmax=modes_lat, mmax=modes_lon).float()
+            self.itrans_up = ifft_handle(self.out_grid, lmax=modes_lat, mmax=modes_lon).float()
+            self.trans = fft_handle(self.internal_grid, lmax=modes_lat, mmax=modes_lon).float()
+            self.itrans = ifft_handle(self.internal_grid, lmax=modes_lat, mmax=modes_lon).float()
         else:
             raise (ValueError("Unknown spectral transform"))
 

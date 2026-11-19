@@ -484,6 +484,7 @@ class Inferencer(Driver):
                 rollout_dt=self.params.dt * dhours,
                 img_shape=img_shape,
                 ensemble_size=self.params.local_ensemble_size,
+                grid_type=self.params.model_grid_type,
                 channel_names=self.params.channel_names,
                 lat_lon=(self.params.lat, self.params.lon),
                 device=self.device,

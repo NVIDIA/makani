@@ -174,6 +174,7 @@ class TestDistributedSpectrumBuffers(unittest.TestCase):
                 rollout_dt=6,
                 img_shape=(nlat, nlon),
                 ensemble_size=ensemble_size,
+                grid_type="equiangular",
                 channel_names=_CHANNEL_NAMES,
                 lat_lon=(lats, lons),
                 device=self.device,

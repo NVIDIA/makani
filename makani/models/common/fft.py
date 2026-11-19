@@ -36,8 +36,8 @@ class RealFFT1(nn.Module):
 
     Parameters
     ----------
-    nlon : int
-        Number of grid points along the transformed dimension.
+    grid : torch_harmonics.RegularGridS2 or makani.utils.grids.PlanarGrid
+        The grid of the field; the transform runs along its ``nlon`` longitudes.
     lmax : int, optional
         Upper bound on the retained mode count, clamped to ``nlon // 2 + 1``.
         Defaults to the full ``nlon // 2 + 1``.
@@ -49,13 +49,14 @@ class RealFFT1(nn.Module):
     InverseRealFFT1 : the corresponding inverse transform.
     """
 
-    def __init__(self, nlon: int, lmax: Optional[int] = None, mmax: Optional[int] = None):
+    def __init__(self, grid, lmax: Optional[int] = None, mmax: Optional[int] = None):
         super().__init__()
 
         # use local FFT here
         self.fft_handle = torch.fft.rfft
 
-        self.nlon = nlon
+        self.grid = grid
+        self.nlon = grid.nlon
         self.lmax = min(lmax or self.nlon // 2 + 1, self.nlon // 2 + 1)
         self.mmax = min(mmax or self.nlon // 2 + 1, self.lmax)
 
@@ -95,8 +96,8 @@ class InverseRealFFT1(nn.Module):
 
     Parameters
     ----------
-    nlon : int
-        Number of grid points along the reconstructed dimension.
+    grid : torch_harmonics.RegularGridS2 or makani.utils.grids.PlanarGrid
+        The grid of the field; the transform runs along its ``nlon`` longitudes.
     lmax : int, optional
         Upper bound on the mode count, clamped to ``nlon // 2 + 1``. Defaults to
         the full ``nlon // 2 + 1``.
@@ -108,13 +109,14 @@ class InverseRealFFT1(nn.Module):
     RealFFT1 : the corresponding forward transform.
     """
 
-    def __init__(self, nlon: int, lmax: Optional[int] = None, mmax: Optional[int] = None):
+    def __init__(self, grid, lmax: Optional[int] = None, mmax: Optional[int] = None):
         super().__init__()
 
         # use local FFT here
         self.ifft_handle = irfft
 
-        self.nlon = nlon
+        self.grid = grid
+        self.nlon = grid.nlon
         self.lmax = min(lmax or self.nlon // 2 + 1, self.nlon // 2 + 1)
         self.mmax = min(mmax or self.nlon // 2 + 1, self.lmax)
 
@@ -161,10 +163,9 @@ class RealFFT2(nn.Module):
 
     Parameters
     ----------
-    nlat : int
-        Number of grid points along the second-to-last (latitude) dimension.
-    nlon : int
-        Number of grid points along the last (longitude) dimension.
+    grid : torch_harmonics.RegularGridS2 or makani.utils.grids.PlanarGrid
+        The grid of the field, ``nlat`` latitudes along the second-to-last dimension and ``nlon``
+        longitudes along the last.
     lmax : int, optional
         Retained latitudinal modes, clamped to ``nlat``. Defaults to ``nlat``.
     mmax : int, optional
@@ -176,14 +177,15 @@ class RealFFT2(nn.Module):
     InverseRealFFT2 : the corresponding inverse transform.
     """
 
-    def __init__(self, nlat: int, nlon: int, lmax: Optional[int] = None, mmax: Optional[int] = None):
+    def __init__(self, grid, lmax: Optional[int] = None, mmax: Optional[int] = None):
         super().__init__()
 
         # use local FFT here
         self.fft_handle = torch.fft.rfft2
 
-        self.nlat = nlat
-        self.nlon = nlon
+        self.grid = grid
+        self.nlat = grid.nlat
+        self.nlon = grid.nlon
         self.lmax = min(lmax or self.nlat, self.nlat)
         self.mmax = min(mmax or self.nlon // 2 + 1, self.nlon // 2 + 1)
 
@@ -231,10 +233,9 @@ class InverseRealFFT2(nn.Module):
 
     Parameters
     ----------
-    nlat : int
-        Number of grid points along the second-to-last (latitude) dimension.
-    nlon : int
-        Number of grid points along the last (longitude) dimension.
+    grid : torch_harmonics.RegularGridS2 or makani.utils.grids.PlanarGrid
+        The grid of the field, ``nlat`` latitudes along the second-to-last dimension and ``nlon``
+        longitudes along the last.
     lmax : int, optional
         Latitudinal modes expected on input, clamped to ``nlat``. Defaults to ``nlat``.
     mmax : int, optional
@@ -246,7 +247,7 @@ class InverseRealFFT2(nn.Module):
     RealFFT2 : the corresponding forward transform.
     """
 
-    def __init__(self, nlat: int, nlon: int, lmax: Optional[int] = None, mmax: Optional[int] = None):
+    def __init__(self, grid, lmax: Optional[int] = None, mmax: Optional[int] = None):
         super().__init__()
 
         # use local FFT here: the inverse in latitude first, then the real inverse in longitude, which
@@ -254,8 +255,9 @@ class InverseRealFFT2(nn.Module):
         # differ in how they treat the remaining imaginary parts
         self.ifft_handle = irfft
 
-        self.nlat = nlat
-        self.nlon = nlon
+        self.grid = grid
+        self.nlat = grid.nlat
+        self.nlon = grid.nlon
         self.lmax = min(lmax or self.nlat, self.nlat)
         self.mmax = min(mmax or self.nlon // 2 + 1, self.nlon // 2 + 1)
 

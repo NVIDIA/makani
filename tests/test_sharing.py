@@ -31,6 +31,7 @@ from makani.models.common.distributed.layer_norm import DistributedGeometricInst
 from makani.models.common.distributed.matmul import DistributedMatmul
 from makani.models.common.distributed.mlp import DistributedEncoderDecoder, DistributedMLP, StochasticMLP
 from makani.models.common.distributed.patch import DistributedPatchEmbed
+from makani.utils.grids import make_grid
 from makani.models.common.distributed.attention import MultiHeadAttention
 
 
@@ -127,7 +128,7 @@ class TestDistributedLayerSharing(unittest.TestCase):
             ("instance_norm", lambda: DistributedInstanceNorm2d(8, affine=True)),
             (
                 "geometric_instance_norm",
-                lambda: DistributedGeometricInstanceNormS2((16, 32), (16, 32), (0, 0), "equiangular", 8, affine=True),
+                lambda: DistributedGeometricInstanceNormS2(make_grid((16, 32), "equiangular"), 8, affine=True),
             ),
         ]
     )

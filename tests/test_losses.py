@@ -533,10 +533,10 @@ class TestSpectralH1Loss(unittest.TestCase):
         applied to both losses, SpectralH1Loss(squared=True) must equal
         l(l+1) · GeometricLpLoss(p=2, squared=True)."""
         import torch_harmonics as th
-        from makani.utils.grids import compute_spherical_bandlimit
+        from makani.utils.grids import spherical_bandlimit
 
         l_test = 4
-        lmax = compute_spherical_bandlimit((_IMG_H, _IMG_W), "equiangular")
+        lmax = spherical_bandlimit(sht_grid((_IMG_H, _IMG_W), "equiangular"))
 
         # build single-mode field by inverse SHT of a unit coefficient at (l, m=0)
         isht = th.InverseRealSHT(sht_grid((_IMG_H, _IMG_W), "equiangular"), lmax=lmax, mmax=lmax).float()

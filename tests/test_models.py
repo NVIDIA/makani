@@ -312,6 +312,24 @@ class TestModelOptions(unittest.TestCase):
         self.params.operator_type = operator_type
         self._forward_backward()
 
+    @parameterized.expand(
+        [
+            (nettype, model_grid_type, sht_grid_type)
+            for nettype in ("SFNO", "SNO", "FCN3")
+            for model_grid_type, sht_grid_type in (("lobatto", "legendre-gauss"), ("fejer1", "fejer1"))
+        ]
+        # FCN3.1 keeps the band limit of its input grid in the processor, which on a Lobatto input is about
+        # nlat, more than its coarser processor grid recovers
+        + [("FCN3.1", "fejer1", "fejer1"), ("FCN3.1", "trapezoidal", "legendre-gauss")]
+    )
+    def test_any_regular_grid(self, nettype, model_grid_type, sht_grid_type):
+        """The spherical models run on any regular grid of torch-harmonics, not only equiangular and
+        Legendre-Gauss: their band limits, norms and transforms come from the grids."""
+        self.params.nettype = nettype
+        self.params.model_grid_type = model_grid_type
+        self.params.sht_grid_type = sht_grid_type
+        self._forward_backward()
+
 
 def _soft_clamp_reference(x):
     # 0 below zero, x^2 on [0, 0.5) and x - 0.25 above: continuous with a continuous first derivative
