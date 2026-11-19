@@ -35,10 +35,10 @@ pip install -e .
 
 ### Training:
 
-Makani supports ensemble and deterministic training. Ensemble training is launched by calling `ensemble.py`, whereas deterministic training is launched by calling `train.py`. Both scripts expect the CLI arguments to specify the configuration file `--yaml_config` and he configuration target `--config`, which is contained in the configuration file:
+Makani supports ensemble and deterministic training. Ensemble training is launched with `python -m makani.ensemble`, whereas deterministic training is launched with `python -m makani.train`. Both scripts expect the CLI arguments to specify the configuration file `--yaml_config` and he configuration target `--config`, which is contained in the configuration file:
 
 ```bash
-mpirun -np 8 --allow-run-as-root python -u train.py --yaml_config="config/fourcastnet3.yaml" --config="fcn3_sc2_edim45_layers10_pretrain1"
+mpirun -np 8 --allow-run-as-root python -u -m makani.train --yaml_config="config/fourcastnet3.yaml" --config="fcn3_sc2_edim45_layers10_pretrain1"
 ```
 
 Makani supports various optimization to fit large models ino GPU memory and enable computationally efficient training. An overview of these features and corresponding CLI arguments is provided in the following table:
@@ -60,16 +60,16 @@ Makani supports various optimization to fit large models ino GPU memory and enab
 Especially larger models are enabled by using a mix of these techniques. Spatial model parallelism splits both the model and the data onto multiple GPUs, thus reducing both the memory footprint of the model and the load on the IO as each rank only needs to read a fraction of the data. A typical "large" training run of SFNO can be launched by running
 
 ```bash
-mpirun -np 256 --allow-run-as-root python -u makani.train --amp_mode=bf16 --multistep_count=1 --run_num="ngpu256_sp4" --yaml_config="config/sfnonet.yaml" --config="sfno_linear_73chq_sc3_layers8_edim384_asgl2" --h_parallel_size=4 --w_parallel_size=1 --batch_size=64
+mpirun -np 256 --allow-run-as-root python -u -m makani.train --amp_mode=bf16 --multistep_count=1 --run_num="ngpu256_sp4" --yaml_config="config/sfnonet.yaml" --config="sfno_linear_73chq_sc3_layers8_edim384_asgl2" --h_parallel_size=4 --w_parallel_size=1 --batch_size=64
 ```
 Here we train the model on 256 GPUs, split horizontally across 4 ranks with a batch size of 64, which amounts to a local batch size of 1/4. Memory requirements are further reduced by the use of `bf16` automatic mixed precision.
 
 ### Inference:
 
-Makani supports scalable and flexible on-line inference aimed at minimizing data movement and disk I/O, which is well suited to the low inference costs of ML weather models and modern HPC infrastructure. In a similar fashion to training, inference can be called from the CLI by calling `inference.py` and handled by `inferencer.py`. To launch inference on the out-of-sample dataset, we can call:
+Makani supports scalable and flexible on-line inference aimed at minimizing data movement and disk I/O, which is well suited to the low inference costs of ML weather models and modern HPC infrastructure. In a similar fashion to training, inference is launched with `python -m makani.inference` and carried out by the `Inferencer` in `makani/inference/inferencer.py`. To launch inference on the out-of-sample dataset, we can call:
 
 ```bash
-mpirun -np 256 --allow-run-as-root python -u makani.inference --run_num="ngpu256_sp4" --yaml_config="config/sfnonet.yaml" --config="sfno_linear_73chq_sc3_layers8_edim384_asgl2" --batch_size=64
+mpirun -np 256 --allow-run-as-root python -u -m makani.inference --run_num="ngpu256_sp4" --yaml_config="config/sfnonet.yaml" --config="sfno_linear_73chq_sc3_layers8_edim384_asgl2" --batch_size=64
 ```
 
 By default, the inference script will perform inference on the out-of-sample dataset and compute the mtrics. The inference script supports model, data and ensemble parallelism out of the box, enabling efficient and scalable scoring. The inference script support additional CLI arguments which enable validation on a subset of the dataset, as well as writing out inferred states:
@@ -146,7 +146,7 @@ makani
 ```
 
 ### Model and Training configuration
-Model training in Makani is specified through the use of `.yaml` files located in the `config` folder. The corresponding models are located in `modelf` and registered in the model registry in `models/model_registry.py`. The following table lists the most important configuration options.
+Model training in Makani is specified through the use of `.yaml` files located in the `config` folder. The corresponding models are located in `makani/models/networks` and registered in the model registry in `makani/models/model_registry.py`. The following table lists the most important configuration options.
 
 | Configuration Key         | Description                                             | Options                                                 |
 |---------------------------|---------------------------------------------------------|---------------------------------------------------------|
@@ -201,7 +201,7 @@ For details on obtaining datasets, converting them to Makani format, concatenati
 
 Makani supports 2 checkpointing formats `legacy` and `flexible`. By default, makani uses the `legacy` format, which saves the model, optimizer and scheduler state dicts into a file for each model parallel rank. This enables restoring the run in the same model-parallel configuration, including optimizer and scheduler states. Alternatively, if a different model-parallel configuration needs to be chosen, the `flexible` format can be used to restore the model in another configuration. Unfortunately, support for restoring optimizer states in this manner is still experimental. Which format is used for saving and restoring is determined by the
 
-Makani offers a conversion script to convert `legacy` checkpoints into `flexible` checkpoints. It can be run by calling `python -u makani.convert_checkpoint` script.
+Makani offers a conversion script to convert `legacy` checkpoints into `flexible` checkpoints. It can be run with `python -u -m makani.convert_checkpoint`.
 
 ### Model packages
 
