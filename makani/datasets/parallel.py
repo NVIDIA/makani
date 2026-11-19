@@ -23,6 +23,7 @@ one rank, see :func:`h5_kwargs`, so a serial run works with any h5py, including 
 are built without parallel HDF5.
 """
 
+import os
 from typing import Any, Dict, List, Optional
 
 try:
@@ -61,11 +62,40 @@ class SerialComm:
         pass
 
 
+#: Environment variables in which launchers export the number of processes they started: Open MPI's
+#: mpirun, the PMI of MPICH, Intel MPI and srun, and torchrun. Slurm's own task counts are left out,
+#: as inside a batch script they describe the job rather than the one process that runs there.
+LAUNCHER_SIZE_VARIABLES = ("OMPI_COMM_WORLD_SIZE", "PMI_SIZE", "WORLD_SIZE")
+
+
+def launched_processes() -> int:
+    """The number of processes a launcher started, from its environment, or 1 without one."""
+    for name in LAUNCHER_SIZE_VARIABLES:
+        value = os.environ.get(name)
+        if value is not None and value.strip().isdigit():
+            return int(value)
+    return 1
+
+
 def get_comm():
-    """A duplicate of ``MPI.COMM_WORLD`` if mpi4py is installed, a :class:`SerialComm` otherwise."""
-    if MPI is None:
-        return SerialComm()
-    return MPI.COMM_WORLD.Dup()
+    """
+    A duplicate of ``MPI.COMM_WORLD`` if mpi4py is installed, a :class:`SerialComm` otherwise.
+
+    Refuses a launch of several processes that MPI does not connect: without mpi4py, or with an
+    mpi4py built against another MPI than the launcher's, every process would take itself for the
+    only rank, read all of the data and write the same files.
+    """
+    launched = launched_processes()
+    comm = SerialComm() if MPI is None else MPI.COMM_WORLD.Dup()
+    if launched > 1 and comm.Get_size() != launched:
+        if MPI is None:
+            reason = "mpi4py is not installed; install it with `pip install makani[datasets-mpi]`"
+        else:
+            reason = (
+                f"MPI connects {comm.Get_size()} of them; mpi4py may be built against another MPI than the launcher's"
+            )
+        raise RuntimeError(f"The script was launched as {launched} processes, but {reason}.")
+    return comm
 
 
 def is_parallel(comm) -> bool:

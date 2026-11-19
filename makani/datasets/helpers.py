@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import math
 
 from tqdm import tqdm
 import numpy as np
@@ -67,6 +66,12 @@ def allgather_dict(stats, group):
 
 
 def send_recv_dict(stats, src_rank, dst_rank, group):
+    """
+    Send the tensors of ``stats`` from ``src_rank`` to ``dst_rank`` of ``group``.
+
+    On ``dst_rank``, returns what ``src_rank`` sent, received into new tensors, so that its own
+    ``stats`` stay as they are; on every other rank, returns ``stats``.
+    """
     group_rank = dist.get_rank(group)
     group_size = dist.get_world_size(group)
     stats_recv = {varname: {} for varname in stats.keys()}
@@ -74,21 +79,15 @@ def send_recv_dict(stats, src_rank, dst_rank, group):
     for varname, substats in stats.items():
         for k, v in substats.items():
             if isinstance(v, torch.Tensor):
-                # send/recv
                 tag = src_rank + group_size * count
                 if group_rank == dst_rank:
-                    # we need to convert group rank to global rank
-                    src_rank_global = dist.get_global_rank(group, src_rank)
-                    recv_handle = dist.irecv(v, src=src_rank_global, tag=tag, group=group)
-                    recv_handle.wait()
+                    buffer = torch.empty_like(v)
+                    dist.recv(buffer, src=dist.get_global_rank(group, src_rank), tag=tag, group=group)
+                    v = buffer
                 elif group_rank == src_rank:
-                    # we need to convert group rank to global rank
-                    dst_rank_global = dist.get_global_rank(group, dst_rank)
-                    send_handle = dist.isend(v, dst=dst_rank_global, tag=tag, group=group)
-                    send_handle.wait()
+                    dist.send(v.contiguous(), dst=dist.get_global_rank(group, dst_rank), tag=tag, group=group)
                 count += 1
 
-            # update dictionary
             stats_recv[varname][k] = v
 
     return stats_recv
@@ -107,32 +106,26 @@ def collective_reduce(stats, group):
 
 
 def binary_reduce(stats, group, device):
+    """
+    Reduce the stats of all ranks of ``group`` onto its rank 0, in pairs.
+
+    At distance 1, 2, 4, ..., each rank ``r`` that is a multiple of twice the distance combines what
+    rank ``r + distance`` sends, if there is one, so any group size works in ``ceil(log2(size))``
+    steps. Only rank 0 holds the result.
+    """
     csize = dist.get_world_size(group)
     crank = dist.get_rank(group)
 
-    # check for power of two
-    assert (csize & (csize - 1) == 0) and csize != 0
+    distance = 1
+    while distance < csize:
+        if (crank % (2 * distance) == 0) and (crank + distance < csize):
+            stats = welford_combine(stats, send_recv_dict(stats, crank + distance, crank, group))
+        elif crank % (2 * distance) == distance:
+            send_recv_dict(stats, crank, crank - distance, group)
 
-    # how many steps do we need:
-    nsteps = int(math.log(csize, 2))
-
-    # init step 1
-    recv_ranks = range(0, csize, 2)
-    send_ranks = range(1, csize, 2)
-
-    for step in range(nsteps):
-        for rrank, srank in zip(recv_ranks, send_ranks):
-            rstats = send_recv_dict(stats, srank, rrank, group)
-            if crank == rrank:
-                stats = welford_combine(stats, rstats)
-
-        # wait for everyone being ready before doing the next epoch
+        # everyone is done with this step before the next one
         dist.barrier(group=group, device_ids=[device.index] if device.type == "cuda" else None)
-
-        # shrink the list
-        if step < nsteps - 1:
-            recv_ranks = recv_ranks[0::2]
-            send_ranks = recv_ranks[1::2]
+        distance *= 2
 
     return stats
 

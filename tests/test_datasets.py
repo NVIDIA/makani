@@ -1198,13 +1198,78 @@ class TestH5Convert(unittest.TestCase):
         self.assertLessEqual(np.prod(chunks) * itemsize, max(target_bytes, itemsize))
 
 
+def _reduction_data(rank):
+    generator = torch.Generator().manual_seed(100 + rank)
+    return torch.randn(5 + rank, 3, dtype=torch.float64, generator=generator) + rank
+
+
+def _reduction_stats(x):
+    """Statistics of samples ``x`` (samples, channels) in the layout of the statistics scripts."""
+    counts = torch.full((x.shape[1],), float(x.shape[0]), dtype=torch.float64)
+    mean = x.mean(0)
+    m2 = ((x - mean) ** 2).sum(0)
+    return {
+        "meanvar": {"type": "meanvar", "counts": counts, "values": torch.stack([mean, m2]).reshape(2, 1, -1, 1, 1)},
+        "mins": {"type": "min", "counts": counts.clone(), "values": x.min(0).values.reshape(1, -1, 1, 1)},
+        "maxs": {"type": "max", "counts": counts.clone(), "values": x.max(0).values.reshape(1, -1, 1, 1)},
+    }
+
+
+def _reduction_worker(rank, world_size, init_file, reduction_group_size, output):
+    import torch.distributed as dist
+    from makani.datasets.helpers import binary_reduce, collective_reduce
+    from makani.datasets.parallel import reduction_mesh_shape
+
+    dist.init_process_group("gloo", init_method=f"file://{init_file}", rank=rank, world_size=world_size)
+    try:
+        # the reduction of the statistics scripts: within the groups, then across them in a tree
+        mesh = dist.init_device_mesh(
+            "cpu",
+            mesh_shape=reduction_mesh_shape(reduction_group_size, world_size),
+            mesh_dim_names=["reduction", "tree"],
+        )
+        stats = collective_reduce(_reduction_stats(_reduction_data(rank)), mesh.get_group("reduction"))
+        if dist.get_rank(mesh.get_group("reduction")) == 0:
+            stats = binary_reduce(stats, mesh.get_group("tree"), torch.device("cpu"))
+        if rank == 0:
+            torch.save(stats, output)
+        dist.barrier()
+    finally:
+        dist.destroy_process_group()
+
+
+class TestParallelReduction(unittest.TestCase):
+    """The parallel reduction of the statistics scripts gives the statistics of all the data, for any number of ranks."""
+
+    @parameterized.expand([(2, 8), (2, 1), (3, 1), (4, 2), (5, 2), (6, 2), (9, 8)])
+    def test_reduction_matches_the_statistics_of_all_data(self, world_size, reduction_group_size):
+        import torch.multiprocessing as mp
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = os.path.join(tmpdir, "stats.pt")
+            mp.spawn(
+                _reduction_worker,
+                args=(world_size, os.path.join(tmpdir, "init"), reduction_group_size, output),
+                nprocs=world_size,
+                join=True,
+            )
+            reduced = torch.load(output)
+
+        expected = _reduction_stats(torch.cat([_reduction_data(rank) for rank in range(world_size)]))
+        for name, entry in expected.items():
+            with self.subTest(stat=name):
+                torch.testing.assert_close(reduced[name]["values"], entry["values"], rtol=1e-12, atol=1e-12)
+                torch.testing.assert_close(reduced[name]["counts"], entry["counts"], rtol=0.0, atol=0.0)
+
+
 class TestParallel(unittest.TestCase):
     """The dataset scripts run on a single rank without MPI, and in parallel where it is available."""
 
     def test_without_mpi4py_a_run_has_one_rank(self):
         from makani.datasets import parallel
 
-        with mock.patch.object(parallel, "MPI", None):
+        environment = {name: "" for name in parallel.LAUNCHER_SIZE_VARIABLES}
+        with mock.patch.object(parallel, "MPI", None), mock.patch.dict(os.environ, environment):
             comm = parallel.get_comm()
 
         self.assertIsInstance(comm, parallel.SerialComm)
@@ -1214,6 +1279,25 @@ class TestParallel(unittest.TestCase):
         self.assertEqual(comm.allgather(3), [3])
         self.assertIs(comm.Dup(), comm)
         self.assertFalse(parallel.is_parallel(comm))
+
+    @parameterized.expand([("OMPI_COMM_WORLD_SIZE",), ("PMI_SIZE",), ("WORLD_SIZE",)])
+    def test_a_parallel_launch_without_mpi4py_is_refused(self, variable):
+        # every process would take itself for the only rank and write the same files
+        from makani.datasets import parallel
+
+        environment = {name: "" for name in parallel.LAUNCHER_SIZE_VARIABLES}
+        environment[variable] = "2"
+        with mock.patch.object(parallel, "MPI", None), mock.patch.dict(os.environ, environment):
+            with self.assertRaisesRegex(RuntimeError, "launched as 2 processes.*datasets-mpi"):
+                parallel.get_comm()
+
+    def test_a_single_process_launch_runs_serially(self):
+        from makani.datasets import parallel
+
+        environment = {name: "" for name in parallel.LAUNCHER_SIZE_VARIABLES}
+        environment["PMI_SIZE"] = "1"
+        with mock.patch.object(parallel, "MPI", None), mock.patch.dict(os.environ, environment):
+            self.assertIsInstance(parallel.get_comm(), parallel.SerialComm)
 
     def test_a_single_rank_writes_files_serially(self):
         from makani.datasets.parallel import SerialComm, h5_kwargs
