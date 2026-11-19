@@ -34,7 +34,7 @@ class DistributedRealFFT1(nn.Module):
     Helper routine to wrap FFT similarly to the SHT
     """
 
-    def __init__(self, nlon: int, lmax: Optional[int] = None, mmax: Optional[int] = None):
+    def __init__(self, grid, lmax: Optional[int] = None, mmax: Optional[int] = None):
         super().__init__()
 
         # get the comms grid:
@@ -42,7 +42,8 @@ class DistributedRealFFT1(nn.Module):
         self.comm_rank_w = comm.get_rank("w")
 
         # dimensions
-        self.nlon = nlon
+        self.grid = grid
+        self.nlon = grid.nlon
         self.lmax = min(lmax or self.nlon // 2 + 1, self.nlon // 2 + 1)
         self.mmax = min(mmax or self.lmax, self.lmax)
 
@@ -82,7 +83,7 @@ class DistributedInverseRealFFT1(nn.Module):
     Helper routine to wrap FFT similarly to the SHT
     """
 
-    def __init__(self, nlon: int, lmax: Optional[int] = None, mmax: Optional[int] = None):
+    def __init__(self, grid, lmax: Optional[int] = None, mmax: Optional[int] = None):
         super().__init__()
 
         # get the comms grid:
@@ -90,7 +91,8 @@ class DistributedInverseRealFFT1(nn.Module):
         self.comm_rank_w = comm.get_rank("w")
 
         # dimensions
-        self.nlon = nlon
+        self.grid = grid
+        self.nlon = grid.nlon
         self.lmax = min(lmax or self.nlon // 2 + 1, self.nlon // 2 + 1)
         self.mmax = min(mmax or self.lmax, self.lmax)
 
@@ -126,7 +128,7 @@ class DistributedRealFFT2(nn.Module):
     Helper routine to wrap FFT similarly to the SHT
     """
 
-    def __init__(self, nlat: int, nlon: int, lmax: Optional[int] = None, mmax: Optional[int] = None):
+    def __init__(self, grid, lmax: Optional[int] = None, mmax: Optional[int] = None):
         super().__init__()
 
         # get the comms grid:
@@ -135,8 +137,9 @@ class DistributedRealFFT2(nn.Module):
         self.comm_rank_w = comm.get_rank("w")
 
         # dimensions
-        self.nlat = nlat
-        self.nlon = nlon
+        self.grid = grid
+        self.nlat = grid.nlat
+        self.nlon = grid.nlon
         self.lmax = min(lmax or self.nlat, self.nlat)
         self.mmax = min(mmax or self.nlon // 2 + 1, self.nlon // 2 + 1)
 
@@ -193,7 +196,7 @@ class DistributedInverseRealFFT2(nn.Module):
     Helper routine to wrap FFT similarly to the SHT
     """
 
-    def __init__(self, nlat: int, nlon: int, lmax: Optional[int] = None, mmax: Optional[int] = None):
+    def __init__(self, grid, lmax: Optional[int] = None, mmax: Optional[int] = None):
         super().__init__()
 
         # get the comms grid:
@@ -202,8 +205,9 @@ class DistributedInverseRealFFT2(nn.Module):
         self.comm_rank_w = comm.get_rank("w")
 
         # dimensions
-        self.nlat = nlat
-        self.nlon = nlon
+        self.grid = grid
+        self.nlat = grid.nlat
+        self.nlon = grid.nlon
         self.lmax = min(lmax or self.nlat, self.nlat)
         self.mmax = min(mmax or self.nlon // 2 + 1, self.nlon // 2 + 1)
 

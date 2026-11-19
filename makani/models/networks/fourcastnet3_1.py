@@ -31,7 +31,7 @@ from makani.models.common import (
 )
 from makani.data.features import get_water_channels, get_channel_groups
 from makani.models.constraints import NonNegativeConstraint
-from makani.utils.grids import compute_spherical_bandlimit
+from makani.utils.grids import spherical_bandlimit
 
 # get spectral transforms and spherical convolutions from torch_harmonics
 import torch_harmonics as th
@@ -105,14 +105,10 @@ class DiscreteContinuousEncoder(nn.Module):
 
     Parameters
     ----------
-    inp_shape : (int, int), optional
-        Input grid as ``(nlat, nlon)``, by default ``(721, 1440)``.
-    out_shape : (int, int), optional
-        Output grid as ``(nlat, nlon)``, by default ``(480, 960)``.
-    grid_in : str, optional
-        Input grid type, by default ``"equiangular"``.
-    grid_out : str, optional
-        Output grid type, by default ``"equiangular"``.
+    inp_grid : torch_harmonics.RegularGridS2
+        The grid of the input, see :func:`~makani.utils.grids.sht_grid`.
+    out_grid : torch_harmonics.RegularGridS2
+        The grid of the output.
     inp_chans : int, optional
         Number of input channels, by default ``2``.
     out_chans : int, optional
@@ -140,10 +136,8 @@ class DiscreteContinuousEncoder(nn.Module):
 
     def __init__(
         self,
-        inp_shape=(721, 1440),
-        out_shape=(480, 960),
-        grid_in="equiangular",
-        grid_out="equiangular",
+        inp_grid,
+        out_grid,
         inp_chans=2,
         out_chans=2,
         kernel_shape=(3, 3),
@@ -164,8 +158,8 @@ class DiscreteContinuousEncoder(nn.Module):
             thd.DistributedDiscreteContinuousConvS2 if comm.get_size("spatial") > 1 else th.DiscreteContinuousConvS2
         )
         self.conv = conv_handle(
-            sht_grid(inp_shape, grid_in),
-            sht_grid(out_shape, grid_out),
+            inp_grid,
+            out_grid,
             inp_chans,
             out_chans,
             kernel_shape=kernel_shape,
@@ -190,12 +184,12 @@ class DiscreteContinuousEncoder(nn.Module):
         Parameters
         ----------
         x : torch.Tensor
-            Input of shape ``(B, inp_chans, *inp_shape)``.
+            Input of shape ``(B, inp_chans, *inp_grid.shape)``.
 
         Returns
         -------
         torch.Tensor
-            Encoded field of shape ``(B, out_chans, *out_shape)``.
+            Encoded field of shape ``(B, out_chans, *out_grid.shape)``.
         """
 
         # convolution
@@ -215,14 +209,10 @@ class DiscreteContinuousDecoder(nn.Module):
 
     Parameters
     ----------
-    inp_shape : (int, int), optional
-        Input grid as ``(nlat, nlon)``, by default ``(480, 960)``.
-    out_shape : (int, int), optional
-        Output grid as ``(nlat, nlon)``, by default ``(721, 1440)``.
-    grid_in : str, optional
-        Input grid type, by default ``"equiangular"``.
-    grid_out : str, optional
-        Output grid type, by default ``"equiangular"``.
+    inp_grid : torch_harmonics.RegularGridS2
+        The grid of the input, see :func:`~makani.utils.grids.sht_grid`.
+    out_grid : torch_harmonics.RegularGridS2
+        The grid of the output.
     inp_chans : int, optional
         Number of input channels, by default ``2``.
     out_chans : int, optional
@@ -254,10 +244,8 @@ class DiscreteContinuousDecoder(nn.Module):
 
     def __init__(
         self,
-        inp_shape=(480, 960),
-        out_shape=(721, 1440),
-        grid_in="equiangular",
-        grid_out="equiangular",
+        inp_grid,
+        out_grid,
         inp_chans=2,
         out_chans=2,
         kernel_shape=(3, 3),
@@ -284,15 +272,13 @@ class DiscreteContinuousDecoder(nn.Module):
             isht_handle = thd.DistributedInverseRealSHT if comm.get_size("spatial") > 1 else th.InverseRealSHT
 
             # set upsampling module
-            self.sht = sht_handle(sht_grid(inp_shape, grid_in)).float()
-            self.isht = isht_handle(sht_grid(out_shape, grid_out), lmax=self.sht.lmax, mmax=self.sht.mmax).float()
+            self.sht = sht_handle(inp_grid).float()
+            self.isht = isht_handle(out_grid, lmax=self.sht.lmax, mmax=self.sht.mmax).float()
             self.resample = nn.Sequential(self.sht, self.isht)
         else:
             resample_handle = thd.DistributedResampleS2 if comm.get_size("spatial") > 1 else th.ResampleS2
 
-            self.resample = resample_handle(
-                sht_grid(inp_shape, grid_in), sht_grid(out_shape, grid_out), mode="bilinear"
-            )
+            self.resample = resample_handle(inp_grid, out_grid, mode="bilinear")
 
         # heuristic for finding theta_cutoff
         # nto entirely clear if out or in shape should be used here with a non-conv method for upsampling
@@ -303,8 +289,8 @@ class DiscreteContinuousDecoder(nn.Module):
             thd.DistributedDiscreteContinuousConvS2 if comm.get_size("spatial") > 1 else th.DiscreteContinuousConvS2
         )
         self.conv = conv_handle(
-            sht_grid(out_shape, grid_out),
-            sht_grid(out_shape, grid_out),
+            out_grid,
+            out_grid,
             inp_chans,
             out_chans,
             kernel_shape=kernel_shape,
@@ -329,12 +315,12 @@ class DiscreteContinuousDecoder(nn.Module):
         Parameters
         ----------
         x : torch.Tensor
-            Latent field of shape ``(B, inp_chans, *inp_shape)``.
+            Latent field of shape ``(B, inp_chans, *inp_grid.shape)``.
 
         Returns
         -------
         torch.Tensor
-            Output field of shape ``(B, out_chans, *out_shape)``.
+            Output field of shape ``(B, out_chans, *out_grid.shape)``.
         """
         dtype = x.dtype
 
@@ -487,11 +473,7 @@ class NeuralOperatorBlock(nn.Module):
 
         # get normalization layer handles and instances
         norm_layer_handle = get_norm_layer_handle(
-            self.inp_shape[0],
-            self.inp_shape[1],
-            inp_chans,
-            normalization_layer=normalization_layer,
-            sht_grid_type=forward_transform.grid.grid_type,
+            forward_transform.grid, inp_chans, normalization_layer=normalization_layer
         )
         self.norm1 = norm_layer_handle()
         self.norm2 = norm_layer_handle()
@@ -641,13 +623,18 @@ class AtmoSphericNeuralOperatorNet31(nn.Module):
         self.h = int(self.inp_shape[0] // scale_factor)
         self.w = int(self.inp_shape[1] // scale_factor)
 
+        # the grids of the input and the output, and that of the processor in between
+        self.inp_grid = sht_grid(self.inp_shape, model_grid_type)
+        self.out_grid = sht_grid(self.out_shape, model_grid_type)
+        self.internal_grid = sht_grid((self.h, self.w), sht_grid_type)
+
         if normalization_means is not None:
             self.register_buffer("normalization_means", torch.as_tensor(normalization_means))
         if normalization_stds is not None:
             self.register_buffer("normalization_stds", torch.as_tensor(normalization_stds))
 
         # initialize spectral transforms
-        self._init_spectral_transforms(model_grid_type, sht_grid_type, hard_thresholding_fraction, lmax)
+        self._init_spectral_transforms(hard_thresholding_fraction, lmax)
 
         # compute static permutations to extract
         self._precompute_channel_groups(channel_names, aux_channel_names, n_history)
@@ -683,12 +670,10 @@ class AtmoSphericNeuralOperatorNet31(nn.Module):
 
         # encoder for the atmospheric and surface channels
         self.encoder = DiscreteContinuousEncoder(
-            inp_shape=inp_shape,
-            out_shape=(self.h, self.w),
+            inp_grid=self.inp_grid,
+            out_grid=self.internal_grid,
             inp_chans=self.n_in_chans,
             out_chans=self.embed_dim,
-            grid_in=model_grid_type,
-            grid_out=sht_grid_type,
             kernel_shape=kernel_shape,
             basis_type=filter_basis_type,
             basis_norm_mode=filter_basis_norm_mode,
@@ -701,12 +686,10 @@ class AtmoSphericNeuralOperatorNet31(nn.Module):
         # encoder for the auxiliary channels
         if self.n_aux_chans > 0:
             self.aux_encoder = DiscreteContinuousEncoder(
-                inp_shape=inp_shape,
-                out_shape=(self.h, self.w),
+                inp_grid=self.inp_grid,
+                out_grid=self.internal_grid,
                 inp_chans=self.n_aux_chans,
                 out_chans=self.aux_embed_dim,
-                grid_in=model_grid_type,
-                grid_out=sht_grid_type,
                 kernel_shape=kernel_shape,
                 basis_type=filter_basis_type,
                 basis_norm_mode=filter_basis_norm_mode,
@@ -718,12 +701,10 @@ class AtmoSphericNeuralOperatorNet31(nn.Module):
 
         # decoder for the atmospheric and surface variables
         self.decoder = DiscreteContinuousDecoder(
-            inp_shape=(self.h, self.w),
-            out_shape=out_shape,
+            inp_grid=self.internal_grid,
+            out_grid=self.out_grid,
             inp_chans=self.embed_dim,
             out_chans=self.n_out_chans,
-            grid_in=sht_grid_type,
-            grid_out=model_grid_type,
             kernel_shape=kernel_shape,
             basis_type=filter_basis_type,
             basis_norm_mode=filter_basis_norm_mode,
@@ -737,7 +718,7 @@ class AtmoSphericNeuralOperatorNet31(nn.Module):
         # position embedding
         if self.pos_embed_dim > 0:
             self.pos_embed = LearnablePositionEmbedding(
-                img_shape=(self.h, self.w), grid=sht_grid_type, num_chans=self.pos_embed_dim, embed_type="lat"
+                grid=self.internal_grid, num_chans=self.pos_embed_dim, embed_type="lat"
             )
 
         # dropout
@@ -809,8 +790,6 @@ class AtmoSphericNeuralOperatorNet31(nn.Module):
     @torch.compiler.disable(recursive=False)
     def _init_spectral_transforms(
         self,
-        model_grid_type="equiangular",
-        sht_grid_type="legendre-gauss",
         hard_thresholding_fraction=1.0,
         lmax=None,
     ):
@@ -821,7 +800,7 @@ class AtmoSphericNeuralOperatorNet31(nn.Module):
 
         # precompute the cutoff frequency on the sphere
         if lmax is None:
-            lmax = compute_spherical_bandlimit(self.inp_shape, model_grid_type)
+            lmax = spherical_bandlimit(self.inp_grid)
             lmax = int(lmax * hard_thresholding_fraction)
         self.lmax = lmax
 
@@ -837,8 +816,8 @@ class AtmoSphericNeuralOperatorNet31(nn.Module):
             isht_handle = thd.DistributedInverseRealSHT
 
         # set up
-        self.sht = sht_handle(sht_grid((self.h, self.w), sht_grid_type), lmax=self.lmax, mmax=self.lmax).float()
-        self.isht = isht_handle(sht_grid((self.h, self.w), sht_grid_type), lmax=self.lmax, mmax=self.lmax).float()
+        self.sht = sht_handle(self.internal_grid, lmax=self.lmax, mmax=self.lmax).float()
+        self.isht = isht_handle(self.internal_grid, lmax=self.lmax, mmax=self.lmax).float()
 
     @torch.compiler.disable(recursive=True)
     def _precompute_channel_groups(

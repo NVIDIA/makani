@@ -863,6 +863,7 @@ class TestZonalSpectrumAverageBufferUnit(unittest.TestCase):
             rollout_dt=6,
             img_shape=(nlat, nlon),
             ensemble_size=ensemble_size,
+            grid_type="equiangular",
             channel_names=channel_names,
             lat_lon=self._lat_lon(nlat, nlon),
             device="cpu",

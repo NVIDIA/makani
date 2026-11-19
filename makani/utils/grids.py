@@ -28,8 +28,6 @@ if not hasattr(th, "as_grid"):
     )
 
 
-from torch_harmonics.quadrature import legendre_gauss_weights
-
 from makani.distributed import comm
 from torch_harmonics.distributed import compute_split_shapes
 from makani.distributed.mappings import reduce_from_parallel_region
@@ -120,49 +118,90 @@ def sht_grid(img_shape, grid_type):
     return make_grid(img_shape, grid_type)
 
 
-def compute_spherical_bandlimit(img_shape, grid_type):
+def spherical_bandlimit(grid) -> int:
+    r"""
+    The spherical bandlimit makani truncates to on a grid on the sphere, as an exclusive ``lmax``.
 
-    if grid_type == "equiangular":
-        lmax = (img_shape[0] - 1) // 2
-        mmax = img_shape[1] // 2
-        return min(lmax, mmax)
-    elif grid_type == "legendre-gauss":
-        lmax = img_shape[0] - 1
-        mmax = img_shape[1] // 2
-        return min(lmax, mmax)
-    else:
-        raise NotImplementedError(f"Unknown type {grid_type} not implemented")
+    One degree below :attr:`torch_harmonics.GridS2.default_sht_degree`, the degrees the quadrature
+    of the grid integrates exactly, and at most ``nlon // 2``. The spectral layers and losses keep
+    it as their ``lmax`` and ``mmax``, so it sets the shapes of spectral weights: it is the value
+    makani has always used on equiangular and Legendre-Gauss grids, so that trained models keep
+    their shapes.
+
+    Parameters
+    ----------
+    grid : torch_harmonics.RegularGridS2
+        The grid, see :func:`sht_grid`.
+
+    Returns
+    -------
+    int
+    """
+    if not isinstance(grid, th.RegularGridS2):
+        raise ValueError(f"A spherical bandlimit needs a regular grid on the sphere, not {grid}")
+    return min(grid.default_sht_degree - 1, grid.nlon // 2)
 
 
 class GridConverter(torch.nn.Module):
-    def __init__(self, src_grid, dst_grid, lat_rad, lon_rad):
+    r"""
+    Moves fields from the latitudes of the data to those of the model's grid.
+
+    Datasets live on the grid their metadata names, models on ``model_grid_type``. Where the two
+    differ, each target latitude, those of the torch-harmonics grid with as many latitudes as the
+    data, is interpolated linearly between the two data latitudes around it. Longitudes are kept.
+
+    Parameters
+    ----------
+    src_grid_type : str
+        The grid type of the data.
+    dst_grid_type : str
+        The grid type of the model, a regular grid on the sphere, see :func:`sht_grid`.
+    lat_rad : torch.Tensor
+        The latitudes of the data in radians, from north to south.
+    lon_rad : torch.Tensor
+        The longitudes of the data in radians.
+
+    Raises
+    ------
+    ValueError
+        If the model's grid is not a regular grid on the sphere, or has latitudes outside of those
+        of the data, as a grid with poles has where the data has none.
+    """
+
+    def __init__(self, src_grid_type, dst_grid_type, lat_rad, lon_rad):
         super().__init__()
-        self.src = src_grid
-        self.dst = dst_grid
+        self.src = src_grid_type
+        self.dst = dst_grid_type
         self.src_lat = lat_rad
         self.src_lon = lon_rad
 
-        if self.src != self.dst:
-            if self.dst == "legendre-gauss":
-                cost_lg, _ = legendre_gauss_weights(lat_rad.shape[0], -1, 1)
-                tq = torch.arccos(cost_lg) - torch.pi / 2.0
-                self.dst_lat = tq.to(lat_rad.device)
-                self.dst_lon = lon_rad
-
-                # compute indices
-                permutation = torch.arange(lat_rad.shape[0] - 1, -1, -1).to(torch.long).to(lat_rad.device)
-                jj = torch.searchsorted(lat_rad, self.dst_lat, sorter=permutation) - 1
-                self.indices = jj[permutation]
-
-                # compute weights
-                self.interp_weights = (
-                    (self.dst_lat - lat_rad[self.indices]) / torch.diff(lat_rad)[self.indices]
-                ).reshape(-1, 1)
-            else:
-                raise NotImplementedError(f"Error, destination grid type {self.dst} not implemented.")
-        else:
+        if self.src == self.dst:
             self.dst_lat = self.src_lat
             self.dst_lon = self.src_lon
+            return
+
+        nlat, nlon = lat_rad.shape[0], lon_rad.shape[0]
+        dst_lat = sht_grid((nlat, nlon), self.dst).lats.to(device=lat_rad.device)
+        src_lat = lat_rad.to(dtype=dst_lat.dtype)
+
+        # the data latitudes around each target latitude: the upper one at indices, the lower at indices + 1
+        tol = 1e-6 * math.pi
+        if (dst_lat > src_lat[0] + tol).any() or (dst_lat < src_lat[-1] - tol).any():
+            raise ValueError(
+                f"The {self.dst} grid has latitudes beyond those of the {self.src} data, which span "
+                f"{math.degrees(src_lat[0]):.4f} to {math.degrees(src_lat[-1]):.4f} degrees; "
+                "values there would be extrapolated"
+            )
+        # the latitudes descend: count the data latitudes north of each target latitude
+        indices = torch.searchsorted(-src_lat, -dst_lat, right=True) - 1
+        indices = torch.clamp(indices, 0, nlat - 2)
+
+        self.dst_lat = dst_lat.to(dtype=lat_rad.dtype)
+        self.dst_lon = lon_rad
+        self.indices = indices
+        self.interp_weights = (
+            ((dst_lat - src_lat[indices]) / (src_lat[indices + 1] - src_lat[indices])).to(dtype=lat_rad.dtype)
+        ).reshape(-1, 1)
 
     def get_src_coords(self):
         return self.src_lat, self.src_lon

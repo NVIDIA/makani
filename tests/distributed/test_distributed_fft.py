@@ -19,6 +19,7 @@ import unittest
 from parameterized import parameterized
 
 import torch
+from makani.utils.grids import make_grid
 from makani.models.common import RealFFT1, InverseRealFFT1, RealFFT2, InverseRealFFT2, RealFFT3, InverseRealFFT3
 from makani.models.common.distributed.fft import (
     DistributedRealFFT1,
@@ -73,8 +74,8 @@ class TestDistributedRealFFT(unittest.TestCase):
         B, C, H, W = batch_size, num_chan, nlat, nlon
 
         # set up handles
-        forward_transform_local = RealFFT1(nlon=W).to(self.device)
-        forward_transform_dist = DistributedRealFFT1(nlon=W).to(self.device)
+        forward_transform_local = RealFFT1(make_grid((H, W), "euclidean")).to(self.device)
+        forward_transform_dist = DistributedRealFFT1(make_grid((H, W), "euclidean")).to(self.device)
 
         # create tensors
         inp_full = torch.randn((B, C, H, W), dtype=torch.float32, device=self.device)
@@ -146,9 +147,9 @@ class TestDistributedRealFFT(unittest.TestCase):
     def test_distributed_ifft1(self, nlat, nlon, batch_size, num_chan, tol, verbose=False):
         B, C, H, W = batch_size, num_chan, nlat, nlon
 
-        forward_transform_local = RealFFT1(nlon=W).to(self.device)
-        backward_transform_local = InverseRealFFT1(nlon=W).to(self.device)
-        backward_transform_dist = DistributedInverseRealFFT1(nlon=W).to(self.device)
+        forward_transform_local = RealFFT1(make_grid((H, W), "euclidean")).to(self.device)
+        backward_transform_local = InverseRealFFT1(make_grid((H, W), "euclidean")).to(self.device)
+        backward_transform_dist = DistributedInverseRealFFT1(make_grid((H, W), "euclidean")).to(self.device)
 
         # create tensors
         dummy_full = torch.randn((B, C, H, W), dtype=torch.float32, device=self.device)
@@ -246,8 +247,10 @@ class TestDistributedRealFFT(unittest.TestCase):
             )
         else:
             lmax, mmax = modes if modes is not None else (None, None)
-            forward_transform_local = RealFFT2(nlat=H, nlon=W, lmax=lmax, mmax=mmax).to(self.device)
-            forward_transform_dist = DistributedRealFFT2(nlat=H, nlon=W, lmax=lmax, mmax=mmax).to(self.device)
+            forward_transform_local = RealFFT2(make_grid((H, W), "euclidean"), lmax=lmax, mmax=mmax).to(self.device)
+            forward_transform_dist = DistributedRealFFT2(make_grid((H, W), "euclidean"), lmax=lmax, mmax=mmax).to(
+                self.device
+            )
 
         # create tensors
         if D > 0:
@@ -344,9 +347,13 @@ class TestDistributedRealFFT(unittest.TestCase):
             ).to(self.device)
         else:
             lmax, mmax = modes if modes is not None else (None, None)
-            forward_transform_local = RealFFT2(nlat=H, nlon=W, lmax=lmax, mmax=mmax).to(self.device)
-            backward_transform_local = InverseRealFFT2(nlat=H, nlon=W, lmax=lmax, mmax=mmax).to(self.device)
-            backward_transform_dist = DistributedInverseRealFFT2(nlat=H, nlon=W, lmax=lmax, mmax=mmax).to(self.device)
+            forward_transform_local = RealFFT2(make_grid((H, W), "euclidean"), lmax=lmax, mmax=mmax).to(self.device)
+            backward_transform_local = InverseRealFFT2(make_grid((H, W), "euclidean"), lmax=lmax, mmax=mmax).to(
+                self.device
+            )
+            backward_transform_dist = DistributedInverseRealFFT2(
+                make_grid((H, W), "euclidean"), lmax=lmax, mmax=mmax
+            ).to(self.device)
 
         # create tensors
         if D > 0:

@@ -26,7 +26,7 @@ import h5py as h5
 from torch import amp
 import torch.distributed as dist
 from makani.distributed import comm
-from makani.utils.grids import sht_grid
+from makani.utils.grids import make_grid, sht_grid
 from makani.models.common import RealFFT1
 from makani.models.common.distributed.fft import DistributedRealFFT1
 from torch_harmonics.distributed import compute_split_shapes, split_tensor_along_dim
@@ -1360,6 +1360,8 @@ class ZonalSpectrumAverageBuffer(MeanStdBuffer):
         Number of total rollout steps
     img_shape: Tuple[int]
         shape of the output
+    grid_type : str
+        the grid type of the output, see :func:`makani.utils.grids.make_grid`
     channel_names : List[str]
         list of all the channel names in the output
     lat_lon: Tuple[List[float], List[float]]
@@ -1382,6 +1384,7 @@ class ZonalSpectrumAverageBuffer(MeanStdBuffer):
         rollout_dt: int,
         img_shape: Tuple[int, int],
         ensemble_size: int,
+        grid_type: str,
         channel_names: List[str],
         lat_lon: Tuple[List[float], List[float]],
         device: Union[str, torch.device],
@@ -1395,16 +1398,17 @@ class ZonalSpectrumAverageBuffer(MeanStdBuffer):
         # instantiate SHT
         self.spatial_distributed = spatial_distributed and comm.get_size("spatial") > 1
         self.nlat = img_shape[0]
+        grid = make_grid(img_shape, grid_type)
         if self.spatial_distributed:
             if comm.get_size("w") > 1:
-                self.rfft = DistributedRealFFT1(nlon=img_shape[1])
+                self.rfft = DistributedRealFFT1(grid)
                 m_shapes = self.rfft.m_shapes
                 self.mmax_local = m_shapes[comm.get_rank("w")]
                 # compute loffset
                 offsets = [0] + np.cumsum(m_shapes).tolist()
                 self.mmax_offset = offsets[comm.get_rank("w")]
             else:
-                self.rfft = RealFFT1(nlon=img_shape[1])
+                self.rfft = RealFFT1(grid)
                 self.mmax_local = self.rfft.mmax
                 self.mmax_offset = 0
             nlat_shapes = compute_split_shapes(self.nlat, comm.get_size("h"))
@@ -1413,7 +1417,7 @@ class ZonalSpectrumAverageBuffer(MeanStdBuffer):
             offsets = [0] + np.cumsum(nlat_shapes).tolist()
             self.nlat_offset = offsets[comm.get_rank("h")]
         else:
-            self.rfft = RealFFT1(nlon=img_shape[1])
+            self.rfft = RealFFT1(grid)
             self.mmax_local = self.rfft.mmax
             self.mmax_offset = 0
             self.nlat_local = self.nlat

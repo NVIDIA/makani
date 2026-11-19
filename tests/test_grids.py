@@ -25,7 +25,15 @@ from parameterized import parameterized
 import torch_harmonics as th
 
 from makani.data.grid_types import canonical_grid_type, expected_latitudes, matching_grid_types, verify_grid_type
-from makani.utils.grids import GridConverter, GridQuadrature, PlanarGrid, make_grid, regular_grid_types, sht_grid
+from makani.utils.grids import (
+    GridConverter,
+    GridQuadrature,
+    PlanarGrid,
+    make_grid,
+    regular_grid_types,
+    sht_grid,
+    spherical_bandlimit,
+)
 from makani.models.common.bandlimit import BandLimitMask
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
@@ -135,10 +143,58 @@ class TestGridConverter(unittest.TestCase):
             compare_tensors("linear function interpolation", out, expected, atol=1e-5, rtol=1e-5, verbose=verbose)
         )
 
-    def test_unsupported_dst_raises(self):
-        """An unsupported destination grid raises NotImplementedError."""
-        with self.assertRaises(NotImplementedError):
-            GridConverter("equiangular", "unsupported_dst", self.lat_rad, self.lon_rad)
+    @parameterized.expand([("legendre-gauss",), ("lobatto",), ("fejer1",), ("trapezoidal",)])
+    def test_to_any_regular_grid_linear_function_exact(self, dst, verbose=False):
+        """Any regular grid of torch-harmonics is a target: its latitudes, and a latitude-linear field on them."""
+        converter = GridConverter("equiangular", dst, self.lat_rad, self.lon_rad)
+        dst_lat, _ = converter.get_dst_coords()
+        expected_lat = th.as_grid(dst, nlat=self.H, nlon=self.W).lats.to(dst_lat.dtype)
+        self.assertTrue(compare_tensors(f"{dst} latitudes", dst_lat, expected_lat, atol=1e-6, verbose=verbose))
+
+        data = self.lat_rad.unsqueeze(-1).expand(self.H, self.W).unsqueeze(0).unsqueeze(0)
+        expected = dst_lat.unsqueeze(-1).expand(-1, self.W).unsqueeze(0).unsqueeze(0).to(data.dtype)
+        self.assertTrue(compare_tensors(f"{dst} linear", converter(data), expected, atol=1e-5, verbose=verbose))
+
+    def test_target_beyond_the_data_raises(self):
+        """Data without poles cannot be moved to a grid with poles: that would extrapolate."""
+        lat_rad = th.as_grid("legendre-gauss", nlat=self.H, nlon=self.W).lats.to(torch.float32)
+        with self.assertRaises(ValueError):
+            GridConverter("legendre-gauss", "equiangular", lat_rad, self.lon_rad)
+
+    @parameterized.expand([("unsupported_dst",), ("euclidean",)])
+    def test_unsupported_dst_raises(self, dst):
+        """A target that is no regular grid on the sphere raises ValueError."""
+        with self.assertRaises(ValueError):
+            GridConverter("equiangular", dst, self.lat_rad, self.lon_rad)
+
+
+class TestSphericalBandlimit(unittest.TestCase):
+    """The band limit makani truncates to, as an exclusive lmax."""
+
+    @parameterized.expand(
+        [
+            # the values makani has always used, which set the shapes of trained spectral weights
+            ((721, 1440), "equiangular", 360),
+            ((721, 1440), "legendre-gauss", 720),
+            ((720, 1440), "legendre-gauss", 719),
+            ((361, 720), "equiangular", 180),
+            ((17, 32), "equiangular", 8),
+            ((16, 32), "legendre-gauss", 15),
+            ((32, 128), "equiangular", 15),
+            # one below the default SHT degree on the other regular grids too
+            ((721, 1440), "lobatto", 719),
+            ((721, 1440), "fejer1", 360),
+            ((721, 1440), "trapezoidal", 360),
+            # and at most nlon // 2
+            ((64, 16), "legendre-gauss", 8),
+        ]
+    )
+    def test_values(self, img_shape, grid_type, expected):
+        self.assertEqual(spherical_bandlimit(sht_grid(img_shape, grid_type)), expected)
+
+    def test_planar_grid_raises(self):
+        with self.assertRaises(ValueError):
+            spherical_bandlimit(make_grid((16, 32), "euclidean"))
 
 
 # ---------------------------------------------------------------------------
@@ -379,7 +435,7 @@ class TestBandLimitMask(unittest.TestCase):
         field = isht(coeffs)
         expected = isht(low)
 
-        mask = BandLimitMask((nlat, nlon), "legendre-gauss", lmax=lmax, type="sht")
+        mask = BandLimitMask(sht_grid((nlat, nlon), "legendre-gauss"), lmax=lmax, type="sht")
         self.assertTrue(compare_tensors("band limited", mask(field), expected, atol=1e-5, rtol=1e-5, verbose=verbose))
         # a field that is already band limited passes unchanged
         self.assertTrue(compare_tensors("unchanged", mask(expected), expected, atol=1e-5, rtol=1e-5, verbose=verbose))
@@ -392,7 +448,7 @@ class TestBandLimitMask(unittest.TestCase):
         wave = torch.cos(m * lon).reshape(1, 1, 1, nlon).expand(1, 1, nlat, nlon)
         constant = torch.ones(1, 1, nlat, nlon)
 
-        mask = BandLimitMask((nlat, nlon), "equiangular", lmax=lmax, type="fft")
+        mask = BandLimitMask(sht_grid((nlat, nlon), "equiangular"), lmax=lmax, type="fft")
 
         # the zonal mean is kept on every latitude
         self.assertTrue(compare_tensors("m=0", mask(constant), constant, atol=1e-5, verbose=verbose))
@@ -404,24 +460,29 @@ class TestBandLimitMask(unittest.TestCase):
         expected = torch.where(keep.reshape(1, 1, nlat, 1), wave, torch.zeros_like(wave))
         self.assertTrue(compare_tensors(f"m={m}", mask(wave), expected, atol=1e-5, verbose=verbose))
 
-    @parameterized.expand([("sht", "legendre-gauss"), ("sht", "equiangular"), ("fft", "equiangular")])
+    @parameterized.expand(
+        [
+            ("sht", "legendre-gauss"),
+            ("sht", "equiangular"),
+            ("sht", "lobatto"),
+            ("fft", "equiangular"),
+            ("fft", "fejer1"),
+        ]
+    )
     def test_default_lmax_is_the_grid_bandlimit(self, mask_type, grid_type, verbose=False):
         # without lmax, the transforms and the mask have to use the grid's band limit
-        from makani.utils.grids import compute_spherical_bandlimit
-
         img_shape = (17, 32) if grid_type == "equiangular" else (16, 32)
+        grid = sht_grid(img_shape, grid_type)
         field = torch.randn(2, 3, *img_shape)
 
-        default = BandLimitMask(img_shape, grid_type, type=mask_type)
-        explicit = BandLimitMask(
-            img_shape, grid_type, lmax=compute_spherical_bandlimit(img_shape, grid_type), type=mask_type
-        )
+        default = BandLimitMask(grid, type=mask_type)
+        explicit = BandLimitMask(grid, lmax=spherical_bandlimit(grid), type=mask_type)
         self.assertEqual(default.lmax, explicit.lmax)
         self.assertTrue(compare_tensors("default lmax", default(field), explicit(field), verbose=verbose))
 
     def test_unknown_type_raises(self):
         with self.assertRaises(ValueError):
-            BandLimitMask((16, 32), "equiangular", lmax=8, type="wavelet")
+            BandLimitMask(sht_grid((16, 32), "equiangular"), lmax=8, type="wavelet")
 
 
 if __name__ == "__main__":

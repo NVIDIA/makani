@@ -37,6 +37,7 @@ from makani.data.batch import (
     INPUT_TIMESTAMP,
 )
 from makani.data.rollout import Rollout
+from makani.data.grid_types import DEFAULT_GRID_TYPE
 from makani.data.data_helpers import get_date_from_timestamp, get_data_normalization, get_climatology
 from makani.utils.params import YParams
 
@@ -147,7 +148,7 @@ class Inferencer(Driver):
                 n_future=0,
                 add_zenith=0,
                 data_grid_type=params.data_grid_type,
-                model_grid_type=params.get("model_grid_type", "equiangular"),
+                model_grid_type=params.get("model_grid_type", DEFAULT_GRID_TYPE),
                 crop_size=(params.get("crop_size_x", None), params.get("crop_size_y", None)),
                 crop_anchor=(params.get("crop_anchor_x", 0), params.get("crop_anchor_y", 0)),
                 relative_timestamp=True,
@@ -163,7 +164,7 @@ class Inferencer(Driver):
             from makani.utils.grids import GridQuadrature, make_grid
 
             self.quadrature = GridQuadrature(
-                make_grid(self.mask_dataset.img_shape, params.get("model_grid_type", "equiangular")),
+                make_grid(self.mask_dataset.img_shape, params.get("model_grid_type", DEFAULT_GRID_TYPE)),
                 crop_shape=self.mask_dataset.crop_size,
                 crop_offset=self.mask_dataset.crop_anchor,
                 normalize=True,
@@ -182,7 +183,7 @@ class Inferencer(Driver):
                 n_future=0,
                 add_zenith=0,
                 data_grid_type=params.data_grid_type,
-                model_grid_type=params.get("model_grid_type", "equiangular"),
+                model_grid_type=params.get("model_grid_type", DEFAULT_GRID_TYPE),
                 bias=bias,  # we subtract the bias to avoid subtracting too big numbers
                 scale=scale,  # we need to set that to make sure the climatology is properly scaled
                 crop_size=(params.get("crop_size_x", None), params.get("crop_size_y", None)),
@@ -464,7 +465,7 @@ class Inferencer(Driver):
                 rollout_dt=self.params.dt * dhours,
                 img_shape=img_shape,
                 ensemble_size=self.params.local_ensemble_size,
-                grid_type=self.params.model_grid_type,
+                grid_type=self.params.get("model_grid_type", DEFAULT_GRID_TYPE),
                 channel_names=self.params.channel_names,
                 device=self.device,
                 scale=scale,
@@ -484,6 +485,7 @@ class Inferencer(Driver):
                 rollout_dt=self.params.dt * dhours,
                 img_shape=img_shape,
                 ensemble_size=self.params.local_ensemble_size,
+                grid_type=self.params.get("model_grid_type", DEFAULT_GRID_TYPE),
                 channel_names=self.params.channel_names,
                 lat_lon=(self.params.lat, self.params.lon),
                 device=self.device,

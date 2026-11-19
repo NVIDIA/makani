@@ -404,6 +404,14 @@ class TestInferencerScoring(_InferencerTestCase):
                 self._assert_close(zonal_mean[k], zonal.mean(dim=0), "zonal spectrum mean")
                 self._assert_close(zonal_std[k], zonal.std(dim=0), "zonal spectrum std", rtol=1e-3)
 
+    def test_score_model_spectra_on_the_default_grid(self):
+        """Parameters without model_grid_type are on the default grid, also for the spectra."""
+        params = self._params(1, 0, None, False)
+        delattr(params, "model_grid_type")
+        _, _, paths = self._score(params, ["spectrum", "zonal_spectrum"])
+        for name, path in paths.items():
+            self.assertTrue(os.path.isfile(path), f"{name} file")
+
     def test_score_model_bias(self):
         params = self._params(1, 0, None, False)
         inferencer, _, paths = self._score(params, ["output", "bias"])

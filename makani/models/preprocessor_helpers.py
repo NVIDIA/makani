@@ -19,6 +19,7 @@ import numpy as np
 import torch
 
 from makani.data.invariants import check_legacy_invariant_options, parse_invariant_features, read_invariants
+from makani.data.grid_types import DEFAULT_GRID_TYPE
 
 
 def get_bias_correction(params):
@@ -181,7 +182,6 @@ def get_static_features(params):
     normalize_static_features = params.get("normalize_static_features", False)
     normalizer = None
     if normalize_static_features:
-        from makani.data.grid_types import DEFAULT_GRID_TYPE
         from makani.utils.grids import GridQuadrature, make_grid
 
         crop_shape = [
@@ -235,7 +235,10 @@ def get_static_features(params):
 
                 # convert grid if required
                 gconv = GridConverter(
-                    params.data_grid_type, params.model_grid_type, torch.deg2rad(lat), torch.deg2rad(lon)
+                    params.data_grid_type,
+                    params.get("model_grid_type", DEFAULT_GRID_TYPE),
+                    torch.deg2rad(lat),
+                    torch.deg2rad(lon),
                 )
                 tx, ty = gconv.get_dst_coords()
                 tx = tx.to(torch.float32)

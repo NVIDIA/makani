@@ -42,6 +42,7 @@ from makani.models.noise.controller import NoiseController
 from makani.models.stepper import StepWrapper
 from makani.distributed import comm
 from makani.data.rollout import Rollout
+from makani.data.grid_types import DEFAULT_GRID_TYPE
 
 # the configuration of the interpolant and its defaults, see interpolant_config
 _DEFAULTS = {
@@ -338,7 +339,7 @@ class StochasticInterpolantWrapper(StepWrapper):
             num_time_steps=1,
             sigma=1.0,
             alpha=0.0,
-            grid_type=params.model_grid_type,
+            grid_type=params.get("model_grid_type", DEFAULT_GRID_TYPE),
         )
         # the shard of the spectral coefficients this rank draws, as the model is laid out when it is built
         self._spatial_rank = comm.get_rank("spatial")

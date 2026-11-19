@@ -30,12 +30,11 @@ from makani.models.common.distributed.layer_norm import (
 
 
 @torch.compiler.disable(recursive=True)
-def get_norm_layer_handle(h, w, embed_dim, normalization_layer="none", sht_grid_type="legendre-gauss"):
+def get_norm_layer_handle(grid, embed_dim, normalization_layer="none"):
     r"""
-    Constructor of the normalization layer ``normalization_layer`` for ``embed_dim`` channels on an
-    ``h`` x ``w`` grid: ``"layer_norm"``, ``"instance_norm"``, ``"instance_norm_s2"`` (with the quadrature
-    of ``sht_grid_type``) or ``"none"``. The instance norms are the distributed ones under spatial
-    parallelism.
+    Constructor of the normalization layer ``normalization_layer`` for ``embed_dim`` channels on
+    ``grid``: ``"layer_norm"``, ``"instance_norm"``, ``"instance_norm_s2"`` (with the quadrature of the
+    grid) or ``"none"``. The instance norms are the distributed ones under spatial parallelism.
     """
     if normalization_layer == "layer_norm":
         norm_layer_handle = partial(
@@ -54,10 +53,7 @@ def get_norm_layer_handle(h, w, embed_dim, normalization_layer="none", sht_grid_
         )
         norm_layer_handle = partial(
             norm_layer_handle,
-            img_shape=(h, w),
-            crop_shape=(h, w),
-            crop_offset=(0, 0),
-            grid_type=sht_grid_type,
+            grid=grid,
             num_features=embed_dim,
             eps=1e-6,
             affine=True,

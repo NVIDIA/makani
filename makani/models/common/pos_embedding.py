@@ -31,18 +31,17 @@ class PositionEmbedding(nn.Module, metaclass=abc.ABCMeta):
 
     Parameters
     ----------
-    img_shape : tuple, optional
-        Image shape (height, width), by default (480, 960)
-    grid : str, optional
-        Grid type, by default "equiangular"
+    grid : torch_harmonics.RegularGridS2 or makani.utils.grids.PlanarGrid
+        The grid of the embedding, see :func:`~makani.utils.grids.make_grid`.
     num_chans : int, optional
         Number of channels, by default 1
     """
 
-    def __init__(self, img_shape=(480, 960), grid="equiangular", num_chans=1):
+    def __init__(self, grid, num_chans=1):
         super().__init__()
 
-        self.img_shape = img_shape
+        self.grid = grid
+        self.img_shape = tuple(grid.shape)
         self.num_chans = num_chans
 
     def forward(self):
@@ -73,10 +72,8 @@ class LearnablePositionEmbedding(PositionEmbedding):
 
     Parameters
     ----------
-    img_shape : tuple, optional
-        Image shape (height, width), by default (480, 960)
-    grid : str, optional
-        Grid type, by default "equiangular"
+    grid : torch_harmonics.RegularGridS2 or makani.utils.grids.PlanarGrid
+        The grid of the embedding, see :func:`~makani.utils.grids.make_grid`.
     num_chans : int, optional
         Number of channels, by default 1
     embed_type : str, optional
@@ -104,8 +101,9 @@ class LearnablePositionEmbedding(PositionEmbedding):
     across the ranks that hold the same latitudes.
     """
 
-    def __init__(self, img_shape=(480, 960), grid="equiangular", num_chans=1, embed_type="lat"):
-        super().__init__(img_shape=img_shape, grid=grid, num_chans=num_chans)
+    def __init__(self, grid, num_chans=1, embed_type="lat"):
+        super().__init__(grid=grid, num_chans=num_chans)
+        img_shape = self.img_shape
 
         # if distributed, make sure to split correctly across ranks:
         # in case of model parallelism, we need to make sure that we use the correct shapes per rank

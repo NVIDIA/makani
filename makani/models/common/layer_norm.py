@@ -21,7 +21,7 @@ from torch import amp
 from typing import Tuple, Optional
 
 # quadrature stuff
-from makani.utils.grids import GridQuadrature, make_grid
+from makani.utils.grids import GridQuadrature
 
 
 @torch.compile
@@ -74,18 +74,15 @@ class GeometricInstanceNormS2(nn.Module):
 
     Parameters
     ----------
-    img_shape : (int, int)
-        Latitude and longitude extent of the full grid the quadrature rule is
-        built for.
-    crop_shape : (int, int)
-        Extent of the sub-region actually normalized over.
-    crop_offset : (int, int)
-        Offset of that sub-region within the full grid.
-    grid_type : str
-        Grid the input lives on (e.g. ``"equiangular"``, ``"legendre-gauss"``),
-        whose quadrature weights the statistics take, see :func:`~makani.utils.grids.make_grid`.
+    grid : torch_harmonics.RegularGridS2 or makani.utils.grids.PlanarGrid
+        The full grid the input lives on, whose quadrature weights the statistics take, see
+        :func:`~makani.utils.grids.make_grid`.
     num_features : int
         Number of channels. Only used to size the affine parameters.
+    crop_shape : (int, int), optional
+        Extent of the sub-region actually normalized over, the whole grid by default.
+    crop_offset : (int, int), optional
+        Offset of that sub-region within the full grid, by default ``(0, 0)``.
     eps : float, optional
         Constant added to the variance for numerical stability, by default ``1e-05``.
     affine : bool, optional
@@ -102,11 +99,10 @@ class GeometricInstanceNormS2(nn.Module):
 
     def __init__(
         self,
-        img_shape: Tuple[int, int],
-        crop_shape: Tuple[int, int],
-        crop_offset: Tuple[int, int],
-        grid_type: str,
+        grid,
         num_features: int,
+        crop_shape: Optional[Tuple[int, int]] = None,
+        crop_offset: Tuple[int, int] = (0, 0),
         eps: Optional[float] = 1e-05,
         affine: Optional[bool] = False,
     ):
@@ -121,7 +117,7 @@ class GeometricInstanceNormS2(nn.Module):
 
         # we only need the weights
         self.quadrature = GridQuadrature(
-            make_grid(img_shape, grid_type),
+            grid,
             crop_shape=crop_shape,
             crop_offset=crop_offset,
             normalize=True,
