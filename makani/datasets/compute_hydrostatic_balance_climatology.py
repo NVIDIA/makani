@@ -16,7 +16,6 @@
 import os
 from typing import Optional
 import time
-import socket
 import json
 import numpy as np
 import h5py as h5
@@ -27,7 +26,7 @@ from bisect import bisect_right
 from glob import glob
 
 # MPI
-from mpi4py import MPI
+from makani.datasets.parallel import get_comm, init_torch_distributed, shutdown_torch_distributed
 
 import torch
 import torch.distributed as dist
@@ -170,7 +169,7 @@ def get_file_stats(
     return stats
 
 
-def get_hydrostatic_balance_climatology(
+def compute_hydrostatic_balance_climatology(
     input_path: str,
     output_path: str,
     metadata_file: str,
@@ -201,7 +200,7 @@ def get_hydrostatic_balance_climatology(
     ``hydrostatic_balance_stds.npy``, and the matched pressure levels to
     ``hydrostatic_balance_pressures.npy`` so consumers can align the per-level values unambiguously.
 
-    Mirrors ``get_stats.py``: spatial averages use spherical quadrature, and reductions across
+    Mirrors ``compute_stats.py``: spatial averages use spherical quadrature, and reductions across
     ranks use parallel Welford combination. ``use_moist_air_formula`` selects virtual temperature
     and must match the setting used by the projection that consumes the offset.
     """
@@ -216,34 +215,12 @@ def get_hydrostatic_balance_climatology(
     torch.set_grad_enabled(False)
 
     # get comm
-    comm = MPI.COMM_WORLD.Dup()
+    comm = get_comm()
     comm_rank = comm.Get_rank()
     comm_size = comm.Get_size()
-    comm_local_rank = comm_rank % torch.cuda.device_count() if torch.cuda.is_available() else 0
 
-    # set wireup parameters
-    hostname = socket.gethostname()
-    hostname = comm.bcast(hostname, root=0)
-    os.environ["MASTER_ADDR"] = hostname
-    os.environ["MASTER_PORT"] = "29500"
-    os.environ["RANK"] = str(comm_rank)
-    os.environ["WORLD_SIZE"] = str(comm_size)
-    os.environ["LOCAL_RANK"] = str(comm_local_rank)
-
-    # init torch distributed
-    device = torch.device(f"cuda:{comm_local_rank}") if torch.cuda.is_available() else torch.device("cpu")
-    dist.init_process_group(
-        backend="nccl" if torch.cuda.is_available() else "gloo",
-        init_method="env://",
-        world_size=comm_size,
-        rank=comm_rank,
-        device_id=device,
-    )
-    mesh = dist.init_device_mesh(
-        device_type=device.type,
-        mesh_shape=[reduction_group_size, comm_size // reduction_group_size],
-        mesh_dim_names=["reduction", "tree"],
-    )
+    # torch.distributed for the reductions
+    device, mesh = init_torch_distributed(comm, reduction_group_size)
 
     # get files
     filelist = None
@@ -446,15 +423,11 @@ def get_hydrostatic_balance_climatology(
     comm.Barrier()
 
     # shut down pytorch comms
-    dist.barrier(device_ids=[device.index] if device.type == "cuda" else None)
-    dist.destroy_process_group()
-
-    # close MPI
-    MPI.Finalize()
+    shutdown_torch_distributed(device)
 
 
 def main(args):
-    get_hydrostatic_balance_climatology(
+    compute_hydrostatic_balance_climatology(
         input_path=args.input_path,
         output_path=args.output_path,
         metadata_file=args.metadata_file,

@@ -33,8 +33,9 @@ from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from .testutils import disable_tf32, init_hdf5_dataset, H5_PATH, IMG_SIZE_H, IMG_SIZE_W, compare_arrays
 from makani.datasets.date_range import add_date_range_arguments, date_range_from_args, parse_date, yearly_sample_times
-from makani.datasets.convert_era5_to_makani_input import _batched, _create_output_file, _write_missing
+from makani.datasets.convert_era5 import _batched, _create_output_file, _write_missing
 from makani.datasets.sources import InvariantSource, Source
+from makani.distributed.launch import Launch
 
 
 def _utc(year, month, day, hour=0):
@@ -1136,14 +1137,14 @@ class TestH5Convert(unittest.TestCase):
             ("1MB", True, (6, 64, 128, 5)),
         ]
     )
-    def test_h5_convert(self, chunksize, transpose, expected_chunks):
-        from makani.datasets.h5_convert import h5_convert
+    def test_rechunk(self, chunksize, transpose, expected_chunks):
+        from makani.datasets.rechunk_dataset import rechunk
 
         output_path = os.path.join(self.tmpdir.name, f"converted_{chunksize}_{transpose}")
         os.makedirs(output_path)
 
         # batchsize 3 over 8 samples exercises the partial last batch
-        h5_convert(
+        rechunk(
             self.train_path,
             output_path,
             chunksize=chunksize,
@@ -1191,11 +1192,176 @@ class TestH5Convert(unittest.TestCase):
         ]
     )
     def test_chunk_shape_from_bytes(self, shape, itemsize, target_bytes, expected):
-        from makani.datasets.h5_convert import _chunk_shape_from_bytes
+        from makani.datasets.rechunk_dataset import _chunk_shape_from_bytes
 
         chunks = _chunk_shape_from_bytes(shape, itemsize, target_bytes)
         self.assertEqual(chunks, expected)
         self.assertLessEqual(np.prod(chunks) * itemsize, max(target_bytes, itemsize))
+
+
+def _reduction_data(rank):
+    generator = torch.Generator().manual_seed(100 + rank)
+    return torch.randn(5 + rank, 3, dtype=torch.float64, generator=generator) + rank
+
+
+def _reduction_stats(x):
+    """Statistics of samples ``x`` (samples, channels) in the layout of the statistics scripts."""
+    counts = torch.full((x.shape[1],), float(x.shape[0]), dtype=torch.float64)
+    mean = x.mean(0)
+    m2 = ((x - mean) ** 2).sum(0)
+    return {
+        "meanvar": {"type": "meanvar", "counts": counts, "values": torch.stack([mean, m2]).reshape(2, 1, -1, 1, 1)},
+        "mins": {"type": "min", "counts": counts.clone(), "values": x.min(0).values.reshape(1, -1, 1, 1)},
+        "maxs": {"type": "max", "counts": counts.clone(), "values": x.max(0).values.reshape(1, -1, 1, 1)},
+    }
+
+
+def _reduction_worker(rank, world_size, init_file, reduction_group_size, output):
+    import torch.distributed as dist
+    from makani.datasets.helpers import binary_reduce, collective_reduce
+    from makani.datasets.parallel import reduction_mesh_shape
+
+    dist.init_process_group("gloo", init_method=f"file://{init_file}", rank=rank, world_size=world_size)
+    try:
+        # the reduction of the statistics scripts: within the groups, then across them in a tree
+        mesh = dist.init_device_mesh(
+            "cpu",
+            mesh_shape=reduction_mesh_shape(reduction_group_size, world_size),
+            mesh_dim_names=["reduction", "tree"],
+        )
+        stats = collective_reduce(_reduction_stats(_reduction_data(rank)), mesh.get_group("reduction"))
+        if dist.get_rank(mesh.get_group("reduction")) == 0:
+            stats = binary_reduce(stats, mesh.get_group("tree"), torch.device("cpu"))
+        if rank == 0:
+            torch.save(stats, output)
+        dist.barrier()
+    finally:
+        dist.destroy_process_group()
+
+
+class TestParallelReduction(unittest.TestCase):
+    """The parallel reduction of the statistics scripts gives the statistics of all the data, for any number of ranks."""
+
+    @parameterized.expand([(2, 8), (2, 1), (3, 1), (4, 2), (5, 2), (6, 2), (9, 8)])
+    def test_reduction_matches_the_statistics_of_all_data(self, world_size, reduction_group_size):
+        import torch.multiprocessing as mp
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = os.path.join(tmpdir, "stats.pt")
+            mp.spawn(
+                _reduction_worker,
+                args=(world_size, os.path.join(tmpdir, "init"), reduction_group_size, output),
+                nprocs=world_size,
+                join=True,
+            )
+            reduced = torch.load(output)
+
+        expected = _reduction_stats(torch.cat([_reduction_data(rank) for rank in range(world_size)]))
+        for name, entry in expected.items():
+            with self.subTest(stat=name):
+                torch.testing.assert_close(reduced[name]["values"], entry["values"], rtol=1e-12, atol=1e-12)
+                torch.testing.assert_close(reduced[name]["counts"], entry["counts"], rtol=0.0, atol=0.0)
+
+
+class TestParallel(unittest.TestCase):
+    """The dataset scripts run on a single rank without MPI, and in parallel where it is available."""
+
+    def test_without_mpi4py_a_run_has_one_rank(self):
+        from makani.datasets import parallel
+
+        with (
+            mock.patch.object(parallel, "MPI", None),
+            mock.patch.object(parallel, "detect_launch", return_value=Launch()),
+        ):
+            comm = parallel.get_comm()
+
+        self.assertIsInstance(comm, parallel.SerialComm)
+        self.assertEqual((comm.Get_rank(), comm.Get_size()), (0, 1))
+        comm.Barrier()
+        self.assertEqual(comm.bcast({"a": 1}, root=0), {"a": 1})
+        self.assertEqual(comm.allgather(3), [3])
+        self.assertIs(comm.Dup(), comm)
+        self.assertFalse(parallel.is_parallel(comm))
+
+    def test_a_parallel_launch_without_mpi4py_is_refused(self):
+        # every process would take itself for the only rank and write the same files
+        from makani.datasets import parallel
+
+        launch = Launch(size=2, rank=0, local_rank=0, launcher="openmpi")
+        with (
+            mock.patch.object(parallel, "MPI", None),
+            mock.patch.object(parallel, "detect_launch", return_value=launch),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "launched by openmpi as 2 processes.*datasets-mpi"):
+                parallel.get_comm()
+
+    def test_a_single_process_launch_runs_serially(self):
+        from makani.datasets import parallel
+
+        launch = Launch(size=1, rank=0, local_rank=0, launcher="slurm")
+        with (
+            mock.patch.object(parallel, "MPI", None),
+            mock.patch.object(parallel, "detect_launch", return_value=launch),
+        ):
+            self.assertIsInstance(parallel.get_comm(), parallel.SerialComm)
+
+    def test_a_single_rank_writes_files_serially(self):
+        from makani.datasets.parallel import SerialComm, h5_kwargs
+
+        self.assertEqual(h5_kwargs(None), {})
+        self.assertEqual(h5_kwargs(SerialComm()), {})
+
+    def test_several_ranks_write_with_mpio(self):
+        from makani.datasets.parallel import h5_kwargs
+
+        comm = mock.Mock()
+        comm.Get_size.return_value = 2
+        if h5.get_config().mpi:
+            self.assertEqual(h5_kwargs(comm), {"driver": "mpio", "comm": comm})
+        else:
+            # several ranks cannot share a file through an h5py without parallel HDF5
+            with self.assertRaisesRegex(RuntimeError, "parallel HDF5"):
+                h5_kwargs(comm)
+
+    def test_device_of_a_rank(self):
+        from makani.datasets import parallel
+
+        comm = mock.Mock()
+        comm.Get_rank.return_value = 5
+        # the rank on its node, where the launcher says
+        with mock.patch.object(parallel, "detect_launch", return_value=Launch(8, 5, 2, "slurm")):
+            with mock.patch("torch.cuda.device_count", return_value=4):
+                self.assertEqual(parallel.local_device_index(comm), 2)
+            with mock.patch("torch.cuda.device_count", return_value=0):
+                self.assertEqual(parallel.local_device_index(comm), 0)
+        # round robin over the rank otherwise
+        with mock.patch.object(parallel, "detect_launch", return_value=Launch(8, 5, None, "pmi")):
+            with mock.patch("torch.cuda.device_count", return_value=4):
+                self.assertEqual(parallel.local_device_index(comm), 1)
+
+    @parameterized.expand([(8, 1, [1, 1]), (8, 4, [4, 1]), (8, 16, [8, 2]), (8, 12, [6, 2]), (2, 7, [1, 7])])
+    def test_reduction_mesh_shape(self, requested, world_size, expected):
+        from makani.datasets.parallel import reduction_mesh_shape
+
+        self.assertEqual(reduction_mesh_shape(requested, world_size), expected)
+
+    def test_progress_bar_on_one_rank(self):
+        from makani.datasets.helpers import DistributedProgressBar
+        from makani.datasets.parallel import SerialComm
+
+        progress = DistributedProgressBar(10, SerialComm())
+        progress.update_counter(3)
+        progress.update_counter(4)
+        self.assertEqual(progress.get_counter(), 7)
+        progress.update_progress()
+        self.assertEqual(progress.pbar.n, 7)
+        del progress
+
+    def test_allgather_on_one_rank(self):
+        from makani.datasets.compute_histograms import allgather_safe
+        from makani.datasets.parallel import SerialComm
+
+        self.assertEqual(allgather_safe(SerialComm(), {"a": 1}), [{"a": 1}])
 
 
 class TestGetStats(unittest.TestCase):
@@ -1223,6 +1389,46 @@ class TestGetStats(unittest.TestCase):
     def tearDownClass(cls):
         cls.tmpdir.cleanup()
 
+    def test_script_runs_serially(self):
+        # the whole script with plain python: one rank, the default reduction group size, no MPI needed
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as output_path:
+            env = dict(os.environ, CUDA_VISIBLE_DEVICES="", MASTER_PORT="29531")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "makani.datasets.compute_stats",
+                    "--input_path",
+                    self.train_path,
+                    "--metadata_file",
+                    os.path.join(self.metadata_path, "data.json"),
+                    "--output_path",
+                    output_path,
+                ],
+                capture_output=True,
+                text=True,
+                env=env,
+                cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr[-3000:])
+
+            # the extrema over all samples, which do not depend on the quadrature
+            data = np.concatenate(
+                [
+                    h5.File(os.path.join(self.train_path, f), "r")[H5_PATH][...]
+                    for f in sorted(os.listdir(self.train_path))
+                    if f.endswith(".h5")
+                ]
+            )
+            mins = np.load(os.path.join(output_path, "mins.npy"))
+            maxs = np.load(os.path.join(output_path, "maxs.npy"))
+            np.testing.assert_allclose(mins.reshape(-1), data.min(axis=(0, 2, 3)), rtol=1e-6)
+            np.testing.assert_allclose(maxs.reshape(-1), data.max(axis=(0, 2, 3)), rtol=1e-6)
+            for name in ["global_means.npy", "global_stds.npy", "time_means.npy", "time_diff_stds_dt1.npy"]:
+                self.assertTrue(np.all(np.isfinite(np.load(os.path.join(output_path, name)))), name)
+
     @parameterized.expand(
         [
             (8, False),
@@ -1232,10 +1438,9 @@ class TestGetStats(unittest.TestCase):
         ],
         skip_on_empty=False,
     )
-    @unittest.skipUnless(importlib.util.find_spec("mpi4py") is not None, "mpi4py needs to be installed for this test")
-    def test_get_stats(self, batch_size, allow_nan, verbose=False):
+    def test_compute_stats(self, batch_size, allow_nan, verbose=False):
         # import necessary modules
-        from makani.datasets.get_stats import welford_combine, get_file_stats, mask_data
+        from makani.datasets.compute_stats import welford_combine, get_file_stats, mask_data
 
         # Get list of files to process
         if allow_nan:
@@ -1337,12 +1542,12 @@ class TestGetStats(unittest.TestCase):
 
 # conversion scripts, with the extras each needs to be importable at all
 _CONVERTERS = [
-    ("makani.datasets.convert_era5_to_makani_input", ["h5py"]),
+    ("makani.datasets.convert_era5", ["h5py"]),
     ("makani.datasets.sources.ncar", ["h5py"]),
     ("makani.datasets.sources.wb2", ["xarray", "h5py"]),
-    ("makani.datasets.convert_era5_invariants_to_makani_input", ["h5py"]),
-    ("makani.datasets.convert_makani_output_to_wb2", ["mpi4py", "xarray", "dask", "h5py"]),
-    ("makani.datasets.generate_wb2_climatology", ["mpi4py", "xarray", "h5py"]),
+    ("makani.datasets.convert_era5_invariants", ["h5py"]),
+    ("makani.datasets.convert_makani_output_to_wb2", ["xarray", "dask", "h5py"]),
+    ("makani.datasets.generate_wb2_climatology", ["xarray", "h5py"]),
 ]
 
 
@@ -1350,7 +1555,7 @@ class TestConverterImports(unittest.TestCase):
     """
     Import each conversion script in ``makani.datasets``.
 
-    The converters are driven by MPI against multi terabyte archives and are not
+    The converters run against multi terabyte archives and are not
     otherwise exercised by any test, so this is the only thing standing between a
     rename here and a failure on a production run.
 
@@ -1359,9 +1564,8 @@ class TestConverterImports(unittest.TestCase):
     happens inside the functions -- a helper called with the wrong arguments in
     the middle of a conversion loop is still invisible here.
 
-    Each is skipped when its dependencies are missing, since ``mpi4py``,
-    ``xarray`` and ``dask`` live in the ``datasets`` extra rather than the
-    base install; that means these normally skip in CI and run in the container.
+    Each is skipped when its dependencies are missing, since ``xarray`` and
+    ``dask`` live in the ``datasets`` extra rather than the base install.
     """
 
     @parameterized.expand(_CONVERTERS)
@@ -1461,15 +1665,15 @@ class TestYearlySampleTimes(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# ERA5 converter and its sources: makani/datasets/convert_era5_to_makani_input.py, makani/datasets/sources/
+# ERA5 converter and its sources: makani/datasets/convert_era5.py, makani/datasets/sources/
 # ---------------------------------------------------------------------------
 #
-# Tests for ``makani/datasets/convert_era5_to_makani_input.py`` and its sources.
+# Tests for ``makani/datasets/convert_era5.py`` and its sources.
 #
 # Everything but the last suite runs without MPI and without network access: the
 # output file helpers write serial files, the NCAR source reads from a stand-in
 # for its S3 store and the WB2 source from a small local zarr store. The full
-# conversion needs mpi4py and parallel HDF5 and is skipped where they are missing.
+# conversion runs serially, on a single rank without MPI.
 
 
 _LAT = [90.0, 0.0, -90.0]
@@ -1483,10 +1687,6 @@ def _metadata(channels):
 
 def _samples(start, num):
     return [(idx, start + dt.timedelta(hours=_DHOURS * idx)) for idx in range(num)]
-
-
-def _have_mpi_hdf5():
-    return importlib.util.find_spec("mpi4py") is not None and h5.get_config().mpi
 
 
 class _OutputFileCase(unittest.TestCase):
@@ -1732,7 +1932,6 @@ class _FakeSource(Source):
         return [len(self.channel_names) - 1]
 
 
-@unittest.skipUnless(_have_mpi_hdf5(), "needs mpi4py and h5py built with MPI")
 class TestConvert(unittest.TestCase):
     """A full conversion on a single rank across a year boundary, with a source that skips a channel."""
 
@@ -1748,7 +1947,7 @@ class TestConvert(unittest.TestCase):
         self._tmpdir.cleanup()
 
     def test_yearly_files(self):
-        from makani.datasets.convert_era5_to_makani_input import convert
+        from makani.datasets.convert_era5 import convert
 
         convert(_FakeSource, self._tmpdir.name, self.metadata_file, _utc(2022, 12, 31, 6), _utc(2023, 1, 1, 12))
 
@@ -1773,7 +1972,7 @@ class TestConvert(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Invariant converter and its sources: makani/datasets/convert_era5_invariants_to_makani_input.py
+# Invariant converter and its sources: makani/datasets/convert_era5_invariants.py
 # ---------------------------------------------------------------------------
 #
 # The time invariant counterpart of the suites above. It is serial throughout, so
@@ -1794,7 +1993,7 @@ class _InvariantOutputFileCase(unittest.TestCase):
     channels = ["z", "lsm", "not_a_variable"]
 
     def setUp(self):
-        from makani.datasets.convert_era5_invariants_to_makani_input import _create_output_file
+        from makani.datasets.convert_era5_invariants import _create_output_file
 
         self._tmpdir = tempfile.TemporaryDirectory()
         self.out = _create_output_file(
@@ -1817,7 +2016,7 @@ class TestInvariantOutputFile(_InvariantOutputFileCase):
         self.assertTrue(np.all(np.isnan(self.out["fields"][...])))
 
     def test_write_missing_touches_only_the_given_channels(self):
-        from makani.datasets.convert_era5_invariants_to_makani_input import _write_missing
+        from makani.datasets.convert_era5_invariants import _write_missing
 
         self.out["fields"][...] = 1.0
         _write_missing(self.out, "fields", [0, 2])
@@ -1975,7 +2174,7 @@ class TestConvertInvariants(unittest.TestCase):
         self._tmpdir.cleanup()
 
     def _convert(self, **options):
-        from makani.datasets.convert_era5_invariants_to_makani_input import convert
+        from makani.datasets.convert_era5_invariants import convert
 
         convert(_FakeInvariantSource, self.output_file, self.metadata_file, ["z", "lsm", "slt"], **options)
 
@@ -2004,7 +2203,7 @@ class TestConvertInvariants(unittest.TestCase):
             self.assertEqual(f["fields"].shape, (3, len(_LAT), len(_LON)))
 
     def test_failed_conversion_leaves_no_file_behind(self):
-        from makani.datasets.convert_era5_invariants_to_makani_input import convert
+        from makani.datasets.convert_era5_invariants import convert
 
         _FailingInvariantSource.closed = False
         with self.assertRaises(FileNotFoundError):
@@ -2019,7 +2218,7 @@ class TestConvertInvariants(unittest.TestCase):
             self.assertTrue(np.all(f["fields"][1] == 1))
 
     def test_command_line_defaults_to_all_invariants(self):
-        from makani.datasets.convert_era5_invariants_to_makani_input import build_parser
+        from makani.datasets.convert_era5_invariants import build_parser
         from makani.data.ncar_helpers import invariant_variables
 
         args = build_parser().parse_args(["ncar", "--output_file", "out.h5", "--metadata_file", "m.json"])

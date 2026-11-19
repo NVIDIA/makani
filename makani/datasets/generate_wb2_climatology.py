@@ -22,7 +22,7 @@ import datetime as dt
 import numpy as np
 from tqdm import tqdm
 
-from mpi4py import MPI
+from makani.datasets.parallel import get_comm, h5_kwargs
 
 from makani.data.wb2_helpers import split_convert_channel_names, gcs_storage_options
 
@@ -41,7 +41,7 @@ def generate_wb2_climatology(
     This function can extract that masks from the corresponding WB2 climatology file stored on GCS and brings it into a format which can be used in
     makani.
 
-    This routine supports distributed processing via mpi4py.
+    It runs serially, or in parallel under mpirun where mpi4py is installed, see :mod:`makani.datasets.parallel`.
 
     ...
 
@@ -70,7 +70,7 @@ def generate_wb2_climatology(
     """
 
     # get comm ranks and size
-    comm = MPI.COMM_WORLD.Dup()
+    comm = get_comm()
     comm_rank = comm.Get_rank()
     comm_size = comm.Get_size()
 
@@ -165,7 +165,7 @@ def generate_wb2_climatology(
         if comm_rank == 0:
             print("Storing masks")
 
-        with h5.File(mask_output_file, "w", driver="mpio", comm=comm) as f:
+        with h5.File(mask_output_file, "w", **h5_kwargs(comm)) as f:
 
             # create dataset
             dset = f.create_dataset("fields", [DT, len(channel_names), H, W], dtype="f4")
@@ -215,7 +215,7 @@ def generate_wb2_climatology(
         if comm_rank == 0:
             print("Storing climatology")
 
-        with h5.File(climatology_output_file, "w", driver="mpio", comm=comm) as f:
+        with h5.File(climatology_output_file, "w", **h5_kwargs(comm)) as f:
 
             # create dataset
             dset = f.create_dataset("fields", [DT, len(channel_names), H, W], dtype="f4")

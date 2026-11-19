@@ -13,8 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""ERA5 sources for ``makani/datasets/convert_era5_to_makani_input.py`` and
-``makani/datasets/convert_era5_invariants_to_makani_input.py``.
+"""ERA5 sources for ``makani/datasets/convert_era5.py`` and
+``makani/datasets/convert_era5_invariants.py``.
 
 The converter owns everything the sources have in common: the metadata, the
 date range, the yearly output files and their layout, the split of work over

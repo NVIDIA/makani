@@ -22,7 +22,7 @@ import datetime as dt
 import argparse as ap
 
 # MPI
-from mpi4py import MPI
+from makani.datasets.parallel import get_comm, h5_kwargs
 
 
 def transfer_channels(
@@ -38,7 +38,7 @@ def transfer_channels(
     This function reads corresponding channels from the input_file and copies them to the corresponding slot
     in the output file.
 
-    This routine supports distributed processing via mpi4py.
+    It runs serially, or in parallel under mpirun where mpi4py is installed, see :mod:`makani.datasets.parallel`.
     ...
 
     Parameters
@@ -59,7 +59,7 @@ def transfer_channels(
     """
 
     # get comm ranks and size
-    comm = MPI.COMM_WORLD.Dup()
+    comm = get_comm()
     comm_rank = comm.Get_rank()
     comm_size = comm.Get_size()
 
@@ -106,8 +106,8 @@ def transfer_channels(
         print(f"Transferring {channels} from {input_file} to {output_file}.")
 
     # open files
-    fin = h5.File(input_file, "r", driver="mpio", comm=comm)
-    fout = h5.File(output_file, "a", driver="mpio", comm=comm)
+    fin = h5.File(input_file, "r", **h5_kwargs(comm))
+    fout = h5.File(output_file, "a", **h5_kwargs(comm))
 
     # do loop over channels
     num_entries_current = 0
@@ -165,7 +165,9 @@ def main(args):
 if __name__ == "__main__":
 
     # argparse
-    parser = ap.ArgumentParser()
+    parser = ap.ArgumentParser(
+        description="Copy channels from one makani dataset file into another, into the slots of the same channels."
+    )
     parser.add_argument("--input_file", type=str, help="makani input file", required=True)
     parser.add_argument("--output_file", type=str, help="File to which channels will be written", required=True)
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size for writing chunks")

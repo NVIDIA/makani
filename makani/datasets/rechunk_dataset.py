@@ -35,7 +35,7 @@ def _chunk_shape_from_bytes(shape: Tuple[int, ...], itemsize: int, target_bytes:
     return tuple(chunks)
 
 
-def h5_convert(
+def rechunk(
     input_dir: str,
     output_dir: str,
     chunksize: str,
@@ -193,7 +193,7 @@ def h5_convert(
 
 
 def main(args):
-    h5_convert(
+    rechunk(
         input_dir=args.input_dir,
         output_dir=args.output_dir,
         chunksize=args.chunksize,
@@ -209,7 +209,9 @@ def main(args):
 
 if __name__ == "__main__":
     # argparse
-    parser = ap.ArgumentParser()
+    parser = ap.ArgumentParser(
+        description="Rewrite the HDF5 files of a makani dataset with new chunking and compression."
+    )
     parser.add_argument("--input_dir", type=str, help="Directory with input files.", required=True)
     parser.add_argument("--output_dir", type=str, help="Directory for output files.", required=True)
     parser.add_argument("--chunksize", type=str, default="auto", help="Default chunksize.")

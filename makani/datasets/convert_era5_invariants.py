@@ -15,7 +15,7 @@
 
 """Convert the time invariant ERA5 fields to a single makani style file.
 
-The counterpart of ``convert_era5_to_makani_input.py`` for fields without a time
+The counterpart of ``convert_era5.py`` for fields without a time
 axis, such as orography, land-sea mask, soil and vegetation type. It reads from
 the same archives and takes the same metadata file, from which only the grid is
 used, but writes a single file and runs serially: the invariants are a few
@@ -103,7 +103,7 @@ def convert(
     output_file : str
         Name of the file to write (makani format, without time axis).
     metadata_file : str
-        Name of the dataset metadata file, see ``convert_era5_to_makani_input.py``. Only
+        Name of the dataset metadata file, see ``convert_era5.py``. Only
         ``coords["lat"]`` and ``coords["lon"]`` are used, so the metadata of the dataset the
         invariants go with can be passed as is.
     channel_names : List[str]

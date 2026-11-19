@@ -27,6 +27,7 @@ import argparse as ap
 from makani.data.ncar_helpers import NCAR_ERA5_BUCKET
 from makani.datasets.date_range import add_date_range_arguments, date_range_from_args, yearly_sample_times
 from makani.datasets.sources import Source
+from makani.datasets.parallel import get_comm, h5_kwargs
 
 
 def _batched(items, size):
@@ -39,12 +40,13 @@ def _batched(items, size):
 def _create_output_file(ofile, comm, entry_key, timestamps, channel_names, lat, lon) -> h5.File:
     """Create a yearly makani file with its datasets and dimension scales.
 
-    The file is opened for parallel writing on ``comm``, or serially if ``comm`` is None.
+    The file is opened for parallel writing on ``comm`` if it has more than one rank, serially otherwise,
+    also if ``comm`` is None, see :func:`~makani.datasets.parallel.h5_kwargs`.
     """
     chanlen = max([len(v) for v in channel_names])
     dataset_shape = (len(timestamps), len(channel_names), len(lat), len(lon))
 
-    f = h5.File(ofile, "w", driver="mpio", comm=comm) if comm is not None else h5.File(ofile, "w")
+    f = h5.File(ofile, "w", **h5_kwargs(comm))
     # Declare NaN as the fill value, so that missing data is self describing to
     # any HDF5 reader. The fill time has to stay "never": parallel HDF5
     # allocates storage at creation, so any other fill time would write the
@@ -106,9 +108,9 @@ def convert(
 
     The archive specific reading is delegated to a :class:`makani.datasets.sources.Source`;
     this routine owns the output files, the date range and the distribution of
-    work. It supports distributed processing via mpi4py: the source groups the
-    samples of each year into units that must stay on one rank, and the units are
-    handed out to the ranks in contiguous runs.
+    work. It runs serially, or in parallel under mpirun where mpi4py is installed, see
+    :mod:`makani.datasets.parallel`: the source groups the samples of each year into units
+    that must stay on one rank, and the units are handed out to the ranks in contiguous runs.
 
     Parameters
     ----------
@@ -139,12 +141,10 @@ def convert(
         Enable for more printing.
     """
 
-    # imported here so that the helpers above can be used and tested without MPI
-    from mpi4py import MPI
     from makani.datasets.helpers import DistributedProgressBar
 
     # get comm ranks and size
-    comm = MPI.COMM_WORLD.Dup()
+    comm = get_comm()
     comm_rank = comm.Get_rank()
     comm_size = comm.Get_size()
 
