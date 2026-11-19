@@ -29,10 +29,6 @@ RUN apt remove cmake -y && \
 # install mpi4py
 RUN pip install mpi4py
 
-# install onnx
-RUN pip install onnxruntime && \
-    if [ "$(uname -m)" = "x86_64" ]; then pip install onnxruntime-gpu; fi
-
 # install AWS prereqs for HDF5
 # Each of these is pinned to the commit its default branch pointed at on 2026-08-04.
 # They are built against each other, so bump them as a set rather than individually.
