@@ -14,7 +14,6 @@
 # limitations under the License.
 
 import os
-import sys
 from typing import Optional
 import time
 import socket
@@ -34,9 +33,8 @@ import torch
 import torch.distributed as dist
 from torch_harmonics import RealSHT, as_grid
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from data_process.data_process_helpers import DistributedProgressBar
-from data_process.data_process_helpers import welford_combine, collective_reduce, binary_reduce
+from makani.datasets.helpers import DistributedProgressBar
+from makani.datasets.helpers import welford_combine, collective_reduce, binary_reduce
 
 
 @torch.compile(fullgraph=True)

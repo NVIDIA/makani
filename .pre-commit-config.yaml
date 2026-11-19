@@ -8,10 +8,6 @@
 # That sweep is intentionally deferred to its own commit so it does not conflict
 # with in-flight branches. Until then, install the hooks with `pre-commit install`
 # and they will only touch files you actually change.
-#
-# Known blocker for the sweep: data_process/h5_convert.py does not parse under
-# Python 3 (TabError, inconsistent tabs and spaces at line 139), so black cannot
-# format it. That file needs fixing before `--all-files` can pass.
 
 # Many Linux installs provide python3 only; avoid hook envs calling bare `python`.
 default_language_version:

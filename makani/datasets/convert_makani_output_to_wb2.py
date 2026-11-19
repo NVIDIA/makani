@@ -16,7 +16,6 @@
 from typing import Optional, List
 from tqdm import tqdm
 import os
-import sys
 import time
 import numpy as np
 import h5py as h5
@@ -31,7 +30,6 @@ from mpi4py import MPI
 
 from makani.data.data_helpers import get_date_from_timestamp
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from makani.data.wb2_helpers import (
     atmospheric_wb2_name,
     split_convert_channel_names,

@@ -20,7 +20,7 @@ and no netCDF library is needed. What ``h5py`` does *not* do is the decoding
 that ``netCDF4``/``xarray`` would normally hide, and ICON adds conventions of
 its own on top. This module isolates that decoding and the mapping from ICON
 variable names onto makani channels, so that the converter in
-``data_process/`` is left with I/O and regridding only, and so that the fiddly
+``makani/datasets/`` is left with I/O and regridding only, and so that the fiddly
 parts can be tested without any ICON data.
 
 Three things here are worth knowing before touching the converter:

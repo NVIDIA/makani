@@ -15,7 +15,7 @@
 
 """Time invariant input features, read from a single file with a channel axis.
 
-The invariants file is written by ``data_process/convert_era5_invariants_to_makani_input.py``:
+The invariants file is written by ``makani/datasets/convert_era5_invariants_to_makani_input.py``:
 ``fields`` is ``(channel, lat, lon)``, with ``channel``, ``lat``, ``lon`` and ``valid_data``
 alongside. The configuration selects channels from it and says how each is encoded::
 
@@ -69,7 +69,7 @@ def check_legacy_invariant_options(params):
     if enabled:
         raise ValueError(
             f"The options {enabled} are discontinued. Write an invariants file with "
-            f"data_process/convert_era5_invariants_to_makani_input.py and select its channels with "
+            f"makani/datasets/convert_era5_invariants_to_makani_input.py and select its channels with "
             f"'invariants_path' and 'invariants' instead, e.g. "
             f"[{{channel: z, encoding: normalize}}, {{channel: lsm, encoding: onehot, num_classes: 2, rounding: floor}}] "
             f"for the former add_orography and add_landmask."

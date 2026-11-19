@@ -100,17 +100,13 @@ test = [
     "xskillscore",
 ]
 
-data_process = [
+datasets = [
     "mpi4py",
     "xarray>=2025.1.0",
     "gcsfs",
     "s3fs",
     "dask",
     "tqdm",
-]
-
-legacy_data_process = [
-    "cdsapi>=0.7.2"
 ]
 
 vis = [

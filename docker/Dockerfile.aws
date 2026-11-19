@@ -143,9 +143,6 @@ RUN cd /tmp && wget https://support.hdfgroup.org/releases/hdf5/v2_0/v2_0_0/downl
 RUN CC="mpicc" HDF5_MPI=ON H5PY_ROS3=1 H5PY_DIRECT_VFD=1 HDF5_DIR=/opt/hdf5 pip install --no-build-isolation --no-binary=h5py h5py==3.16.0
 ENV PATH=/opt/hdf5/bin:${PATH}
 
-# install cdsapi for downloading the dataset
-RUN pip install cdsapi>=0.7.2
-
 # install zarr and data stuff. the zarr reader needs v3 (v2 has no zarr.core.buffer), so
 # the version is stated here rather than left to whatever the base image happens to ship
 RUN pip install more_itertools "zarr>=3" "xarray>=2025.1.0" gcsfs s3fs boto3
@@ -183,8 +180,6 @@ RUN pip install git+https://github.com/NVIDIA/physicsnemo.git@14e0874847ffb56b35
 RUN mkdir -p /opt/makani
 COPY config /opt/makani/config
 COPY docker /opt/makani/docker
-COPY data_process /opt/makani/data_process
-COPY datasets /opt/makani/datasets
 COPY makani /opt/makani/makani
 COPY scripts /opt/makani/scripts
 COPY tests /opt/makani/tests

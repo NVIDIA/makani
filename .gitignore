@@ -4,7 +4,7 @@ __pycache__
 expts/
 wandb/
 build/
-data_process/.ipynb_checkpoints/*
+makani/datasets/.ipynb_checkpoints/*
 notebooks/.ipynb_checkpoints/*
 utils/.ipynb_checkpoints/*
 .devcontainer/

@@ -1,6 +1,6 @@
-# Data Process
+# Datasets
 
-This folder contains python files for processing the data.
+This package contains the scripts that build makani datasets: converting ERA5, annotating and concatenating the files, and computing their statistics. Each runs as a module, `python -m makani.datasets.<script>`, and their dependencies come with `pip install makani[datasets]`.
 
 ## Overview of processing
 
@@ -12,26 +12,26 @@ This folder is organized as follows:
 ```
 makani
 ├── ...
-├── data_process                         # code related to pre-processing the data
-│   ├── annotate_dataset.py              # annotation of the dataset
-│   ├── concatenate_dataset.py           # concatenation of data files across several years
-│   ├── convert_makani_output_to_wb2.py  # converting makani output to wb2 format
-│   ├── convert_era5_to_makani_input.py  # convert ERA5 (WB2/ARCO or NSF NCAR) in makani format
+├── datasets                                        # building makani datasets
+│   ├── annotate_dataset.py                         # annotation of the dataset
+│   ├── concatenate_dataset.py                      # concatenation of data files across several years
 │   ├── convert_era5_invariants_to_makani_input.py  # convert time invariant ERA5 fields (WB2/ARCO or NSF NCAR) in makani format
-│   ├── data_process_helpers.py          # helper functions for distributed Welford reductions
-│   ├── date_range.py                    # date range options shared by the yearly converters
-│   ├── generate_wb2_climatology.py      # generate mask and dataset for climatology data
-│   ├── get_histograms.py                # compute histograms for each variable over a dataset
-│   ├── get_stats.py                     # compute power spectra for each variable over a dataset
-│   ├── get_stats.py                     # calculate stats from the dataset
-│   ├── h5_convert.py                    # reformat h5 files to enable compression/chunking
-│   ├── merge_wb2_dataset.py             # add additional fields to an existing makani dataset from the Weatherbench dataset repo
-│   ├── postprocess_stats.py             # postprocessg of stats
-│   ├── sources                          # ERA5 sources of the two convert_era5_* scripts (wb2, ncar)
-│   ├── wb2_helpers.py                   # wb2 helper functions
-│   └── Readme.md                        # this file
+│   ├── convert_era5_to_makani_input.py             # convert ERA5 (WB2/ARCO or NSF NCAR) in makani format
+│   ├── convert_makani_output_to_wb2.py             # converting makani output to wb2 format
+│   ├── date_range.py                               # date range options shared by the yearly converters
+│   ├── examples/metadata.json                      # an example of the metadata file of a dataset
+│   ├── generate_wb2_climatology.py                 # generate mask and dataset for climatology data
+│   ├── get_histograms.py                           # compute histograms for each variable over a dataset
+│   ├── get_hydrostatic_balance_climatology.py      # climatology for the hydrostatic balance constraint
+│   ├── get_spectra.py                              # compute power spectra for each variable over a dataset
+│   ├── get_stats.py                                # calculate stats from the dataset
+│   ├── h5_convert.py                               # reformat h5 files to enable compression/chunking
+│   ├── helpers.py                                  # helper functions for distributed Welford reductions
+│   ├── merge_wb2_dataset.py                        # add additional fields to an existing makani dataset from the Weatherbench dataset repo
+│   ├── postprocess_stats.py                        # postprocessg of stats
+│   ├── sources                                     # ERA5 sources of the two convert_era5_* scripts (wb2, ncar)
+│   └── Readme.md                                   # this file
 ...
-
 ```
 
 ### Annotate dataset
@@ -48,7 +48,7 @@ For scoring, the .h5 files are expected to be annotated with the correct metadat
 
 ### Weatherbench
 
-Makani contains several files to enable scoring consistent with Weatherbench2. `generate_wb2_climatology.py` computes climatology data provided by WeatherBench2 (ERA5 data, averaged data from 1990 - 2019) and converts them to a h5 dataset. Additionally, generates a climatology masks used by WB. Other helper functions are contained in `wb2_helpers.py`. `convert_era5_to_makani_input.py wb2` can be used to convert Weatherbench2 data such as the ARCO-ERA5 dataset to a makani-compatible format. `convert_makani_output_to_wb` converts makani inference output to Weatherbench2.
+Makani contains several files to enable scoring consistent with Weatherbench2. `generate_wb2_climatology.py` computes climatology data provided by WeatherBench2 (ERA5 data, averaged data from 1990 - 2019) and converts them to a h5 dataset. Additionally, generates a climatology masks used by WB. Other helper functions are contained in `makani/data/wb2_helpers.py`. `convert_era5_to_makani_input.py wb2` can be used to convert Weatherbench2 data such as the ARCO-ERA5 dataset to a makani-compatible format. `convert_makani_output_to_wb` converts makani inference output to Weatherbench2.
 
 ## Data Processing Examples
 
@@ -88,7 +88,7 @@ data into Makani-compatible yearly `.h5` files.
    A full example for a metadata file for a dataset which was used to train FourCastNet3 can be found under `examples/metadata.json`.
 2. Run the converter (MPI optional but recommended for speed):
    ```
-   mpirun -n 8 python convert_era5_to_makani_input.py wb2 \
+   mpirun -n 8 python -m makani.datasets.convert_era5_to_makani_input wb2 \
      --input_file "gs://weatherbench2/datasets/era5/1959-2022-full_37-1h-0p25deg-chunk-1.zarr-v2" \
      --output_dir "/path/to/output/makani_era5" \
      --metadata_file "/path/to/metadata.json" \
@@ -125,7 +125,7 @@ against the metadata grid is reported as an error rather than silently corrected
 The `ncar` source takes the same metadata json as the `wb2` source and the converter writes
 the same yearly files for both, so the two are interchangeable as dataset sources:
 ```
-mpirun -n 8 python convert_era5_to_makani_input.py ncar \
+mpirun -n 8 python -m makani.datasets.convert_era5_to_makani_input ncar \
   --output_dir "/path/to/output/makani_era5" \
   --metadata_file "/path/to/metadata.json" \
   --start_date 2018-01-01 \
@@ -172,7 +172,7 @@ same absolute locations that were used when the VDS was created.
 
 Basic usage (single directory of yearly files):
 ```
-python concatenate_dataset.py \
+python -m makani.datasets.concatenate_dataset \
   --dataset_metadata /data/makani_era5/metadata.json \
   --input_dirs /data/makani_era5 \
   --output_file /data/makani_era5/makani_era5_vds.h5 \
@@ -182,7 +182,7 @@ python concatenate_dataset.py \
 Path consistency with Docker:
 ```
 # Create VDS on the host (absolute paths are embedded in the VDS):
-python concatenate_dataset.py \
+python -m makani.datasets.concatenate_dataset \
   --dataset_metadata /mnt/era5/metadata.json \
   --input_dirs /mnt/era5/train \
   --output_file /mnt/era5/makani_era5_train_vds.h5v # we give the file a differen suffix in order to distinguish it from "proper" h5 files
@@ -209,7 +209,7 @@ The script `get_stats.py` computes per-channel statistics for a Makani dataset (
 
 Run (MPI recommended for speed; works on VDS or a directory of yearly `.h5`):
 ```
-mpirun -n 8 python get_stats.py \
+mpirun -n 8 python -m makani.datasets.get_stats \
   --input_path /mnt/era5/makani_era5_train_vds.h5v \   # or a folder with .h5 files
   --metadata_file /mnt/era5/metadata.json \
   --output_path /mnt/era5/stats/train \
@@ -252,7 +252,7 @@ are selected with `--channels` by ECMWF short name and default to all of them:
 The invariants are a few megabytes in total, so the script runs serially and writes a
 single file:
 ```
-python convert_era5_invariants_to_makani_input.py ncar \
+python -m makani.datasets.convert_era5_invariants_to_makani_input ncar \
   --output_file "/path/to/output/invariants.h5" \
   --metadata_file "/path/to/metadata.json" \
   --channels z lsm slt cvl cvh tvl tvh

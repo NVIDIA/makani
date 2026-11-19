@@ -41,7 +41,7 @@ def parse_dataset_metadata(metadata_json_path, params):
                 f"{metadata_json_path} does not declare coords.grid_type. It is required: the quadrature "
                 "weights follow from it, so a dataset that does not say what grid it is on cannot be area "
                 "averaged correctly. Add one of 'equiangular', 'legendre-gauss', 'clenshaw-curtiss', "
-                "'weatherbench2' or 'euclidean'; see data_process/examples/metadata.json."
+                "'weatherbench2' or 'euclidean'; see makani/datasets/examples/metadata.json."
             )
         params["data_grid_type"] = metadata["coords"]["grid_type"]
 

@@ -24,7 +24,6 @@ megabytes in total, so there is nothing to distribute.
 
 from typing import Callable, Dict, List, Optional
 import os
-import sys
 import json
 import time
 import functools
@@ -33,9 +32,8 @@ import h5py as h5
 import datetime as dt
 import argparse as ap
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from makani.data.ncar_helpers import NCAR_ERA5_BUCKET, invariant_variables
-from data_process.sources import InvariantSource
+from makani.datasets.sources import InvariantSource
 
 
 def _create_output_file(ofile, entry_key, channel_names, lat, lon) -> h5.File:
@@ -95,7 +93,7 @@ def convert(
 ):
     """Convert time invariant ERA5 fields from one of the supported archives to a single makani style file.
 
-    The archive specific reading is delegated to a :class:`data_process.sources.InvariantSource`;
+    The archive specific reading is delegated to a :class:`makani.datasets.sources.InvariantSource`;
     this routine owns the output file.
 
     Parameters
@@ -170,7 +168,7 @@ def convert(
 def main(args):
     # backends are imported lazily, so that each only needs its own dependencies
     if args.source == "wb2":
-        from data_process.sources.wb2 import Wb2InvariantSource
+        from makani.datasets.sources.wb2 import Wb2InvariantSource
 
         make_source = functools.partial(
             Wb2InvariantSource,
@@ -179,7 +177,7 @@ def main(args):
             skip_missing_channels=args.skip_missing_channels,
         )
     elif args.source == "ncar":
-        from data_process.sources.ncar import NcarInvariantSource
+        from makani.datasets.sources.ncar import NcarInvariantSource
 
         make_source = functools.partial(
             NcarInvariantSource,

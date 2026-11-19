@@ -12,3 +12,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+"""
+Building makani datasets offline: converting ERA5, annotating and concatenating the files, and
+computing their statistics. Each script runs as ``python -m makani.datasets.<script>``; their
+dependencies come with ``pip install makani[datasets]``. Loading datasets is :mod:`makani.data`.
+The package imports nothing itself.
+"""

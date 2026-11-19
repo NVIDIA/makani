@@ -45,9 +45,6 @@ RUN cd /tmp && wget https://support.hdfgroup.org/releases/hdf5/v2_0/v2_0_0/downl
 RUN CC="mpicc" HDF5_MPI=ON H5PY_DIRECT_VFD=1 HDF5_DIR=/opt/hdf5 pip install --no-build-isolation --no-binary=h5py h5py==3.16.0
 ENV PATH=/opt/hdf5/bin:${PATH}
 
-# install cdsapi for downloading the dataset
-RUN pip install cdsapi>=0.7.2
-
 # install zarr and data stuff. zarr is pinned to >=3 because makani is installed with
 # --no-deps below, so the requirement in pyproject.toml is never enforced: an unpinned
 # zarr is left at whatever the base image ships, and a v2 base silently breaks the zarr
@@ -93,8 +90,6 @@ RUN cd /opt && git clone https://github.com/NVIDIA/torch-harmonics.git && \
 RUN mkdir -p /opt/makani
 COPY config /opt/makani/config
 COPY docker /opt/makani/docker
-COPY data_process /opt/makani/data_process
-COPY datasets /opt/makani/datasets
 COPY makani /opt/makani/makani
 COPY scripts /opt/makani/scripts
 COPY tests /opt/makani/tests
