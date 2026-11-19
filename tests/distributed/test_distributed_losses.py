@@ -37,6 +37,7 @@ from makani.losses import (
     SpectralL2EnergyScoreLoss,
     SobolevEnergyScoreLoss,
     CoherenceRegularization,
+    GaussianMMDLoss,
 )
 from makani.losses.energy_score import SpectralCoherenceLoss
 from makani.training.training_helpers import NonFiniteLossCheck
@@ -715,6 +716,92 @@ class TestDistributedLoss(unittest.TestCase):
                     compare_tensors(
                         "observation gradients", obsgrad_gather_full, obsgrad_full, tol, tol, verbose=verbose
                     ),
+                    self.device,
+                )
+            )
+
+    @parameterized.expand(
+        [
+            [64, 128, 2, 3, 4, 1e-5, False, False],
+            [64, 128, 2, 3, 4, 1e-5, True, False],
+            [65, 128, 1, 2, 4, 1e-5, False, True],
+            [65, 128, 1, 2, 4, 1e-5, True, True],
+        ],
+        skip_on_empty=True,
+    )
+    def test_distributed_mmd(
+        self, nlat, nlon, batch_size, num_chan, ens_size, tol, channel_reduction, weighted, verbose=False
+    ):
+        # the MMD loss moves the ensemble split into the spatial dimensions, so that each rank holds all
+        # members on a part of the grid; it has to give what the serial loss gives on the whole of it
+
+        disable_tf32()
+
+        skip_unless_ensemble_splits_evenly(self, ens_size)
+
+        B, E, C, H, W = batch_size, ens_size, num_chan, nlat, nlon
+
+        forecasts_full = torch.randn((B, E, C, H, W), dtype=torch.float32, device=self.device) * 0.5 + 1.0
+        obs_full = torch.randn((B, C, H, W), dtype=torch.float32, device=self.device) * 0.5 + 1.0
+        weights_full = None
+        if weighted:
+            weights_full = torch.rand((1, 1, H, W), dtype=torch.float32, device=self.device) + 0.5
+
+        def make_loss(distributed):
+            return GaussianMMDLoss(
+                img_shape=(H, W),
+                crop_shape=(H, W),
+                crop_offset=(0, 0),
+                channel_names=tuple(f"c{c}" for c in range(C)),
+                grid_type="equiangular",
+                sigma=1.0,
+                alpha=1.0,
+                beta=2.0,
+                channel_reduction=channel_reduction,
+                spatial_distributed=distributed and comm.is_distributed("spatial") and (comm.get_size("spatial") > 1),
+                ensemble_distributed=distributed
+                and comm.is_distributed("ensemble")
+                and (comm.get_size("ensemble") > 1),
+            ).to(self.device)
+
+        # serial loss
+        forecasts_full.requires_grad = True
+        obs_full.requires_grad = True
+        loss_full = make_loss(False)(forecasts_full, obs_full, spatial_weights=weights_full)
+        with torch.no_grad():
+            ograd_full = torch.randn_like(loss_full)
+        loss_full.backward(ograd_full)
+
+        # distributed loss
+        forecasts_local = self._split_helper(forecasts_full.detach().clone())
+        obs_local = self._split_helper(obs_full.detach().clone())
+        weights_local = self._split_helper(weights_full) if weighted else None
+        forecasts_local.requires_grad = True
+        obs_local.requires_grad = True
+        loss_local = make_loss(True)(forecasts_local, obs_local, spatial_weights=weights_local)
+        loss_local.backward(ograd_full.clone())
+
+        with self.subTest(desc="outputs"):
+            self.assertTrue(
+                reduce_success(
+                    compare_tensors("outputs", loss_local, loss_full, tol, tol, verbose=verbose), self.device
+                )
+            )
+
+        with self.subTest(desc="forecast gradients"):
+            fgrad = self._gather_helper_bwd(forecasts_local.grad, True)
+            self.assertTrue(
+                reduce_success(
+                    compare_tensors("forecast gradients", fgrad, forecasts_full.grad, tol, tol, verbose=verbose),
+                    self.device,
+                )
+            )
+
+        with self.subTest(desc="observation gradients"):
+            ograd = self._gather_helper_bwd(obs_local.grad, False)
+            self.assertTrue(
+                reduce_success(
+                    compare_tensors("observation gradients", ograd, obs_full.grad, tol, tol, verbose=verbose),
                     self.device,
                 )
             )

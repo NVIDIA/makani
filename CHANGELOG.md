@@ -29,6 +29,9 @@
 - The stochastic interpolant is brought up to speed with the rest of the codebase: a `StepWrapper` driven by rollouts and the noise controller, configured by a `stochastic_interpolant` block. Breaking: earlier interpolant checkpoints do not load, and `n_future > 0` is refused.
 
 **Fixed**
+- `normalize_static_features: True` raised an `AttributeError` for every configuration, as the area-weighted normalization read `params.img_shape`, which nothing sets; with a crop, it also applied the weights of the crop to the whole grid. It now takes the statistics over the crop, the region the model sees.
+- `GaussianMMDLoss` with spatial weights and without `ensemble_distributed`, in a run with ensemble parallelism: the weights were split over the ensemble ranks anyway, so the loss raised a shape mismatch.
+- `DropPath()`, whose default rate `None` is documented as disabled, raised a `TypeError` in training mode.
 - `SpectralH1Loss` under spatial parallelism with more than one rank in `h`: the weights were not reduced to the local chunk of the rank, so building the loss raised an `AttributeError`.
 - `LossHandler` with several losses and `n_future > 0`: the channel weights were tiled as `[loss 0, loss 1] * steps` and the multistep weights were repeated across all losses, while the losses are laid out as `loss 0: steps, loss 1: steps`. Each loss therefore got weights of the wrong loss and lead time, silently. With a single loss, nothing changes. `uncertainty_weighting` and `balanced_weighting` with `n_future > 0` crashed on the same mismatch, and now run.
 - Learnable white noise (`IsotropicGaussianRandomFieldS2`) under spatial model parallelism: its `sigma_l` is sharded over `h` and `w` but was not annotated as shared over `matmul` only, so the gradient reduction summed the shards of other ranks (or failed on shards of different sizes) and `sync_params` overwrote them with those of rank 0.

@@ -763,6 +763,173 @@ class TestCheckpointFormat(unittest.TestCase):
         self.assertTrue(torch.equal(noise.get_rng_state()["white"][0], before))
 
 
+class _StatefulLoss(nn.Module):
+    """A loss with a state of its own, as the running statistics of some losses are."""
+
+    def __init__(self):
+        super().__init__()
+        self.register_buffer("running", torch.zeros(3))
+
+
+class TestRunStateRoundTrip(unittest.TestCase):
+    """
+    Everything a resume restores comes back as it was saved, in either checkpoint mode: the
+    weights, the loss, the optimizer, the scheduler, the counters, the data pipeline and the
+    noise generators.
+    """
+
+    def setUp(self):
+        self.tmpdir_ctx = tempfile.TemporaryDirectory()
+        self.path = os.path.join(self.tmpdir_ctx.name, "ckpt_mp{mp_rank}.tar")
+
+    def tearDown(self):
+        self.tmpdir_ctx.cleanup()
+
+    def _run_state(self, seed):
+        from makani.models.noise import IsotropicGaussianRandomFieldS2
+        from makani.models.noise.controller import NoiseController
+
+        set_seed(seed)
+        model = _small_model()
+        loss = _StatefulLoss()
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-2)
+        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.5)
+        noise = NoiseController({"white": IsotropicGaussianRandomFieldS2((8, 16), 1, 1, seed=seed)})
+        return model, loss, optimizer, scheduler, noise
+
+    def _train_a_little(self, model, optimizer, scheduler):
+        for _ in range(2):
+            optimizer.zero_grad()
+            model(torch.randn(2, 3, 4, 4)).square().mean().backward()
+            optimizer.step()
+            scheduler.step()
+
+    @parameterized.expand(["legacy", "flexible"])
+    def test_everything_is_restored(self, mode):
+        from makani.driver.checkpoint import gather_noise_rng_state
+
+        model, loss, optimizer, scheduler, noise = self._run_state(seed=1)
+        self._train_a_little(model, optimizer, scheduler)
+        loss.running.copy_(torch.tensor([1.0, 2.0, 3.0]))
+        noise.advance(replace_state=True)
+        data_state = {"format_version": 1, "pipeline_checkpoint": torch.arange(8, dtype=torch.uint8)}
+
+        Driver.save_checkpoint(
+            self.path,
+            model=model,
+            loss=loss,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            counters={"iters": 7, "epoch": 3},
+            dataloader_state=gather_dataloader_state_dict(_FakeDataloader(data_state)),
+            checkpoint_mode=mode,
+            noise_rng_state=gather_noise_rng_state(noise),
+        )
+        # where the generator of the saved run is after its next draw
+        noise.advance(replace_state=True)
+        expected_rng = noise.get_rng_state()["white"][0].clone()
+
+        # a fresh run, built from another seed, resumes from the checkpoint
+        model2, loss2, optimizer2, scheduler2, noise2 = self._run_state(seed=2)
+        self._train_a_little(model2, optimizer2, scheduler2)
+        self._train_a_little(model2, optimizer2, scheduler2)
+        counters = {"iters": 0, "start_epoch": 0}
+        dataloader = _FakeDataloader({})
+        Driver.restore_from_checkpoint(
+            self.path,
+            model=model2,
+            loss=loss2,
+            optimizer=optimizer2,
+            scheduler=scheduler2,
+            counters=counters,
+            dataloader=dataloader,
+            checkpoint_mode=mode,
+            noise=noise2,
+        )
+
+        for name, param in model.named_parameters():
+            self.assertTrue(torch.equal(param, dict(model2.named_parameters())[name]), name)
+        self.assertTrue(torch.equal(loss2.running, loss.running))
+        for key, value in optimizer.state_dict()["state"].items():
+            for field, tensor in value.items():
+                self.assertTrue(
+                    torch.equal(torch.as_tensor(optimizer2.state_dict()["state"][key][field]), torch.as_tensor(tensor)),
+                    (key, field),
+                )
+        self.assertEqual(scheduler2.state_dict(), scheduler.state_dict())
+        self.assertEqual(optimizer2.param_groups[0]["lr"], optimizer.param_groups[0]["lr"])
+        self.assertEqual(counters, {"iters": 7, "start_epoch": 3})
+        self.assertEqual(dataloader.state["format_version"], 1)
+        self.assertTrue(torch.equal(dataloader.state["pipeline_checkpoint"], data_state["pipeline_checkpoint"]))
+
+        # the noise continues where the saved run was
+        noise2.advance(replace_state=True)
+        self.assertTrue(torch.equal(noise2.get_rng_state()["white"][0], expected_rng))
+
+    def test_dataloader_without_checkpointing_is_refused(self):
+        model, *_ = self._run_state(seed=1)
+        Driver.save_checkpoint(self.path, model=model, checkpoint_mode="flexible")
+        with self.assertRaisesRegex(ValueError, "does not support checkpointing"):
+            Driver.restore_from_checkpoint(
+                self.path,
+                model=model,
+                dataloader=_FakeDataloader({}, enable_checkpointing=False),
+                checkpoint_mode="flexible",
+            )
+
+    def test_checkpoint_without_dataloader_state_starts_the_epoch_over(self):
+        model, *_ = self._run_state(seed=1)
+        Driver.save_checkpoint(self.path, model=model, checkpoint_mode="flexible")
+        dataloader = _FakeDataloader({"untouched": True})
+        with self.assertLogs(level="WARNING") as logs:
+            Driver.restore_from_checkpoint(
+                self.path, model=model, dataloader=dataloader, checkpoint_mode="flexible", log_to_screen=True
+            )
+        self.assertIn("does not contain a dataloader state", "\n".join(logs.output))
+        self.assertEqual(dataloader.state, {"untouched": True})
+
+    def test_dataloader_state_of_another_decomposition(self):
+        # written by two data-parallel ranks: refused under strict restore, skipped with a warning otherwise
+        model, *_ = self._run_state(seed=1)
+        Driver.save_checkpoint(self.path, model=model, dataloader_state=[{}, {}], checkpoint_mode="flexible")
+        with self.assertRaises(ValueError):
+            Driver.restore_from_checkpoint(
+                self.path, model=model, dataloader=_FakeDataloader({}), checkpoint_mode="flexible"
+            )
+
+        dataloader = _FakeDataloader({"untouched": True})
+        with self.assertLogs(level="WARNING") as logs:
+            Driver.restore_from_checkpoint(
+                self.path,
+                model=model,
+                dataloader=dataloader,
+                checkpoint_mode="flexible",
+                strict=False,
+                log_to_screen=True,
+            )
+        self.assertIn("Skipping restore of the dataloader state", "\n".join(logs.output))
+        self.assertEqual(dataloader.state, {"untouched": True})
+
+    @parameterized.expand(
+        [
+            ("missing", {}, "not found"),
+            ("size", {"h": {"size": 2, "rank": 0}}, "has size"),
+            ("rank", {"h": {"size": 1, "rank": 1}}, "is trying to load"),
+        ]
+    )
+    def test_legacy_restore_checks_the_comm_grid(self, _, comm_grid, message):
+        # a run with an h communicator of size 1 restores a checkpoint written on another grid
+        model, *_ = self._run_state(seed=1)
+        Driver.save_checkpoint(self.path, model=model, checkpoint_mode="legacy")
+        fname = self.path.format(mp_rank=0)
+        checkpoint = torch.load(fname, weights_only=False)
+        checkpoint["comm_grid"] = comm_grid
+        torch.save(checkpoint, fname)
+        with mock.patch("makani.distributed.comm.get_model_comm_names", return_value=["h"]):
+            with self.assertRaisesRegex(RuntimeError, message):
+                Driver.restore_from_checkpoint(self.path, model=model, checkpoint_mode="legacy")
+
+
 class TestRunHasCheckpoint(unittest.TestCase):
     """Whether a run resumes: its own checkpoint files, in the mode it saves in, not the one of a pretrained checkpoint."""
 

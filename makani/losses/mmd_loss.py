@@ -142,7 +142,8 @@ class GaussianMMDLoss(GeometricBaseLoss):
         # for correct spatial reduction we need to do the same with spatial weights
         if spatial_weights is not None:
             spatial_weights_split = spatial_weights.flatten(start_dim=-2, end_dim=-1)
-            spatial_weights_split = scatter_to_parallel_region(spatial_weights_split, -1, "ensemble")
+            if self.ensemble_distributed:
+                spatial_weights_split = scatter_to_parallel_region(spatial_weights_split, -1, "ensemble")
 
         if self.ensemble_weights is not None:
             raise NotImplementedError("currently only constant ensemble weights are supported")
