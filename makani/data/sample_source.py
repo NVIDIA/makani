@@ -452,7 +452,7 @@ class SampleSource(object):
         if torch.cuda.is_available():
             torch.cuda.nvtx.range_push("SampleSource:_compute_zenith_angle")
 
-        from makani.third_party.climt.zenith_angle_v2 import cos_zenith_angle
+        from makani.third_party.climt.zenith_angle import cos_zenith_angle
 
         cos_zenith_inp = np.expand_dims(
             cos_zenith_angle(self.date_fn(inp_times), self.lon_grid_local, self.lat_grid_local).astype(np.float32),

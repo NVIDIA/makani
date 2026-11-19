@@ -25,7 +25,7 @@ import torch
 from makani.utils.functions import expand_history
 from makani.utils.params import ParamsBase, ensure_resampled_shapes
 from makani.driver.base import Driver
-from makani.third_party.climt.zenith_angle_v2 import cos_zenith_angle
+from makani.third_party.climt.zenith_angle import cos_zenith_angle
 from makani.data.data_helpers import get_data_normalization
 from makani.data.batch import ZENITH
 from makani.models import model_registry

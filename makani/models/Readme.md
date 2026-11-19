@@ -31,7 +31,6 @@ makani
 │   │   ├── fourcastnet3.py         # FourCastNet 3
 │   │   ├── fourcastnet3_1.py       # FourCastNet 3.1
 │   │   ├── pangu.py                # implementation of Pangu-Weather
-│   │   ├── pangu_onnx.py           # Pangu-Weather from its ONNX export
 │   │   ├── sfnonet.py              # implementation of (S)FNO
 │   │   ├── snonet.py               # spherical neural operator (FourCastNet 2)
 │   │   └── vit.py                  # implementation of a VIT
@@ -44,7 +43,6 @@ makani
 │   ├── noise                       # noise on the sphere
 │   │   ├── processes.py            # noise processes: white, diffusion and dummy noise
 │   │   └── controller.py           # NoiseController: advances, snapshots, restores and re-seeds the noise of a model
-│   ├── onnx_wrapper.py             # runs an ONNX model as a torch module
 │   ├── parametrizations.py         # output parametrizations such as hydrostatic balance
 │   ├── physicsnemo_compat.py       # building PhysicsNeMo modules across 1.x and 2.x
 │   ├── preprocessor.py             # stateless preprocessor: history normalization, dynamic and static features, bias correction

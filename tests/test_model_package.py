@@ -182,7 +182,7 @@ class TestZenithFeatureShapes(_ModelPackageTestBase):
 
         z = wrapper._zenith_features(x, times)
 
-        from makani.third_party.climt.zenith_angle_v2 import cos_zenith_angle
+        from makani.third_party.climt.zenith_angle import cos_zenith_angle
 
         for b in range(batch):
             expected = cos_zenith_angle(times[b * nhist : (b + 1) * nhist], wrapper.lon_grid, wrapper.lat_grid)
