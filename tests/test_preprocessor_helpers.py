@@ -255,18 +255,23 @@ class TestStaticFeatureOptions(unittest.TestCase):
     def tearDown(self):
         self._tmpdir.cleanup()
 
-    def _quadrature(self):
+    def _quadrature(self, crop_shape=None, crop_offset=(0, 0)):
         from makani.utils.grids import grid_to_quadrature_rule, GridQuadrature
 
         return GridQuadrature(
-            grid_to_quadrature_rule(self.params.data_grid_type), img_shape=(IMG_H, IMG_W), normalize=True
+            grid_to_quadrature_rule(self.params.data_grid_type),
+            img_shape=(IMG_H, IMG_W),
+            crop_shape=crop_shape,
+            crop_offset=crop_offset,
+            normalize=True,
         )
 
-    def _assert_normalized(self, out):
-        # area-weighted mean zero and variance one, per channel
-        quadrature = self._quadrature()
-        mean = quadrature(out)
-        var = quadrature(torch.square(out - mean.reshape(1, -1, 1, 1)))
+    def _assert_normalized(self, out, crop_shape=None, crop_offset=(0, 0)):
+        # area-weighted mean zero and variance one, per channel, over the crop
+        quadrature = self._quadrature(crop_shape, crop_offset)
+        area = quadrature(torch.ones_like(out[:, :1]))
+        mean = quadrature(out) / area
+        var = quadrature(torch.square(out - mean.reshape(1, -1, 1, 1))) / area
         torch.testing.assert_close(mean, torch.zeros_like(mean), atol=1e-5, rtol=0.0)
         torch.testing.assert_close(var, torch.ones_like(var), atol=1e-4, rtol=0.0)
 
@@ -300,7 +305,7 @@ class TestStaticFeatureOptions(unittest.TestCase):
         self.assertTrue(torch.all(lat.abs() < torch.pi / 2))
         self.assertTrue(torch.all(torch.diff(lat) != 0.0))
         # symmetric about the equator
-        torch.testing.assert_close(torch.sort(lat).values, -torch.sort(-lat).values.flip(0))
+        torch.testing.assert_close(torch.sort(lat).values, -torch.sort(lat).values.flip(0))
         torch.testing.assert_close(out[0, 1, 0], torch.deg2rad(torch.as_tensor(self.lon, dtype=torch.float32)))
 
     def test_normalized_grid(self):
@@ -308,6 +313,21 @@ class TestStaticFeatureOptions(unittest.TestCase):
         self.params.normalize_static_features = True
 
         self._assert_normalized(get_static_features(self.params))
+
+    def test_normalized_grid_of_a_crop(self):
+        # the statistics are those of the crop, which the features are cut to with the shard
+        crop_shape, crop_offset = (IMG_H - 2, IMG_W - 4), (1, 2)
+        self.params.add_grid = True
+        self.params.normalize_static_features = True
+        self.params.img_crop_shape_x, self.params.img_crop_shape_y = crop_shape
+        self.params.img_crop_offset_x, self.params.img_crop_offset_y = crop_offset
+        self.params.img_local_shape_x, self.params.img_local_shape_y = crop_shape
+        self.params.img_local_offset_x, self.params.img_local_offset_y = crop_offset
+
+        out = get_static_features(self.params)
+
+        self.assertEqual(tuple(out.shape[-2:]), crop_shape)
+        self._assert_normalized(out, crop_shape, crop_offset)
 
     def test_normalized_invariant(self):
         path = os.path.join(self._tmpdir.name, "invariants.h5")

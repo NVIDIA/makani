@@ -203,8 +203,17 @@ def get_static_features(params):
         )
 
         def normalize(tensor, eps=0.0):
-            mean = quadrature(tensor).reshape(1, -1, 1, 1)
-            std = torch.sqrt(quadrature(torch.square(tensor - mean)).reshape(1, -1, 1, 1))
+            # the statistics of the crop, the region the model sees and the quadrature covers; the features
+            # span the whole grid and are cut to the crop when they are sharded. The weights are normalized
+            # to the whole sphere, so the averages divide by the area of the crop, which is one without a crop
+            crop = tensor[
+                ...,
+                crop_offset[0] : crop_offset[0] + crop_shape[0],
+                crop_offset[1] : crop_offset[1] + crop_shape[1],
+            ]
+            area = quadrature(torch.ones_like(crop[:, :1])).reshape(1, 1, 1, 1)
+            mean = (quadrature(crop) / area).reshape(1, -1, 1, 1)
+            std = torch.sqrt(quadrature(torch.square(crop - mean)).reshape(1, -1, 1, 1) / area)
             tensor = (tensor - mean) / (std + eps)
             return tensor
 
