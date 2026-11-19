@@ -35,6 +35,7 @@ from .testutils import disable_tf32, init_hdf5_dataset, H5_PATH, IMG_SIZE_H, IMG
 from makani.datasets.date_range import add_date_range_arguments, date_range_from_args, parse_date, yearly_sample_times
 from makani.datasets.convert_era5 import _batched, _create_output_file, _write_missing
 from makani.datasets.sources import InvariantSource, Source
+from makani.distributed.launch import Launch
 
 
 def _utc(year, month, day, hour=0):
@@ -1268,8 +1269,10 @@ class TestParallel(unittest.TestCase):
     def test_without_mpi4py_a_run_has_one_rank(self):
         from makani.datasets import parallel
 
-        environment = {name: "" for name in parallel.LAUNCHER_SIZE_VARIABLES}
-        with mock.patch.object(parallel, "MPI", None), mock.patch.dict(os.environ, environment):
+        with (
+            mock.patch.object(parallel, "MPI", None),
+            mock.patch.object(parallel, "detect_launch", return_value=Launch()),
+        ):
             comm = parallel.get_comm()
 
         self.assertIsInstance(comm, parallel.SerialComm)
@@ -1280,23 +1283,26 @@ class TestParallel(unittest.TestCase):
         self.assertIs(comm.Dup(), comm)
         self.assertFalse(parallel.is_parallel(comm))
 
-    @parameterized.expand([("OMPI_COMM_WORLD_SIZE",), ("PMI_SIZE",), ("WORLD_SIZE",)])
-    def test_a_parallel_launch_without_mpi4py_is_refused(self, variable):
+    def test_a_parallel_launch_without_mpi4py_is_refused(self):
         # every process would take itself for the only rank and write the same files
         from makani.datasets import parallel
 
-        environment = {name: "" for name in parallel.LAUNCHER_SIZE_VARIABLES}
-        environment[variable] = "2"
-        with mock.patch.object(parallel, "MPI", None), mock.patch.dict(os.environ, environment):
-            with self.assertRaisesRegex(RuntimeError, "launched as 2 processes.*datasets-mpi"):
+        launch = Launch(size=2, rank=0, local_rank=0, launcher="openmpi")
+        with (
+            mock.patch.object(parallel, "MPI", None),
+            mock.patch.object(parallel, "detect_launch", return_value=launch),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "launched by openmpi as 2 processes.*datasets-mpi"):
                 parallel.get_comm()
 
     def test_a_single_process_launch_runs_serially(self):
         from makani.datasets import parallel
 
-        environment = {name: "" for name in parallel.LAUNCHER_SIZE_VARIABLES}
-        environment["PMI_SIZE"] = "1"
-        with mock.patch.object(parallel, "MPI", None), mock.patch.dict(os.environ, environment):
+        launch = Launch(size=1, rank=0, local_rank=0, launcher="slurm")
+        with (
+            mock.patch.object(parallel, "MPI", None),
+            mock.patch.object(parallel, "detect_launch", return_value=launch),
+        ):
             self.assertIsInstance(parallel.get_comm(), parallel.SerialComm)
 
     def test_a_single_rank_writes_files_serially(self):
@@ -1317,15 +1323,21 @@ class TestParallel(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "parallel HDF5"):
                 h5_kwargs(comm)
 
-    def test_device_without_gpus(self):
-        from makani.datasets.parallel import local_device_index
+    def test_device_of_a_rank(self):
+        from makani.datasets import parallel
 
         comm = mock.Mock()
         comm.Get_rank.return_value = 5
-        with mock.patch("torch.cuda.device_count", return_value=0):
-            self.assertEqual(local_device_index(comm), 0)
-        with mock.patch("torch.cuda.device_count", return_value=4):
-            self.assertEqual(local_device_index(comm), 1)
+        # the rank on its node, where the launcher says
+        with mock.patch.object(parallel, "detect_launch", return_value=Launch(8, 5, 2, "slurm")):
+            with mock.patch("torch.cuda.device_count", return_value=4):
+                self.assertEqual(parallel.local_device_index(comm), 2)
+            with mock.patch("torch.cuda.device_count", return_value=0):
+                self.assertEqual(parallel.local_device_index(comm), 0)
+        # round robin over the rank otherwise
+        with mock.patch.object(parallel, "detect_launch", return_value=Launch(8, 5, None, "pmi")):
+            with mock.patch("torch.cuda.device_count", return_value=4):
+                self.assertEqual(parallel.local_device_index(comm), 1)
 
     @parameterized.expand([(8, 1, [1, 1]), (8, 4, [4, 1]), (8, 16, [8, 2]), (8, 12, [6, 2]), (2, 7, [1, 7])])
     def test_reduction_mesh_shape(self, requested, world_size, expected):

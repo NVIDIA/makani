@@ -23,8 +23,9 @@ one rank, see :func:`h5_kwargs`, so a serial run works with any h5py, including 
 are built without parallel HDF5.
 """
 
-import os
 from typing import Any, Dict, List, Optional
+
+from makani.distributed.launch import detect_launch
 
 try:
     from mpi4py import MPI
@@ -62,39 +63,25 @@ class SerialComm:
         pass
 
 
-#: Environment variables in which launchers export the number of processes they started: Open MPI's
-#: mpirun, the PMI of MPICH, Intel MPI and srun, and torchrun. Slurm's own task counts are left out,
-#: as inside a batch script they describe the job rather than the one process that runs there.
-LAUNCHER_SIZE_VARIABLES = ("OMPI_COMM_WORLD_SIZE", "PMI_SIZE", "WORLD_SIZE")
-
-
-def launched_processes() -> int:
-    """The number of processes a launcher started, from its environment, or 1 without one."""
-    for name in LAUNCHER_SIZE_VARIABLES:
-        value = os.environ.get(name)
-        if value is not None and value.strip().isdigit():
-            return int(value)
-    return 1
-
-
 def get_comm():
     """
     A duplicate of ``MPI.COMM_WORLD`` if mpi4py is installed, a :class:`SerialComm` otherwise.
 
-    Refuses a launch of several processes that MPI does not connect: without mpi4py, or with an
-    mpi4py built against another MPI than the launcher's, every process would take itself for the
-    only rank, read all of the data and write the same files.
+    Refuses a launch of several processes, see :func:`makani.distributed.launch.detect_launch`, that
+    MPI does not connect: without mpi4py, or with an mpi4py built against another MPI than the
+    launcher's, every process would take itself for the only rank, read all of the data and write the
+    same files.
     """
-    launched = launched_processes()
+    launch = detect_launch()
     comm = SerialComm() if MPI is None else MPI.COMM_WORLD.Dup()
-    if launched > 1 and comm.Get_size() != launched:
+    if (launch.size > 1) and (comm.Get_size() != launch.size):
         if MPI is None:
             reason = "mpi4py is not installed; install it with `pip install makani[datasets-mpi]`"
         else:
             reason = (
                 f"MPI connects {comm.Get_size()} of them; mpi4py may be built against another MPI than the launcher's"
             )
-        raise RuntimeError(f"The script was launched as {launched} processes, but {reason}.")
+        raise RuntimeError(f"The script was launched by {launch.launcher} as {launch.size} processes, but {reason}.")
     return comm
 
 
@@ -124,10 +111,18 @@ def h5_kwargs(comm) -> Dict[str, Optional[Any]]:
 
 
 def local_device_index(comm) -> int:
-    """The GPU of this rank on its node, round robin, or 0 without GPUs."""
+    """
+    The GPU of this rank on its node, or 0 without GPUs.
+
+    The rank on its node, if the launcher says, see :func:`makani.distributed.launch.detect_launch`;
+    the rank in ``comm`` otherwise, round robin over the GPUs.
+    """
     import torch
 
-    return comm.Get_rank() % max(torch.cuda.device_count(), 1)
+    local_rank = detect_launch().local_rank
+    if local_rank is None:
+        local_rank = comm.Get_rank()
+    return local_rank % max(torch.cuda.device_count(), 1)
 
 
 def reduction_mesh_shape(reduction_group_size: int, world_size: int) -> List[int]:
