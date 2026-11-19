@@ -1442,7 +1442,7 @@ class TestLossHandler(unittest.TestCase):
             LossHandler(self.params)
 
     # ------------------------------------------------------------------
-    # tendency: True path — loss.py:360-386
+    # tendency: True path — losses/handler.py
     # When ANY loss in the list has tendency=True AND inp is passed to forward,
     # prd/tar are transformed to (prd - inp_state) / (tar - inp_state).
     # ------------------------------------------------------------------
@@ -1495,7 +1495,7 @@ class TestLossHandler(unittest.TestCase):
         self.assertTrue(compare_tensors("tendency w/ zero inp", out_no_inp, out_inp_zero, verbose=verbose))
 
     # ------------------------------------------------------------------
-    # random_slice_loss path — loss.py:330-349
+    # random_slice_loss path — losses/handler.py
     # Mixes channels through a random orthonormal matrix before computing the loss.
     # ------------------------------------------------------------------
 
@@ -1524,7 +1524,7 @@ class TestLossHandler(unittest.TestCase):
         self.assertFalse(torch.isnan(inp.grad).any())
 
     # ------------------------------------------------------------------
-    # reset_running_stats — loss.py:292-296
+    # reset_running_stats — losses/handler.py
     # ------------------------------------------------------------------
 
     def test_reset_running_stats(self, verbose=False):
@@ -1556,7 +1556,7 @@ class TestLossHandler(unittest.TestCase):
         self.assertEqual(loss_obj.num_batches_tracked.item(), 0)
 
     # ------------------------------------------------------------------
-    # 5-D prd path of random_slice_loss — loss.py:343-346
+    # 5-D prd path of random_slice_loss — losses/handler.py
     # ------------------------------------------------------------------
 
     def test_random_slice_loss_ensemble_path(self):
@@ -1598,7 +1598,7 @@ class TestLossHandler(unittest.TestCase):
         self.assertFalse(torch.isnan(prd.grad).any())
 
     # ------------------------------------------------------------------
-    # 5-D prd path of tendency — loss.py:377-380
+    # 5-D prd path of tendency — losses/handler.py
     # ------------------------------------------------------------------
 
     def test_tendency_loss_ensemble_path(self):
@@ -1644,7 +1644,7 @@ class TestLossHandler(unittest.TestCase):
 
     # ------------------------------------------------------------------
     # multistep with empty {} dict — falls back to "constant" weight_type
-    # (loss.py:212, _compute_multistep_weight default branch)
+    # (losses/handler.py, _compute_multistep_weight default branch)
     # ------------------------------------------------------------------
 
     def test_multistep_default_weight_type(self):
@@ -1663,7 +1663,7 @@ class TestLossHandler(unittest.TestCase):
         self.assertTrue(compare_tensors("default multistep_weight", loss_obj.multistep_weight, expected))
 
     # ------------------------------------------------------------------
-    # channel_weights given as a Python list — loss.py:160-164
+    # channel_weights given as a Python list — losses/handler.py
     # The handler accepts a nested list (shape (1, N)) in addition to the
     # named-string modes ("constant", "auto", etc.).
     # ------------------------------------------------------------------
@@ -1671,7 +1671,7 @@ class TestLossHandler(unittest.TestCase):
     def test_channel_weights_as_list(self):
         """A list-valued channel_weights bypasses the named-string branch and is
         loaded directly. Must be nested (shape (1, N)) so the assert at
-        loss.py:164 passes."""
+        losses/handler.py passes."""
         custom = [[0.1, 0.2, 0.3, 0.4, 0.5]]  # nested → shape (1, 5) for N=5
         self.params.losses = [{"type": "l2", "channel_weights": custom}]
         loss_obj = LossHandler(self.params)
@@ -1689,7 +1689,7 @@ class TestLossHandler(unittest.TestCase):
         )
 
     # ------------------------------------------------------------------
-    # relative_weight per loss — loss.py:172-173
+    # relative_weight per loss — losses/handler.py
     # Multiplies the channel weights of one loss by a scalar before they're
     # registered into the channel_weights buffer. Used to balance the
     # contributions of multiple losses without changing their internal weights.
@@ -2370,7 +2370,7 @@ class TestSpectralCRPSLoss(unittest.TestCase):
         self.assertFalse(torch.isinf(fc.grad).any(), "Inf in absolute=False gradient")
 
     def test_absolute_false_e1_path(self):
-        """E=1 + absolute=False hits the early-return at loss.py:506-509 with
+        """E=1 + absolute=False hits the early-return at losses/handler.py with
         complex spectral coefficients; ``torch.abs(complex_diff)`` produces a
         real magnitude that the spatial reduction can sum normally. No crash,
         finite output, near-zero on perfect prediction."""

@@ -457,7 +457,7 @@ class TestIsotropicGRF(unittest.TestCase):
         self.assertTrue(torch.all(noise.state == 0.0), "reset(batch_size=N) should produce an all-zero state")
 
     # -----------------------------------------------------------------------
-    # learnable=True — covers noise.py line 210
+    # learnable=True — covers noise/processes.py
     # -----------------------------------------------------------------------
     def test_learnable_sigma_l_is_parameter(self):
         """With learnable=True, sigma_l is registered as an nn.Parameter."""
@@ -771,7 +771,7 @@ class TestDiffusionNoiseS2(unittest.TestCase):
         )
 
     # -----------------------------------------------------------------------
-    # Per-channel kT / lambd lists — noise.py lines 305-319
+    # Per-channel kT / lambd lists — noise/processes.py
     # -----------------------------------------------------------------------
     def test_per_channel_kT_list(self):
         """kT given as a list of length num_channels constructs and runs without error."""
@@ -809,7 +809,7 @@ class TestDiffusionNoiseS2(unittest.TestCase):
         self.assertFalse(torch.isinf(out).any())
 
     # -----------------------------------------------------------------------
-    # learnable=True — noise.py lines 345-354
+    # learnable=True — noise/processes.py
     # -----------------------------------------------------------------------
     def test_learnable_constructs_phi_and_sigma_l_as_parameters(self):
         """learnable=True registers phi and sigma_l as nn.Parameters."""
@@ -904,7 +904,7 @@ class TestDiffusionNoiseS2(unittest.TestCase):
         self.assertIn("state", noise._buffers)
 
     # -----------------------------------------------------------------------
-    # num_time_steps > 1 — noise.py lines 364-376 (init) and 405-417 (update)
+    # num_time_steps > 1 — noise/processes.py
     # -----------------------------------------------------------------------
     def test_num_time_steps_gt1_has_discount_buffer(self):
         """num_time_steps>1 creates a 'discount' buffer of shape (C, T, T)."""
@@ -957,7 +957,7 @@ class TestDiffusionNoiseS2(unittest.TestCase):
         )
 
     # -----------------------------------------------------------------------
-    # update_internal_state=True — noise.py line 445
+    # update_internal_state=True — noise/processes.py
     # -----------------------------------------------------------------------
     def test_update_internal_state_advances_after_forward(self):
         """forward(update_internal_state=True) advances the AR(1) state after returning."""

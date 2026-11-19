@@ -173,7 +173,7 @@ ignore = ["E711", "E712", "E722", "E741", "F841"]
 
 # Deliberately NOT ignored, because they flag real defects rather than style:
 #   F821  undefined name  -- these are latent NameErrors on branches that are
-#         currently unreachable (e.g. the distributed FFT path in the old mpu/layers.py
+#         currently unreachable (e.g. the distributed FFT path in models/common/distributed/fft.py
 #         and the non-default operator types in spectral_convolution.py)
 #   F811  redefinition of an unused name
 

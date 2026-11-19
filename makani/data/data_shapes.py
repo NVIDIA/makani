@@ -37,8 +37,8 @@ quadrature weights and spectral bounds. Until then this stays dependency free
 and deliberately small.
 
 The ``img_shape_x`` style names survive as properties. They are what ``params``
-carries, what configs and checkpoints are written in, and what ``loss.py``,
-``metric.py`` and the preprocessor read. They are a compatibility surface over a
+carries, what configs and checkpoints are written in, and what the ``LossHandler``,
+the ``MetricsHandler`` and the preprocessor read. They are a compatibility surface over a
 structured core, not the core itself.
 """
 

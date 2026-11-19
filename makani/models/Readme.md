@@ -1,6 +1,6 @@
 ## Networks
 
-This folder contains models for training and associated code. Models that are currently supported can be queried by calling `networks.models.list_models()`.
+This folder contains models for training and associated code. Models that are currently supported can be queried by calling `makani.models.model_registry.list_models()`.
 
 ### Directory structure
 This folder is organized as follows:
@@ -11,10 +11,16 @@ makani
 ├── models                          # code realted to ML models
 │   ├── common                      # folder containing common features used in the neworks
 │   │   ├── activations.py          # complex activation functions
+│   │   ├── bandlimit.py            # band limiting on the sphere
 │   │   ├── contractions.py         # einsum wrappers for complex contractions
 │   │   ├── distributed             # the distributed versions of the layers: matmul, MLP, patch embedding, attention, norms, FFTs
+│   │   ├── fft.py                  # real FFTs with mode truncation
+│   │   ├── imputation.py           # learned imputation of missing values
+│   │   ├── layer_norm.py           # layer and instance norm kernels
 │   │   ├── mlp.py                  # encoder/decoder and MLP
+│   │   ├── norm_layers.py          # the normalization layer of a network, picked by name, serial or distributed
 │   │   ├── patch.py                # patch embeddings and recoveries
+│   │   ├── pos_embedding.py        # position embeddings
 │   │   ├── regularization.py       # drop path, seeded dropout, layer scale
 │   │   ├── resample.py             # up- and downsampling
 │   │   └── spectral_convolution.py # spectral convolution layers for (S)FNO architectures
@@ -38,8 +44,13 @@ makani
 │   ├── noise                       # noise on the sphere
 │   │   ├── processes.py            # noise processes: white, diffusion and dummy noise
 │   │   └── controller.py           # NoiseController: advances, snapshots, restores and re-seeds the noise of a model
+│   ├── onnx_wrapper.py             # runs an ONNX model as a torch module
+│   ├── parametrizations.py         # output parametrizations such as hydrostatic balance
+│   ├── physicsnemo_compat.py       # building PhysicsNeMo modules across 1.x and 2.x
 │   ├── preprocessor.py             # stateless preprocessor: history normalization, dynamic and static features, bias correction
+│   ├── preprocessor_helpers.py     # bias correction and other inputs of the preprocessor
 │   ├── stepper.py                  # StepWrapper: binds a network to its preprocessor and its input, runs a Rollout
+│   ├── stochastic_interpolant.py   # forecasting with stochastic interpolants
 │   └── Readme.md                   # this file
 ...
 
