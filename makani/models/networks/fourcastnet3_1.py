@@ -556,9 +556,14 @@ class NeuralOperatorBlock(nn.Module):
 
 class AtmoSphericNeuralOperatorNet31(nn.Module):
     """
-    Backbone of the FourCastNet2 architecture. Uses a Spherical Neural Operator which is derived from the
+    Backbone of the FourCastNet 3.1 architecture. Uses a Spherical Neural Operator which is derived from the
     Spherical Fourier Neural Operator and augmented with localized spherical Neural Operator Convolutions.
-    Encoder and Decoder are grouped into channel groups to treat armospheric and surface variables appropriately.
+    Encoder and Decoder are grouped into channel groups to treat atmospheric and surface variables appropriately.
+
+    The input and the output live on ``inp_shape`` and ``out_shape`` grids of ``model_grid_type``, and the
+    processor on a grid of ``sht_grid_type`` reduced by ``scale_factor``; the model builds them once, as
+    ``inp_grid``, ``out_grid`` and ``internal_grid``, and hands them to its layers. Any regular grid of
+    torch-harmonics will do, see :func:`~makani.utils.grids.sht_grid`.
 
     References:
     [1] Bonev et al., Spherical Fourier Neural Operators: Learning Stable Dynamics on the Sphere

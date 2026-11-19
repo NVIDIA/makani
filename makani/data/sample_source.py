@@ -110,6 +110,10 @@ class SampleSource(object):
         the windows, computed on this rank's coordinates.
     lat_lon : tuple, optional
         Coordinates to use instead of those found in the files.
+    grid_type : str, optional
+        The grid the dataset declares, see :mod:`makani.data.grid_types`. Where
+        the files carry coordinates, the backend checks them against it.
+        Equiangular by default.
     dataset_name, timestamp_name : str
         Names of the field array and the time coordinate within a file, where the
         layout has them.
