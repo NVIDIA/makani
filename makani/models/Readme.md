@@ -87,7 +87,7 @@ self.out_grid = sht_grid(out_shape, model_grid_type)
 self.internal_grid = sht_grid((h, w), sht_grid_type)
 ```
 
-The spectral transforms, the DISCO convolutions, the norms (`get_norm_layer_handle`), the position embeddings and `BandLimitMask` take these grids, and so do the losses, the metrics and the noise processes, which their handlers build from the same parameters. `spherical_bandlimit(grid)` gives the band limit the spectral layers truncate to.
+The spectral transforms, the DISCO convolutions, the norms (`get_norm_layer_handle`), the position embeddings and `BandLimitMask` take these grids, and so do the losses, the metrics and the noise processes, which their handlers build from the same parameters. `spherical_bandlimit(grid)` gives the band limit of a grid, the default cutoff of `BandLimitMask` and the largest the spectral losses keep. The networks set their own cutoffs: SFNO, SNO and FCN3 from the processor grid and `hard_thresholding_fraction`, or `max_modes`; FCN3.1 from `lmax`, or, without it, from the band limit of its input grid scaled by `hard_thresholding_fraction`.
 
 ### The input of a network
 
