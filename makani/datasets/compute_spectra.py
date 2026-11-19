@@ -118,7 +118,7 @@ def get_file_power_spectra(
     return power_spectra
 
 
-def get_power_spectra(
+def compute_power_spectra(
     input_path: str,
     output_path: str,
     metadata_file: str,
@@ -361,7 +361,7 @@ def get_power_spectra(
 
 
 def main(args):
-    get_power_spectra(
+    compute_power_spectra(
         input_path=args.input_path,
         output_path=args.output_path,
         metadata_file=args.metadata_file,

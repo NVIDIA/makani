@@ -170,7 +170,7 @@ def get_file_stats(
     return stats
 
 
-def get_hydrostatic_balance_climatology(
+def compute_hydrostatic_balance_climatology(
     input_path: str,
     output_path: str,
     metadata_file: str,
@@ -201,7 +201,7 @@ def get_hydrostatic_balance_climatology(
     ``hydrostatic_balance_stds.npy``, and the matched pressure levels to
     ``hydrostatic_balance_pressures.npy`` so consumers can align the per-level values unambiguously.
 
-    Mirrors ``get_stats.py``: spatial averages use spherical quadrature, and reductions across
+    Mirrors ``compute_stats.py``: spatial averages use spherical quadrature, and reductions across
     ranks use parallel Welford combination. ``use_moist_air_formula`` selects virtual temperature
     and must match the setting used by the projection that consumes the offset.
     """
@@ -451,7 +451,7 @@ def get_hydrostatic_balance_climatology(
 
 
 def main(args):
-    get_hydrostatic_balance_climatology(
+    compute_hydrostatic_balance_climatology(
         input_path=args.input_path,
         output_path=args.output_path,
         metadata_file=args.metadata_file,

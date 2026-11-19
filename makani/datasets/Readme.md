@@ -8,7 +8,7 @@ MPI is optional:
 - **Serially**, with plain `python -m makani.datasets.<script>`: the script runs on a single rank and works with any h5py, including the pip wheels.
 - **In parallel**, under `mpirun -n <ranks> python -m makani.datasets.<script>`, after `pip install makani[datasets-mpi]`, which adds mpi4py. The scripts that write a shared file from several ranks, `convert_era5_to_makani_input`, `generate_wb2_climatology` and `merge_wb2_dataset`, then also need h5py built against parallel HDF5, and stop with a message saying so if it is not.
 
-The statistics scripts, `get_stats`, `get_spectra` and `get_hydrostatic_balance_climatology`, reduce with torch.distributed: over NCCL on GPUs, one per rank, and over gloo on CPUs, so they need no GPU. They listen on `MASTER_PORT`, 29500 unless set.
+The statistics scripts, `compute_stats`, `compute_spectra` and `compute_hydrostatic_balance_climatology`, reduce with torch.distributed: over NCCL on GPUs, one per rank, and over gloo on CPUs, so they need no GPU. They listen on `MASTER_PORT`, 29500 unless set.
 
 The `mpirun -n 8` in the examples below can be dropped for a serial run.
 
@@ -31,10 +31,10 @@ makani
 │   ├── date_range.py                               # date range options shared by the yearly converters
 │   ├── examples/metadata.json                      # an example of the metadata file of a dataset
 │   ├── generate_wb2_climatology.py                 # generate mask and dataset for climatology data
-│   ├── get_histograms.py                           # compute histograms for each variable over a dataset
-│   ├── get_hydrostatic_balance_climatology.py      # climatology for the hydrostatic balance constraint
-│   ├── get_spectra.py                              # compute power spectra for each variable over a dataset
-│   ├── get_stats.py                                # calculate stats from the dataset
+│   ├── compute_histograms.py                           # compute histograms for each variable over a dataset
+│   ├── compute_hydrostatic_balance_climatology.py      # climatology for the hydrostatic balance constraint
+│   ├── compute_spectra.py                              # compute power spectra for each variable over a dataset
+│   ├── compute_stats.py                                # calculate stats from the dataset
 │   ├── h5_convert.py                               # reformat h5 files to enable compression/chunking
 │   ├── helpers.py                                  # helper functions for distributed Welford reductions
 │   ├── merge_wb2_dataset.py                        # add additional fields to an existing makani dataset from the Weatherbench dataset repo
@@ -54,7 +54,7 @@ For scoring, the .h5 files are expected to be annotated with the correct metadat
 
 ### Compute statistics and histograms
 
-`get_stats.py ` several statistics calculated for either a folder containing several h5 files, or a combined h5f dataset (virtual dataset, concatenated across several years). Calculated stats are: global_means, global_stds, mins, maxs, time-means, time_diff_means_dt, time_diff_stds_dt. In a similar fashion, `get_histograms.py` computes histograms from the dataset
+`compute_stats.py ` several statistics calculated for either a folder containing several h5 files, or a combined h5f dataset (virtual dataset, concatenated across several years). Calculated stats are: global_means, global_stds, mins, maxs, time-means, time_diff_means_dt, time_diff_stds_dt. In a similar fashion, `compute_histograms.py` computes histograms from the dataset
 
 ### Weatherbench
 
@@ -211,7 +211,7 @@ From performance perspective, there is no significant difference in IO time betw
 
 ### Compute Statistics on Dataset for Data Normalization
 
-The script `get_stats.py` computes per-channel statistics for a Makani dataset (yearly files or a virtual HDF5 created via `concatenate_dataset.py`). Outputs are NumPy files:
+The script `compute_stats.py` computes per-channel statistics for a Makani dataset (yearly files or a virtual HDF5 created via `concatenate_dataset.py`). Outputs are NumPy files:
 - `global_means.npy`, `global_stds.npy` (per-channel scalars)
 - `mins.npy`, `maxs.npy` (per-channel scalars)
 - `time_means.npy` (per-channel spatial climatology)
@@ -219,7 +219,7 @@ The script `get_stats.py` computes per-channel statistics for a Makani dataset (
 
 Run, here on 8 ranks; without `mpirun -n 8` it runs serially, see [Running the scripts](#running-the-scripts). It works on a VDS or a directory of yearly `.h5`:
 ```
-mpirun -n 8 python -m makani.datasets.get_stats \
+mpirun -n 8 python -m makani.datasets.compute_stats \
   --input_path /mnt/era5/makani_era5_train_vds.h5v \   # or a folder with .h5 files
   --metadata_file /mnt/era5/metadata.json \
   --output_path /mnt/era5/stats/train \

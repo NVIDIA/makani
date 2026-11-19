@@ -208,7 +208,7 @@ By default, Makani will save out a model package when training starts. Model pac
 
 ### Data Processing Scripts Overview
 
-The package `makani.datasets` contains a collection of scripts in order to modify data input files or compute statistics on them. Each runs as `python -m makani.datasets.<script>`, e.g. `python -m makani.datasets.get_stats`, and their dependencies come with `pip install makani[datasets]`. They run serially with plain `python`, and in parallel under `mpirun` with `pip install makani[datasets-mpi]`.
+The package `makani.datasets` contains a collection of scripts in order to modify data input files or compute statistics on them. Each runs as `python -m makani.datasets.<script>`, e.g. `python -m makani.datasets.compute_stats`, and their dependencies come with `pip install makani[datasets]`. They run serially with plain `python`, and in parallel under `mpirun` with `pip install makani[datasets-mpi]`.
 
 #### Core Data Processing
 * `annotate_dataset.py` - Adds metadata annotations to HDF5 files including timestamps, latitude/longitude coordinates, and channel names. Ensures uniform time information across datasets by converting to UTC timezone.
@@ -216,8 +216,8 @@ The package `makani.datasets` contains a collection of scripts in order to modif
 * `h5_convert.py` - Reformats HDF5 files to enable compression and chunking. Supports various compression modes (LZF, GZIP, SZIP, scale-offset) and chunking strategies for optimized storage and access.
 * `convert_era5_to_makani_input.py` - Converts ERA5 to Makani-compatible HDF5 format, one file per year over a given date range, serially or in parallel with MPI. The source is chosen by subcommand: `wb2` reads WeatherBench2/ARCO-ERA5 zarr stores, handling channel name translation and data restructuring; `ncar` streams NSF NCAR ERA5 (RDA dataset d633000, on the public `s3://nsf-ncar-era5` bucket) with optional local caching, reconstructing total precipitation as the sum of large-scale and convective precipitation. The sources live in `sources/`.
 Statistics and Analysis
-* `get_stats.py` - Computes comprehensive statistics from datasets including global means, standard deviations, min/max values, time means, and time-difference statistics. Runs serially, or in parallel with MPI.
-* `get_histograms.py` - Generates histograms from dataset distributions, useful for data analysis and validation. Runs serially, or in parallel with MPI.
+* `compute_stats.py` - Computes comprehensive statistics from datasets including global means, standard deviations, min/max values, time means, and time-difference statistics. Runs serially, or in parallel with MPI.
+* `compute_histograms.py` - Generates histograms from dataset distributions, useful for data analysis and validation. Runs serially, or in parallel with MPI.
 * `postprocess_stats.py` - Post-processes computed statistics by correcting water channel minima to exactly 0.0 and clamping standard deviations to prevent numerical issues.
 
 #### WeatherBench2 Integration

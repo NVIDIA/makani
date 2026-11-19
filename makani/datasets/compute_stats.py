@@ -260,7 +260,7 @@ def get_file_stats(
     return stats
 
 
-def get_stats(
+def compute_stats(
     input_path: str,
     output_path: str,
     metadata_file: str,
@@ -610,7 +610,7 @@ def get_stats(
 
 
 def main(args):
-    get_stats(
+    compute_stats(
         input_path=args.input_path,
         output_path=args.output_path,
         metadata_file=args.metadata_file,

@@ -1262,7 +1262,7 @@ class TestParallel(unittest.TestCase):
         del progress
 
     def test_allgather_on_one_rank(self):
-        from makani.datasets.get_histograms import allgather_safe
+        from makani.datasets.compute_histograms import allgather_safe
         from makani.datasets.parallel import SerialComm
 
         self.assertEqual(allgather_safe(SerialComm(), {"a": 1}), [{"a": 1}])
@@ -1303,7 +1303,7 @@ class TestGetStats(unittest.TestCase):
                 [
                     sys.executable,
                     "-m",
-                    "makani.datasets.get_stats",
+                    "makani.datasets.compute_stats",
                     "--input_path",
                     self.train_path,
                     "--metadata_file",
@@ -1342,9 +1342,9 @@ class TestGetStats(unittest.TestCase):
         ],
         skip_on_empty=False,
     )
-    def test_get_stats(self, batch_size, allow_nan, verbose=False):
+    def test_compute_stats(self, batch_size, allow_nan, verbose=False):
         # import necessary modules
-        from makani.datasets.get_stats import welford_combine, get_file_stats, mask_data
+        from makani.datasets.compute_stats import welford_combine, get_file_stats, mask_data
 
         # Get list of files to process
         if allow_nan:

@@ -198,7 +198,7 @@ def get_wind_channels(channel_names):
     return uchannels, vchannels
 
 
-def get_histograms(
+def compute_histograms(
     input_dir: str,
     output_dir: str,
     stats_dir: str,
@@ -226,7 +226,7 @@ def get_histograms(
     output_path : str
         Output path to specify where to store the computed statistics.
     stats_dir : str
-        Path which contains the stats computed by get_stats.py.
+        Path which contains the stats computed by compute_stats.py.
     metadata_file : str
         name of the file to read metadata from. The metadata is a json file, and after reading it should be a
         dictionary containing metadata describing the dataset. Most important entries are:
@@ -458,7 +458,7 @@ def get_histograms(
 
 
 def main(args):
-    get_histograms(
+    compute_histograms(
         input_dir=args.input_dir,
         output_dir=args.output_dir,
         stats_dir=args.stats_dir,

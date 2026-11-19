@@ -168,7 +168,7 @@ class HydrostaticBalanceProjection(nn.Module):
     offset is a per-interior-level residual b_clim in physical geopotential units
     (m^2/s^2); b_clim[i-1] is the expected value of
     ``(Z_i - Z_{i-1}) - c_i (Tv_i + Tv_{i-1})``. It is expected to be computed over
-    *all* matching z/t pressure levels (as get_hydrostatic_balance_climatology does),
+    *all* matching z/t pressure levels (as compute_hydrostatic_balance_climatology does),
     so its length must be ``(#matching z/t levels) - 1``; the constructor verifies
     this and slices out the contiguous subset for the requested [p_min, p_max]
     window, relying on the metadata-consistent channel ordering rather than an
@@ -273,7 +273,7 @@ class HydrostaticBalanceProjection(nn.Module):
         if climatology_offset is not None:
             b_clim_full = climatology_offset.to(device="cpu", dtype=torch.float64).reshape(-1)
             # The climatology is expected to be computed over ALL matching z/t levels (the
-            # convention of get_hydrostatic_balance_climatology), so its length is one per
+            # convention of compute_hydrostatic_balance_climatology), so its length is one per
             # interior level over the full set. Verify that, then slice out the contiguous
             # subset for this [p_min, p_max] window -- relying, like the other stats, on the
             # metadata-consistent channel ordering rather than an explicit level file.
