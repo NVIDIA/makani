@@ -40,6 +40,7 @@ from makani.models.noise import build_noise, noise_base_seed, run_eager
 from makani.models.preprocessor import HistoryNormalization, HistoryStats, model_dynamic_features
 from makani.utils.functions import flatten_history
 from makani.data.grid_types import DEFAULT_GRID_TYPE
+from makani.utils.grids import sht_grid
 
 # the name of the input noise among the noise processes of a model
 INPUT_NOISE = "input_noise"
@@ -164,14 +165,12 @@ class InputNoise(nn.Module):
         settings of the process, see :func:`~makani.models.noise.build_noise`.
     channel_names : list of str
         The channels of the state, to look the perturbed channels up in.
-    img_shape : tuple of int
-        The grid of the model.
+    grid : torch_harmonics.RegularGridS2
+        The grid of the model, see :func:`~makani.utils.grids.sht_grid`.
     batch_size : int
         The batch the process is sized for initially.
     n_history : int
         The window holds ``n_history + 1`` time steps.
-    grid_type : str
-        The grid type of the model.
     history_normalization_mode : str
         The history normalization of the state; a perturbation is scaled by
         the history standard deviation unless it is ``"none"`` or
@@ -185,10 +184,9 @@ class InputNoise(nn.Module):
         self,
         noise_params,
         channel_names,
-        img_shape,
+        grid,
         batch_size: int,
         n_history: int,
-        grid_type: str,
         history_normalization_mode: str,
         dt_hours: Optional[float] = None,
     ):
@@ -214,11 +212,10 @@ class InputNoise(nn.Module):
         default_lambd = dt_hours / 6.0 if noise_params.get("type") == "diffusion" else 1.0
         self.process = build_noise(
             noise_params,
-            img_shape=list(img_shape),
+            grid=grid,
             batch_size=batch_size,
             num_channels=num_channels,
             num_time_steps=n_history + 1,
-            grid_type=grid_type,
             seed=seed,
             reflect=reflect,
             centered=centered,
@@ -233,10 +230,12 @@ class InputNoise(nn.Module):
         return cls(
             params.input_noise,
             channel_names=params.channel_names,
-            img_shape=(params.img_shape_x_resampled, params.img_shape_y_resampled),
+            grid=sht_grid(
+                (params.img_shape_x_resampled, params.img_shape_y_resampled),
+                params.get("model_grid_type", DEFAULT_GRID_TYPE),
+            ),
             batch_size=params.batch_size,
             n_history=params.n_history,
-            grid_type=params.get("model_grid_type", DEFAULT_GRID_TYPE),
             history_normalization_mode=params.history_normalization_mode,
             # read only for diffusion noise, the other types have no temporal correlation
             dt_hours=(params.dt * params.dhours) if params.input_noise.get("type") == "diffusion" else None,

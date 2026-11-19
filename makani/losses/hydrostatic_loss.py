@@ -28,11 +28,10 @@ class HydrostaticBalanceLoss(GeometricBaseLoss):
 
     def __init__(
         self,
-        img_shape: Tuple[int, int],
+        grid,
         crop_shape: Tuple[int, int],
         crop_offset: Tuple[int, int],
         channel_names: List[str],
-        grid_type: str,
         bias: torch.Tensor,
         scale: torch.Tensor,
         p_min: Optional[int] = 0,
@@ -42,7 +41,7 @@ class HydrostaticBalanceLoss(GeometricBaseLoss):
         **kwargs,
     ):
 
-        super().__init__(img_shape, crop_shape, crop_offset, channel_names, grid_type, spatial_distributed)
+        super().__init__(grid, crop_shape, crop_offset, channel_names, spatial_distributed)
 
         # store some variables
         self.use_moist_air_formula = use_moist_air_formula

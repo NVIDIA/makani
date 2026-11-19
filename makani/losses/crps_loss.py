@@ -29,7 +29,6 @@ from makani.losses.base_loss import (
     GradientBaseLoss,
 )
 from makani.distributed import comm
-from makani.utils.grids import sht_grid
 
 # distributed stuff
 from torch_harmonics.distributed import split_tensor_along_dim
@@ -222,11 +221,10 @@ class CRPSLoss(GeometricBaseLoss):
 
     def __init__(
         self,
-        img_shape: Tuple[int, int],
+        grid,
         crop_shape: Tuple[int, int],
         crop_offset: Tuple[int, int],
         channel_names: List[str],
-        grid_type: str,
         crps_type: str = "skillspread",
         spatial_distributed: Optional[bool] = False,
         ensemble_distributed: Optional[bool] = False,
@@ -237,11 +235,10 @@ class CRPSLoss(GeometricBaseLoss):
     ):
 
         super().__init__(
-            img_shape=img_shape,
+            grid=grid,
             crop_shape=crop_shape,
             crop_offset=crop_offset,
             channel_names=channel_names,
-            grid_type=grid_type,
             spatial_distributed=spatial_distributed,
         )
 
@@ -404,11 +401,10 @@ class SpectralCRPSLoss(SpectralBaseLoss):
 
     def __init__(
         self,
-        img_shape: Tuple[int, int],
+        grid,
         crop_shape: Tuple[int, int],
         crop_offset: Tuple[int, int],
         channel_names: List[str],
-        grid_type: str,
         lmax: Optional[int] = None,
         crps_type: str = "skillspread",
         spatial_distributed: Optional[bool] = False,
@@ -421,11 +417,10 @@ class SpectralCRPSLoss(SpectralBaseLoss):
     ):
 
         super().__init__(
-            img_shape=img_shape,
+            grid=grid,
             crop_shape=crop_shape,
             crop_offset=crop_offset,
             channel_names=channel_names,
-            grid_type=grid_type,
             lmax=lmax,
             spatial_distributed=spatial_distributed,
         )
@@ -591,11 +586,10 @@ class GradientCRPSLoss(GradientBaseLoss):
 
     def __init__(
         self,
-        img_shape: Tuple[int, int],
+        grid,
         crop_shape: Tuple[int, int],
         crop_offset: Tuple[int, int],
         channel_names: List[str],
-        grid_type: str,
         lmax: Optional[int] = None,
         crps_type: str = "skillspread",
         spatial_distributed: Optional[bool] = False,
@@ -608,11 +602,10 @@ class GradientCRPSLoss(GradientBaseLoss):
     ):
 
         super().__init__(
-            img_shape=img_shape,
+            grid=grid,
             crop_shape=crop_shape,
             crop_offset=crop_offset,
             channel_names=channel_names,
-            grid_type=grid_type,
             lmax=lmax,
             spatial_distributed=spatial_distributed,
         )
@@ -808,11 +801,10 @@ class VortDivCRPSLoss(VortDivBaseLoss):
 
     def __init__(
         self,
-        img_shape: Tuple[int, int],
+        grid,
         crop_shape: Tuple[int, int],
         crop_offset: Tuple[int, int],
         channel_names: List[str],
-        grid_type: str,
         crps_type: str = "skillspread",
         spatial_distributed: Optional[bool] = False,
         ensemble_distributed: Optional[bool] = False,
@@ -823,11 +815,10 @@ class VortDivCRPSLoss(VortDivBaseLoss):
     ):
 
         super().__init__(
-            img_shape=img_shape,
+            grid=grid,
             crop_shape=crop_shape,
             crop_offset=crop_offset,
             channel_names=channel_names,
-            grid_type=grid_type,
             spatial_distributed=spatial_distributed,
         )
 
@@ -995,11 +986,10 @@ class KernelScoreLoss(GeometricBaseLoss):
 
     def __init__(
         self,
-        img_shape: Tuple[int, int],
+        grid,
         crop_shape: Tuple[int, int],
         crop_offset: Tuple[int, int],
         channel_names: List[str],
-        grid_type: str,
         crps_type: str = "skillspread",
         spatial_distributed: Optional[bool] = False,
         ensemble_distributed: Optional[bool] = False,
@@ -1013,11 +1003,10 @@ class KernelScoreLoss(GeometricBaseLoss):
     ):
 
         super().__init__(
-            img_shape=img_shape,
+            grid=grid,
             crop_shape=crop_shape,
             crop_offset=crop_offset,
             channel_names=channel_names,
-            grid_type=grid_type,
             spatial_distributed=spatial_distributed,
         )
 
@@ -1063,7 +1052,6 @@ class KernelScoreLoss(GeometricBaseLoss):
         fb = th.filter_basis.get_filter_basis(tuple(kernel_shape), kernel_basis_type)
         self.kernel_basis_size = fb.kernel_size
 
-        grid = sht_grid(img_shape, grid_type)
         self.conv = conv_handle(
             grid,
             grid,
@@ -1074,7 +1062,7 @@ class KernelScoreLoss(GeometricBaseLoss):
             basis_norm_mode=kernel_basis_norm_mode,
             groups=self.n_channels,
             bias=False,
-            theta_cutoff=2 * kernel_shape[0] * math.pi / float(img_shape[0] - 1),
+            theta_cutoff=2 * kernel_shape[0] * math.pi / float(grid.nlat - 1),
         )
 
         # initialize the weight to identity

@@ -26,7 +26,6 @@ import h5py as h5
 from torch import amp
 import torch.distributed as dist
 from makani.distributed import comm
-from makani.utils.grids import make_grid, sht_grid
 from makani.models.common import RealFFT1
 from makani.models.common.distributed.fft import DistributedRealFFT1
 from torch_harmonics.distributed import compute_split_shapes, split_tensor_along_dim
@@ -1129,8 +1128,8 @@ class SpectrumAverageBuffer(MeanStdBuffer):
     ============
     num_rollout_steps : int
         Number of total rollout steps
-    img_shape: Tuple[int]
-        shape of the output
+    grid : torch_harmonics.RegularGridS2
+        the grid of the output, see :func:`makani.utils.grids.sht_grid`
     channel_names : List[str]
         list of all the channel names in the output
     device : Union[str, torch.device]
@@ -1149,9 +1148,8 @@ class SpectrumAverageBuffer(MeanStdBuffer):
         self,
         num_rollout_steps: int,
         rollout_dt: int,
-        img_shape: Tuple[int, int],
+        grid,
         ensemble_size: int,
-        grid_type: str,
         channel_names: List[str],
         device: Union[str, torch.device],
         scale: Optional[torch.Tensor] = None,
@@ -1168,7 +1166,7 @@ class SpectrumAverageBuffer(MeanStdBuffer):
                 polar_group = None if (comm.get_size("h") == 1) else comm.get_group("h")
                 azimuth_group = None if (comm.get_size("w") == 1) else comm.get_group("w")
                 thd.init(polar_group, azimuth_group)
-            self.sht = thd.DistributedRealSHT(sht_grid(img_shape, grid_type))
+            self.sht = thd.DistributedRealSHT(grid)
             self.lmax = self.sht.lmax
             self.lmax_local = self.sht.l_shapes[comm.get_rank("h")]
             # compute loffset
@@ -1179,7 +1177,7 @@ class SpectrumAverageBuffer(MeanStdBuffer):
             self.mmax_offset = sum(self.sht.m_shapes[: comm.get_rank("w")])
             self.reduce_orders = comm.get_size("w") > 1
         else:
-            self.sht = th.RealSHT(sht_grid(img_shape, grid_type))
+            self.sht = th.RealSHT(grid)
             self.lmax = self.sht.lmax
             self.lmax_local = self.lmax
             self.lmax_offset = 0
@@ -1210,7 +1208,7 @@ class SpectrumAverageBuffer(MeanStdBuffer):
         self.sht = self.sht.to(self.device)
 
         # weights of the local orders in the power spectrum
-        self.m_weights = _real_order_weights(img_shape[1], self.mmax_offset, self.mmax_local).to(self.device)
+        self.m_weights = _real_order_weights(grid.nlon, self.mmax_offset, self.mmax_local).to(self.device)
 
         # reshape bias and scale
         self.bias = self.bias.reshape(1, 1, -1, 1, 1)
@@ -1358,10 +1356,8 @@ class ZonalSpectrumAverageBuffer(MeanStdBuffer):
     ============
     num_rollout_steps : int
         Number of total rollout steps
-    img_shape: Tuple[int]
-        shape of the output
-    grid_type : str
-        the grid type of the output, see :func:`makani.utils.grids.make_grid`
+    grid : torch_harmonics.RegularGridS2 or makani.utils.grids.PlanarGrid
+        the grid of the output, see :func:`makani.utils.grids.make_grid`
     channel_names : List[str]
         list of all the channel names in the output
     lat_lon: Tuple[List[float], List[float]]
@@ -1382,9 +1378,8 @@ class ZonalSpectrumAverageBuffer(MeanStdBuffer):
         self,
         num_rollout_steps: int,
         rollout_dt: int,
-        img_shape: Tuple[int, int],
+        grid,
         ensemble_size: int,
-        grid_type: str,
         channel_names: List[str],
         lat_lon: Tuple[List[float], List[float]],
         device: Union[str, torch.device],
@@ -1397,8 +1392,7 @@ class ZonalSpectrumAverageBuffer(MeanStdBuffer):
 
         # instantiate SHT
         self.spatial_distributed = spatial_distributed and comm.get_size("spatial") > 1
-        self.nlat = img_shape[0]
-        grid = make_grid(img_shape, grid_type)
+        self.nlat = grid.nlat
         if self.spatial_distributed:
             if comm.get_size("w") > 1:
                 self.rfft = DistributedRealFFT1(grid)
@@ -1463,7 +1457,7 @@ class ZonalSpectrumAverageBuffer(MeanStdBuffer):
         self.lat_weights = torch.reshape(self.lat_weights, (1, 1, 1, -1, 1))
 
         # weights of the local orders in the power spectrum
-        self.m_weights = _real_order_weights(img_shape[1], self.mmax_offset, self.mmax_local).to(self.device)
+        self.m_weights = _real_order_weights(grid.nlon, self.mmax_offset, self.mmax_local).to(self.device)
 
     def update(self, data, targ, idt):
         """update local buffers"""

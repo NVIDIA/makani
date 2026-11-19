@@ -35,22 +35,20 @@ class DriftRegularization(GeometricBaseLoss):
 
     def __init__(
         self,
-        img_shape: Tuple[int, int],
+        grid,
         crop_shape: Tuple[int, int],
         crop_offset: Tuple[int, int],
         channel_names: List[str],
         p: Optional[float] = 1.0,
-        grid_type: Optional[str] = "equiangular",
         spatial_distributed: Optional[bool] = False,
         ensemble_distributed: Optional[bool] = False,
         **kwargs,
     ):
         super().__init__(
-            img_shape=img_shape,
+            grid=grid,
             crop_shape=crop_shape,
             crop_offset=crop_offset,
             channel_names=channel_names,
-            grid_type=grid_type,
             spatial_distributed=spatial_distributed,
         )
 
@@ -90,11 +88,10 @@ class SpectralRegularization(SpectralBaseLoss):
 
     def __init__(
         self,
-        img_shape: Tuple[int, int],
+        grid,
         crop_shape: Tuple[int, int],
         crop_offset: Tuple[int, int],
         channel_names: List[str],
-        grid_type: str,
         lmax: Optional[int] = None,
         spatial_distributed: Optional[bool] = False,
         ensemble_distributed: Optional[bool] = False,
@@ -106,11 +103,10 @@ class SpectralRegularization(SpectralBaseLoss):
     ):
 
         super().__init__(
-            img_shape=img_shape,
+            grid=grid,
             crop_shape=crop_shape,
             crop_offset=crop_offset,
             channel_names=channel_names,
-            grid_type=grid_type,
             lmax=lmax,
             spatial_distributed=spatial_distributed,
         )
@@ -244,11 +240,10 @@ class CoherenceRegularization(SpectralBaseLoss):
 
     def __init__(
         self,
-        img_shape: Tuple[int, int],
+        grid,
         crop_shape: Tuple[int, int],
         crop_offset: Tuple[int, int],
         channel_names: List[str],
-        grid_type: str,
         lmin: Optional[int] = None,
         lmax: Optional[int] = None,
         spatial_distributed: Optional[bool] = False,
@@ -259,11 +254,10 @@ class CoherenceRegularization(SpectralBaseLoss):
         **kwargs,
     ):
         super().__init__(
-            img_shape=img_shape,
+            grid=grid,
             crop_shape=crop_shape,
             crop_offset=crop_offset,
             channel_names=channel_names,
-            grid_type=grid_type,
             lmax=lmax,
             spatial_distributed=spatial_distributed,
         )

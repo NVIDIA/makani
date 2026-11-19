@@ -35,11 +35,10 @@ class LpEnergyScoreLoss(GeometricBaseLoss):
 
     def __init__(
         self,
-        img_shape: Tuple[int, int],
+        grid,
         crop_shape: Tuple[int, int],
         crop_offset: Tuple[int, int],
         channel_names: List[str],
-        grid_type: str,
         spatial_distributed: Optional[bool] = False,
         ensemble_distributed: Optional[bool] = False,
         ensemble_weights: Optional[torch.Tensor] = None,
@@ -53,11 +52,10 @@ class LpEnergyScoreLoss(GeometricBaseLoss):
     ):
 
         super().__init__(
-            img_shape=img_shape,
+            grid=grid,
             crop_shape=crop_shape,
             crop_offset=crop_offset,
             channel_names=channel_names,
-            grid_type=grid_type,
             spatial_distributed=spatial_distributed,
         )
 
@@ -257,11 +255,10 @@ class SobolevEnergyScoreLoss(SpectralBaseLoss):
 
     def __init__(
         self,
-        img_shape: Tuple[int, int],
+        grid,
         crop_shape: Tuple[int, int],
         crop_offset: Tuple[int, int],
         channel_names: List[str],
-        grid_type: str,
         lmax: Optional[int] = None,
         spatial_distributed: Optional[bool] = False,
         ensemble_distributed: Optional[bool] = False,
@@ -277,11 +274,10 @@ class SobolevEnergyScoreLoss(SpectralBaseLoss):
     ):
 
         super().__init__(
-            img_shape=img_shape,
+            grid=grid,
             crop_shape=crop_shape,
             crop_offset=crop_offset,
             channel_names=channel_names,
-            grid_type=grid_type,
             lmax=lmax,
             spatial_distributed=spatial_distributed,
         )
@@ -451,11 +447,10 @@ class SpectralL2EnergyScoreLoss(SpectralBaseLoss):
 
     def __init__(
         self,
-        img_shape: Tuple[int, int],
+        grid,
         crop_shape: Tuple[int, int],
         crop_offset: Tuple[int, int],
         channel_names: List[str],
-        grid_type: str,
         lmax: Optional[int] = None,
         spatial_distributed: Optional[bool] = False,
         ensemble_distributed: Optional[bool] = False,
@@ -468,11 +463,10 @@ class SpectralL2EnergyScoreLoss(SpectralBaseLoss):
     ):
 
         super().__init__(
-            img_shape=img_shape,
+            grid=grid,
             crop_shape=crop_shape,
             crop_offset=crop_offset,
             channel_names=channel_names,
-            grid_type=grid_type,
             lmax=lmax,
             spatial_distributed=spatial_distributed,
         )
@@ -631,11 +625,10 @@ class SpectralCoherenceLoss(SpectralBaseLoss):
 
     def __init__(
         self,
-        img_shape: Tuple[int, int],
+        grid,
         crop_shape: Tuple[int, int],
         crop_offset: Tuple[int, int],
         channel_names: List[str],
-        grid_type: str,
         lmax: Optional[int] = None,
         relative: Optional[bool] = False,
         spatial_distributed: Optional[bool] = False,
@@ -648,11 +641,10 @@ class SpectralCoherenceLoss(SpectralBaseLoss):
     ):
 
         super().__init__(
-            img_shape=img_shape,
+            grid=grid,
             crop_shape=crop_shape,
             crop_offset=crop_offset,
             channel_names=channel_names,
-            grid_type=grid_type,
             lmax=lmax,
             spatial_distributed=spatial_distributed,
         )
@@ -846,11 +838,10 @@ class CorrectedSpectralL2EnergyScoreLoss(SpectralBaseLoss):
 
     def __init__(
         self,
-        img_shape: Tuple[int, int],
+        grid,
         crop_shape: Tuple[int, int],
         crop_offset: Tuple[int, int],
         channel_names: List[str],
-        grid_type: str,
         lmax: Optional[int] = None,
         spatial_distributed: Optional[bool] = False,
         ensemble_distributed: Optional[bool] = False,
@@ -862,11 +853,10 @@ class CorrectedSpectralL2EnergyScoreLoss(SpectralBaseLoss):
         **kwargs,
     ):
         super().__init__(
-            img_shape=img_shape,
+            grid=grid,
             crop_shape=crop_shape,
             crop_offset=crop_offset,
             channel_names=channel_names,
-            grid_type=grid_type,
             lmax=lmax,
             spatial_distributed=spatial_distributed,
         )

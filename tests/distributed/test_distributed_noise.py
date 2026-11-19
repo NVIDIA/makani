@@ -41,6 +41,7 @@ from makani.distributed.helpers import SUM, all_reduce_mean, get_sharing
 from makani.distributed import comm
 from makani.models.noise import DiffusionNoiseS2, IsotropicGaussianRandomFieldS2, noise_base_seed
 from makani.models.noise.controller import NoiseController
+from makani.utils.grids import make_grid
 from makani.driver.checkpoint import gather_noise_rng_state, scatter_noise_rng_state
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
@@ -49,6 +50,7 @@ from ..testutils import compare_tensors, disable_tf32
 
 # an odd number of latitudes, so that the degrees, orders and latitudes split unevenly over two ranks
 _IMG_SHAPE = (17, 32)
+_GRID = make_grid(_IMG_SHAPE, "equiangular")
 _BATCH = 2
 _CHANNELS = 3
 
@@ -116,9 +118,9 @@ class TestDistributedNoise(unittest.TestCase):
 
     def _pair(self, cls, kwargs):
         """The process on the grid and the same process built serially."""
-        process = cls(_IMG_SHAPE, _BATCH, _CHANNELS, **kwargs).to(self.device)
+        process = cls(_GRID, _BATCH, _CHANNELS, **kwargs).to(self.device)
         with comm.serial():
-            reference = cls(_IMG_SHAPE, _BATCH, _CHANNELS, **kwargs).to(self.device)
+            reference = cls(_GRID, _BATCH, _CHANNELS, **kwargs).to(self.device)
         return process, reference
 
     def _spectral(self, shape, seed):
@@ -241,8 +243,8 @@ class TestDistributedNoise(unittest.TestCase):
     def test_controller_restores_its_shards(self):
         """A snapshot of the shards, restored, continues as the processes did after it, on every rank."""
         processes = {
-            "input_noise": IsotropicGaussianRandomFieldS2(_IMG_SHAPE, _BATCH, _CHANNELS, seed=noise_base_seed()[0]),
-            "latent": DiffusionNoiseS2(_IMG_SHAPE, _BATCH, _CHANNELS, num_time_steps=2, seed=noise_base_seed()[0] + 1),
+            "input_noise": IsotropicGaussianRandomFieldS2(_GRID, _BATCH, _CHANNELS, seed=noise_base_seed()[0]),
+            "latent": DiffusionNoiseS2(_GRID, _BATCH, _CHANNELS, num_time_steps=2, seed=noise_base_seed()[0] + 1),
         }
         controller = NoiseController({name: p.to(self.device) for name, p in processes.items()})
         controller.advance(replace_state=True, batch_size=_BATCH)
@@ -304,7 +306,7 @@ class TestDistributedNoise(unittest.TestCase):
         if comm.get_size("matmul") < 2:
             self.skipTest("needs at least two matmul ranks")
         seed, reflect = noise_base_seed()
-        process = IsotropicGaussianRandomFieldS2(_IMG_SHAPE, _BATCH, _CHANNELS, seed=seed, reflect=reflect)
+        process = IsotropicGaussianRandomFieldS2(_GRID, _BATCH, _CHANNELS, seed=seed, reflect=reflect)
         process = process.to(self.device)
         process.update()
         with torch.no_grad():
@@ -319,7 +321,7 @@ class TestDistributedNoise(unittest.TestCase):
         for centered in (False, True):
             seed, reflect = noise_base_seed(centered=centered)
             process = IsotropicGaussianRandomFieldS2(
-                _IMG_SHAPE, _BATCH, _CHANNELS, seed=seed, reflect=reflect, centered=centered
+                _GRID, _BATCH, _CHANNELS, seed=seed, reflect=reflect, centered=centered
             )
             NoiseController({"input_noise": process}).set_rng(seed=333)
             with self.subTest(centered=centered):
@@ -328,7 +330,7 @@ class TestDistributedNoise(unittest.TestCase):
     def test_generator_states_round_trip_over_the_ranks(self):
         """The generators of all ranks, gathered as for the checkpoint, give every rank its own back."""
         seed, _ = noise_base_seed()
-        controller = NoiseController({"input_noise": DiffusionNoiseS2(_IMG_SHAPE, _BATCH, _CHANNELS, seed=seed)})
+        controller = NoiseController({"input_noise": DiffusionNoiseS2(_GRID, _BATCH, _CHANNELS, seed=seed)})
         controller.advance(replace_state=True)
         stored = gather_noise_rng_state(controller)
         mine = controller.get_rng_state()["input_noise"][0]
@@ -343,7 +345,7 @@ class TestDistributedNoise(unittest.TestCase):
         if comm.get_size("ensemble") < 2:
             self.skipTest("needs at least two ensemble ranks")
         seed, reflect = noise_base_seed(centered=True)
-        process = DiffusionNoiseS2(_IMG_SHAPE, _BATCH, _CHANNELS, seed=seed, reflect=reflect).to(self.device)
+        process = DiffusionNoiseS2(_GRID, _BATCH, _CHANNELS, seed=seed, reflect=reflect).to(self.device)
         process.update(replace_state=True)
         process.update()
         with torch.no_grad():

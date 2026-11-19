@@ -31,7 +31,6 @@ import torch_harmonics as th
 import torch_harmonics.distributed as thd
 
 from makani.distributed import comm
-from makani.utils.grids import sht_grid
 from torch_harmonics.distributed import split_tensor_along_dim
 
 
@@ -59,8 +58,8 @@ class BaseNoiseS2(nn.Module):
 
     Parameters
     ----------
-    img_shape : (int, int)
-        Output grid as ``(nlat, nlon)``.
+    grid : torch_harmonics.RegularGridS2
+        The grid the noise is drawn on, see :func:`~makani.utils.grids.sht_grid`.
     batch_size : int
         Initial batch size of the state buffer. Automatically resized when a
         different batch size is passed to ``update`` or ``reset``.
@@ -68,8 +67,6 @@ class BaseNoiseS2(nn.Module):
         Number of noise channels.
     num_time_steps : int
         Number of time steps held in the state.
-    grid_type : str, optional
-        Grid the noise is generated on, by default ``"equiangular"``.
     lmax : int, optional
         Spectral truncation. Defaults to the maximum supported by the grid;
         lowering it produces a smoother field.
@@ -94,11 +91,10 @@ class BaseNoiseS2(nn.Module):
 
     def __init__(
         self,
-        img_shape,
+        grid,
         batch_size,
         num_channels,
         num_time_steps,
-        grid_type="equiangular",
         lmax=None,
         seed=333,
         reflect=False,
@@ -107,8 +103,9 @@ class BaseNoiseS2(nn.Module):
     ):
         super().__init__()
 
-        # Number of latitudinal modes.
-        self.nlat, self.nlon = img_shape
+        # the grid and its numbers of latitudes and longitudes
+        self.grid = grid
+        self.nlat, self.nlon = grid.shape
         self.num_channels = num_channels
         self.num_time_steps = num_time_steps
         self.reflect = reflect
@@ -121,13 +118,13 @@ class BaseNoiseS2(nn.Module):
                 polar_group = None if (comm.get_size("h") == 1) else comm.get_group("h")
                 azimuth_group = None if (comm.get_size("w") == 1) else comm.get_group("w")
                 thd.init(polar_group, azimuth_group)
-            self.isht = thd.DistributedInverseRealSHT(sht_grid((self.nlat, self.nlon), grid_type), lmax=lmax, mmax=lmax)
+            self.isht = thd.DistributedInverseRealSHT(grid, lmax=lmax, mmax=lmax)
             self.lmax_local = self.isht.l_shapes[comm.get_rank("h")]
             self.mmax_local = self.isht.m_shapes[comm.get_rank("w")]
             self.nlat_local = self.isht.lat_shapes[comm.get_rank("h")]
             self.nlon_local = self.isht.lon_shapes[comm.get_rank("w")]
         else:
-            self.isht = th.InverseRealSHT(sht_grid((self.nlat, self.nlon), grid_type), lmax=lmax, mmax=lmax)
+            self.isht = th.InverseRealSHT(grid, lmax=lmax, mmax=lmax)
             self.lmax_local = self.isht.lmax
             self.mmax_local = self.isht.mmax
             self.nlat_local = self.nlat
@@ -229,7 +226,7 @@ class BaseNoiseS2(nn.Module):
             reflection flag.
         """
         return (
-            f"img_shape=({self.nlat}, {self.nlon}), "
+            f"grid={self.grid.grid_type} ({self.nlat}, {self.nlon}), "
             f"num_channels={self.num_channels}, num_time_steps={self.num_time_steps}, "
             f"lmax={self.lmax}, reflect={self.reflect}"
         )
@@ -492,8 +489,8 @@ class IsotropicGaussianRandomFieldS2(BaseNoiseS2):
 
     Parameters
     ----------
-    img_shape : (int, int)
-        Output grid as ``(nlat, nlon)``.
+    grid : torch_harmonics.RegularGridS2
+        The grid the noise is drawn on, see :func:`~makani.utils.grids.sht_grid`.
     batch_size : int
         Initial batch size of the state buffer.
     num_channels : int
@@ -506,8 +503,6 @@ class IsotropicGaussianRandomFieldS2(BaseNoiseS2):
     alpha : float, default is 0.0
         Decay factor in the angular power spectrum. White noise corresponds to
         ``alpha = 0.0``.
-    grid_type : string, default is "equiangular"
-        Grid type. Currently supports ``"equiangular"`` and ``"legendre-gauss"``.
     lmax : int, optional
         Spectral truncation. Defaults to the maximum supported by the grid;
         lowering it produces a smoother field.
@@ -539,13 +534,12 @@ class IsotropicGaussianRandomFieldS2(BaseNoiseS2):
 
     def __init__(
         self,
-        img_shape,
+        grid,
         batch_size,
         num_channels,
         num_time_steps=1,
         sigma=1.0,
         alpha=0.0,
-        grid_type="equiangular",
         lmax=None,
         seed=333,
         reflect=False,
@@ -554,11 +548,10 @@ class IsotropicGaussianRandomFieldS2(BaseNoiseS2):
         **kwargs,
     ):
         super().__init__(
-            img_shape=img_shape,
+            grid=grid,
             batch_size=batch_size,
             num_channels=num_channels,
             num_time_steps=num_time_steps,
-            grid_type=grid_type,
             lmax=lmax,
             seed=seed,
             reflect=reflect,
@@ -751,8 +744,8 @@ class DiffusionNoiseS2(BaseNoiseS2):
 
     Parameters
     ----------
-    img_shape : (int, int)
-        Output grid as ``(nlat, nlon)``.
+    grid : torch_harmonics.RegularGridS2
+        The grid the noise is drawn on, see :func:`~makani.utils.grids.sht_grid`.
     batch_size : int
         Initial batch size of the state buffer.
     num_channels : int
@@ -767,8 +760,6 @@ class DiffusionNoiseS2(BaseNoiseS2):
     lambd : float or List, default is 1.0
         Temporal correlation length, should be set to ``(t / tau)``. If this is
         a list it has to match ``num_channels``.
-    grid_type : string, default is "equiangular"
-        Grid type. Currently supports ``"equiangular"`` and ``"legendre-gauss"``.
     lmax : int, optional
         Spectral truncation. Defaults to the maximum supported by the grid;
         lowering it produces a smoother field.
@@ -798,14 +789,13 @@ class DiffusionNoiseS2(BaseNoiseS2):
 
     def __init__(
         self,
-        img_shape,
+        grid,
         batch_size,
         num_channels,
         num_time_steps=1,
         sigma=1.0,
         kT=0.5 * (500.0 / 6370.0) ** 2,
         lambd=1.0,
-        grid_type="equiangular",
         lmax=None,
         seed=333,
         reflect=False,
@@ -814,11 +804,10 @@ class DiffusionNoiseS2(BaseNoiseS2):
         **kwargs,
     ):
         super().__init__(
-            img_shape=img_shape,
+            grid=grid,
             batch_size=batch_size,
             num_channels=num_channels,
             num_time_steps=num_time_steps,
-            grid_type=grid_type,
             lmax=lmax,
             seed=seed,
             reflect=reflect,
@@ -1101,8 +1090,8 @@ class DummyNoiseS2(BaseNoiseS2):
 
     Parameters
     ----------
-    img_shape : (int, int)
-        Number of latitudinal and longitudinal modes.
+    grid : torch_harmonics.RegularGridS2
+        The grid the noise is drawn on, see :func:`~makani.utils.grids.sht_grid`.
     batch_size : int
         Batch size for the noise.
     num_channels : int
@@ -1124,7 +1113,7 @@ class DummyNoiseS2(BaseNoiseS2):
 
     def __init__(
         self,
-        img_shape,
+        grid,
         batch_size,
         num_channels,
         num_time_steps=1,
@@ -1143,7 +1132,7 @@ class DummyNoiseS2(BaseNoiseS2):
         # our override of _state_shape_suffix below, which gives a spatial (H, W)
         # layout instead of the spectral (L, M, 2) default.
         super().__init__(
-            img_shape=img_shape,
+            grid=grid,
             batch_size=batch_size,
             num_channels=num_channels,
             num_time_steps=num_time_steps,
@@ -1303,11 +1292,10 @@ def noise_base_seed(centered: bool = False, seed_offset: int = 0) -> Tuple[int, 
 def build_noise(
     noise_params,
     *,
-    img_shape,
+    grid,
     batch_size,
     num_channels,
     num_time_steps,
-    grid_type,
     seed,
     reflect,
     centered=False,
@@ -1322,13 +1310,11 @@ def build_noise(
         The configuration, e.g. ``params.input_noise``: ``type`` (``"diffusion"``,
         ``"white"`` or ``"dummy"``) and the optional ``sigma``, ``kT``, ``lambd``,
         ``alpha``, ``lmax`` and ``learnable``.
-    img_shape : tuple of int
-        The grid the process draws its field on.
+    grid : torch_harmonics.RegularGridS2
+        The grid the process draws its field on, see :func:`~makani.utils.grids.sht_grid`.
     batch_size, num_channels, num_time_steps : int
         The layout of the field. ``num_channels`` is passed rather than read from
         ``noise_params``, since the input noise derives it from its mode.
-    grid_type : str
-        The grid type of ``img_shape``.
     seed : int
         The seed, see :func:`noise_base_seed`.
     reflect : bool
@@ -1362,14 +1348,13 @@ def build_noise(
 
     if ntype == "diffusion":
         return DiffusionNoiseS2(
-            img_shape=img_shape,
+            grid=grid,
             batch_size=batch_size,
             num_channels=num_channels,
             num_time_steps=num_time_steps,
             sigma=noise_params.get("sigma", 1.0),
             kT=noise_params.get("kT", 0.5 * (100 / 6370) ** 2),
             lambd=noise_params.get("lambd", default_lambd),
-            grid_type=grid_type,
             lmax=lmax,
             seed=seed,
             reflect=reflect,
@@ -1378,13 +1363,12 @@ def build_noise(
         )
     elif ntype == "white":
         return IsotropicGaussianRandomFieldS2(
-            img_shape=img_shape,
+            grid=grid,
             batch_size=batch_size,
             num_channels=num_channels,
             num_time_steps=num_time_steps,
             sigma=noise_params.get("sigma", 1.0),
             alpha=noise_params.get("alpha", 0.0),
-            grid_type=grid_type,
             lmax=lmax,
             seed=seed,
             reflect=reflect,
@@ -1393,7 +1377,7 @@ def build_noise(
         )
     elif ntype == "dummy":
         return DummyNoiseS2(
-            img_shape=img_shape,
+            grid=grid,
             batch_size=batch_size,
             num_channels=num_channels,
             num_time_steps=num_time_steps,

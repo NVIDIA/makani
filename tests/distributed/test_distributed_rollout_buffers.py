@@ -21,6 +21,7 @@ from parameterized import parameterized
 import numpy as np
 import torch
 
+from makani.utils.grids import make_grid
 from makani.distributed import comm
 from makani.inference.rollout_buffer import SpectrumAverageBuffer, ZonalSpectrumAverageBuffer
 
@@ -140,9 +141,8 @@ class TestDistributedSpectrumBuffers(unittest.TestCase):
             return SpectrumAverageBuffer(
                 num_rollout_steps=2,
                 rollout_dt=6,
-                img_shape=(nlat, nlon),
+                grid=make_grid((nlat, nlon), grid),
                 ensemble_size=ensemble_size,
-                grid_type=grid,
                 channel_names=_CHANNEL_NAMES,
                 device=self.device,
                 scale=scale,
@@ -172,9 +172,8 @@ class TestDistributedSpectrumBuffers(unittest.TestCase):
             return ZonalSpectrumAverageBuffer(
                 num_rollout_steps=2,
                 rollout_dt=6,
-                img_shape=(nlat, nlon),
+                grid=make_grid((nlat, nlon), "equiangular"),
                 ensemble_size=ensemble_size,
-                grid_type="equiangular",
                 channel_names=_CHANNEL_NAMES,
                 lat_lon=(lats, lons),
                 device=self.device,

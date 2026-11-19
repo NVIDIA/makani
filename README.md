@@ -185,7 +185,7 @@ Makani requires a metadata file named `data.json`, which describes important pro
     "dims": ["time", "channel", "lat", "lon"],      # dimensions of fields contained in the dataset
     "dhours": 6,                                    # temporal resolution in hours
     "coord": {                                      # coordinates and channel descriptions
-        "grid_type": "equiangular",                 # type of grid used in dataset: currently suppported choices are 'equiangular' and 'legendre-gauss'
+        "grid_type": "equiangular",                 # type of grid used in dataset: a regular grid of torch-harmonics ('equiangular', 'legendre-gauss', 'lobatto', 'fejer1', 'trapezoidal') or 'euclidean'
         "lat": [0.0, 0.1, ...],                     # latitudinal grid coordinates
         "lon": [0.0, 0.1, ...],                     # longitudinal grid coordinates
         "channel": ["t2m", "u10", "v10", ...]       # names of the channels contained in the dataset

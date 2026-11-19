@@ -25,7 +25,7 @@ import numpy as np
 import torch
 
 from makani.losses import LossHandler
-from makani.utils.grids import sht_grid
+from makani.utils.grids import make_grid, sht_grid
 from makani.data.missing_data import fill_missing, missing_values, missing_weights
 from makani.losses.base_loss import abs_pow
 from makani.losses import (
@@ -131,27 +131,24 @@ _WIND_CHANNEL_NAMES = ["u500", "v500", "u850", "v850", "t500"]
 _NUM_WIND_CH = len(_WIND_CHANNEL_NAMES)
 
 _GEOM_KWARGS = dict(
-    img_shape=(_IMG_H, _IMG_W),
+    grid=make_grid((_IMG_H, _IMG_W), "equiangular"),
     crop_shape=(_IMG_H, _IMG_W),
     crop_offset=(0, 0),
     channel_names=_CHANNEL_NAMES,
-    grid_type="equiangular",
 )
 
 _WIND_GEOM_KWARGS = dict(
-    img_shape=(_IMG_H, _IMG_W),
+    grid=make_grid((_IMG_H, _IMG_W), "equiangular"),
     crop_shape=(_IMG_H, _IMG_W),
     crop_offset=(0, 0),
     channel_names=_WIND_CHANNEL_NAMES,
-    grid_type="equiangular",
 )
 
 _SPEC_KWARGS = dict(
-    img_shape=(_IMG_H, _IMG_W),
+    grid=make_grid((_IMG_H, _IMG_W), "equiangular"),
     crop_shape=(_IMG_H, _IMG_W),
     crop_offset=(0, 0),
     channel_names=_CHANNEL_NAMES,
-    grid_type="equiangular",
 )
 
 
@@ -270,7 +267,7 @@ class TestLossCommon(unittest.TestCase):
     @staticmethod
     def _make(name: str, grid_type: str = "equiangular"):
         """Return a freshly constructed loss instance for *name*, on a grid of *grid_type*."""
-        geom_kwargs = dict(_GEOM_KWARGS, grid_type=grid_type)
+        geom_kwargs = dict(_GEOM_KWARGS, grid=make_grid((_IMG_H, _IMG_W), grid_type))
         if name == "geometric_l2":
             return GeometricLpLoss(**geom_kwargs, p=2.0)
         if name == "geometric_l1":
@@ -2546,11 +2543,10 @@ class TestSobolevEnergyScoreLoss(unittest.TestCase):
         verifying that output and gradients are not NaN or inf.
         """
         sobolev_loss = SobolevEnergyScoreLoss(
-            img_shape=(self.params.img_shape_x, self.params.img_shape_y),
+            grid=make_grid((self.params.img_shape_x, self.params.img_shape_y), self.params.model_grid_type),
             crop_shape=(self.params.img_shape_x, self.params.img_shape_y),
             crop_offset=(0, 0),
             channel_names=self.params.channel_names,
-            grid_type=self.params.model_grid_type,
             lmax=None,
             spatial_distributed=False,
             ensemble_distributed=False,
@@ -2609,11 +2605,10 @@ class TestSobolevEnergyScoreLoss(unittest.TestCase):
         For beta<1 the |diff|^beta derivative at diff=0 is singular; the eps-mask must neutralize
         that path in the backward pass."""
         sobolev_loss = SobolevEnergyScoreLoss(
-            img_shape=(self.params.img_shape_x, self.params.img_shape_y),
+            grid=make_grid((self.params.img_shape_x, self.params.img_shape_y), self.params.model_grid_type),
             crop_shape=(self.params.img_shape_x, self.params.img_shape_y),
             crop_offset=(0, 0),
             channel_names=self.params.channel_names,
-            grid_type=self.params.model_grid_type,
             lmax=None,
             spatial_distributed=False,
             ensemble_distributed=False,

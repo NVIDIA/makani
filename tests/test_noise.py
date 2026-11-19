@@ -21,6 +21,7 @@ from parameterized import parameterized, parameterized_class
 import numpy as np
 import torch
 
+from makani.utils.grids import make_grid
 from makani.distributed.helpers import AVG, MODEL_GROUPS, get_sharing
 from makani.models.noise import (
     toep,
@@ -106,7 +107,7 @@ class TestDummyNoiseS2(unittest.TestCase):
         self.T = NUM_TIME_STEPS
         self.C = NUM_CHANNELS
         self.noise = DummyNoiseS2(
-            img_shape=IMG_SHAPE,
+            grid=make_grid(IMG_SHAPE, "equiangular"),
             batch_size=self.B,
             num_channels=self.C,
             num_time_steps=self.T,
@@ -173,7 +174,7 @@ class TestDummyNoiseS2(unittest.TestCase):
         """Constructing with an unknown mode raises ValueError."""
         with self.assertRaises(ValueError):
             DummyNoiseS2(
-                img_shape=IMG_SHAPE,
+                grid=make_grid(IMG_SHAPE, "equiangular"),
                 batch_size=self.B,
                 num_channels=self.C,
                 num_time_steps=self.T,
@@ -196,7 +197,7 @@ class TestDummyNoiseS2ConstantRandom(unittest.TestCase):
         self.T = NUM_TIME_STEPS
         self.C = NUM_CHANNELS
         self.noise = DummyNoiseS2(
-            img_shape=IMG_SHAPE,
+            grid=make_grid(IMG_SHAPE, "equiangular"),
             batch_size=self.B,
             num_channels=self.C,
             num_time_steps=self.T,
@@ -249,7 +250,7 @@ class TestDummyNoiseS2ConstantRandom(unittest.TestCase):
 
         def _make(seed):
             return DummyNoiseS2(
-                img_shape=IMG_SHAPE,
+                grid=make_grid(IMG_SHAPE, "equiangular"),
                 batch_size=self.B,
                 num_channels=self.C,
                 num_time_steps=self.T,
@@ -267,7 +268,7 @@ class TestDummyNoiseS2ConstantRandom(unittest.TestCase):
 
         def _make(seed):
             return DummyNoiseS2(
-                img_shape=IMG_SHAPE,
+                grid=make_grid(IMG_SHAPE, "equiangular"),
                 batch_size=self.B,
                 num_channels=self.C,
                 num_time_steps=self.T,
@@ -311,7 +312,7 @@ class TestIsotropicGRF(unittest.TestCase):
         if batch_size is None:
             batch_size = self.B
         return IsotropicGaussianRandomFieldS2(
-            img_shape=IMG_SHAPE,
+            grid=make_grid(IMG_SHAPE, "equiangular"),
             batch_size=batch_size,
             num_channels=self.C,
             num_time_steps=self.T,
@@ -462,7 +463,7 @@ class TestIsotropicGRF(unittest.TestCase):
     def test_learnable_sigma_l_is_parameter(self):
         """With learnable=True, sigma_l is registered as an nn.Parameter."""
         noise = IsotropicGaussianRandomFieldS2(
-            img_shape=IMG_SHAPE,
+            grid=make_grid(IMG_SHAPE, "equiangular"),
             batch_size=self.B,
             num_channels=self.C,
             num_time_steps=self.T,
@@ -477,7 +478,7 @@ class TestIsotropicGRF(unittest.TestCase):
     def test_learnable_gradient_flows_through_sigma_l(self):
         """Gradient of output sum flows back to sigma_l when learnable=True."""
         noise = IsotropicGaussianRandomFieldS2(
-            img_shape=IMG_SHAPE,
+            grid=make_grid(IMG_SHAPE, "equiangular"),
             batch_size=self.B,
             num_channels=self.C,
             num_time_steps=self.T,
@@ -505,7 +506,7 @@ class TestIsotropicGRF(unittest.TestCase):
 
         def _sample(alpha):
             n = IsotropicGaussianRandomFieldS2(
-                img_shape=IMG_SHAPE,
+                grid=make_grid(IMG_SHAPE, "equiangular"),
                 batch_size=B_stat,
                 num_channels=1,
                 num_time_steps=1,
@@ -553,7 +554,7 @@ class TestDiffusionNoiseS2(unittest.TestCase):
         if num_channels is None:
             num_channels = self.C
         return DiffusionNoiseS2(
-            img_shape=IMG_SHAPE,
+            grid=make_grid(IMG_SHAPE, "equiangular"),
             batch_size=batch_size,
             num_channels=num_channels,
             num_time_steps=self.T,
@@ -681,7 +682,7 @@ class TestDiffusionNoiseS2(unittest.TestCase):
         phi_expected = math.exp(-lambd)
 
         noise = DiffusionNoiseS2(
-            img_shape=IMG_SHAPE,
+            grid=make_grid(IMG_SHAPE, "equiangular"),
             batch_size=B_stat,
             num_channels=1,
             num_time_steps=1,
@@ -777,7 +778,7 @@ class TestDiffusionNoiseS2(unittest.TestCase):
         """kT given as a list of length num_channels constructs and runs without error."""
         kT_list = [0.001, 0.002]  # two distinct spatial correlation lengths
         noise = DiffusionNoiseS2(
-            img_shape=IMG_SHAPE,
+            grid=make_grid(IMG_SHAPE, "equiangular"),
             batch_size=self.B,
             num_channels=2,
             num_time_steps=1,
@@ -795,7 +796,7 @@ class TestDiffusionNoiseS2(unittest.TestCase):
         """lambd given as a list of length num_channels constructs and runs without error."""
         lambd_list = [0.3, 0.7]  # two distinct temporal decay rates
         noise = DiffusionNoiseS2(
-            img_shape=IMG_SHAPE,
+            grid=make_grid(IMG_SHAPE, "equiangular"),
             batch_size=self.B,
             num_channels=2,
             num_time_steps=1,
@@ -814,7 +815,7 @@ class TestDiffusionNoiseS2(unittest.TestCase):
     def test_learnable_constructs_phi_and_sigma_l_as_parameters(self):
         """learnable=True registers phi and sigma_l as nn.Parameters."""
         noise = DiffusionNoiseS2(
-            img_shape=IMG_SHAPE,
+            grid=make_grid(IMG_SHAPE, "equiangular"),
             batch_size=self.B,
             num_channels=self.C,
             num_time_steps=1,
@@ -838,7 +839,7 @@ class TestDiffusionNoiseS2(unittest.TestCase):
 
     def _make_learnable(self):
         return DiffusionNoiseS2(
-            img_shape=IMG_SHAPE,
+            grid=make_grid(IMG_SHAPE, "equiangular"),
             batch_size=self.B,
             num_channels=self.C,
             num_time_steps=1,
@@ -910,7 +911,7 @@ class TestDiffusionNoiseS2(unittest.TestCase):
         """num_time_steps>1 creates a 'discount' buffer of shape (C, T, T)."""
         T = 3
         noise = DiffusionNoiseS2(
-            img_shape=IMG_SHAPE,
+            grid=make_grid(IMG_SHAPE, "equiangular"),
             batch_size=self.B,
             num_channels=self.C,
             num_time_steps=T,
@@ -924,7 +925,7 @@ class TestDiffusionNoiseS2(unittest.TestCase):
         """With num_time_steps=3 the state time dimension is 3."""
         T = 3
         noise = DiffusionNoiseS2(
-            img_shape=IMG_SHAPE,
+            grid=make_grid(IMG_SHAPE, "equiangular"),
             batch_size=self.B,
             num_channels=self.C,
             num_time_steps=T,
@@ -937,7 +938,7 @@ class TestDiffusionNoiseS2(unittest.TestCase):
         """update(replace_state=False) shifts time history: old[1:] becomes new[:-1]."""
         T = 3
         noise = DiffusionNoiseS2(
-            img_shape=IMG_SHAPE,
+            grid=make_grid(IMG_SHAPE, "equiangular"),
             batch_size=self.B,
             num_channels=self.C,
             num_time_steps=T,
@@ -1019,7 +1020,7 @@ class TestNoiseIsotropy(unittest.TestCase):
     def test_white_and_isotropic_noise(self, grid_type, img_shape, alpha):
         sigma = 2.0
         process = IsotropicGaussianRandomFieldS2(
-            img_shape=img_shape, batch_size=1, num_channels=1, sigma=sigma, alpha=alpha, grid_type=grid_type
+            grid=make_grid(img_shape, grid_type), batch_size=1, num_channels=1, sigma=sigma, alpha=alpha
         )
         variance = self._exact_variance(process)
         self._assert_isotropic(variance)
@@ -1038,7 +1039,7 @@ class TestNoiseIsotropy(unittest.TestCase):
     def test_diffusion_noise(self, grid_type, img_shape, kT):
         sigma = 2.0
         process = DiffusionNoiseS2(
-            img_shape=img_shape, batch_size=1, num_channels=1, sigma=sigma, kT=kT, grid_type=grid_type
+            grid=make_grid(img_shape, grid_type), batch_size=1, num_channels=1, sigma=sigma, kT=kT
         )
         variance = self._exact_variance(process)
         self._assert_isotropic(variance)
@@ -1059,7 +1060,9 @@ class TestNoiseIsotropy(unittest.TestCase):
         # check on the samples, independent of the exact variance above, which a stray factor in the convention
         # of the draw would get past. The seed is fixed; with 512 fields the estimates scatter by a few percent,
         # the polar caps, which hold fewer independent points, by more
-        process = cls(img_shape=(33, 64), batch_size=512, num_channels=1, sigma=1.0, seed=333, **kwargs)
+        process = cls(
+            grid=make_grid((33, 64), "equiangular"), batch_size=512, num_channels=1, sigma=1.0, seed=333, **kwargs
+        )
         process = process.to(self.device)
         with torch.no_grad():
             process.update(replace_state=True)
@@ -1087,7 +1090,7 @@ class TestLearnableNoiseAnnotations(unittest.TestCase):
         ]
     )
     def test_shared_and_sharded_groups_cover_the_model(self, _, cls, kwargs):
-        noise = cls(IMG_SHAPE, BATCH_SIZE, NUM_CHANNELS, learnable=True, **kwargs)
+        noise = cls(make_grid(IMG_SHAPE, "equiangular"), BATCH_SIZE, NUM_CHANNELS, learnable=True, **kwargs)
         for name, param in noise.named_parameters():
             with self.subTest(param=name):
                 self.assertEqual(len(param.sharded_dims_mp), param.dim())
@@ -1105,11 +1108,10 @@ class TestBuildNoise(unittest.TestCase):
 
     def _build(self, noise_params, **kwargs):
         args = dict(
-            img_shape=IMG_SHAPE,
+            grid=make_grid(IMG_SHAPE, "equiangular"),
             batch_size=BATCH_SIZE,
             num_channels=NUM_CHANNELS,
             num_time_steps=NUM_TIME_STEPS,
-            grid_type="equiangular",
             seed=444,
             reflect=True,
         )
