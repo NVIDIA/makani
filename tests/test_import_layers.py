@@ -35,9 +35,6 @@ LAYERS = [
     ("makani",),  # the package itself, its entry scripts and the benchmark
 ]
 
-# the entry point that model packages written before makani 0.4 record, which Earth2MIP imports by name
-ALLOWED = {("makani.models.model_package", "makani.driver.model_package")}
-
 
 def _layer(module):
     best = None
@@ -90,8 +87,6 @@ class TestImportLayers(unittest.TestCase):
             source = _layer(module)
             for lineno, target, _ in _imports(path, module):
                 if target == "makani" or not target.startswith("makani."):
-                    continue
-                if (module, target) in ALLOWED:
                     continue
                 if _layer(target) > source:
                     violations.append(f"{module}:{lineno} imports {target}")

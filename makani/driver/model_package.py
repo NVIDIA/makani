@@ -15,7 +15,7 @@
 
 """
 Model package for easy inference/packaging. Model packages contain all the necessary data to
-perform inference and its interface is compatible with earth2mip
+perform inference outside of makani, e.g. in Earth2Studio
 """
 import os
 import shutil
@@ -29,7 +29,6 @@ from makani.third_party.climt.zenith_angle_v2 import cos_zenith_angle
 from makani.data.data_helpers import get_data_normalization
 from makani.data.batch import ZENITH
 from makani.models import model_registry
-import datetime
 import logging
 
 
@@ -53,7 +52,6 @@ class LocalPackage:
     """
 
     # These define the model package in terms of where makani expects the files to be located
-    THIS_MODULE = "makani.driver.model_package"
     MODEL_PACKAGE_CHECKPOINT_PATH = "training_checkpoints/best_ckpt_mp0.tar"
     MINS_FILE = "mins.npy"
     MAXS_FILE = "maxs.npy"
@@ -488,14 +486,6 @@ def save_model_package(params):
     if params.get("max_path", None) is not None:
         shutil.copy(params.max_path, os.path.join(params.experiment_dir, LocalPackage.MAXS_FILE))
 
-    # write out earth2mip metadata.json
-    fcn_mip_data = {
-        "entrypoint": {"name": f"{LocalPackage.THIS_MODULE}:load_time_loop"},
-    }
-    with open(os.path.join(params.experiment_dir, "metadata.json"), "w") as f:
-        msg = json.dumps(fcn_mip_data, indent=4, sort_keys=True)
-        f.write(msg)
-
 
 # TODO: this is not clean and should be reworked to allow restoring from params + checkpoint file
 def load_model_package(package, pretrained=True, device="cpu", multistep=False):
@@ -534,60 +524,3 @@ def load_model_package(package, pretrained=True, device="cpu", multistep=False):
     model.eval()
 
     return model
-
-
-def load_time_loop(package, device=None, time_step_hours=None):
-    """This function loads an earth2mip TimeLoop object that
-    can be used for inference.
-
-    A TimeLoop encapsulates normalization, regridding, and other logic, so is a
-    very minimal interface to expose to a framework like earth2mip.
-
-    See https://github.com/NVIDIA/earth2mip/blob/main/docs/concepts.rst
-    for more info on this interface.
-    """
-
-    from earth2mip.networks import Inference
-    from earth2mip.grid import equiangular_lat_lon_grid
-
-    config = package.get("config.json")
-    params = ParamsBase.from_json(config)
-
-    if params.in_channels != params.out_channels:
-        raise NotImplementedError("Non-equal input and output channels are not implemented yet.")
-
-    names = [params.data_channel_names[i] for i in params.in_channels]
-    params.min_path = package.get(LocalPackage.MINS_FILE)
-    params.max_path = package.get(LocalPackage.MAXS_FILE)
-    params.global_means_path = package.get(LocalPackage.MEANS_FILE)
-    params.global_stds_path = package.get(LocalPackage.STDS_FILE)
-
-    center, scale = get_data_normalization(params)
-
-    model = load_model_package(package, pretrained=True, device=device)
-    shape = (params.img_crop_shape_x, params.img_crop_shape_y)
-
-    # TODO: insert a check to see if the grid e2mip computes is the same that makani uses
-    grid = equiangular_lat_lon_grid(
-        nlat=params.img_crop_shape_x, nlon=params.img_crop_shape_y, includes_south_pole=True
-    )
-
-    if time_step_hours is None:
-        # the model step in hours, dt data steps of dhours each, as the wrapper defines it
-        time_step = datetime.timedelta(hours=model.timestep)
-    else:
-        time_step = datetime.timedelta(hours=time_step_hours)
-
-    # Here we use the built-in class earth2mip.networks.Inference
-    # will later be extended to use the makani inferencer
-    inference = Inference(
-        model=model,
-        channel_names=names,
-        center=center[:, params.in_channels],
-        scale=scale[:, params.out_channels],
-        grid=grid,
-        n_history=params.n_history,
-        time_step=time_step,
-    )
-    inference.to(device)
-    return inference
