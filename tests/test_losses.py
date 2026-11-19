@@ -268,40 +268,41 @@ class TestLossCommon(unittest.TestCase):
         set_seed(333)
 
     @staticmethod
-    def _make(name: str):
-        """Return a freshly constructed loss instance for *name*."""
+    def _make(name: str, grid_type: str = "equiangular"):
+        """Return a freshly constructed loss instance for *name*, on a grid of *grid_type*."""
+        geom_kwargs = dict(_GEOM_KWARGS, grid_type=grid_type)
         if name == "geometric_l2":
-            return GeometricLpLoss(**_GEOM_KWARGS, p=2.0)
+            return GeometricLpLoss(**geom_kwargs, p=2.0)
         if name == "geometric_l1":
-            return GeometricLpLoss(**_GEOM_KWARGS, p=1.0)
+            return GeometricLpLoss(**geom_kwargs, p=1.0)
         if name == "spectral_l2":
             return SpectralLpLoss(**_SPEC_KWARGS)
         if name == "spectral_h1":
             return SpectralH1Loss(**_SPEC_KWARGS)
         if name == "drift_regularization":
-            return DriftRegularization(**_GEOM_KWARGS)
+            return DriftRegularization(**geom_kwargs)
         if name == "crps_cdf":
-            return CRPSLoss(**_GEOM_KWARGS, crps_type="cdf", spatial_distributed=False, ensemble_distributed=False)
+            return CRPSLoss(**geom_kwargs, crps_type="cdf", spatial_distributed=False, ensemble_distributed=False)
         if name == "crps_gauss":
             return CRPSLoss(
-                **_GEOM_KWARGS, crps_type="gauss", spatial_distributed=False, ensemble_distributed=False, eps=1e-5
+                **geom_kwargs, crps_type="gauss", spatial_distributed=False, ensemble_distributed=False, eps=1e-5
             )
         if name == "crps_pwm":
             return CRPSLoss(
-                **_GEOM_KWARGS,
+                **geom_kwargs,
                 crps_type="probability weighted moment",
                 spatial_distributed=False,
                 ensemble_distributed=False,
             )
         if name == "crps_naive_skillspread":
             return CRPSLoss(
-                **_GEOM_KWARGS, crps_type="naive skillspread", spatial_distributed=False, ensemble_distributed=False
+                **geom_kwargs, crps_type="naive skillspread", spatial_distributed=False, ensemble_distributed=False
             )
         if name == "nll":
-            return EnsembleNLLLoss(**_GEOM_KWARGS)
+            return EnsembleNLLLoss(**geom_kwargs)
         if name == "mmd":
             # squared=True: avoids sqrt of potentially negative mmd² values in common tests
-            return GaussianMMDLoss(**_GEOM_KWARGS, squared=True)
+            return GaussianMMDLoss(**geom_kwargs, squared=True)
         raise ValueError(f"Unknown loss name: {name!r}")
 
     @classmethod
@@ -355,6 +356,21 @@ class TestLossCommon(unittest.TestCase):
             compare_tensors(f"{name} batchsize", loss_single[0], loss_batch[0], verbose=verbose),
             f"{name}: loss[0] differs between single-sample and full-batch evaluation",
         )
+
+    @parameterized.expand(
+        [
+            (name, grid_type)
+            for name in ("geometric_l2", "crps_cdf", "crps_gauss", "crps_pwm", "crps_naive_skillspread", "nll", "mmd")
+            for grid_type in ("equiangular", "legendre-gauss", "euclidean")
+        ]
+    )
+    def test_float32_stays_float32(self, name, grid_type):
+        """The quadrature weights of every grid are float64; a loss of float32 fields must still be float32
+        rather than be computed in double precision."""
+        fn = self._make(name, grid_type=grid_type)
+        prd, tar = self._make_prd_tar(name)
+        loss = fn(prd, tar)
+        self.assertEqual(loss.dtype, torch.float32, f"{name} on {grid_type}")
 
     @parameterized.expand(_COMMON_BATCHSIZE)
     def test_nan_propagates(self, name):

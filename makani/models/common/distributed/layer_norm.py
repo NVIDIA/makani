@@ -184,13 +184,11 @@ class DistributedGeometricInstanceNormS2(DistributedInstanceNorm2d):
         # extract shapes
         B, C, _, _ = x.shape
 
-        # compute var, mean locally: those have the shapes [B, C]
-        count = torch.tile(torch.sum(self.quad_weight, dim=(-2, -1), keepdim=False), (B, C))
-        mean = torch.sum(x * self.quad_weight, dim=(-2, -1), keepdim=False) / count
-        var = (
-            torch.sum(torch.square(x - mean.reshape(B, C, 1, 1)) * self.quad_weight, dim=(-2, -1), keepdim=False)
-            / count
-        )
+        # compute var, mean locally: those have the shapes [B, C]; the weights in the dtype of x, as in the serial norm
+        quad_weight = self.quad_weight.to(dtype=x.dtype)
+        count = torch.tile(torch.sum(quad_weight, dim=(-2, -1), keepdim=False), (B, C))
+        mean = torch.sum(x * quad_weight, dim=(-2, -1), keepdim=False) / count
+        var = torch.sum(torch.square(x - mean.reshape(B, C, 1, 1)) * quad_weight, dim=(-2, -1), keepdim=False) / count
 
         # compute welford variance
         var, mean, _ = distributed_welford_variance(var, mean, count, "spatial")

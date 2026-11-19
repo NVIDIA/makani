@@ -155,13 +155,14 @@ class GaussianMMDLoss(GeometricBaseLoss):
         espread = abs_pow(forecasts.unsqueeze(1) - forecasts.unsqueeze(0), self.beta)
         eskill = abs_pow(observations - forecasts, self.beta)
 
-        # do the spatial reduction
+        # do the spatial reduction, with the weights in the dtype of the score, float32 at leasts
+        quad_weight_split = self.quad_weight_split.to(dtype=torch.promote_types(eskill.dtype, torch.float32))
         if spatial_weights is not None:
-            espread = torch.sum(espread * self.quad_weight_split * spatial_weights_split, dim=-1)
-            eskill = torch.sum(eskill * self.quad_weight_split * spatial_weights_split, dim=-1)
+            espread = torch.sum(espread * quad_weight_split * spatial_weights_split, dim=-1)
+            eskill = torch.sum(eskill * quad_weight_split * spatial_weights_split, dim=-1)
         else:
-            espread = torch.sum(espread * self.quad_weight_split, dim=-1)
-            eskill = torch.sum(eskill * self.quad_weight_split, dim=-1)
+            espread = torch.sum(espread * quad_weight_split, dim=-1)
+            eskill = torch.sum(eskill * quad_weight_split, dim=-1)
 
         # since we split spatial dim into ensemble dim, we need to do an ensemble sum as well
         if self.ensemble_distributed:
