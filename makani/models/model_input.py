@@ -39,6 +39,7 @@ import torch.nn as nn
 from makani.models.noise import build_noise, noise_base_seed, run_eager
 from makani.models.preprocessor import HistoryNormalization, HistoryStats, model_dynamic_features
 from makani.utils.functions import flatten_history
+from makani.data.grid_types import DEFAULT_GRID_TYPE
 
 # the name of the input noise among the noise processes of a model
 INPUT_NOISE = "input_noise"
@@ -235,7 +236,7 @@ class InputNoise(nn.Module):
             img_shape=(params.img_shape_x_resampled, params.img_shape_y_resampled),
             batch_size=params.batch_size,
             n_history=params.n_history,
-            grid_type=params.model_grid_type,
+            grid_type=params.get("model_grid_type", DEFAULT_GRID_TYPE),
             history_normalization_mode=params.history_normalization_mode,
             # read only for diffusion noise, the other types have no temporal correlation
             dt_hours=(params.dt * params.dhours) if params.input_noise.get("type") == "diffusion" else None,

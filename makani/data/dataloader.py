@@ -25,6 +25,7 @@ import torch.distributed as dist
 from makani.distributed import comm
 
 from makani.data.data_helpers import get_data_normalization
+from makani.data.grid_types import DEFAULT_GRID_TYPE
 
 
 def init_distributed_io(params):
@@ -84,7 +85,7 @@ def _multifiles_dataset(params, files_pattern, mode, bias, scale):
         n_future=(params.get("valid_autoreg_steps") if (mode == "eval") else params.get("n_future", 0)),
         add_zenith=params.get("add_zenith", False),
         data_grid_type=params.data_grid_type,
-        model_grid_type=params.get("model_grid_type", "equiangular"),
+        model_grid_type=params.get("model_grid_type", DEFAULT_GRID_TYPE),
         bias=bias,
         scale=scale,
         crop_size=(params.get("crop_size_x", None), params.get("crop_size_y", None)),
@@ -187,7 +188,7 @@ def get_dataloader(params, files_pattern, device, mode="train", dali_device=None
             latitudes=params.get("lat", None),
             longitudes=params.get("lon", None),
             data_grid_type=params.data_grid_type,
-            model_grid_type=params.get("model_grid_type", "equiangular"),
+            model_grid_type=params.get("model_grid_type", DEFAULT_GRID_TYPE),
             crop_size=(params.get("crop_size_x", None), params.get("crop_size_y", None)),
             crop_anchor=(params.get("crop_anchor_x", 0), params.get("crop_anchor_y", 0)),
             subsampling_factor=params.get("subsampling_factor", 1),
@@ -231,7 +232,7 @@ def get_dataloader(params, files_pattern, device, mode="train", dali_device=None
                 batch_size=params.batch_size,
                 num_data_workers=params.num_data_workers,
                 data_grid_type=params.data_grid_type,
-                model_grid_type=params.get("model_grid_type", "equiangular"),
+                model_grid_type=params.get("model_grid_type", DEFAULT_GRID_TYPE),
                 dali_device=dali_device,
             )
         else:

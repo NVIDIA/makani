@@ -42,6 +42,7 @@ import torch.distributed as dist
 from torch_harmonics.distributed import compute_split_shapes
 from makani.distributed.mappings import gather_from_parallel_region, reduce_from_parallel_region
 from makani.distributed.helpers import barrier
+from makani.data.grid_types import DEFAULT_GRID_TYPE
 
 
 class MetricRollout:
@@ -330,7 +331,7 @@ class MetricsHandler:
         self.crop_offset = (params.img_crop_offset_x, params.img_crop_offset_y)
 
         # grid extraction
-        grid_type = params.get("model_grid_type", "equiangular")
+        grid_type = params.get("model_grid_type", DEFAULT_GRID_TYPE)
 
         # mask nan
         self.mask_target_nan = mask_target_nan

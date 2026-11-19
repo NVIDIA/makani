@@ -31,6 +31,7 @@ from makani.losses import LpEnergyScoreLoss, SobolevEnergyScoreLoss, SpectralL2E
 from makani.losses import GaussianMMDLoss
 from makani.losses import EnsembleNLLLoss
 from makani.losses import DriftRegularization, HydrostaticBalanceLoss, SpectralRegularization
+from makani.data.grid_types import DEFAULT_GRID_TYPE
 
 _LOSS_REGISTRY = {
     "l1": partial(GeometricLpLoss, p=1),
@@ -140,7 +141,7 @@ class LossHandler(nn.Module):
                 channel_names=params.channel_names,
                 bias=bias,
                 scale=scale,
-                grid_type=params.model_grid_type,
+                grid_type=params.get("model_grid_type", DEFAULT_GRID_TYPE),
                 spatial_distributed=self.spatial_distributed,
                 ensemble_distributed=self.ensemble_distributed,
                 **loss_params,

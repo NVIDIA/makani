@@ -23,6 +23,7 @@ from makani.distributed.mappings import copy_to_parallel_region
 
 from makani.models.preprocessor_helpers import get_bias_correction, get_static_features
 from makani.data.batch import ZENITH
+from makani.data.grid_types import DEFAULT_GRID_TYPE
 
 
 def model_dynamic_features(params):
@@ -87,7 +88,7 @@ class HistoryNormalization(nn.Module):
         self.register_buffer("history_normalization_weights", history_normalization_weights, persistent=False)
         if self.history_normalization_mode != "none":
             self.quadrature = GridQuadrature(
-                make_grid(img_shape_resampled, params.model_grid_type),
+                make_grid(img_shape_resampled, params.get("model_grid_type", DEFAULT_GRID_TYPE)),
                 crop_shape=None,
                 crop_offset=(0, 0),
                 normalize=True,

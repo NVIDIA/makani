@@ -58,6 +58,7 @@ from makani.data.batch import (
 )
 from makani.data.sample_source import SampleSource, feature_output_name
 from makani.utils.grids import GridConverter
+from makani.data.grid_types import DEFAULT_GRID_TYPE
 
 # bump whenever the layout of the dict returned by DaliDataloader.state_dict changes, or the pipeline
 # whose checkpoint it carries does. 2: the pipeline always outputs the timestamps, as GPU tensors
@@ -262,7 +263,7 @@ class DaliDataloader(object):
         # grid types
         self.grid_converter = GridConverter(
             params.data_grid_type,
-            params.model_grid_type,
+            params.get("model_grid_type", DEFAULT_GRID_TYPE),
             torch.deg2rad(torch.tensor(self.extsource.lat_lon_local[0])).to(torch.float32).to(self.device),
             torch.deg2rad(torch.tensor(self.extsource.lat_lon_local[1])).to(torch.float32).to(self.device),
         )
