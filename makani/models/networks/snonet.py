@@ -544,6 +544,11 @@ class SphericalNeuralOperatorNet(nn.Module):
     Backbone of the FourCastNet2 architecture. Uses a variant of the Spherical Fourier Neural Operator augmented with localized
     spherical Neural Operator Convolutions in encoder and decoder as well as processor layers.
 
+    The input and the output live on ``inp_shape`` and ``out_shape`` grids of ``model_grid_type``, and the
+    processor on a grid of ``sht_grid_type`` reduced by ``scale_factor``; the model builds them once, as
+    ``inp_grid``, ``out_grid`` and ``internal_grid``, and hands them to its layers. Any regular grid of
+    torch-harmonics will do, see :func:`~makani.utils.grids.sht_grid`.
+
     References:
     [1] Bonev et al., Spherical Fourier Neural Operators: Learning Stable Dynamics on the Sphere
     [2] Ocampo et al., Scalable and Equivariant Spherical CNNs by Discrete-Continuous (DISCO) Convolutions

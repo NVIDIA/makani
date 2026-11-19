@@ -73,6 +73,22 @@ nettype: "path/to/model_file.py:ModelName"
 
 using the path to the model file and the class name `ModelName`.
 
+### Grids
+
+A network works on the grid of its data, which the parameters name: `model_grid_type`, and for the spherical networks `sht_grid_type`, the grid of their processor. A grid type is a regular grid of torch-harmonics, `equiangular`, `legendre-gauss`, `lobatto`, `fejer1` or `trapezoidal`, or `euclidean` for a field in the plane. The data is moved from the grid its metadata declares, `data_grid_type`, onto `model_grid_type` by the dataloader (`makani.utils.grids.GridConverter`).
+
+`get_model` passes the shapes of the input and the output, `inp_shape` and `out_shape`, and the grid types among the other parameters, so the constructors of the networks take shapes and names: PhysicsNeMo stores the constructor arguments of a model in its checkpoints. Inside, a network builds its grids once and hands the grid descriptors to its layers, rather than shapes and names:
+
+```python
+from makani.utils.grids import make_grid, sht_grid
+
+self.inp_grid = sht_grid(inp_shape, model_grid_type)  # make_grid also takes the plane
+self.out_grid = sht_grid(out_shape, model_grid_type)
+self.internal_grid = sht_grid((h, w), sht_grid_type)
+```
+
+The spectral transforms, the DISCO convolutions, the norms (`get_norm_layer_handle`), the position embeddings and `BandLimitMask` take these grids, and so do the losses, the metrics and the noise processes, which their handlers build from the same parameters. `spherical_bandlimit(grid)` gives the band limit of a grid, the default cutoff of `BandLimitMask` and the largest the spectral losses keep. The networks set their own cutoffs: SFNO, SNO and FCN3 from the processor grid and `hard_thresholding_fraction`, or `max_modes`; FCN3.1 from `lmax`, or, without it, from the band limit of its input grid scaled by `hard_thresholding_fraction`.
+
 ### The input of a network
 
 In each step, the `StepWrapper` assembles the input of the network as a `ModelInput`: the state window `(B, n_history + 1, C, H, W)`, normalized with its history statistics, the dynamic features as the data holds them, and the static features, each in a field of its own. A network that declares `takes_model_input = True` gets it as it is:
