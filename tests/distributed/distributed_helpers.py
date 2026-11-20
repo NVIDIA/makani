@@ -115,15 +115,16 @@ def _init_grid(cls):
     cls.grid_size_w = int(os.getenv("GRID_W", 1))
     cls.grid_size_m = int(os.getenv("GRID_M", 1))
     cls.grid_size_e = int(os.getenv("GRID_E", 1))
-    cls.world_size = cls.grid_size_h * cls.grid_size_w * cls.grid_size_m * cls.grid_size_e
 
-    # init groups
+    # init groups; the batch dimension takes the ranks that remain
     comm.init(
         model_parallel_sizes=[cls.grid_size_h, cls.grid_size_w, cls.grid_size_m],
         model_parallel_names=["h", "w", "matmul"],
         data_parallel_sizes=[cls.grid_size_e, -1],
         data_parallel_names=["ensemble", "batch"],
     )
+    cls.grid_size_b = comm.get_size("batch")
+    cls.world_size = comm.get_world_size()
     cls.world_rank = comm.get_world_rank()
 
     if torch.cuda.is_available():
