@@ -115,6 +115,7 @@ _loss_zero_params = [
     ([{"type": "l2", "channel_weights": "constant"}], False),
     ([{"type": "l1", "channel_weights": "constant"}], False),
     ([{"type": "h1", "channel_weights": "constant"}], False),
+    ([{"type": "amse", "channel_weights": "constant"}], False),
     ([{"type": "drift_regularization"}], False),
 ]
 
@@ -694,6 +695,20 @@ class TestSpectralRelativeLoss(unittest.TestCase):
 
 
 # ===========================================================================
+def _red_field(batch=_BATCH, channels=_NUM_CH, exponent=1.5):
+    """A field with a red spectrum, amplitudes (l + 1)^-exponent at each degree l, and unit variance."""
+    from torch_harmonics import InverseRealSHT
+
+    isht = InverseRealSHT(sht_grid((_IMG_H, _IMG_W), "equiangular"))
+    lmax, mmax = isht.lmax, isht.mmax
+    amplitude = (torch.arange(lmax, dtype=torch.float32) + 1.0).pow(-exponent).reshape(-1, 1)
+    coeffs = torch.complex(torch.randn(batch, channels, lmax, mmax), torch.randn(batch, channels, lmax, mmax))
+    coeffs = torch.tril(coeffs * amplitude)
+    coeffs[..., 0] = coeffs[..., 0].real
+    field = isht(coeffs)
+    return field / field.std(dim=(-2, -1), keepdim=True)
+
+
 class TestSpectralAMSELoss(unittest.TestCase):
 
     def setUp(self):
@@ -702,6 +717,32 @@ class TestSpectralAMSELoss(unittest.TestCase):
 
     def _fn(self):
         return SpectralAMSELoss(**_SPEC_KWARGS)
+
+    def test_perfect_forecast_of_a_red_spectrum(self):
+        """
+        A perfect forecast scores 0, with zero gradient, also on a red spectrum, whose small scales hold little power:
+        a guard that added a fixed eps to the product of the powers swamped them, so that the loss of a perfect
+        forecast came out at about twice the power of the small scales, with a gradient that damped them.
+        """
+        fn = self._fn()
+        tar = _red_field()
+        prd = tar.clone().requires_grad_(True)
+        loss = fn(prd, tar)
+        loss.sum().backward()
+
+        # well below the loss of a 1% amplitude error; what remains is float32 rounding of the coherence
+        scale = fn(1.01 * tar, tar).abs().max().item()
+        self.assertLess(loss.abs().max().item(), 1e-2 * scale)
+        self.assertLess(prd.grad.abs().max().item(), 1e-3)
+
+    def test_zero_power_stays_finite(self):
+        """A prediction without power at some degrees, here none at all, gives a finite loss and gradient."""
+        fn = self._fn()
+        prd = torch.zeros(_BATCH, _NUM_CH, _IMG_H, _IMG_W, requires_grad=True)
+        loss = fn(prd, _red_field())
+        loss.sum().backward()
+        self.assertTrue(torch.isfinite(loss).all())
+        self.assertTrue(torch.isfinite(prd.grad).all())
 
     def test_amplitude_difference_penalized(self):
         """prd = 2*tar has identical phase but double amplitude -> amplitude term > 0, loss > 0."""
@@ -3677,15 +3718,15 @@ class TestSpectralCoherenceLoss(unittest.TestCase):
     def test_zero_on_perfect_prediction(self, relative, verbose=False):
         """All ensemble members == observation:
           - psd_skill = 0 exactly (same inputs through the same op)
-          - coherences = P / sqrt(P² + eps) → 1 only as eps → 0
+          - coherences = P / (sqrt(P) * sqrt(P)) = 1, with the default arguments
 
-        Setting eps=0 collapses ``1 - P/sqrt(P²)`` to algebraically zero, but
+        ``1 - P/(sqrt(P) sqrt(P))`` is algebraically zero, but
         the loss uses two paths to compute |X|²: ``X.abs().square()`` for the
         PSD term and ``Re(X.conj() * X)`` for coherence. These are equal in
         real arithmetic but differ by a sqrt-then-square ULP per mode in fp32,
         so after summing 75 (l, channel) modes the residual lands at ~1e-6 for
         the relative case. atol is set above that floor."""
-        fn = self._fn(relative=relative, eps=0.0)
+        fn = self._fn(relative=relative)
         obs = _rand()
         fc = obs.unsqueeze(1).expand(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W).clone()
         out = fn(fc, obs)
@@ -4287,7 +4328,6 @@ class TestEnsembleLossE1FastPath(unittest.TestCase):
     def _coherence_regularization(self):
         return CoherenceRegularization(
             **_SPEC_KWARGS,
-            eps=1e-16,
             ensemble_coherence_weight=0.5,
             spatial_distributed=False,
             ensemble_distributed=False,
@@ -4520,7 +4560,7 @@ class TestCoherenceRegularization(unittest.TestCase):
     The loss penalizes low spectral coherence between each ensemble member and
     the observation over a wavenumber band:
 
-        Coh_l = CrossPSD_l / sqrt(PSD^f_l * PSD^y_l + eps)
+        Coh_l = CrossPSD_l / (sqrt(PSD^f_l) * sqrt(PSD^y_l))
         Loss  = mean_{l in band} (1 - mean_e Coh_l)
 
     Coherence is signed, so the loss has three reference points that anchor most
@@ -4529,12 +4569,6 @@ class TestCoherenceRegularization(unittest.TestCase):
         f = +y  -> Coh = +1 -> loss 0    (perfectly correlated)
         f random-> Coh ~  0 -> loss 1    (uncorrelated)
         f = -y  -> Coh = -1 -> loss 2    (anti-correlated)
-
-    Several tests use a tiny eps. The default eps=1e-6 is a stabilizer that
-    biases the ratio toward 0 wherever the PSD is small, which pulls the loss
-    toward the "uncorrelated" value of 1: at eps=1e-6 the perfectly-correlated
-    case scores 0.086 rather than 0. That is fine for training but makes the
-    exact reference points untestable, so the analytic tests shrink eps.
 
     This class also serves as the regression test for the three bugs reported in
     issue #95, each marked below.
@@ -4576,10 +4610,18 @@ class TestCoherenceRegularization(unittest.TestCase):
 
     # -- analytic reference points -------------------------------------------
 
+    def test_fully_correlated_red_spectrum_is_zero(self):
+        """Also where the small scales hold little power, as in a red spectrum, f = y has coherence 1."""
+        obs = _red_field()
+        out = self._fn()(self._broadcast(obs, self._E), obs)
+        self.assertTrue(
+            torch.allclose(out, torch.zeros_like(out), atol=1e-5), f"expected 0, got mean {out.mean().item()}"
+        )
+
     def test_fully_correlated_is_zero(self):
         """f = y is perfect coherence, so the loss must vanish."""
         obs = _rand()
-        out = self._fn(eps=1e-16)(self._broadcast(obs, self._E), obs)
+        out = self._fn()(self._broadcast(obs, self._E), obs)
         self.assertTrue(
             torch.allclose(out, torch.zeros_like(out), atol=1e-3), f"expected 0, got mean {out.mean().item()}"
         )
@@ -4592,7 +4634,7 @@ class TestCoherenceRegularization(unittest.TestCase):
         identically to a perfect forecast.
         """
         obs = _rand()
-        out = self._fn(eps=1e-16)(self._broadcast(obs, self._E, scale=-1.0), obs)
+        out = self._fn()(self._broadcast(obs, self._E, scale=-1.0), obs)
         self.assertTrue(
             torch.allclose(out, 2.0 * torch.ones_like(out), atol=1e-3), f"expected 2, got mean {out.mean().item()}"
         )
@@ -4602,13 +4644,13 @@ class TestCoherenceRegularization(unittest.TestCase):
 
         This one is statistical rather than exact, hence the loose tolerance.
         """
-        out = self._fn(eps=1e-16)(_rand_ensemble(self._E), _rand())
+        out = self._fn()(_rand_ensemble(self._E), _rand())
         self.assertAlmostEqual(out.mean().item(), 1.0, delta=0.1)
 
     def test_ordering_of_the_three_regimes(self):
         """correlated < uncorrelated < anti-correlated, without tolerance games."""
         obs = _rand()
-        fn = self._fn(eps=1e-16)
+        fn = self._fn()
         pos = fn(self._broadcast(obs, self._E), obs).mean().item()
         rnd = fn(_rand_ensemble(self._E), obs).mean().item()
         neg = fn(self._broadcast(obs, self._E, scale=-1.0), obs).mean().item()
@@ -4618,7 +4660,7 @@ class TestCoherenceRegularization(unittest.TestCase):
     def test_positive_scaling_is_invariant(self):
         """Coherence is normalized, so f = a*y scores 0 for any a > 0."""
         obs = _rand()
-        fn = self._fn(eps=1e-16)
+        fn = self._fn()
         for scale in (0.5, 1.0, 7.0):
             out = fn(self._broadcast(obs, self._E, scale=scale), obs)
             self.assertTrue(
@@ -4636,7 +4678,7 @@ class TestCoherenceRegularization(unittest.TestCase):
         invisible to the loss. A sign flip must move the result by 2.
         """
         obs = _rand()
-        fn = self._fn(eps=1e-16)
+        fn = self._fn()
         pos = fn(self._broadcast(obs, self._E), obs)
         neg = fn(self._broadcast(obs, self._E, scale=-1.0), obs)
         self.assertTrue(torch.allclose(neg - pos, 2.0 * torch.ones_like(pos), atol=1e-3))

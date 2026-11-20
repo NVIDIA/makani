@@ -20,7 +20,7 @@ import math
 import torch
 from torch import amp
 
-from makani.losses.base_loss import GeometricBaseLoss, SpectralBaseLoss, LossType
+from makani.losses.base_loss import GeometricBaseLoss, SpectralBaseLoss, LossType, norm_product
 from makani.distributed import comm
 
 # distributed stuff
@@ -218,7 +218,9 @@ class CoherenceRegularization(SpectralBaseLoss):
         CrossPSD_l  = sum_{m} w_m * Re( f^(e)_{c,l,m} * conj(y_{c,l,m}) )
         PSD^f_l     = sum_{m} w_m * |f^(e)_{c,l,m}|^2
         PSD^y_l     = sum_{m} w_m * |y_{c,l,m}|^2
-        Coh_l       = CrossPSD_l / sqrt(PSD^f_l * PSD^y_l + eps)
+        Coh_l       = CrossPSD_l / (sqrt(PSD^f_l) * sqrt(PSD^y_l))
+
+    with the powers clamped to the smallest positive number, so that the coherence is 0 where a field has no power.
 
     Loss = (1 / |band|) * sum_{l in band} (1 - mean_{e} Coh_l^(e))
 
@@ -250,7 +252,6 @@ class CoherenceRegularization(SpectralBaseLoss):
         ensemble_distributed: Optional[bool] = False,
         ensemble_weights: Optional[torch.Tensor] = None,
         ensemble_coherence_weight: Optional[float] = 0.0,
-        eps: Optional[float] = 1.0e-6,
         **kwargs,
     ):
         super().__init__(
@@ -267,7 +268,6 @@ class CoherenceRegularization(SpectralBaseLoss):
             ensemble_distributed and comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1)
         )
         self.ensemble_coherence_weight = ensemble_coherence_weight
-        self.eps = eps
 
         if ensemble_weights is not None:
             self.register_buffer("ensemble_weights", ensemble_weights, persistent=False)
@@ -381,14 +381,14 @@ class CoherenceRegularization(SpectralBaseLoss):
                 coh_inter = reduce_from_parallel_region(coh_inter, "ensemble")
 
         # signed coherence in [-1, 1] against the observation
-        coh_obs = cross_psd / torch.sqrt(psd_fcasts * psd_obs + self.eps)
+        coh_obs = cross_psd / norm_product(psd_fcasts, psd_obs)
 
         # (1 - Coh) averaged over the ensemble -> (B, C, L)
         loss = (1.0 - coh_obs).sum(dim=0) / float(num_ensemble)
 
         # optional inter-member decoherence penalty, diagonal excluded
         if compute_inter:
-            coh_inter = coh_inter / torch.sqrt(psd_fcasts.unsqueeze(0) * psd_fcasts.unsqueeze(1) + self.eps)
+            coh_inter = coh_inter / norm_product(psd_fcasts.unsqueeze(0), psd_fcasts.unsqueeze(1))
             eye = torch.eye(num_ensemble, device=coh_inter.device).bool().reshape(num_ensemble, num_ensemble, 1, 1, 1)
             coh_inter = torch.where(eye, 0.0, 1.0 - coh_inter)
             coh_inter = coh_inter.sum(dim=(0, 1)) / float(num_ensemble * (num_ensemble - 1))

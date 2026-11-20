@@ -1266,9 +1266,12 @@ class TestDistributedLoss(unittest.TestCase):
         # shapes
         B, E, C, H, W = batch_size, ens_size, num_chan, nlat, nlon
 
+        # observations of the same amplitude as the forecasts: the gradient of the coherence with respect to the
+        # observation scales like 1 / |y| at each degree, so observations a hundred times smaller than the forecasts
+        # would amplify the rounding differences of the distributed SHT beyond any useful tolerance
         mean, sigma = (1.0, 2.0)
         forecasts_full = torch.randn((B, E, C, H, W), dtype=torch.float32, device=self.device) * sigma + mean
-        obs_full = torch.randn((B, C, H, W), dtype=torch.float32, device=self.device) * sigma * 0.01 + mean
+        obs_full = torch.randn((B, C, H, W), dtype=torch.float32, device=self.device) * sigma + mean
 
         # local loss
         loss_fn_local = SpectralCoherenceLoss(

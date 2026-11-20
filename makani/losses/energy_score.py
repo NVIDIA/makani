@@ -19,7 +19,14 @@ import math
 import torch
 from torch import amp
 
-from makani.losses.base_loss import GeometricBaseLoss, SpectralBaseLoss, LossType, abs_pow, sum_channels_per_step
+from makani.losses.base_loss import (
+    GeometricBaseLoss,
+    SpectralBaseLoss,
+    LossType,
+    abs_pow,
+    norm_product,
+    sum_channels_per_step,
+)
 from makani.distributed import comm
 
 # distributed stuff
@@ -777,11 +784,9 @@ class SpectralCoherenceLoss(SpectralBaseLoss):
             coherence_forecasts = reduce_from_parallel_region(coherence_forecasts, "w")
             coherence_observations = reduce_from_parallel_region(coherence_observations, "w")
 
-        # divide the coherence by the product of the norms (with epsilon for numerical stability)
-        coherence_observations = coherence_observations / torch.sqrt(psd_forecasts * psd_observations + self.eps)
-        coherence_forecasts = coherence_forecasts / torch.sqrt(
-            psd_forecasts.unsqueeze(0) * psd_forecasts.unsqueeze(1) + self.eps
-        )
+        # divide the coherence by the product of the norms, clamped where a field has no power
+        coherence_observations = coherence_observations / norm_product(psd_forecasts, psd_observations)
+        coherence_forecasts = coherence_forecasts / norm_product(psd_forecasts.unsqueeze(0), psd_forecasts.unsqueeze(1))
 
         # compute the error in the power spectral density
         psd_skill = (psd_forecasts - psd_observations).square()

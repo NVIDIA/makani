@@ -266,6 +266,27 @@ class LossType(object):
     Probabilistic = 2
 
 
+def clamped_sqrt(power: torch.Tensor) -> torch.Tensor:
+    """
+    The norm of a power, ``sqrt(power)``, with the power clamped to the smallest positive number of its dtype.
+
+    Where the power is zero, the norm is tiny but positive, so that a division by it stays finite and so does the
+    gradient of the square root. The clamp touches nothing else: a guard that adds a fixed ``eps`` instead depends on
+    the scale of the data, and swamps the powers of the small scales.
+    """
+    return torch.sqrt(torch.clamp(power, min=torch.finfo(power.dtype).tiny))
+
+
+def norm_product(power_a: torch.Tensor, power_b: torch.Tensor) -> torch.Tensor:
+    """
+    The product of the norms of two powers, ``sqrt(power_a) * sqrt(power_b)``, the denominator of a coherence.
+
+    Each norm is clamped, see :func:`clamped_sqrt`, so that a coherence is 0 where either field has no power, and
+    the product does not underflow where both have little.
+    """
+    return clamped_sqrt(power_a) * clamped_sqrt(power_b)
+
+
 def sum_channels_per_step(x: torch.Tensor, dim: int, channels_per_step: int) -> torch.Tensor:
     """
     Sum the channels of each lead step.
