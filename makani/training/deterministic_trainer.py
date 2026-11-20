@@ -47,6 +47,7 @@ from makani.models import model_registry
 # distributed computing stuff
 from makani.distributed import comm
 from makani.utils.precision import AutocastManager
+from makani.utils.jit import compiles_model
 
 from makani.distributed.mappings import init_gradient_reduction_hooks
 from makani.distributed.helpers import sync_params, gather_uneven, barrier
@@ -253,7 +254,7 @@ class Trainer(Driver):
     # compile stuff
     def _compile_model(self):
 
-        if self.params.jit_mode == "inductor":
+        if compiles_model(self.params):
             # compile the step, not the rollout: the loop and the noise stay in Python, and the
             # compiled step does not depend on the number of steps. See StepWrapper.compile_step
             wrapper = self.model.module if isinstance(self.model, nn.parallel.DistributedDataParallel) else self.model

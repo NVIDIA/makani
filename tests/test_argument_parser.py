@@ -33,7 +33,7 @@ class TestArgumentsToParams(unittest.TestCase):
         params = self._params(
             [
                 "--amp_mode=bf16",
-                "--jit_mode=inductor",
+                "--jit_mode=all",
                 "--checkpointing_level=2",
                 "--print_timings_frequency=10",
                 "--enable_synthetic_data",
@@ -43,7 +43,7 @@ class TestArgumentsToParams(unittest.TestCase):
             ]
         )
         self.assertEqual(params.amp_mode, "bf16")
-        self.assertEqual(params.jit_mode, "inductor")
+        self.assertEqual(params.jit_mode, "all")
         self.assertEqual(params.checkpointing_level, 2)
         self.assertEqual(params.print_timings_frequency, 10)
         self.assertTrue(params.enable_synthetic_data)
@@ -87,8 +87,8 @@ class TestArgumentsToParams(unittest.TestCase):
         self.assertEqual(params.data_parallel_names, ["ensemble", "batch"])
 
     def test_parser_without_training_options(self):
-        params = self._params(["--jit_mode=inductor"], training=False)
-        self.assertEqual(params.jit_mode, "inductor")
+        params = self._params(["--jit_mode=metrics"], training=False)
+        self.assertEqual(params.jit_mode, "metrics")
         self.assertFalse(params.is_set("save_checkpoint"))
         self.assertFalse(params.is_set("n_future"))
 

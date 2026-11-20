@@ -42,6 +42,7 @@ import torch.distributed as dist
 from torch_harmonics.distributed import compute_split_shapes
 from makani.distributed.mappings import gather_from_parallel_region, reduce_from_parallel_region
 from makani.distributed.helpers import barrier
+from makani.utils.jit import compiles_metrics
 from makani.data.grid_types import DEFAULT_GRID_TYPE
 from makani.utils.grids import make_grid
 
@@ -271,11 +272,12 @@ class MetricsHandler:
         ssr_var_names=["u10m", "t2m", "sp", "sst", "u500", "z500", "q500", "q50"],
         rh_var_names=[],
         mask_target_nan=True,
-        compile=True,
+        compile=None,
     ):
 
         self.device = device
-        self.compile = compile
+        # compile the metrics as jit_mode says, unless told explicitly
+        self.compile = compiles_metrics(params) if compile is None else compile
         self.log_to_screen = params.log_to_screen
         self.log_to_wandb = params.log_to_wandb
         # these are the names of the channels emitted by the dataloader in that order
