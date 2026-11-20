@@ -20,9 +20,6 @@ import json
 import numpy as np
 import h5py as h5
 import argparse as ap
-from itertools import accumulate
-import operator
-from bisect import bisect_right
 from glob import glob
 
 # MPI
@@ -30,9 +27,12 @@ from makani.datasets.parallel import get_comm, init_torch_distributed, shutdown_
 
 import torch
 import torch.distributed as dist
-from torch_harmonics import RealSHT, as_grid
+from torch_harmonics import RealSHT
 
-from makani.datasets.helpers import DistributedProgressBar
+from makani.utils.grids import make_grid
+from makani.data.grid_types import canonical_grid_type
+
+from makani.datasets.helpers import DistributedProgressBar, file_sample_ranges
 from makani.datasets.helpers import welford_combine, collective_reduce, binary_reduce
 
 
@@ -174,6 +174,7 @@ def compute_power_spectra(
     num_samples = None
     channel_names = None
     combined_file = None
+    grid_type = None
     if comm_rank == 0:
         if os.path.isdir(input_path):
             combined_file = False
@@ -201,13 +202,14 @@ def compute_power_spectra(
 
         # read channel names
         channel_names = metadata["coords"]["channel"]
+        grid_type = canonical_grid_type(metadata["coords"]["grid_type"], source=metadata_file)
 
     # communicate important information
-    combined_file = comm.bcast(combined_file, root=0)
     channel_names = comm.bcast(channel_names, root=0)
     filelist = comm.bcast(filelist, root=0)
     num_samples = comm.bcast(num_samples, root=0)
     data_shape = comm.bcast(data_shape, root=0)
+    grid_type = comm.bcast(grid_type, root=0)
 
     # get file offsets
     num_samples_total = sum(num_samples)
@@ -215,7 +217,7 @@ def compute_power_spectra(
     height, width = (data_shape[2], data_shape[3])
 
     # SHT:
-    sht = RealSHT(as_grid("equiangular", nlat=height, nlon=width)).to(device)
+    sht = RealSHT(make_grid((height, width), grid_type)).to(device)
 
     if comm_rank == 0:
         print(
@@ -226,8 +228,6 @@ def compute_power_spectra(
     num_samples_chunk = (num_samples_total + comm_size - 1) // comm_size
     samples_start = num_samples_chunk * comm_rank
     samples_end = min([samples_start + num_samples_chunk, num_samples_total])
-    sample_offsets = list(accumulate(num_samples, operator.add))[:-1]
-    sample_offsets.insert(0, 0)
     # num_samples_local = samples_end - samples_start
 
     if comm_rank == 0:
@@ -237,23 +237,8 @@ def compute_power_spectra(
             print(f"Rank {comm_rank}, working on samples [{samples_start}, {samples_end})", flush=True)
         comm.Barrier()
 
-    # convert list of indices to files and ranges in files:
-    if combined_file:
-        mapping = {filelist[0]: (samples_start, samples_end)}
-    else:
-        mapping = {}
-        for idx in range(samples_start, samples_end):
-            # compute indices
-            file_idx = bisect_right(sample_offsets, idx) - 1
-            local_idx = idx - sample_offsets[file_idx]
-
-            # lookup
-            filename = filelist[file_idx]
-            if filename in mapping:
-                # update upper and lower bounds
-                mapping[filename] = (min(local_idx, mapping[filename][0]), max(local_idx, mapping[filename][1]))
-            else:
-                mapping[filename] = (local_idx, local_idx)
+    # the samples of this rank, as a range within each file
+    mapping = file_sample_ranges(filelist, num_samples, samples_start, samples_end)
 
     # initialize arrays
     stats = dict(
@@ -267,10 +252,8 @@ def compute_power_spectra(
     # compute local stats
     progress = DistributedProgressBar(num_samples_total, comm)
     start = time.time()
-    for filename, index_bounds in mapping.items():
-        tmpstats = get_file_power_spectra(
-            filename, slice(index_bounds[0], index_bounds[1] + 1), sht, batch_size, device, progress
-        )
+    for filename, file_slice in mapping.items():
+        tmpstats = get_file_power_spectra(filename, file_slice, sht, batch_size, device, progress)
         stats = welford_combine(stats, tmpstats)
 
     # wait for everybody else
