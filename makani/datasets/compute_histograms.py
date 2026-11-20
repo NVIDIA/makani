@@ -20,13 +20,11 @@ import pickle
 import numpy as np
 import h5py as h5
 import argparse as ap
-from itertools import accumulate
-import operator
-from bisect import bisect_right
 from tqdm import tqdm
 
 # MPI
 from makani.datasets.parallel import MPI, get_comm
+from makani.datasets.helpers import file_sample_ranges
 
 # we need the parser
 import json
@@ -159,14 +157,12 @@ def get_file_histograms(
             # get histograms along channel axis
             datalist = np.split(data, data.shape[1], axis=1)
 
-            # tile the weights
-            quadrature_weights = np.tile(quadrature_weights, (batch_stop - batch_start, 1, 1, 1))
-
-            print(datalist[0].shape, quadrature_weights.shape)
+            # the weights of every sample of the batch
+            batch_weights = np.tile(quadrature_weights, (batch_stop - batch_start, 1, 1, 1))
 
             # generate histograms
             tmphistograms = [
-                np.histogram(x, bins=nbins, range=(minval, maxval), weights=quadrature_weights)
+                np.histogram(x, bins=nbins, range=(minval, maxval), weights=batch_weights)
                 for x, minval, maxval in zip(datalist, minvals, maxvals)
             ]
 
@@ -312,8 +308,6 @@ def compute_histograms(
     samples_start = num_samples_chunk * comm_rank
     samples_end = min([samples_start + num_samples_chunk, num_samples_total])
     num_samples_local = samples_end - samples_start
-    sample_offsets = list(accumulate(num_samples, operator.add))[:-1]
-    sample_offsets.insert(0, 0)
 
     if comm_rank == 0:
         print("Loading data with the following chunking:")
@@ -322,20 +316,8 @@ def compute_histograms(
             print("Rank = ", comm_rank, " samples start = ", samples_start, " samples end = ", samples_end, flush=True)
         comm.Barrier()
 
-    # convert list of indices to files and ranges in files:
-    mapping = {}
-    for idx in range(samples_start, samples_end):
-        # compute indices
-        file_idx = bisect_right(sample_offsets, idx) - 1
-        local_idx = idx - sample_offsets[file_idx]
-
-        # lookup
-        filename = filelist[file_idx]
-        if filename in mapping:
-            # update upper and lower bounds
-            mapping[filename] = (min(local_idx, mapping[filename][0]), max(local_idx, mapping[filename][1]))
-        else:
-            mapping[filename] = (local_idx, local_idx)
+    # the samples of this rank, as a range within each file
+    mapping = file_sample_ranges(filelist, num_samples, samples_start, samples_end)
 
     # offsets has order like:
     # [0, 1460, 2920, ...]
@@ -349,10 +331,10 @@ def compute_histograms(
     mins = []
     maxs = []
     count = 0
-    for filename, index_bounds in mapping.items():
+    for filename, file_slice in mapping.items():
         tmpcount, tmpmins, tmpmaxs = get_file_stats(
             filename,
-            file_slice=slice(index_bounds[0], index_bounds[1] + 1),
+            file_slice=file_slice,
             batch_size=batch_size,
             bias=bias,
             norm=norm,
@@ -390,9 +372,7 @@ def compute_histograms(
 
     # set nbins to sqrt(count) if smaller than one
     if nbins <= 0:
-        nbins = np.sqrt(count)
-    else:
-        nbins = nbins
+        nbins = max(1, int(np.sqrt(count)))
 
     # wait for rank 0 to finish
     comm.Barrier()
@@ -404,10 +384,10 @@ def compute_histograms(
         progress = None
     start = time.time()
     histograms = None
-    for filename, index_bounds in mapping.items():
+    for filename, file_slice in mapping.items():
         tmphistograms = get_file_histograms(
             filename,
-            file_slice=slice(index_bounds[0], index_bounds[1] + 1),
+            file_slice=file_slice,
             minvals=mins,
             maxvals=maxs,
             nbins=nbins,

@@ -20,9 +20,6 @@ import json
 import numpy as np
 import h5py as h5
 import argparse as ap
-from itertools import accumulate
-import operator
-from bisect import bisect_right
 from glob import glob
 
 # MPI
@@ -33,7 +30,7 @@ import torch.distributed as dist
 from makani.utils.grids import GridQuadrature, make_grid
 from makani.data.grid_types import canonical_grid_type
 
-from makani.datasets.helpers import DistributedProgressBar
+from makani.datasets.helpers import DistributedProgressBar, file_sample_ranges
 
 from makani.datasets.helpers import (
     mask_data,
@@ -366,7 +363,6 @@ def compute_stats(
         grid_type = canonical_grid_type(metadata["coords"]["grid_type"], source=metadata_file)
 
     # communicate important information
-    combined_file = comm.bcast(combined_file, root=0)
     channel_names = comm.bcast(channel_names, root=0)
     grid_type = comm.bcast(grid_type, root=0)
     filelist = comm.bcast(filelist, root=0)
@@ -397,8 +393,6 @@ def compute_stats(
     num_samples_chunk = (num_samples_total + comm_size - 1) // comm_size
     samples_start = num_samples_chunk * comm_rank
     samples_end = min([samples_start + num_samples_chunk, num_samples_total])
-    sample_offsets = list(accumulate(num_samples, operator.add))[:-1]
-    sample_offsets.insert(0, 0)
     # num_samples_local = samples_end - samples_start
 
     if comm_rank == 0:
@@ -408,23 +402,8 @@ def compute_stats(
             print(f"Rank {comm_rank}, working on samples [{samples_start}, {samples_end})", flush=True)
         comm.Barrier()
 
-    # convert list of indices to files and ranges in files:
-    if combined_file:
-        mapping = {filelist[0]: (samples_start, samples_end)}
-    else:
-        mapping = {}
-        for idx in range(samples_start, samples_end):
-            # compute indices
-            file_idx = bisect_right(sample_offsets, idx) - 1
-            local_idx = idx - sample_offsets[file_idx]
-
-            # lookup
-            filename = filelist[file_idx]
-            if filename in mapping:
-                # update upper and lower bounds
-                mapping[filename] = (min(local_idx, mapping[filename][0]), max(local_idx, mapping[filename][1]))
-            else:
-                mapping[filename] = (local_idx, local_idx)
+    # the samples of this rank, as a range within each file
+    mapping = file_sample_ranges(filelist, num_samples, samples_start, samples_end)
 
     # initialize arrays
     stats = dict(
@@ -471,10 +450,10 @@ def compute_stats(
     # compute local stats
     progress = DistributedProgressBar(num_samples_total, comm)
     start = time.time()
-    for filename, index_bounds in mapping.items():
+    for filename, file_slice in mapping.items():
         tmpstats = get_file_stats(
             filename,
-            slice(index_bounds[0], index_bounds[1] + 1),
+            file_slice,
             wind_channels,
             quadrature,
             fail_on_nan,

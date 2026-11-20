@@ -2,8 +2,9 @@ name: Run distributed tests
 
 # The distributed suite on CPU, with the gloo backend, over polar x azimuth process grids with
 # 1, 2 and 4 ranks per direction, each without and with a 2-way ensemble dimension, and two grids
-# with 2-way matmul (feature) parallelism, alone and with a 2 x 2 spatial grid; the batch
-# dimension is filled with whatever ranks remain, which is always 1 here. DALI runs its CPU
+# with 2-way matmul (feature) parallelism, alone and with a 2 x 2 spatial grid, and three grids
+# with 2-way batch (data) parallelism, alone, with 2-way polar and with 2-way matmul parallelism;
+# the batch dimension is filled with the ranks that remain (GRID_B of them). DALI runs its CPU
 # pipelines on grids of up to 8 ranks; everything CUDA-only (TransformerEngine) skips.
 #
 # Heavy (up to 16 processes per grid), so it does not run on every push: tests.yml calls it on
@@ -47,7 +48,7 @@ jobs:
         path: dist/*.whl
 
   distributed:
-    name: Grid ${{ matrix.grid_h }}x${{ matrix.grid_w }}, matmul ${{ matrix.grid_m }}, ensemble ${{ matrix.grid_e }}
+    name: Grid ${{ matrix.grid_h }}x${{ matrix.grid_w }}, matmul ${{ matrix.grid_m }}, ensemble ${{ matrix.grid_e }}, batch ${{ matrix.grid_b }}
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -58,6 +59,7 @@ jobs:
         grid_h: [1, 2, 4]
         grid_w: [1, 2, 4]
         grid_m: [1]
+        grid_b: [1]
         exclude:
           # 4 x 4 exceeds 8 spatial ranks
           - {grid_h: 4, grid_w: 4}
@@ -66,8 +68,13 @@ jobs:
         include:
           # matmul parallelism, alone and with the spatial one: the layers split over the matmul ranks,
           # and the reductions of those that are not
-          - {grid_h: 1, grid_w: 1, grid_m: 2, grid_e: 1}
-          - {grid_h: 2, grid_w: 2, grid_m: 2, grid_e: 1}
+          - {grid_h: 1, grid_w: 1, grid_m: 2, grid_e: 1, grid_b: 1}
+          - {grid_h: 2, grid_w: 2, grid_m: 2, grid_e: 1, grid_b: 1}
+          # batch parallelism, alone and with the spatial and the matmul one: the data-parallel
+          # reductions over the batch ranks, next to the model-parallel ones
+          - {grid_h: 1, grid_w: 1, grid_m: 1, grid_e: 1, grid_b: 2}
+          - {grid_h: 2, grid_w: 1, grid_m: 1, grid_e: 1, grid_b: 2}
+          - {grid_h: 1, grid_w: 1, grid_m: 2, grid_e: 1, grid_b: 2}
 
     steps:
     - uses: actions/checkout@v5
@@ -103,11 +110,12 @@ jobs:
         GRID_W: ${{ matrix.grid_w }}
         GRID_M: ${{ matrix.grid_m }}
         GRID_E: ${{ matrix.grid_e }}
+        GRID_B: ${{ matrix.grid_b }}
       run: |
         # every rank runs its own DALI pipeline and spawns its own Python worker, which imports torch
         # again; with 16 ranks that exhausts the runner's memory, so the DALI tests skip there
-        if [ $((GRID_H * GRID_W * GRID_M * GRID_E)) -gt 8 ]; then
-          echo "Not installing DALI on $((GRID_H * GRID_W * GRID_M * GRID_E)) ranks, the DALI tests skip"
+        if [ $((GRID_H * GRID_W * GRID_M * GRID_E * GRID_B)) -gt 8 ]; then
+          echo "Not installing DALI on $((GRID_H * GRID_W * GRID_M * GRID_E * GRID_B)) ranks, the DALI tests skip"
           exit 0
         fi
         # CPU pipelines without the GPU codec libraries, see test_serial.yml
@@ -121,6 +129,7 @@ jobs:
         GRID_W: ${{ matrix.grid_w }}
         GRID_M: ${{ matrix.grid_m }}
         GRID_E: ${{ matrix.grid_e }}
+        GRID_B: ${{ matrix.grid_b }}
         MASTER_ADDR: localhost
         MASTER_PORT: "29501"
         # the ranks share the runner's few vCPUs; threads per rank would oversubscribe them further
@@ -134,8 +143,8 @@ jobs:
         #
         # Every rank of every file writes its own coverage data file; the coverage job in
         # tests.yml combines them across ranks and grids, and with the serial suite's.
-        nranks=$((GRID_H * GRID_W * GRID_M * GRID_E))
-        grid="${GRID_H}x${GRID_W}x${GRID_M}x${GRID_E}"
+        nranks=$((GRID_H * GRID_W * GRID_M * GRID_E * GRID_B))
+        grid="${GRID_H}x${GRID_W}x${GRID_M}x${GRID_E}x${GRID_B}"
         status=0
         mkdir -p covdata
         for f in tests/distributed/test_distributed_*.py; do
@@ -163,6 +172,6 @@ jobs:
     - uses: actions/upload-artifact@v4
       if: ${{ !cancelled() }}
       with:
-        name: coverage-distributed-${{ matrix.grid_h }}x${{ matrix.grid_w }}x${{ matrix.grid_m }}x${{ matrix.grid_e }}
+        name: coverage-distributed-${{ matrix.grid_h }}x${{ matrix.grid_w }}x${{ matrix.grid_m }}x${{ matrix.grid_e }}x${{ matrix.grid_b }}
         path: covdata/
         include-hidden-files: true  # the data files are .coverage.*
