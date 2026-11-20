@@ -1640,7 +1640,7 @@ class TestLossHandler(unittest.TestCase):
 
         shape = (self.params.batch_size, self.params.N_out_channels, self.params.img_shape_x, self.params.img_shape_y)
 
-        # this needs to be sufficiently large to mitigarte the bias due to the initialization of the running stats
+        # the running stats over many batches
         num_samples = 100
         for i in range(num_samples):
 
@@ -1667,6 +1667,40 @@ class TestLossHandler(unittest.TestCase):
             self.assertTrue(compare_tensors("mean", mean, expected_mean, verbose=verbose))
         with self.subTest(desc="var"):
             self.assertTrue(compare_tensors("var", var, expected_var, verbose=verbose))
+
+    def test_running_stats_are_exact_from_the_start(self, verbose=False):
+        """
+        The running stats start from an empty sum, so after a few batches they are the mean and variance of every loss
+        value seen, however small their variance, and before any batch, or after a reset, they are 0.
+        """
+        self.params.losses = [{"type": "l2"}]
+        loss_obj = LossHandler(self.params, track_running_stats=True)
+        loss_obj.train()
+
+        with self.subTest(desc="before any batch"):
+            var, mean = loss_obj.get_running_stats()
+            self.assertTrue(compare_tensors("var", var, torch.zeros_like(var), atol=0.0, verbose=verbose))
+            self.assertTrue(compare_tensors("mean", mean, torch.zeros_like(mean), atol=0.0, verbose=verbose))
+
+        shape = (self.params.batch_size, self.params.N_out_channels, self.params.img_shape_x, self.params.img_shape_y)
+        values = []
+        for _ in range(3):
+            tar = torch.zeros(*shape)
+            prd = 0.01 * torch.randn(*shape)
+            loss_obj(prd, tar)
+            values.append(loss_obj.loss_fn[0](prd, tar))
+        expected_var, expected_mean = torch.var_mean(torch.cat(values, dim=0), dim=0, correction=0)
+
+        var, mean = loss_obj.get_running_stats()
+        with self.subTest(desc="mean"):
+            self.assertTrue(compare_tensors("mean", mean, expected_mean, atol=0.0, rtol=1e-4, verbose=verbose))
+        with self.subTest(desc="var"):
+            self.assertTrue(compare_tensors("var", var, expected_var, atol=0.0, rtol=1e-3, verbose=verbose))
+
+        with self.subTest(desc="after a reset"):
+            loss_obj.reset_running_stats()
+            var, mean = loss_obj.get_running_stats(correction=1)
+            self.assertTrue(compare_tensors("var", var, torch.zeros_like(var), atol=0.0, verbose=verbose))
 
     @parameterized.expand([(False,), (True,)])
     def test_channel_weights_as_a_list(self, temp_diff_normalization):
@@ -1926,7 +1960,7 @@ class TestLossHandler(unittest.TestCase):
     # ------------------------------------------------------------------
 
     def test_reset_running_stats(self, verbose=False):
-        """reset_running_stats restores running_mean=0, running_var=1, and
+        """reset_running_stats restores running_mean=0, running_var=0 (the M2 of Welford's algorithm), and
         num_batches_tracked=0 after warm-up batches have populated them."""
         self.params.losses = [{"type": "l2"}]
         loss_obj = LossHandler(self.params, track_running_stats=True)
@@ -1948,7 +1982,7 @@ class TestLossHandler(unittest.TestCase):
         )
         self.assertTrue(
             compare_tensors(
-                "running_var reset", loss_obj.running_var, torch.ones_like(loss_obj.running_var), verbose=verbose
+                "running_var reset", loss_obj.running_var, torch.zeros_like(loss_obj.running_var), verbose=verbose
             )
         )
         self.assertEqual(loss_obj.num_batches_tracked.item(), 0)
