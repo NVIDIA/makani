@@ -22,6 +22,7 @@ import torch.distributed as dist
 from makani.distributed import comm
 from makani.distributed.helpers import AVG, SUM, get_sharing, sync_params
 from makani.distributed.mappings import init_gradient_reduction_hooks
+from makani.training.training_helpers import normalize_weights
 
 from .distributed_helpers import _init_grid, reduce_success, sync_and_barrier, teardown_comms
 
@@ -56,6 +57,28 @@ class _TinyModel(nn.Module):
 
     def forward(self, xs):
         return sum((p * x).sum() for p, x in zip(self.parameters(), xs))
+
+
+class _ShardedModel(nn.Module):
+    """
+    A parameter of each kind of sharding, for the weight normalization: each rank holds a shard, and
+    the norm of a parameter is that of the whole tensor, over the shards of all the groups it is split
+    across.
+
+    * ``replicated``: not sharded, each rank normalizes its own tensor.
+    * ``h``: sharded over h, like a spectral weight.
+    * ``spatial``: sharded over h and w, like a position embedding.
+    * ``matmul``: sharded over the matmul ranks, like the weights of a distributed MLP.
+    """
+
+    _SHARDING = {"replicated": [], "h": ["h"], "spatial": [None, "h", "w"], "matmul": ["matmul", None]}
+
+    def __init__(self):
+        super().__init__()
+        for name, sharded_dims in self._SHARDING.items():
+            param = nn.Parameter(torch.zeros(_NUM_FEATURES, dtype=torch.float64))
+            param.sharded_dims_mp = sharded_dims
+            self.register_parameter(name, param)
 
 
 class TestDistributedTrainingHelpers(unittest.TestCase):
@@ -155,6 +178,27 @@ class TestDistributedTrainingHelpers(unittest.TestCase):
             for group, reduction in get_sharing(param).items():
                 expected = self._replay(expected, group, "sum" if reduction == SUM else "mean")
             self._check(f"gradient {pname}", param.grad, expected[self.world_rank], verbose=verbose)
+
+    def test_normalize_weights(self, verbose=False):
+        model = _ShardedModel().to(self.device)
+        with torch.no_grad():
+            for i, p in enumerate(model.parameters()):
+                p.copy_(self._rank_values(0.5 * i))
+
+        initial = {pname: p.detach().clone() for pname, p in model.named_parameters()}
+
+        eps = 1e-5
+        normalize_weights(model, eps=eps)
+
+        # each parameter is divided by the norm of the whole tensor: the sum of squares of the shards, summed
+        # over every group the parameter is split across
+        for pname, param in model.named_parameters():
+            sumsq = self._all_gather(initial[pname].square().sum().reshape(1))
+            for group in model._SHARDING[pname]:
+                if group is not None:
+                    sumsq = self._replay(sumsq, group, "sum")
+            expected = initial[pname] / (sumsq[self.world_rank].sqrt() + eps)
+            self._check(f"normalized {pname}", param.detach(), expected, verbose=verbose)
 
     def test_the_sharing_of_the_model(self):
         model = _TinyModel()

@@ -268,7 +268,7 @@ class TestGetModelMultistep(unittest.TestCase):
 @parameterized_class(("device",), _devices)
 class TestModelOptions(unittest.TestCase):
     """
-    Model options the default configurations leave off: the normalization layers of FCN3 and the
+    Model options the default configurations leave off: the normalization layers of FCN3 and SFNO, and the
     non-linear spectral filter (SpectralAttention) of SFNO.
     """
 
@@ -302,6 +302,13 @@ class TestModelOptions(unittest.TestCase):
     @parameterized.expand([("layer_norm",), ("instance_norm",), ("instance_norm_s2",)])
     def test_fcn3_normalization_layer(self, normalization_layer):
         self.params.nettype = "FCN3"
+        self.params.normalization_layer = normalization_layer
+        self._forward_backward()
+
+    @parameterized.expand([("layer_norm",), ("instance_norm_s2",), ("none",)])
+    def test_sfno_normalization_layer(self, normalization_layer):
+        # instance_norm, the default, is covered by TestModels
+        self.params.nettype = "SFNO"
         self.params.normalization_layer = normalization_layer
         self._forward_backward()
 
