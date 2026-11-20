@@ -37,6 +37,9 @@
 - The stochastic interpolant is brought up to speed with the rest of the codebase: a `StepWrapper` driven by rollouts and the noise controller, configured by a `stochastic_interpolant` block. Breaking: earlier interpolant checkpoints do not load, and `n_future > 0` is refused.
 
 **Fixed**
+- Dataset statistics of a single combined file (`.h5v`) on several ranks: `compute_stats`, `compute_spectra` and `compute_hydrostatic_balance_climatology` read each rank's samples up to and including the first sample of the next rank, so the samples at the rank boundaries counted twice. The four statistics scripts now share the split into per-file ranges, `makani.datasets.helpers.file_sample_ranges`.
+- `compute_spectra` transformed every dataset on an equiangular grid; it now uses the `grid_type` of the dataset metadata, as the other statistics scripts do.
+- `compute_histograms` failed for more than one batch per file, as the quadrature weights grew with every batch, and for `nbins <= 0`, whose fallback of `sqrt(count)` bins was not an integer.
 - The ACC AUC of validation and inference is the mean of the ACC over the rollout, from the first to the last step. It integrated the N steps with a width of 1/N instead of 1/(N - 1), so it came out at (N - 1)/N of the mean, e.g. 0.75 for a perfect forecast over 4 steps, and 0 for a rollout of a single step, which now reports its ACC. Reported ACC AUCs are larger than before, by N/(N - 1).
 - `normalize_static_features: True` raised an `AttributeError` for every configuration, as the area-weighted normalization read `params.img_shape`, which nothing sets; with a crop, it also applied the weights of the crop to the whole grid. It now takes the statistics over the crop, the region the model sees.
 - `GaussianMMDLoss` with spatial weights and without `ensemble_distributed`, in a run with ensemble parallelism: the weights were split over the ensemble ranks anyway, so the loss raised a shape mismatch.

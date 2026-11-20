@@ -41,6 +41,25 @@ def mask_data(data):
     return data_masked, valid_mask
 
 
+def file_sample_ranges(filelist, num_samples, samples_start, samples_end):
+    """
+    The samples ``[samples_start, samples_end)`` of the files ``filelist``, taken one after the other.
+
+    ``num_samples`` holds the number of samples of each file. Returns ``{filename: slice}`` with the
+    range of these samples within each file, in file order, leaving out the files with none of them.
+    A single combined file is the case of one file.
+    """
+    ranges = {}
+    offset = 0
+    for filename, count in zip(filelist, num_samples):
+        start = max(samples_start - offset, 0)
+        stop = min(samples_end - offset, count)
+        if start < stop:
+            ranges[filename] = slice(start, stop)
+        offset += count
+    return ranges
+
+
 def allgather_dict(stats, group):
     # initialize a list of empty dictionaries
     stats_gather = []
