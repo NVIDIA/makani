@@ -52,7 +52,11 @@ from makani.losses.energy_score import (
 )
 from makani.losses.crps_loss import KernelScoreLoss
 from makani.losses.base_loss import _compute_channel_weighting_helper, compute_alpha_per_step
-from makani.losses.crps_loss import _crps_skillspread_kernel, _crps_gauss_kernel
+from makani.losses.crps_loss import (
+    _crps_skillspread_kernel,
+    _crps_gauss_kernel,
+    _crps_probability_weighted_moment_kernel,
+)
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from .testutils import disable_tf32, set_seed, get_default_parameters, compare_tensors, compare_arrays
@@ -1120,6 +1124,21 @@ class TestSpectralNormalization(unittest.TestCase):
         if name != "relative spectral coherence":
             expected = fn(truncate(fc), truncate(obs))
             self.assertTrue(compare_tensors(name, weighted, expected, atol=1e-5, rtol=1e-4, verbose=verbose))
+
+    @parameterized.expand([(1,), (2,)])
+    def test_relative_coherence_ignores_the_removed_degrees(self, ensemble_size):
+        """
+        Degrees whose weights are all 0 do not add to the relative coherence, so a perfect forecast scores 0 with
+        any weights.
+        """
+        fn = SpectralCoherenceLoss(**self.kwargs, relative=True)
+        obs = self._fields(_BATCH, _NUM_CH)
+        fc = obs.unsqueeze(1).expand(-1, ensemble_size, -1, -1, -1)
+
+        lmax, mmax = fn.lm_weights.shape
+        weights = (torch.arange(lmax).reshape(-1, 1) <= self.LMAX // 2).float().expand(-1, mmax)
+        loss = fn(fc, obs, weights)
+        self.assertTrue(torch.allclose(loss, torch.zeros_like(loss), atol=1e-5), loss)
 
     @parameterized.expand([(name,) for name in _SPECTRAL_LOSSES])
     def test_grid_weights_are_refused(self, name):
@@ -2520,6 +2539,22 @@ class TestCRPSLossExtended(unittest.TestCase):
         out = self._fn("probability weighted moment", ensemble_weights=torch.full((self._E,), 3.0))(fc, obs)
         expected = self._fn("probability weighted moment")(fc, obs)
         self.assertTrue(compare_tensors("pwm", out, expected, atol=1e-6, rtol=1e-5, verbose=verbose))
+
+    @parameterized.expand([(4, 100.0), (300, 1.0)])
+    def test_pwm_in_half_precision(self, num_ensemble, weight, verbose=False):
+        """
+        In half precision, the probability weighted moment stays finite for weights and ensembles whose squared total
+        weight exceeds the range of float16, and matches the score in single precision.
+        """
+        fc = torch.sort(torch.randn(num_ensemble, _BATCH, _NUM_CH, 8), dim=0).values
+        obs = torch.randn(_BATCH, _NUM_CH, 8)
+        weights = torch.full_like(fc, weight)
+
+        out = _crps_probability_weighted_moment_kernel(obs.half(), fc.half(), weights.half())
+        expected = _crps_probability_weighted_moment_kernel(obs.half().float(), fc.half().float(), weights)
+        self.assertEqual(out.dtype, torch.float16)
+        self.assertTrue(torch.isfinite(out).all())
+        self.assertTrue(compare_tensors("pwm half", out.float(), expected, atol=2e-3, rtol=2e-3, verbose=verbose))
 
     # ------ gauss + ensemble_weights ------
 

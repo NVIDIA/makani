@@ -749,6 +749,16 @@ class SpectralCoherenceLoss(SpectralBaseLoss):
 
         # the lm_weights, times the weights of the coefficients if given
         lm_weights_split = self.weighted_lm_weights(spectral_weights)
+
+        # the relative loss scores each degree by its coherence, which is 0 where the weights remove all coefficients
+        # of the degree. Such a degree would add a constant to the loss, so keep only the degrees with weights.
+        degree_mask = None
+        if self.relative and (spectral_weights is not None):
+            degree_mask = (lm_weights_split != 0).to(dtype=lm_weights_split.dtype).sum(dim=-1)
+            if self.spatial_distributed:
+                degree_mask = reduce_from_parallel_region(degree_mask, "w")
+            degree_mask = degree_mask > 0
+
         if self.ensemble_distributed:
             lm_weights_split = scatter_to_parallel_region(lm_weights_split, -1, "ensemble")
 
@@ -819,6 +829,8 @@ class SpectralCoherenceLoss(SpectralBaseLoss):
         # compute the loss
         if self.relative:
             loss = psd_skill + 2.0 * (coherence_skill - 0.5 * coherence_spread)
+            if degree_mask is not None:
+                loss = torch.where(degree_mask, loss, 0.0)
         else:
             loss = psd_skill + 2.0 * psd_observations.squeeze(0) * (coherence_skill - 0.5 * coherence_spread)
 

@@ -150,20 +150,27 @@ def _crps_probability_weighted_moment_kernel(
     [1] Michael Zamo, Phillippe Naveau. Estimation of the Continuous Ranked Probability Score with Limited Information and Applications to Ensemble Weather Forecasts. Mathematical Geosciences. Volume 50 pp. 209-234. 2018.
     """
 
-    observation = observation.unsqueeze(0)
-    weights = weights.to(dtype=forecasts.dtype)
+    # compute in at least single precision, as the cumulative sums lose too much in half precision
+    dtype = forecasts.dtype
+    compute_dtype = torch.promote_types(dtype, torch.float32)
+    observation = observation.unsqueeze(0).to(dtype=compute_dtype)
+    forecasts = forecasts.to(dtype=compute_dtype)
+    weights = weights.to(dtype=compute_dtype)
 
-    # total weight, the weight below each member and the normalization of the pairs
-    total_weight = torch.sum(weights, dim=0)
+    # the score does not depend on the scale of the weights, so normalize them to a total weight W = 1. This keeps
+    # W^2 - sum_i w_i^2 below 1 for any weights and ensemble size.
+    weights = weights / torch.sum(weights, dim=0, keepdim=True)
+
+    # the weight below each member and the normalization of the pairs
     weight_below = torch.cumsum(weights, dim=0) - weights
-    pair_weight = torch.square(total_weight) - torch.sum(torch.square(weights), dim=0)
+    pair_weight = 1.0 - torch.sum(torch.square(weights), dim=0)
 
-    eskill = torch.sum(weights * (observation - forecasts).abs(), dim=0) / total_weight
-    half_espread = torch.sum(weights * (2.0 * weight_below + weights - total_weight) * forecasts, dim=0) / pair_weight
+    eskill = torch.sum(weights * (observation - forecasts).abs(), dim=0)
+    half_espread = torch.sum(weights * (2.0 * weight_below + weights - 1.0) * forecasts, dim=0) / pair_weight
 
     crps = eskill - half_espread
 
-    return crps
+    return crps.to(dtype=dtype)
 
 
 def _crps_naive_skillspread_kernel(
