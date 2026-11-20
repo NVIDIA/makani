@@ -963,6 +963,74 @@ class TestGaussianMMDLoss(unittest.TestCase):
         self.assertTrue(torch.isfinite(fc.grad).all(), "non-finite fc.grad")
 
 
+class TestSpectralNormalization(unittest.TestCase):
+    """
+    The spectral losses score the coefficients of the orthonormal SHT with the weights of the mean over the sphere,
+    1 / (4 pi), doubled for the orders m > 0, so that by Parseval a spectral L2 score is the grid L2 score of a
+    band-limited field.
+    """
+
+    NLAT, NLON = 16, 32
+    LMAX = 8
+
+    def setUp(self):
+        from torch_harmonics import InverseRealSHT
+
+        disable_tf32()
+        set_seed(333)
+        self.grid = make_grid((self.NLAT, self.NLON), "legendre-gauss")
+        self.kwargs = dict(
+            grid=self.grid, crop_shape=(self.NLAT, self.NLON), crop_offset=(0, 0), channel_names=_CHANNEL_NAMES
+        )
+        self.isht = InverseRealSHT(
+            sht_grid((self.NLAT, self.NLON), "legendre-gauss"), lmax=self.LMAX, mmax=self.LMAX
+        ).to(torch.float64)
+
+    def _fields(self, *shape):
+        """Band-limited fields, real at m = 0, from random coefficients up to degree LMAX."""
+        coeffs = torch.randn(*shape, self.LMAX, self.LMAX, dtype=torch.complex128)
+        coeffs[..., 0] = coeffs[..., 0].real
+        coeffs = torch.tril(coeffs.real) + 1j * torch.tril(coeffs.imag)
+        return self.isht(coeffs).to(torch.float32)
+
+    @parameterized.expand([(1, 1.0), (3, 1.0), (1, 2.0), (3, 2.0)])
+    def test_energy_scores_match_the_grid(self, ensemble_size, beta, verbose=False):
+        obs = self._fields(_BATCH, _NUM_CH)
+        fc = obs.unsqueeze(1) + self._fields(_BATCH, ensemble_size, _NUM_CH)
+
+        grid_score = LpEnergyScoreLoss(**self.kwargs, p=2.0, beta=beta)(fc, obs)
+        scores = {
+            "sobolev, l2 term only": SobolevEnergyScoreLoss(**self.kwargs, beta=beta, relative_weight=0.0)(fc, obs),
+        }
+        # the spectral L2 scores apply beta to each degree and sum over the degrees, which for beta = 2 is the sum
+        # over the sphere
+        if beta == 2.0:
+            scores["spectral l2"] = SpectralL2EnergyScoreLoss(**self.kwargs, beta=beta)(fc, obs)
+        if ensemble_size == 1 and beta == 2.0:
+            # the correction rescales the spread, which a single member does not have
+            scores["corrected spectral l2"] = CorrectedSpectralL2EnergyScoreLoss(**self.kwargs, beta=beta)(
+                fc, obs
+            ).reshape(grid_score.shape)
+        for name, score in scores.items():
+            with self.subTest(loss=name):
+                self.assertTrue(compare_tensors(name, score, grid_score, atol=1e-5, rtol=1e-4, verbose=verbose))
+
+    def test_spectral_crps_of_one_member(self, verbose=False):
+        """With one member, the CRPS of each coefficient magnitude is its absolute error, weighted for the mean over the sphere."""
+        from torch_harmonics import RealSHT
+
+        fn = SpectralCRPSLoss(**self.kwargs, crps_type="cdf")
+        obs = self._fields(_BATCH, _NUM_CH)
+        fc = obs.unsqueeze(1) + self._fields(_BATCH, 1, _NUM_CH)
+
+        sht = RealSHT(sht_grid((self.NLAT, self.NLON), "legendre-gauss"), lmax=fn.sht.lmax, mmax=fn.sht.mmax)
+        error = torch.abs(sht(fc.squeeze(1)).abs() - sht(obs).abs())
+        m_weights = torch.full((fn.sht.mmax,), 2.0)
+        m_weights[0] = 1.0
+        expected = (error * m_weights / (4.0 * math.pi)).sum(dim=(-2, -1))
+        self.assertTrue(compare_tensors("spectral crps", fn(fc, obs), expected, atol=1e-6, rtol=1e-4, verbose=verbose))
+
+
 # ===========================================================================
 class TestCRPSLoss(unittest.TestCase):
     """Verifies CRPSLoss against the properscoring reference implementation

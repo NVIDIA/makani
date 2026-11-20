@@ -352,7 +352,7 @@ class SobolevEnergyScoreLoss(SpectralBaseLoss):
         # before anything else compute the transform
         # as the CDF definition doesn't generalize well to more than one-dimensional variables, we treat complex and imaginary part as the same
         with amp.autocast(device_type="cuda", enabled=False):
-            # TODO: check 4 pi normalization
+            # the lm_weights of this loss carry no 1 / (4 pi), so the coefficients are scaled to the mean over the sphere
             forecasts = self.sht(forecasts.float()) / math.sqrt(4 * math.pi)
             observations = self.sht(observations.float()) / math.sqrt(4 * math.pi)
 
@@ -518,9 +518,9 @@ class SpectralL2EnergyScoreLoss(SpectralBaseLoss):
         forecasts = forecasts.float()
         observations = observations.float()
         with amp.autocast(device_type="cuda", enabled=False):
-            # TODO: check 4 pi normalization
-            forecasts = self.sht(forecasts) / math.sqrt(4.0 * math.pi)
-            observations = self.sht(observations) / math.sqrt(4.0 * math.pi)
+            # the coefficients of the orthonormal SHT; lm_weights hold the 1 / (4 pi) of the mean over the sphere
+            forecasts = self.sht(forecasts)
+            observations = self.sht(observations)
 
         # the SH coefficients stay COMPLEX from here on. Casting them back to the input
         # (real) dtype would silently discard the imaginary part, and the score below is
@@ -715,7 +715,7 @@ class SpectralCoherenceLoss(SpectralBaseLoss):
         # before anything else compute the transform
         # as the CDF definition doesn't generalize well to more than one-dimensional variables, we treat complex and imaginary part as the same
         with amp.autocast(device_type="cuda", enabled=False):
-            # TODO: check 4 pi normalization
+            # the lm_weights of this loss carry no 1 / (4 pi), so the coefficients are scaled to the mean over the sphere
             forecasts = self.sht(forecasts.float()) / math.sqrt(4.0 * math.pi)
             observations = self.sht(observations.float()) / math.sqrt(4.0 * math.pi)
 
@@ -904,8 +904,9 @@ class CorrectedSpectralL2EnergyScoreLoss(SpectralBaseLoss):
         forecasts = forecasts.float()
         observations = observations.float()
         with amp.autocast(device_type="cuda", enabled=False):
-            forecasts = self.sht(forecasts) / math.sqrt(4.0 * math.pi)
-            observations = self.sht(observations) / math.sqrt(4.0 * math.pi)
+            # the coefficients of the orthonormal SHT; lm_weights hold the 1 / (4 pi) of the mean over the sphere
+            forecasts = self.sht(forecasts)
+            observations = self.sht(observations)
 
         # the SH coefficients stay COMPLEX from here on -- see the note in
         # SpectralL2EnergyScoreLoss.forward for why casting back to a real dtype is wrong.

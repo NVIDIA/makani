@@ -474,8 +474,9 @@ class SpectralCRPSLoss(SpectralBaseLoss):
         with amp.autocast(device_type=forecasts.device.type, enabled=False):
             forecasts = forecasts.to(torch.float32)
             observations = observations.to(torch.float32)
-            forecasts = self.sht(forecasts) / math.sqrt(4.0 * math.pi)
-            observations = self.sht(observations) / math.sqrt(4.0 * math.pi)
+            # the coefficients of the orthonormal SHT; lm_weights hold the 1 / (4 pi) of the mean over the sphere
+            forecasts = self.sht(forecasts)
+            observations = self.sht(observations)
 
         if self.absolute:
             forecasts = torch.abs(forecasts).to(dtype)
