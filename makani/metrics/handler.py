@@ -42,6 +42,7 @@ import torch.distributed as dist
 from torch_harmonics.distributed import compute_split_shapes
 from makani.distributed.mappings import gather_from_parallel_region, reduce_from_parallel_region
 from makani.distributed.helpers import barrier
+from makani.utils.jit import compiles_metrics
 from makani.data.grid_types import DEFAULT_GRID_TYPE
 from makani.utils.grids import make_grid
 
@@ -127,7 +128,13 @@ class MetricRollout:
             self.rollout_integral_cpu = torch.zeros(
                 integral_shape, dtype=torch.float32, device="cpu", pin_memory=pin_memory
             )
-            self.simpquad = Quadrature(self.num_rollout_steps - 1, 1.0 / float(self.num_rollout_steps), self.device)
+            # the AUC is the mean of the curve over the rollout: the steps span the normalized time [0, 1], from
+            # the first to the last, and a rollout of a single step is its own mean
+            if self.num_rollout_steps > 1:
+                num_intervals = self.num_rollout_steps - 1
+                self.simpquad = Quadrature(num_intervals, 1.0 / float(num_intervals), self.device)
+            else:
+                self.simpquad = None
 
     @property
     def type(self):
@@ -214,7 +221,10 @@ class MetricRollout:
 
             # integrate
             if self.integrate:
-                self.rollout_integral.copy_(self.simpquad(rollout_curve_normalized, dim=0))
+                if self.simpquad is not None:
+                    self.rollout_integral.copy_(self.simpquad(rollout_curve_normalized, dim=0))
+                else:
+                    self.rollout_integral.copy_(rollout_curve_normalized[0])
                 self.rollout_integral_cpu.copy_(self.rollout_integral, non_blocking=non_blocking)
 
         return
@@ -271,11 +281,12 @@ class MetricsHandler:
         ssr_var_names=["u10m", "t2m", "sp", "sst", "u500", "z500", "q500", "q50"],
         rh_var_names=[],
         mask_target_nan=True,
-        compile=True,
+        compile=None,
     ):
 
         self.device = device
-        self.compile = compile
+        # compile the metrics as jit_mode says, unless told explicitly
+        self.compile = compiles_metrics(params) if compile is None else compile
         self.log_to_screen = params.log_to_screen
         self.log_to_wandb = params.log_to_wandb
         # these are the names of the channels emitted by the dataloader in that order

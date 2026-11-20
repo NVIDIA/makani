@@ -48,7 +48,7 @@ Makani supports various optimization to fit large models ino GPU memory and enab
 | Batch size                | `--batch_size`                                | 1,2,3,...                    |
 | Ensemble size             | `--ensemble_size`                             | 1,2,3,...                    |
 | Automatic Mixed Precision | `--amp_mode`                                  | `none`, `fp16`, `bf16`       |
-| Just-in-time compilation  | `--jit_mode`                                  | `none`, `script`, `inductor` |
+| Just-in-time compilation  | `--jit_mode`                                  | `none`, `metrics`, `all`     |
 | Activation checkpointing  | `--checkpointing_level`                       | 0,1,2,3                      |
 | Channel parallelism       | `--fin_parallel_size`, `--fout_parallel_size` | 1,2,3,...                    |
 | Spatial model parallelism | `--h_parallel_size`, `--w_parallel_size`      | 1,2,3,...                    |
@@ -246,7 +246,9 @@ This will create a large virtual memory pool into which PyTorch can index. If yo
 PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512
 ```
 
-With `--jit_mode=inductor`, layers whose forward breaks the compiled graph, e.g. around distributed communication, are compiled once for every parameter shape they come with. Models with many such layers of different sizes, like the DISCO convolutions in FourCastNet3, can exceed torch's default recompile limit of 8; the layers beyond it then run eagerly, and torch warns that it `hit config.recompile_limit`. Makani raises the limit to 32. If this is still not enough, set it with
+`--jit_mode` picks what runs under `torch.compile`: nothing with `none`, the default; the loss terms and the metrics with `metrics`; and the model step of training as well with `all`. Losses that carry a spherical harmonic transform always run eagerly. `inductor`, the earlier name of `all`, is still accepted with a warning.
+
+With `--jit_mode=all`, layers whose forward breaks the compiled graph, e.g. around distributed communication, are compiled once for every parameter shape they come with. Models with many such layers of different sizes, like the DISCO convolutions in FourCastNet3, can exceed torch's default recompile limit of 8; the layers beyond it then run eagerly, and torch warns that it `hit config.recompile_limit`. Makani raises the limit to 32. If this is still not enough, set it with
 
 ```bash
 export MAKANI_INDUCTOR_COMPILE_LIMIT=64

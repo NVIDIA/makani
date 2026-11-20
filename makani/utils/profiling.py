@@ -106,7 +106,7 @@ class StepTimer:
 
     ``warmup_steps`` leading steps are recorded but dropped from the statistics.
     They cover cudnn/cublas autotuning, NCCL buffer allocation, the allocator
-    reaching steady state, and (with ``--jit_mode=inductor``) compilation.
+    reaching steady state, and (with ``--jit_mode``) compilation.
 
     When ``enabled`` is False every method is a no-op, so the calls can sit
     unconditionally in the training loops.

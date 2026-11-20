@@ -33,6 +33,7 @@ from makani.losses import EnsembleNLLLoss
 from makani.losses import DriftRegularization, HydrostaticBalanceLoss, SpectralRegularization
 from makani.data.grid_types import DEFAULT_GRID_TYPE
 from makani.utils.grids import make_grid
+from makani.utils.jit import compiles_metrics
 
 _LOSS_REGISTRY = {
     "l1": partial(GeometricLpLoss, p=1),
@@ -69,10 +70,14 @@ class LossHandler(nn.Module):
         track_running_stats: bool = False,
         seed: int = 0,
         eps: float = 1e-6,
-        compile: bool = True,
+        compile: Optional[bool] = None,
         **kwargs,
     ):
         super().__init__()
+
+        # compile the loss terms as jit_mode says, unless told explicitly
+        if compile is None:
+            compile = compiles_metrics(params)
 
         self.rank = comm.get_rank("matmul")
         self.n_future = params.n_future

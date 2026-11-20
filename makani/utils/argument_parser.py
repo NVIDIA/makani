@@ -53,8 +53,9 @@ def get_default_argument_parser(training=True):
         "--jit_mode",
         default="none",
         type=str,
-        choices=["none", "inductor"],
-        help="Specify if and how to use torch compile.",
+        # "inductor" is the deprecated name of "all"
+        choices=["none", "metrics", "all", "inductor"],
+        help="What to torch.compile: 'none', 'metrics' (the losses and the metrics) or 'all' (the model step too).",
     )
     parser.add_argument("--checkpointing_level", default=0, type=int, help="How aggressively checkpointing is used")
     parser.add_argument(

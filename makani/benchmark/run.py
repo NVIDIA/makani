@@ -129,7 +129,7 @@ def get_benchmark_argument_parser():
         default=5,
         type=int,
         help="Number of leading steps to run but discard, covering autotuning, NCCL buffer "
-        "allocation, allocator warmup and (with --jit_mode=inductor) compilation.",
+        "allocation, allocator warmup and (with --jit_mode) compilation.",
     )
     parser.add_argument(
         "--rollout_steps",
