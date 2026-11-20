@@ -350,7 +350,7 @@ class SobolevEnergyScoreLoss(SpectralBaseLoss):
         self,
         forecasts: torch.Tensor,
         observations: torch.Tensor,
-        ensemble_weights: Optional[torch.Tensor] = None,
+        spectral_weights: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> torch.Tensor:
 
@@ -383,7 +383,8 @@ class SobolevEnergyScoreLoss(SpectralBaseLoss):
                 forecasts, (-1, 0), ensemble_shapes, "ensemble"
             )  # for correct spatial reduction we need to do the same with spatial weights
 
-        lm_weights_split = self.lm_weights.flatten(start_dim=-2, end_dim=-1)
+        # the lm_weights, times the weights of the coefficients if given
+        lm_weights_split = self.weighted_lm_weights(spectral_weights).flatten(start_dim=-2, end_dim=-1)
         if self.ensemble_distributed:
             lm_weights_split = scatter_to_parallel_region(lm_weights_split, -1, "ensemble")
 
@@ -517,7 +518,7 @@ class SpectralL2EnergyScoreLoss(SpectralBaseLoss):
         self,
         forecasts: torch.Tensor,
         observations: torch.Tensor,
-        ensemble_weights: Optional[torch.Tensor] = None,
+        spectral_weights: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> torch.Tensor:
 
@@ -555,7 +556,8 @@ class SpectralL2EnergyScoreLoss(SpectralBaseLoss):
                 forecasts, (-1, 0), ensemble_shapes, "ensemble"
             )  # for correct spatial reduction we need to do the same with spatial weights
 
-        lm_weights_split = self.lm_weights
+        # the lm_weights, times the weights of the coefficients if given
+        lm_weights_split = self.weighted_lm_weights(spectral_weights)
         if self.ensemble_distributed:
             lm_weights_split = scatter_to_parallel_region(lm_weights_split, -1, "ensemble")
 
@@ -713,7 +715,7 @@ class SpectralCoherenceLoss(SpectralBaseLoss):
         self,
         forecasts: torch.Tensor,
         observations: torch.Tensor,
-        ensemble_weights: Optional[torch.Tensor] = None,
+        spectral_weights: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> torch.Tensor:
 
@@ -745,7 +747,8 @@ class SpectralCoherenceLoss(SpectralBaseLoss):
                 forecasts, (-1, 0), ensemble_shapes, "ensemble"
             )  # for correct spatial reduction we need to do the same with spatial weights
 
-        lm_weights_split = self.lm_weights
+        # the lm_weights, times the weights of the coefficients if given
+        lm_weights_split = self.weighted_lm_weights(spectral_weights)
         if self.ensemble_distributed:
             lm_weights_split = scatter_to_parallel_region(lm_weights_split, -1, "ensemble")
 
@@ -905,7 +908,7 @@ class CorrectedSpectralL2EnergyScoreLoss(SpectralBaseLoss):
         self,
         forecasts: torch.Tensor,
         observations: torch.Tensor,
-        ensemble_weights: Optional[torch.Tensor] = None,
+        spectral_weights: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> torch.Tensor:
         if forecasts.dim() != 5:
@@ -928,7 +931,8 @@ class CorrectedSpectralL2EnergyScoreLoss(SpectralBaseLoss):
             ensemble_shapes = [forecasts.shape[0] for _ in range(comm.get_size("ensemble"))]
             forecasts = distributed_transpose(forecasts, (-1, 0), ensemble_shapes, "ensemble")
 
-        lm_weights_split = self.lm_weights
+        # the lm_weights, times the weights of the coefficients if given
+        lm_weights_split = self.weighted_lm_weights(spectral_weights)
         if self.ensemble_distributed:
             lm_weights_split = scatter_to_parallel_region(lm_weights_split, -1, "ensemble")
 

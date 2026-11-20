@@ -1071,6 +1071,65 @@ class TestSpectralNormalization(unittest.TestCase):
         expected = (error * m_weights / (4.0 * math.pi)).sum(dim=(-2, -1))
         self.assertTrue(compare_tensors("spectral crps", fn(fc, obs), expected, atol=1e-6, rtol=1e-4, verbose=verbose))
 
+    _SPECTRAL_LOSSES = {
+        "spectral crps cdf": lambda kw: SpectralCRPSLoss(**kw, crps_type="cdf"),
+        "spectral crps pwm": lambda kw: SpectralCRPSLoss(**kw, crps_type="probability weighted moment"),
+        "spectral crps skillspread": lambda kw: SpectralCRPSLoss(**kw, crps_type="skillspread"),
+        "spectral crps gauss": lambda kw: SpectralCRPSLoss(**kw, crps_type="gauss"),
+        "sobolev energy score": lambda kw: SobolevEnergyScoreLoss(**kw, beta=1.0),
+        "spectral l2 energy score": lambda kw: SpectralL2EnergyScoreLoss(**kw, beta=1.0),
+        "spectral coherence": lambda kw: SpectralCoherenceLoss(**kw),
+        "relative spectral coherence": lambda kw: SpectralCoherenceLoss(**kw, relative=True),
+        "corrected spectral l2 energy score": lambda kw: CorrectedSpectralL2EnergyScoreLoss(**kw, beta=1.0),
+    }
+
+    @parameterized.expand([(name,) for name in _SPECTRAL_LOSSES])
+    def test_spectral_weights_select_the_coefficients(self, name, verbose=False):
+        """
+        Weights of 1 on the degrees up to L0 and 0 above give the loss of the fields truncated to those degrees, for
+        a cutoff L0 of every sample and channel.
+        """
+        from torch_harmonics import RealSHT
+
+        fn = self._SPECTRAL_LOSSES[name](self.kwargs)
+        obs = self._fields(_BATCH, _NUM_CH)
+        fc = obs.unsqueeze(1) + self._fields(_BATCH, 3, _NUM_CH)
+
+        lmax, mmax = fn.lm_weights.shape
+        cutoff = torch.randint(1, self.LMAX, (_BATCH, _NUM_CH, 1, 1))
+        weights = (torch.arange(lmax).reshape(1, 1, -1, 1) <= cutoff).float().expand(-1, -1, -1, mmax)
+
+        sht = RealSHT(sht_grid((self.NLAT, self.NLON), "legendre-gauss"), lmax=self.LMAX, mmax=self.LMAX).to(
+            torch.float64
+        )
+        keep = torch.arange(self.LMAX).reshape(1, 1, -1, 1) <= cutoff
+
+        def truncate(field):
+            keep_field = keep if field.dim() == 4 else keep.unsqueeze(1)
+            return self.isht(sht(field.double()) * keep_field).to(torch.float32)
+
+        # the weighted loss depends only on the degrees it keeps
+        weighted = fn(fc, obs, weights)
+        self.assertTrue(
+            compare_tensors(
+                name, weighted, fn(truncate(fc), truncate(obs), weights), atol=1e-5, rtol=1e-4, verbose=verbose
+            )
+        )
+        # and is the loss of the truncated fields. Not for the relative coherence: truncating on the grid leaves the
+        # roundoff of float32 in the cut degrees, and normalized by its own power, that noise has any coherence
+        if name != "relative spectral coherence":
+            expected = fn(truncate(fc), truncate(obs))
+            self.assertTrue(compare_tensors(name, weighted, expected, atol=1e-5, rtol=1e-4, verbose=verbose))
+
+    @parameterized.expand([(name,) for name in _SPECTRAL_LOSSES])
+    def test_grid_weights_are_refused(self, name):
+        """The spectral losses weight the coefficients, so weights on the grid are an error."""
+        fn = self._SPECTRAL_LOSSES[name](self.kwargs)
+        obs = self._fields(_BATCH, _NUM_CH)
+        fc = obs.unsqueeze(1) + self._fields(_BATCH, 3, _NUM_CH)
+        with self.assertRaises(ValueError):
+            fn(fc, obs, torch.ones(_BATCH, _NUM_CH, self.NLAT, self.NLON))
+
 
 _CHANNEL_REDUCED_LOSSES = {
     "mmd": lambda **kw: GaussianMMDLoss(**_GEOM_KWARGS, channel_reduction=True, **kw),
@@ -2339,6 +2398,47 @@ class TestCRPSLossExtended(unittest.TestCase):
         with self.assertRaises(NotImplementedError):
             fn(fc, obs)
 
+    # ------ weighted fair and non-fair CRPS against the pairs ------
+
+    @staticmethod
+    def _weighted_pair_crps(fc, obs, weights, fair):
+        """
+        The CRPS of members fc [B, E, C] with weights [E] at observations obs [B, C], from the pairs: the skill
+        weights each member by w_i / W and the spread each pair by w_i w_j, normalized by W^2 or, for the fair
+        score, by the weight of the pairs i != j, W^2 - sum_i w_i^2.
+        """
+        fc, obs, w = fc.double(), obs.double(), weights.double()
+        total = w.sum()
+        skill = torch.einsum("e,bec->bc", w, (fc - obs.unsqueeze(1)).abs()) / total
+        pairs = torch.einsum("e,f,befc->bc", w, w, (fc.unsqueeze(2) - fc.unsqueeze(1)).abs())
+        norm = total**2 - (w**2).sum() if fair else total**2
+        return skill - 0.5 * pairs / norm
+
+    @parameterized.expand([("probability weighted moment", True), ("cdf", False)])
+    def test_ensemble_weights_match_the_pairs(self, crps_type, fair, verbose=False):
+        """
+        The CRPS with member weights against the CRPS from the pairs, on fields constant over the sphere, where the
+        score is its value at a point. The probability weighted moment is the fair score, the cdf the score of the
+        weighted empirical distribution.
+        """
+        ew = torch.rand(self._E) + 0.1
+        fc = torch.randn(_BATCH, self._E, _NUM_CH)
+        obs = torch.randn(_BATCH, _NUM_CH)
+
+        fn = self._fn(crps_type, ensemble_weights=ew)
+        out = fn(
+            fc[..., None, None].expand(-1, -1, -1, _IMG_H, _IMG_W), obs[..., None, None].expand(-1, -1, _IMG_H, _IMG_W)
+        )
+        expected = self._weighted_pair_crps(fc, obs, ew, fair) * fn.quad_weight_split.double().sum()
+        self.assertTrue(compare_tensors(crps_type, out, expected.float(), atol=1e-5, rtol=1e-5, verbose=verbose))
+
+    def test_pwm_with_equal_weights_is_unweighted(self, verbose=False):
+        """Equal member weights, of any size, give the probability weighted moment without weights."""
+        fc, obs = _rand_ensemble(self._E), _rand()
+        out = self._fn("probability weighted moment", ensemble_weights=torch.full((self._E,), 3.0))(fc, obs)
+        expected = self._fn("probability weighted moment")(fc, obs)
+        self.assertTrue(compare_tensors("pwm", out, expected, atol=1e-6, rtol=1e-5, verbose=verbose))
+
     # ------ gauss + ensemble_weights ------
 
     def test_gauss_with_ensemble_weights(self, verbose=False):
@@ -3470,6 +3570,22 @@ class TestGradientCRPSLoss(unittest.TestCase):
         obs = _rand()
         out = fn(fc, obs)
         self.assertEqual(tuple(out.shape), (_BATCH, _NUM_CH))
+
+    @parameterized.expand([("skillspread",), ("cdf",)])
+    def test_channel_weights_absolute_false(self, crps_type, verbose=False):
+        """
+        Without the absolute value, each channel scores the two components of its gradient, which both take the
+        channel's weights: a channel weighted 0 scores 0 in both, the others as without weights.
+        """
+        fn = self._fn(crps_type, absolute=False)
+        fc, obs = _rand_ensemble(self._E), _rand()
+        weights = torch.ones(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
+        weights[:, 1] = 0.0
+
+        out = fn(fc, obs, weights)
+        expected = fn(fc, obs)
+        expected[:, 2:4] = 0.0
+        self.assertTrue(compare_tensors(crps_type, out, expected, atol=1e-6, rtol=1e-5, verbose=verbose))
 
     def test_output_shape_absolute_false(self):
         fn = self._fn("skillspread", absolute=False)

@@ -454,6 +454,21 @@ class SpectralBaseLoss(nn.Module, metaclass=ABCMeta):
         # register
         self.register_buffer("lm_weights", lm_weights, persistent=False)
 
+    def weighted_lm_weights(self, spectral_weights: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        The lm_weights, times the weights of the spectral coefficients if given. Spectral losses weight the
+        coefficients (l, m) of the local spectral domain, not the points of the grid, so the weights end in the
+        local shape of the lm_weights.
+        """
+        if spectral_weights is None:
+            return self.lm_weights
+        if tuple(spectral_weights.shape[-2:]) != tuple(self.lm_weights.shape):
+            raise ValueError(
+                f"spectral losses weight the spectral coefficients, so the weights have to end in the shape "
+                f"{tuple(self.lm_weights.shape)} of the local (l, m) domain, but found {tuple(spectral_weights.shape)}."
+            )
+        return spectral_weights * self.lm_weights
+
     def sum_over_m(self, coeffs: torch.Tensor) -> torch.Tensor:
         """
         Parseval sum of SH coefficient powers over the orders m, by the weights of each order in lm_weights:

@@ -135,25 +135,33 @@ def _crps_probability_weighted_moment_kernel(
     observation: torch.Tensor, forecasts: torch.Tensor, weights: torch.Tensor
 ) -> torch.Tensor:
     """
-    CRPS estimator based on the probability weighted moment. see [1].
+    Fair CRPS estimator based on the probability weighted moments, see [1]. Assumes forecasts and weights sorted
+    along the ensemble dimension 0.
+
+    With equal weights, this is E|X - y| + beta0 - 2 beta1, where beta0 and beta1 are the unbiased estimates of the
+    first two probability weighted moments. With member weights w, the skill weights each member by w_i / W and the
+    spread each pair i != j by w_i w_j / (W^2 - sum_i w_i^2), with W = sum_i w_i. Over the sorted members, half the
+    spread is then
+
+        sum_j x_(j) w_(j) (2 W_(<j) + w_(j) - W) / (W^2 - sum_i w_i^2),
+
+    where W_(<j) is the weight of the members below member j. For equal weights, this is -(beta0 - 2 beta1).
 
     [1] Michael Zamo, Phillippe Naveau. Estimation of the Continuous Ranked Probability Score with Limited Information and Applications to Ensemble Weather Forecasts. Mathematical Geosciences. Volume 50 pp. 209-234. 2018.
     """
 
     observation = observation.unsqueeze(0)
+    weights = weights.to(dtype=forecasts.dtype)
 
-    #  ensemble size
-    num_ensemble = forecasts.shape[0]
+    # total weight, the weight below each member and the normalization of the pairs
+    total_weight = torch.sum(weights, dim=0)
+    weight_below = torch.cumsum(weights, dim=0) - weights
+    pair_weight = torch.square(total_weight) - torch.sum(torch.square(weights), dim=0)
 
-    # get the ranks for the pwm computation
-    rank = torch.arange(num_ensemble, device=forecasts.device).reshape((num_ensemble,) + (1,) * (forecasts.dim() - 1))
+    eskill = torch.sum(weights * (observation - forecasts).abs(), dim=0) / total_weight
+    half_espread = torch.sum(weights * (2.0 * weight_below + weights - total_weight) * forecasts, dim=0) / pair_weight
 
-    # get the ensemble spread (total_weight is ensemble size here)
-    beta0 = forecasts.mean(dim=0)
-    beta1 = (rank * forecasts).sum(dim=0) / float(num_ensemble * (num_ensemble - 1))
-    eskill = (observation - forecasts).abs().mean(dim=0)
-
-    crps = eskill + beta0 - 2 * beta1
+    crps = eskill - half_espread
 
     return crps
 
@@ -493,17 +501,14 @@ class SpectralCRPSLoss(SpectralBaseLoss):
         # observations: batch, channels, mmax, lmax
         B, E, C, H, W = forecasts.shape
 
-        # always use lm_weights
-        if spectral_weights is None:
-            spectral_weights = self.lm_weights
-        else:
-            spectral_weights = spectral_weights * self.lm_weights
+        # always use lm_weights, times the weights of the coefficients if given
+        spectral_weights = self.weighted_lm_weights(spectral_weights)
 
         # if ensemble dim is one dimensional then computing the score is quick:
         if (not self.ensemble_distributed) and (E == 1):
             # in this case, CRPS is straightforward
             crps = torch.abs(observations - forecasts.squeeze(1)).reshape(B, C, H * W)
-            spectral_weights_split = spectral_weights.reshape(1, 1, H * W)
+            spectral_weights_split = spectral_weights.flatten(start_dim=-2, end_dim=-1)
         else:
             # transpose forecasts: ensemble, batch, channels, lat, lon
             forecasts = torch.movedim(forecasts, 1, 0)
@@ -519,8 +524,8 @@ class SpectralCRPSLoss(SpectralBaseLoss):
             if self.ensemble_distributed:
                 observations = scatter_to_parallel_region(observations, -1, "ensemble")
 
-            # tile in complex dim, then flatten last 3 dims
-            spectral_weights_split = spectral_weights.reshape(1, 1, H * W)
+            # flatten the coefficients like the score
+            spectral_weights_split = spectral_weights.flatten(start_dim=-2, end_dim=-1)
             if self.ensemble_distributed:
                 spectral_weights_split = scatter_to_parallel_region(spectral_weights_split, -1, "ensemble")
 
@@ -714,6 +719,9 @@ class GradientCRPSLoss(GradientBaseLoss):
             observations = observations.pow(2).sum(dim=-3).sqrt()
         else:
             C = 2 * C
+            # the two components of each channel's gradient share its weights
+            if (spatial_weights is not None) and (spatial_weights.shape[-3] > 1):
+                spatial_weights = spatial_weights.repeat_interleave(2, dim=-3)
 
         forecasts = forecasts.reshape(B, E, C, H, W)
         observations = observations.reshape(B, C, H, W)
