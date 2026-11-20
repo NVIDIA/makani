@@ -619,12 +619,12 @@ class TestTrainerRollouts(_TrainerTestCase):
         self.assertEqual(len(updates), n_batches * n_steps)
 
     def test_stochastic_compile_keeps_the_model(self):
-        # inductor compiles the drift network inside the wrapper, and the trainer keeps the model itself, so that
+        # jit_mode=all compiles the drift network inside the wrapper, and the trainer keeps the model itself, so that
         # validation reaches the steps of the rollout; compiling the model whole hid them behind the compiled module
         from makani.models.stochastic_interpolant import StochasticInterpolantWrapper
 
         params = self.params
-        params.jit_mode = "inductor"
+        params.jit_mode = "all"
         params.valid_autoreg_steps = self._VALID_STEPS
         with mock.patch.object(StochasticInterpolantWrapper, "compile_step") as compile_step:
             trainer = StochasticTrainer(params, 0, device=torch.device("cpu"))
