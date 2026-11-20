@@ -198,8 +198,7 @@ def _rand_ensemble(ensemble=5, batch=_BATCH, channels=_NUM_CH, requires_grad=Fal
 
 # Losses expected to be elementwise non-negative.
 # EnsembleNLLLoss excluded: proper scoring rule that can be negative.
-# GaussianMMDLoss excluded: the unbiased U-statistic MMD² can be negative
-#   (e.g., all E members = obs with E=5 gives mmd² = (3-E)/(E-1) = -0.5).
+# GaussianMMDLoss excluded: the fair (unbiased) estimate of MMD² can be negative.
 _COMMON_NONNEG = [
     ("geometric_l2",),
     ("geometric_l1",),
@@ -215,7 +214,6 @@ _COMMON_NONNEG = [
 # Losses expected to be (near) zero when prd perfectly matches tar.
 # EnsembleNLLLoss excluded: with a degenerate ensemble sigma is clipped to eps,
 #   leaving a residual log(eps^2)/2 term that is large and negative.
-# GaussianMMDLoss excluded: perfect prediction gives mmd² = (3-E)/(E-1) ≠ 0.
 # crps_gauss included: with sigma clamped to eps the residual ≈ eps * 0.23 ≈ 2e-6,
 #   well within atol=1e-4.
 _COMMON_ZERO_PERFECT = [
@@ -228,10 +226,10 @@ _COMMON_ZERO_PERFECT = [
     ("crps_gauss",),
     ("crps_pwm",),
     ("crps_naive_skillspread",),
+    ("mmd",),
 ]
 
 # All losses participate in the batch-size independence test.
-# GaussianMMDLoss is tested with squared=True to avoid sqrt of potentially negative mmd².
 _COMMON_BATCHSIZE = [
     ("geometric_l2",),
     ("geometric_l1",),
@@ -298,8 +296,7 @@ class TestLossCommon(unittest.TestCase):
         if name == "nll":
             return EnsembleNLLLoss(**geom_kwargs)
         if name == "mmd":
-            # squared=True: avoids sqrt of potentially negative mmd² values in common tests
-            return GaussianMMDLoss(**geom_kwargs, squared=True)
+            return GaussianMMDLoss(**geom_kwargs)
         raise ValueError(f"Unknown loss name: {name!r}")
 
     @classmethod
@@ -871,72 +868,99 @@ class TestEnsembleNLLLoss(unittest.TestCase):
 
 
 # ===========================================================================
+def _reference_mmd(forecasts, observations, quad_weight, sigma=1.0, alpha=1.0, beta=2.0, channel_reduction=False):
+    """The squared MMD of each batch entry (and channel), member by member: k(y, y) + E k(X, X') - 2 E k(X, y)."""
+    B, E, C = forecasts.shape[:3]
+
+    def distance_beta(x, y):
+        # the quadrature-weighted sum of |x - y|^beta over the grid, per channel, or over the channels too
+        d = (torch.abs(x - y) ** beta * quad_weight).sum(dim=(-2, -1))
+        return d.sum(dim=-1, keepdim=True) if channel_reduction else d
+
+    def kernel(x, y):
+        return torch.exp(-(distance_beta(x, y) ** (2.0 / beta)) / (2.0 * sigma**2))
+
+    skill = sum(kernel(forecasts[:, i], observations) for i in range(E)) / E
+    offdiagonal = sum(kernel(forecasts[:, i], forecasts[:, j]) for i in range(E) for j in range(E) if i != j)
+    all_pairs = (offdiagonal + E) / E**2
+    spread = alpha * offdiagonal / (E * (E - 1)) + (1.0 - alpha) * all_pairs if E > 1 else all_pairs
+    return 1.0 + spread - 2.0 * skill
+
+
 class TestGaussianMMDLoss(unittest.TestCase):
-    """Specific tests for GaussianMMDLoss.
-
-    Note: the unbiased U-statistic MMD² can be negative (e.g., perfect prediction
-    with E=5 gives mmd² = (3-E)/(E-1) = -0.5), so nonneg and zero-on-perfect tests
-    do not apply.  Tested properties: squared-flag consistency, spread ordering,
-    backward pass, and the E=1 code-path.
-    """
-
-    _E = 5
+    """GaussianMMDLoss against a direct computation of the squared MMD, and its behavior as a training loss."""
 
     def setUp(self):
         disable_tf32()
         set_seed(333)
 
-    def test_squared_flag_consistency(self, verbose=False):
-        """For a wide ensemble where mmd² > 0, sqrt(mmd²) must equal the unsquared loss."""
-        fn_sq = GaussianMMDLoss(**_GEOM_KWARGS, squared=True)
-        fn_unsq = GaussianMMDLoss(**_GEOM_KWARGS, squared=False)
-        # use a large-offset ensemble so that k(y_m, obs) ≈ 0 → mmd² > 0
-        obs = torch.zeros(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
-        fc = obs.unsqueeze(1) + 10.0 * torch.randn(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W)
-        mmd2 = fn_sq(fc, obs)
-        mmd = fn_unsq(fc, obs)
+    @parameterized.expand(
+        [
+            # ensemble size, sigma, alpha, beta, channel reduction
+            (1, 1.0, 1.0, 2.0, False),
+            (2, 1.0, 1.0, 2.0, False),
+            (4, 1.0, 1.0, 2.0, False),
+            (4, 0.7, 1.0, 2.0, True),
+            (4, 1.5, 0.5, 2.0, False),
+            (4, 1.0, 0.0, 2.0, True),
+            (3, 2.0, 1.0, 1.0, False),
+            (3, 1.0, 0.3, 1.0, True),
+        ]
+    )
+    def test_matches_reference(self, ensemble_size, sigma, alpha, beta, channel_reduction, verbose=False):
+        fn = GaussianMMDLoss(**_GEOM_KWARGS, sigma=sigma, alpha=alpha, beta=beta, channel_reduction=channel_reduction)
+        obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W, dtype=torch.float64)
+        fc = obs.unsqueeze(1) + 0.5 * torch.randn(_BATCH, ensemble_size, _NUM_CH, _IMG_H, _IMG_W, dtype=torch.float64)
+
+        expected = _reference_mmd(
+            fc, obs, fn.quadrature.quad_weight.to(torch.float64), sigma, alpha, beta, channel_reduction
+        )
+        self.assertEqual(fn.n_channels, 1 if channel_reduction else _NUM_CH)
         self.assertTrue(
-            compare_tensors("squared flag", torch.sqrt(mmd2), mmd, atol=1e-5, rtol=1e-4, verbose=verbose),
+            compare_tensors("mmd", fn(fc, obs), expected, atol=1e-10, rtol=1e-8, verbose=verbose, shape_check=True)
         )
 
-    def test_spread_increases_mmd(self):
-        """A tight ensemble near the observation must have a higher kernel score
-        than a wide ensemble far from it."""
-        fn = GaussianMMDLoss(**_GEOM_KWARGS, squared=True)
+    @parameterized.expand([(1,), (5,)])
+    def test_perfect_forecast_scores_zero_and_a_distant_one_two(self, ensemble_size):
+        fn = GaussianMMDLoss(**_GEOM_KWARGS)
+        obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
+        perfect = obs.unsqueeze(1).expand(_BATCH, ensemble_size, _NUM_CH, _IMG_H, _IMG_W)
+        torch.testing.assert_close(fn(perfect, obs), torch.zeros(_BATCH, _NUM_CH), atol=1e-6, rtol=0.0)
+        # far away, k(X, y) = 0, while the members, all alike, keep k(X, X') = 1
+        torch.testing.assert_close(fn(perfect + 10.0, obs), torch.full((_BATCH, _NUM_CH), 2.0), atol=1e-6, rtol=0.0)
+
+    def test_a_closer_ensemble_scores_lower(self):
+        fn = GaussianMMDLoss(**_GEOM_KWARGS)
         obs = torch.zeros(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
-        set_seed(333)
-        noise = torch.randn(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W)
-        fc_tight = obs.unsqueeze(1) + 0.01 * noise
-        fc_wide = obs.unsqueeze(1) + 10.0 * noise
-        score_tight = fn(fc_tight, obs).mean().item()
-        score_wide = fn(fc_wide, obs).mean().item()
-        self.assertGreater(
-            score_tight,
-            score_wide,
-            f"Tight score ({score_tight:.4f}) should be > wide score ({score_wide:.4f})",
-        )
+        noise = torch.randn(_BATCH, 5, _NUM_CH, _IMG_H, _IMG_W)
+        scores = [fn(obs.unsqueeze(1) + 0.3 * noise + offset, obs).mean().item() for offset in (0.0, 0.5, 1.0, 2.0)]
+        self.assertEqual(scores, sorted(scores), f"the score has to grow with the distance, got {scores}")
+
+    @parameterized.expand([(1,), (5,)])
+    def test_minimizing_moves_the_members_to_the_observation(self, ensemble_size):
+        fn = GaussianMMDLoss(**_GEOM_KWARGS)
+        obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
+        fc = (obs.unsqueeze(1) + torch.randn(_BATCH, ensemble_size, _NUM_CH, _IMG_H, _IMG_W)).requires_grad_(True)
+
+        def error():
+            return ((fc - obs.unsqueeze(1)) ** 2).mean().item()
+
+        initial = error()
+        optimizer = torch.optim.SGD([fc], lr=5.0)
+        for _ in range(20):
+            optimizer.zero_grad()
+            fn(fc, obs).sum().backward()
+            optimizer.step()
+        self.assertLess(error(), initial)
 
     def test_backward(self):
         """Gradients through the double-loop MMD kernel must be finite and free of NaNs."""
-        fn = GaussianMMDLoss(**_GEOM_KWARGS, squared=True)
-        fc = torch.randn(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W, requires_grad=True)
+        fn = GaussianMMDLoss(**_GEOM_KWARGS)
+        fc = torch.randn(_BATCH, 5, _NUM_CH, _IMG_H, _IMG_W, requires_grad=True)
         obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
         fn(fc, obs).sum().backward()
         self.assertIsNotNone(fc.grad)
-        self.assertFalse(torch.isnan(fc.grad).any(), "NaN in fc.grad")
-        self.assertFalse(torch.isinf(fc.grad).any(), "Inf in fc.grad")
-
-    def test_e1_special_case(self, verbose=False):
-        """With E=1 the code takes a direct kernel path: mmd = k(obs, fc).
-        When obs == fc the RBF kernel equals 1, so the spatially-averaged loss
-        must equal 1 (squared=True) or 1 (squared=False, sqrt(1)=1)."""
-        fn = GaussianMMDLoss(**_GEOM_KWARGS, squared=True)
-        obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
-        fc = obs.unsqueeze(1)  # E=1, all members = obs
-        loss = fn(fc, obs)
-        self.assertTrue(
-            compare_tensors("e1 perfect", loss, torch.ones_like(loss), atol=1e-5, verbose=verbose),
-        )
+        self.assertTrue(torch.isfinite(fc.grad).all(), "non-finite fc.grad")
 
 
 # ===========================================================================
@@ -1246,6 +1270,47 @@ class TestLossHandler(unittest.TestCase):
         out_weighted = loss_obj(tar, inp, wgt)
 
         self.assertTrue(compare_tensors("loss", out, out_weighted, verbose=verbose))
+
+    @parameterized.expand(
+        [
+            ([{"type": "gaussian_mmd", "channel_weights": "constant"}], 0),
+            ([{"type": "gaussian_mmd", "channel_weights": "constant"}], 1),
+            ([{"type": "gaussian_mmd", "channel_weights": "constant", "parameters": {"channel_reduction": True}}], 0),
+            (
+                [
+                    {"type": "gaussian_mmd", "channel_weights": "constant"},
+                    {"type": "ensemble_crps", "channel_weights": "constant", "parameters": {"crps_type": "cdf"}},
+                ],
+                0,
+            ),
+            (
+                [
+                    {"type": "gaussian_mmd", "channel_weights": "constant"},
+                    {"type": "ensemble_crps", "channel_weights": "constant", "parameters": {"crps_type": "cdf"}},
+                ],
+                1,
+            ),
+        ]
+    )
+    def test_mmd_in_handler(self, losses, n_future):
+        """The MMD loss weights its channels like the other losses, alone, next to another loss and over several steps."""
+        self.params.losses = losses
+        self.params.n_future = n_future
+        loss_obj = LossHandler(self.params, compile=self.compile)
+
+        num_channels = (n_future + 1) * self.params.N_out_channels
+        tar = torch.randn(self.params.batch_size, num_channels, self.params.img_shape_x, self.params.img_shape_y)
+        prd = (tar.unsqueeze(1) + torch.randn(self.params.batch_size, 4, *tar.shape[1:])).requires_grad_(True)
+
+        out = loss_obj(prd, tar)
+        self.assertEqual(torch.numel(out), 1)
+        self.assertTrue(torch.isfinite(out))
+        out.backward()
+        self.assertTrue(torch.isfinite(prd.grad).all())
+
+        # a perfect forecast scores zero
+        perfect = tar.unsqueeze(1).expand(self.params.batch_size, 4, *tar.shape[1:])
+        self.assertLess(abs(loss_obj(perfect, tar).item()), 1e-5)
 
     @parameterized.expand(_loss_zero_params)
     def test_zero_on_perfect_prediction(self, losses, uncertainty_weighting=False, verbose=False):
