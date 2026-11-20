@@ -17,7 +17,7 @@ from typing import Optional, Tuple, List
 
 import torch
 
-from makani.losses.base_loss import GeometricBaseLoss, LossType, abs_pow
+from makani.losses.base_loss import GeometricBaseLoss, LossType, abs_pow, sum_channels_per_step
 from makani.distributed import comm
 
 
@@ -185,10 +185,10 @@ class GaussianMMDLoss(GeometricBaseLoss):
             espread = reduce_from_parallel_region(espread, "spatial")
             eskill = reduce_from_parallel_region(eskill, "spatial")
 
-        # do the channel reduction: espread is (E, E, B, C), eskill (E, B, C)
+        # do the channel reduction, per lead step: espread is (E, E, B, C), eskill (E, B, C)
         if self.channel_reduction:
-            espread = espread.sum(dim=-1, keepdim=True)
-            eskill = eskill.sum(dim=-1, keepdim=True)
+            espread = sum_channels_per_step(espread, -1, len(self.channel_names))
+            eskill = sum_channels_per_step(eskill, -1, len(self.channel_names))
 
         # apply the Gaussian kernel to the squared distances, d^2 = (sum |x - y|^beta)^(2 / beta)
         two_sigma_sq = 2.0 * self.sigma * self.sigma
@@ -212,5 +212,5 @@ class GaussianMMDLoss(GeometricBaseLoss):
         else:
             kspread = all_pairs
 
-        # the result has the dimensions B, C (C = 1 with channel_reduction); k(y, y) = 1
+        # the result has the dimensions B, C (one per lead step with channel_reduction); k(y, y) = 1
         return 1.0 + kspread - 2.0 * kskill

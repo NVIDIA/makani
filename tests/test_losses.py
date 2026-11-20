@@ -1031,6 +1031,61 @@ class TestSpectralNormalization(unittest.TestCase):
         self.assertTrue(compare_tensors("spectral crps", fn(fc, obs), expected, atol=1e-6, rtol=1e-4, verbose=verbose))
 
 
+_CHANNEL_REDUCED_LOSSES = {
+    "mmd": lambda **kw: GaussianMMDLoss(**_GEOM_KWARGS, channel_reduction=True, **kw),
+    "lp_energy_score": lambda **kw: LpEnergyScoreLoss(**_GEOM_KWARGS, channel_reduction=True, **kw),
+    "sobolev_energy_score": lambda **kw: SobolevEnergyScoreLoss(**_SPEC_KWARGS, channel_reduction=True, **kw),
+    "spectral_l2_energy_score": lambda **kw: SpectralL2EnergyScoreLoss(**_SPEC_KWARGS, channel_reduction=True, **kw),
+    "spectral_coherence": lambda **kw: SpectralCoherenceLoss(**_SPEC_KWARGS, channel_reduction=True, **kw),
+    "corrected_spectral_l2_energy_score": lambda **kw: CorrectedSpectralL2EnergyScoreLoss(
+        **_SPEC_KWARGS, channel_reduction=True, **kw
+    ),
+}
+
+
+class TestMultistepChannelReduction(unittest.TestCase):
+    """
+    In multistep training the lead steps are stacked along the channels, and a loss that reduces over its channels
+    gives one value per step: the value the loss gives each step on its own.
+    """
+
+    N_STEPS = 3
+
+    def setUp(self):
+        disable_tf32()
+        set_seed(333)
+
+    def _steps(self):
+        tar = [torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W) for _ in range(self.N_STEPS)]
+        prd = [t.unsqueeze(1) + 0.5 * torch.randn(_BATCH, 4, _NUM_CH, _IMG_H, _IMG_W) for t in tar]
+        return prd, tar
+
+    @parameterized.expand([(name,) for name in _CHANNEL_REDUCED_LOSSES])
+    def test_one_value_per_step(self, name, verbose=False):
+        fn = _CHANNEL_REDUCED_LOSSES[name]()
+        self.assertEqual(fn.n_channels, 1)
+        prd, tar = self._steps()
+
+        stacked = fn(torch.cat(prd, dim=2), torch.cat(tar, dim=1))
+        per_step = torch.cat([fn(p, t) for p, t in zip(prd, tar)], dim=-1)
+        self.assertTrue(
+            compare_tensors(name, stacked, per_step, atol=1e-5, rtol=1e-4, verbose=verbose, shape_check=True)
+        )
+
+    def test_spread_tempering_per_step(self, verbose=False):
+        """Tempering scales the spread of each step by the factor of that step."""
+        fn = _CHANNEL_REDUCED_LOSSES["lp_energy_score"](spread_temper_steps=1).train()
+        prd, tar = self._steps()
+
+        stacked = fn(torch.cat(prd, dim=2), torch.cat(tar, dim=1), lead_time_step=torch.arange(self.N_STEPS))
+        per_step = torch.cat(
+            [fn(p, t, lead_time_step=torch.tensor([step])) for step, (p, t) in enumerate(zip(prd, tar))], dim=-1
+        )
+        self.assertTrue(
+            compare_tensors("tempered", stacked, per_step, atol=1e-5, rtol=1e-4, verbose=verbose, shape_check=True)
+        )
+
+
 # ===========================================================================
 class TestCRPSLoss(unittest.TestCase):
     """Verifies CRPSLoss against the properscoring reference implementation
@@ -1379,6 +1434,34 @@ class TestLossHandler(unittest.TestCase):
         # a perfect forecast scores zero
         perfect = tar.unsqueeze(1).expand(self.params.batch_size, 4, *tar.shape[1:])
         self.assertLess(abs(loss_obj(perfect, tar).item()), 1e-5)
+
+    @parameterized.expand(
+        [
+            (loss, others)
+            for loss in (
+                {"type": "l2_energy_score"},
+                {"type": "sobolev_energy_score"},
+                {"type": "spectral_l2_energy_score"},
+                {"type": "gaussian_mmd", "parameters": {"channel_reduction": True}},
+            )
+            for others in ([], [{"type": "l2", "channel_weights": "constant"}])
+        ]
+    )
+    def test_channel_reduced_loss_multistep(self, loss, others):
+        """A loss that reduces over its channels gives one value per lead step, next to other losses."""
+        self.params.losses = [loss] + others
+        self.params.n_future = 2
+        loss_obj = LossHandler(self.params, compile=self.compile)
+
+        num_channels = (self.params.n_future + 1) * self.params.N_out_channels
+        tar = torch.randn(self.params.batch_size, num_channels, self.params.img_shape_x, self.params.img_shape_y)
+        prd = (tar.unsqueeze(1) + torch.randn(self.params.batch_size, 4, *tar.shape[1:])).requires_grad_(True)
+
+        out = loss_obj(prd, tar)
+        self.assertEqual(torch.numel(out), 1)
+        self.assertTrue(torch.isfinite(out))
+        out.backward()
+        self.assertTrue(torch.isfinite(prd.grad).all())
 
     @parameterized.expand(_loss_zero_params)
     def test_zero_on_perfect_prediction(self, losses, uncertainty_weighting=False, verbose=False):

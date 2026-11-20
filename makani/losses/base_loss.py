@@ -266,6 +266,19 @@ class LossType(object):
     Probabilistic = 2
 
 
+def sum_channels_per_step(x: torch.Tensor, dim: int, channels_per_step: int) -> torch.Tensor:
+    """
+    Sum the channels of each lead step.
+
+    In multistep training the lead steps are stacked along the channel dimension, ``channels_per_step`` channels
+    each, ``[step 0: c_0, c_1, ...; step 1: c_0, c_1, ...]``. A loss that reduces over its channels has to do so per
+    step, so that it gives one value per step, as the loss handler weights them; with a single step, this is the sum
+    over the channels, keeping the dimension.
+    """
+    dim = dim % x.dim()
+    return x.unflatten(dim, (-1, channels_per_step)).sum(dim=dim + 1)
+
+
 def compute_alpha_per_step(
     n_future: int,
     schedule: str = "linear",

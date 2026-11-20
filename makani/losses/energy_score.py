@@ -19,7 +19,7 @@ import math
 import torch
 from torch import amp
 
-from makani.losses.base_loss import GeometricBaseLoss, SpectralBaseLoss, LossType, abs_pow
+from makani.losses.base_loss import GeometricBaseLoss, SpectralBaseLoss, LossType, abs_pow, sum_channels_per_step
 from makani.distributed import comm
 
 # distributed stuff
@@ -192,11 +192,11 @@ class LpEnergyScoreLoss(GeometricBaseLoss):
             diff = reduce_from_parallel_region(diff, "spatial")
             eskill = reduce_from_parallel_region(eskill, "spatial")
 
-        # do the channel reduction
+        # do the channel reduction, per lead step
         # if channel weights are required they should be added here to the reduction
         if self.channel_reduction:
-            diff = diff.sum(dim=-1, keepdim=True)  # (P, B, 1)
-            eskill = eskill.sum(dim=-1, keepdim=True)
+            diff = sum_channels_per_step(diff, -1, len(self.channel_names))  # (P, B, steps)
+            eskill = sum_channels_per_step(eskill, -1, len(self.channel_names))
 
         # get the masks
         diff_mask = diff < self.eps
@@ -236,7 +236,8 @@ class LpEnergyScoreLoss(GeometricBaseLoss):
         # sum over ensemble
         eskill = eskill.sum(dim=0) / float(num_ensemble)
 
-        # apply spread tempering (lead_time_step shape (C,) for channel-wise weighting)
+        # apply spread tempering; lead_time_step holds the step of each output column, one per channel and step, or
+        # one per step with channel_reduction
         if self.training and self.spread_temper_steps > 0 and lead_time_step is not None:
             scale = lead_time_step.float().to(espread.device) / self.spread_temper_steps
             espread = espread * torch.maximum(scale, torch.ones_like(scale))
@@ -386,10 +387,10 @@ class SobolevEnergyScoreLoss(SpectralBaseLoss):
         espread = lm_weights_split * (forecasts.unsqueeze(1) - forecasts.unsqueeze(0)).abs().square()
         eskill = lm_weights_split * (observations - forecasts).abs().square()
 
-        # do the channel reduction first
+        # do the channel reduction first, per lead step
         if self.channel_reduction:
-            espread = espread.sum(dim=-2, keepdim=True)
-            eskill = eskill.sum(dim=-2, keepdim=True)
+            espread = sum_channels_per_step(espread, -2, len(self.channel_names))
+            eskill = sum_channels_per_step(eskill, -2, len(self.channel_names))
 
         # do the spatial reduction
         espread = espread.sum(dim=-1, keepdim=False)
@@ -556,10 +557,10 @@ class SpectralL2EnergyScoreLoss(SpectralBaseLoss):
         espread = lm_weights_split * (forecasts.unsqueeze(1) - forecasts.unsqueeze(0)).abs().square()
         eskill = lm_weights_split * (observations - forecasts).abs().square()
 
-        # do the channel reduction first
+        # do the channel reduction first, per lead step
         if self.channel_reduction:
-            espread = espread.sum(dim=-3, keepdim=True)
-            eskill = eskill.sum(dim=-3, keepdim=True)
+            espread = sum_channels_per_step(espread, -3, len(self.channel_names))
+            eskill = sum_channels_per_step(eskill, -3, len(self.channel_names))
 
         # do the spatial m reduction
         espread = espread.sum(dim=-1, keepdim=False)
@@ -814,11 +815,11 @@ class SpectralCoherenceLoss(SpectralBaseLoss):
         if self.spatial_distributed:
             loss = reduce_from_parallel_region(loss, "h")
 
-        # reduce over the channel dimension if requested; matches sibling loss
-        # contract: output has shape (B, n_channels) where n_channels is 1 if
+        # reduce over the channels of each lead step if requested; matches sibling loss
+        # contract: output has shape (B, n_channels) per step, where n_channels is 1 if
         # reduction is on, else len(channel_names)
         if self.channel_reduction:
-            loss = loss.sum(dim=-1, keepdim=True)
+            loss = sum_channels_per_step(loss, -1, len(self.channel_names))
 
         return loss
 
@@ -945,10 +946,10 @@ class CorrectedSpectralL2EnergyScoreLoss(SpectralBaseLoss):
         eskill = lm_weights_split * (observations - forecasts).abs().square()
 
         if self.channel_reduction:
-            espread = espread.sum(dim=-3, keepdim=True)
-            eskill = eskill.sum(dim=-3, keepdim=True)
-            psd_pred = psd_pred.sum(dim=-2, keepdim=True)
-            psd_true = psd_true.sum(dim=-2, keepdim=True)
+            espread = sum_channels_per_step(espread, -3, len(self.channel_names))
+            eskill = sum_channels_per_step(eskill, -3, len(self.channel_names))
+            psd_pred = sum_channels_per_step(psd_pred, -2, len(self.channel_names))
+            psd_true = sum_channels_per_step(psd_true, -2, len(self.channel_names))
 
         espread = espread.sum(dim=-1, keepdim=False)
         eskill = eskill.sum(dim=-1, keepdim=False)
