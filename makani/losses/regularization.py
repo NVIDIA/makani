@@ -95,8 +95,7 @@ class SpectralRegularization(SpectralBaseLoss):
         lmax: Optional[int] = None,
         spatial_distributed: Optional[bool] = False,
         ensemble_distributed: Optional[bool] = False,
-        # eps is applied inside sqrt(psd_a * psd_b + eps); the output-scale floor is sqrt(eps) ≈ 1e-5,
-        # matching the 1e-5/1e-6 guards used by sibling losses
+        # with logarithmic, the floor of the power spectra in log(psd + eps), so that degrees without power stay finite
         eps: Optional[float] = 1.0e-10,
         logarithmic: Optional[bool] = False,
         **kwargs,
@@ -168,7 +167,8 @@ class SpectralRegularization(SpectralBaseLoss):
         # before anything else compute the transform
         # as the CDF definition doesn't generalize well to more than one-dimensional variables, we treat complex and imaginary part as the same
         with amp.autocast(device_type="cuda", enabled=False):
-            # TODO: check 4 pi normalization
+            # the powers of the orthonormal SHT, divided by 4 pi and with the m > 0 doubled below, sum to the mean
+            # over the sphere
             forecasts = self.sht(forecasts.float()).abs().pow(2) / (4.0 * math.pi)
             observations = self.sht(observations.float()).abs().pow(2) / (4.0 * math.pi)
 
@@ -184,9 +184,10 @@ class SpectralRegularization(SpectralBaseLoss):
             forecasts = reduce_from_parallel_region(forecasts, "w")
             observations = reduce_from_parallel_region(observations, "w")
 
+        # compare the logarithms of the power spectra, floored by eps where a degree has no power
         if self.logarithmic:
-            forecasts = torch.log(forecasts)
-            observations = torch.log(observations)
+            forecasts = torch.log(forecasts + self.eps)
+            observations = torch.log(observations + self.eps)
 
         diff = (forecasts - observations).abs()
 

@@ -3583,6 +3583,23 @@ class TestSpectralRegularization(unittest.TestCase):
         out = fn(fc, obs)
         self.assertTrue(torch.isfinite(out).all())
 
+    def test_logarithmic_mode_without_power(self, verbose=False):
+        """
+        With logarithmic=True, degrees without power are floored by eps: fields without power score 0 against each
+        other, and a forecast without power scores finitely, with finite gradients, against an observation.
+        """
+        fn = self._fn(logarithmic=True)
+        zeros = torch.zeros(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W, requires_grad=True)
+
+        out = fn(zeros, torch.zeros(_BATCH, _NUM_CH, _IMG_H, _IMG_W))
+        self.assertTrue(compare_tensors("no power", out, torch.zeros_like(out), atol=0.0, verbose=verbose))
+
+        out = fn(zeros, _rand())
+        self.assertTrue(torch.isfinite(out).all())
+        self.assertTrue((out > 0).all())
+        out.sum().backward()
+        self.assertTrue(torch.isfinite(zeros.grad).all())
+
     def test_wrong_forecast_dims_raises(self):
         fn = self._fn()
         fc = torch.randn(1, 2, 3)
