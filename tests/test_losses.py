@@ -1584,6 +1584,36 @@ class TestLossHandler(unittest.TestCase):
         out.backward()
         self.assertTrue(torch.isfinite(prd.grad).all())
 
+    @parameterized.expand([([],), ([{"type": "l2", "channel_weights": "constant"}],)])
+    def test_hydrostatic_in_handler(self, others, verbose=False):
+        """
+        The handler builds the hydrostatic loss, and over several lead steps it scores the residuals of each step:
+        with constant multistep weights, the loss of three steps is the mean of the losses of each step alone.
+        """
+        channel_names = ["z250", "t250", "z500", "t500", "z850", "t850"]
+        self.params.channel_names = channel_names
+        self.params.out_channels = list(range(len(channel_names)))
+        self.params.N_out_channels = len(channel_names)
+        self.params.losses = [{"type": "hydrostatic", "parameters": {"p_min": 200, "p_max": 900}}] + others
+
+        num_steps = 3
+        shape = (self.params.batch_size, len(channel_names), self.params.img_shape_x, self.params.img_shape_y)
+        tars = [torch.randn(shape) for _ in range(num_steps)]
+        prds = [tar + 0.1 * torch.randn(shape) for tar in tars]
+
+        self.params.n_future = 0
+        single = LossHandler(self.params, compile=self.compile)
+        expected = sum(single(prd, tar) for prd, tar in zip(prds, tars)) / num_steps
+
+        self.params.n_future = num_steps - 1
+        multi = LossHandler(self.params, compile=self.compile)
+        prd = torch.cat(prds, dim=1).requires_grad_(True)
+        out = multi(prd, torch.cat(tars, dim=1))
+        self.assertTrue(compare_tensors("hydrostatic", out, expected, atol=0.0, rtol=1e-5, verbose=verbose))
+
+        out.backward()
+        self.assertTrue(torch.isfinite(prd.grad).all())
+
     @parameterized.expand(_loss_zero_params)
     def test_zero_on_perfect_prediction(self, losses, uncertainty_weighting=False, verbose=False):
         """Loss must be exactly zero when prediction equals target."""
