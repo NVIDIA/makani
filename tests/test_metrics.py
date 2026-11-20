@@ -1410,6 +1410,47 @@ class TestMetricsHandler(unittest.TestCase):
         for key, value in aucs.items():
             self.assertAlmostEqual(float(value), expected_auc, delta=1e-5, msg=key)
 
+    @parameterized.expand([(1,), (2,)])
+    def test_spread_and_ssr_need_an_ensemble(self, ensemble_size):
+        """
+        A single member has no spread, so the handler computes spread and SSR only for an ensemble, while the
+        other metrics stay finite. With one member, they would divide by E - 1 = 0.
+        """
+        names = self.params.channel_names
+        num_rollout_steps = 2
+        self.params.batch_size = 2
+        self.params.ensemble_size = ensemble_size
+        handler = MetricsHandler(
+            self.params,
+            None,
+            num_rollout_steps,
+            self.device,
+            l1_var_names=names,
+            rmse_var_names=names,
+            acc_var_names=[],
+            crps_var_names=names,
+            spread_var_names=names,
+            ssr_var_names=names,
+            compile=False,
+        )
+        handler.initialize_buffers()
+        handler.zero_buffers()
+
+        shape = (self.params.batch_size, len(names), self.params.img_local_shape_x, self.params.img_local_shape_y)
+        loss = torch.tensor(0.0, device=self.device)
+        for idt in range(num_rollout_steps):
+            tar = torch.randn(shape, dtype=torch.float32, device=self.device)
+            prd = tar.unsqueeze(1) + torch.randn((shape[0], ensemble_size, *shape[1:]), device=self.device)
+            handler.update(prd, tar, loss, idt)
+        metrics = handler.finalize()["metrics"]
+
+        for metric_name in ["Spread", "SSR"]:
+            keys = [key for key in metrics if key.startswith(f"validation {metric_name} ")]
+            self.assertEqual(len(keys) > 0, ensemble_size > 1, msg=metric_name)
+        for key, value in metrics.items():
+            if key.startswith("validation "):
+                self.assertTrue(math.isfinite(float(value)), msg=key)
+
     def test_dimensional_metrics_are_in_physical_units(self):
         """
         The handler sees normalized fields, (x - bias) / scale, and reports the dimensional metrics in the

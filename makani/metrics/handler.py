@@ -309,8 +309,10 @@ class MetricsHandler:
         self.rmse_var_names = [x for x in rmse_var_names if x in self.channel_names]
         self.acc_var_names = [x for x in acc_var_names if x in self.channel_names]
         self.crps_var_names = [x for x in crps_var_names if x in self.channel_names]
-        self.spread_var_names = [x for x in spread_var_names if x in self.channel_names]
-        self.ssr_var_names = [x for x in ssr_var_names if x in self.channel_names]
+        # a single member has no spread, so spread and SSR are only computed for ensembles
+        is_ensemble = params.get("ensemble_size", 1) > 1
+        self.spread_var_names = [x for x in spread_var_names if x in self.channel_names] if is_ensemble else []
+        self.ssr_var_names = [x for x in ssr_var_names if x in self.channel_names] if is_ensemble else []
         self.rh_var_names = [x for x in rh_var_names if x in self.channel_names]
 
         # split channels not supported atm
