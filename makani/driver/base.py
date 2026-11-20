@@ -45,6 +45,7 @@ from makani.utils.profiling import StepTimer
 from makani.data.data_helpers import get_data_normalization
 from makani.driver.helpers import get_parameter_groups
 from makani.utils.profiling import Timer
+from makani.utils.jit import compiles_model
 from makani.driver.checkpoint import (
     upgrade_checkpoint,
     get_latest_checkpoint_version,
@@ -87,16 +88,16 @@ class Driver(metaclass=abc.ABCMeta):
         every ``.item()`` is a graph break and the parameter ``name`` is specialized as a
         constant, so dynamo recompiles once per parameter until it hits ``recompile_limit`` and
         abandons compilation for that frame. The hook-based design is fundamentally incompatible
-        with a single compiled graph, so we skip watching when ``jit_mode`` enables compilation.
+        with a single compiled graph, so we skip watching when ``jit_mode`` compiles the model.
         (If gradient/parameter histograms are needed under compile, log them out-of-graph in the
         training loop after ``backward()`` instead.)
         """
         if not self.log_to_wandb:
             return
-        if self.params.get("jit_mode", "none") == "inductor":
+        if compiles_model(self.params):
             if self.log_to_screen:
                 self.logger.info(
-                    "Skipping wandb.watch under jit_mode=inductor: its hooks would be traced into "
+                    "Skipping wandb.watch under jit_mode=all: its hooks would be traced into "
                     "the compiled graph and trigger a recompile per parameter (recompile_limit). "
                     "Gradient/parameter histograms are disabled under torch.compile."
                 )

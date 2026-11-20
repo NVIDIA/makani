@@ -285,17 +285,21 @@ class TestDistributedModel(unittest.TestCase):
     @parameterized.expand(
         [
             ("SFNO", 1e-4),
+            # the spherical instance norm, on the processor grid and on the output grid of the last block
+            ("SFNO", 1e-4, "instance_norm_s2"),
             ("SNO", 1e-4),
             ("FCN3", 1e-4),
         ],
         skip_on_empty=True,
     )
-    def test_distributed_model_fwd_bwd(self, nettype, tol, verbose=False):
+    def test_distributed_model_fwd_bwd(self, nettype, tol, normalization_layer=None, verbose=False):
         """
         Tests forward backward pass of distributed model vs serial model
         """
 
         self.params.nettype = nettype
+        if normalization_layer is not None:
+            self.params.normalization_layer = normalization_layer
         if nettype == "DebugNet":
             return
 
