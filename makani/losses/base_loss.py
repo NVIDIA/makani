@@ -266,6 +266,40 @@ class LossType(object):
     Probabilistic = 2
 
 
+def clamped_sqrt(power: torch.Tensor) -> torch.Tensor:
+    """
+    The norm of a power, ``sqrt(power)``, with the power clamped to the smallest positive number of its dtype.
+
+    Where the power is zero, the norm is tiny but positive, so that a division by it stays finite and so does the
+    gradient of the square root. The clamp touches nothing else: a guard that adds a fixed ``eps`` instead depends on
+    the scale of the data, and swamps the powers of the small scales.
+    """
+    return torch.sqrt(torch.clamp(power, min=torch.finfo(power.dtype).tiny))
+
+
+def norm_product(power_a: torch.Tensor, power_b: torch.Tensor) -> torch.Tensor:
+    """
+    The product of the norms of two powers, ``sqrt(power_a) * sqrt(power_b)``, the denominator of a coherence.
+
+    Each norm is clamped, see :func:`clamped_sqrt`, so that a coherence is 0 where either field has no power, and
+    the product does not underflow where both have little.
+    """
+    return clamped_sqrt(power_a) * clamped_sqrt(power_b)
+
+
+def sum_channels_per_step(x: torch.Tensor, dim: int, channels_per_step: int) -> torch.Tensor:
+    """
+    Sum the channels of each lead step.
+
+    In multistep training the lead steps are stacked along the channel dimension, ``channels_per_step`` channels
+    each, ``[step 0: c_0, c_1, ...; step 1: c_0, c_1, ...]``. A loss that reduces over its channels has to do so per
+    step, so that it gives one value per step, as the loss handler weights them; with a single step, this is the sum
+    over the channels, keeping the dimension.
+    """
+    dim = dim % x.dim()
+    return x.unflatten(dim, (-1, channels_per_step)).sum(dim=dim + 1)
+
+
 def compute_alpha_per_step(
     n_future: int,
     schedule: str = "linear",
@@ -419,6 +453,21 @@ class SpectralBaseLoss(nn.Module, metaclass=ABCMeta):
 
         # register
         self.register_buffer("lm_weights", lm_weights, persistent=False)
+
+    def weighted_lm_weights(self, spectral_weights: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        The lm_weights, times the weights of the spectral coefficients if given. Spectral losses weight the
+        coefficients (l, m) of the local spectral domain, not the points of the grid, so the weights end in the
+        local shape of the lm_weights.
+        """
+        if spectral_weights is None:
+            return self.lm_weights
+        if tuple(spectral_weights.shape[-2:]) != tuple(self.lm_weights.shape):
+            raise ValueError(
+                f"spectral losses weight the spectral coefficients, so the weights have to end in the shape "
+                f"{tuple(self.lm_weights.shape)} of the local (l, m) domain, but found {tuple(spectral_weights.shape)}."
+            )
+        return spectral_weights * self.lm_weights
 
     def sum_over_m(self, coeffs: torch.Tensor) -> torch.Tensor:
         """

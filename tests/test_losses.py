@@ -52,7 +52,11 @@ from makani.losses.energy_score import (
 )
 from makani.losses.crps_loss import KernelScoreLoss
 from makani.losses.base_loss import _compute_channel_weighting_helper, compute_alpha_per_step
-from makani.losses.crps_loss import _crps_skillspread_kernel, _crps_gauss_kernel
+from makani.losses.crps_loss import (
+    _crps_skillspread_kernel,
+    _crps_gauss_kernel,
+    _crps_probability_weighted_moment_kernel,
+)
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from .testutils import disable_tf32, set_seed, get_default_parameters, compare_tensors, compare_arrays
@@ -115,6 +119,7 @@ _loss_zero_params = [
     ([{"type": "l2", "channel_weights": "constant"}], False),
     ([{"type": "l1", "channel_weights": "constant"}], False),
     ([{"type": "h1", "channel_weights": "constant"}], False),
+    ([{"type": "amse", "channel_weights": "constant"}], False),
     ([{"type": "drift_regularization"}], False),
 ]
 
@@ -198,8 +203,7 @@ def _rand_ensemble(ensemble=5, batch=_BATCH, channels=_NUM_CH, requires_grad=Fal
 
 # Losses expected to be elementwise non-negative.
 # EnsembleNLLLoss excluded: proper scoring rule that can be negative.
-# GaussianMMDLoss excluded: the unbiased U-statistic MMD² can be negative
-#   (e.g., all E members = obs with E=5 gives mmd² = (3-E)/(E-1) = -0.5).
+# GaussianMMDLoss excluded: the fair (unbiased) estimate of MMD² can be negative.
 _COMMON_NONNEG = [
     ("geometric_l2",),
     ("geometric_l1",),
@@ -215,7 +219,6 @@ _COMMON_NONNEG = [
 # Losses expected to be (near) zero when prd perfectly matches tar.
 # EnsembleNLLLoss excluded: with a degenerate ensemble sigma is clipped to eps,
 #   leaving a residual log(eps^2)/2 term that is large and negative.
-# GaussianMMDLoss excluded: perfect prediction gives mmd² = (3-E)/(E-1) ≠ 0.
 # crps_gauss included: with sigma clamped to eps the residual ≈ eps * 0.23 ≈ 2e-6,
 #   well within atol=1e-4.
 _COMMON_ZERO_PERFECT = [
@@ -228,10 +231,10 @@ _COMMON_ZERO_PERFECT = [
     ("crps_gauss",),
     ("crps_pwm",),
     ("crps_naive_skillspread",),
+    ("mmd",),
 ]
 
 # All losses participate in the batch-size independence test.
-# GaussianMMDLoss is tested with squared=True to avoid sqrt of potentially negative mmd².
 _COMMON_BATCHSIZE = [
     ("geometric_l2",),
     ("geometric_l1",),
@@ -298,8 +301,7 @@ class TestLossCommon(unittest.TestCase):
         if name == "nll":
             return EnsembleNLLLoss(**geom_kwargs)
         if name == "mmd":
-            # squared=True: avoids sqrt of potentially negative mmd² values in common tests
-            return GaussianMMDLoss(**geom_kwargs, squared=True)
+            return GaussianMMDLoss(**geom_kwargs)
         raise ValueError(f"Unknown loss name: {name!r}")
 
     @classmethod
@@ -697,6 +699,20 @@ class TestSpectralRelativeLoss(unittest.TestCase):
 
 
 # ===========================================================================
+def _red_field(batch=_BATCH, channels=_NUM_CH, exponent=1.5):
+    """A field with a red spectrum, amplitudes (l + 1)^-exponent at each degree l, and unit variance."""
+    from torch_harmonics import InverseRealSHT
+
+    isht = InverseRealSHT(sht_grid((_IMG_H, _IMG_W), "equiangular"))
+    lmax, mmax = isht.lmax, isht.mmax
+    amplitude = (torch.arange(lmax, dtype=torch.float32) + 1.0).pow(-exponent).reshape(-1, 1)
+    coeffs = torch.complex(torch.randn(batch, channels, lmax, mmax), torch.randn(batch, channels, lmax, mmax))
+    coeffs = torch.tril(coeffs * amplitude)
+    coeffs[..., 0] = coeffs[..., 0].real
+    field = isht(coeffs)
+    return field / field.std(dim=(-2, -1), keepdim=True)
+
+
 class TestSpectralAMSELoss(unittest.TestCase):
 
     def setUp(self):
@@ -705,6 +721,32 @@ class TestSpectralAMSELoss(unittest.TestCase):
 
     def _fn(self):
         return SpectralAMSELoss(**_SPEC_KWARGS)
+
+    def test_perfect_forecast_of_a_red_spectrum(self):
+        """
+        A perfect forecast scores 0, with zero gradient, also on a red spectrum, whose small scales hold little power:
+        a guard that added a fixed eps to the product of the powers swamped them, so that the loss of a perfect
+        forecast came out at about twice the power of the small scales, with a gradient that damped them.
+        """
+        fn = self._fn()
+        tar = _red_field()
+        prd = tar.clone().requires_grad_(True)
+        loss = fn(prd, tar)
+        loss.sum().backward()
+
+        # well below the loss of a 1% amplitude error; what remains is float32 rounding of the coherence
+        scale = fn(1.01 * tar, tar).abs().max().item()
+        self.assertLess(loss.abs().max().item(), 1e-2 * scale)
+        self.assertLess(prd.grad.abs().max().item(), 1e-3)
+
+    def test_zero_power_stays_finite(self):
+        """A prediction without power at some degrees, here none at all, gives a finite loss and gradient."""
+        fn = self._fn()
+        prd = torch.zeros(_BATCH, _NUM_CH, _IMG_H, _IMG_W, requires_grad=True)
+        loss = fn(prd, _red_field())
+        loss.sum().backward()
+        self.assertTrue(torch.isfinite(loss).all())
+        self.assertTrue(torch.isfinite(prd.grad).all())
 
     def test_amplitude_difference_penalized(self):
         """prd = 2*tar has identical phase but double amplitude -> amplitude term > 0, loss > 0."""
@@ -871,71 +913,316 @@ class TestEnsembleNLLLoss(unittest.TestCase):
 
 
 # ===========================================================================
+def _reference_mmd(forecasts, observations, quad_weight, sigma=1.0, alpha=1.0, beta=2.0, channel_reduction=False):
+    """The squared MMD of each batch entry (and channel), member by member: k(y, y) + E k(X, X') - 2 E k(X, y)."""
+    B, E, C = forecasts.shape[:3]
+
+    def distance_beta(x, y):
+        # the quadrature-weighted sum of |x - y|^beta over the grid, per channel, or over the channels too
+        d = (torch.abs(x - y) ** beta * quad_weight).sum(dim=(-2, -1))
+        return d.sum(dim=-1, keepdim=True) if channel_reduction else d
+
+    def kernel(x, y):
+        return torch.exp(-(distance_beta(x, y) ** (2.0 / beta)) / (2.0 * sigma**2))
+
+    skill = sum(kernel(forecasts[:, i], observations) for i in range(E)) / E
+    offdiagonal = sum(kernel(forecasts[:, i], forecasts[:, j]) for i in range(E) for j in range(E) if i != j)
+    all_pairs = (offdiagonal + E) / E**2
+    spread = alpha * offdiagonal / (E * (E - 1)) + (1.0 - alpha) * all_pairs if E > 1 else all_pairs
+    return 1.0 + spread - 2.0 * skill
+
+
 class TestGaussianMMDLoss(unittest.TestCase):
-    """Specific tests for GaussianMMDLoss.
-
-    Note: the unbiased U-statistic MMD² can be negative (e.g., perfect prediction
-    with E=5 gives mmd² = (3-E)/(E-1) = -0.5), so nonneg and zero-on-perfect tests
-    do not apply.  Tested properties: squared-flag consistency, spread ordering,
-    backward pass, and the E=1 code-path.
-    """
-
-    _E = 5
+    """GaussianMMDLoss against a direct computation of the squared MMD, and its behavior as a training loss."""
 
     def setUp(self):
         disable_tf32()
         set_seed(333)
 
-    def test_squared_flag_consistency(self, verbose=False):
-        """For a wide ensemble where mmd² > 0, sqrt(mmd²) must equal the unsquared loss."""
-        fn_sq = GaussianMMDLoss(**_GEOM_KWARGS, squared=True)
-        fn_unsq = GaussianMMDLoss(**_GEOM_KWARGS, squared=False)
-        # use a large-offset ensemble so that k(y_m, obs) ≈ 0 → mmd² > 0
-        obs = torch.zeros(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
-        fc = obs.unsqueeze(1) + 10.0 * torch.randn(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W)
-        mmd2 = fn_sq(fc, obs)
-        mmd = fn_unsq(fc, obs)
+    @parameterized.expand(
+        [
+            # ensemble size, sigma, alpha, beta, channel reduction
+            (1, 1.0, 1.0, 2.0, False),
+            (2, 1.0, 1.0, 2.0, False),
+            (4, 1.0, 1.0, 2.0, False),
+            (4, 0.7, 1.0, 2.0, True),
+            (4, 1.5, 0.5, 2.0, False),
+            (4, 1.0, 0.0, 2.0, True),
+            (3, 2.0, 1.0, 1.0, False),
+            (3, 1.0, 0.3, 1.0, True),
+        ]
+    )
+    def test_matches_reference(self, ensemble_size, sigma, alpha, beta, channel_reduction, verbose=False):
+        fn = GaussianMMDLoss(**_GEOM_KWARGS, sigma=sigma, alpha=alpha, beta=beta, channel_reduction=channel_reduction)
+        obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W, dtype=torch.float64)
+        fc = obs.unsqueeze(1) + 0.5 * torch.randn(_BATCH, ensemble_size, _NUM_CH, _IMG_H, _IMG_W, dtype=torch.float64)
+
+        expected = _reference_mmd(
+            fc, obs, fn.quadrature.quad_weight.to(torch.float64), sigma, alpha, beta, channel_reduction
+        )
+        self.assertEqual(fn.n_channels, 1 if channel_reduction else _NUM_CH)
         self.assertTrue(
-            compare_tensors("squared flag", torch.sqrt(mmd2), mmd, atol=1e-5, rtol=1e-4, verbose=verbose),
+            compare_tensors("mmd", fn(fc, obs), expected, atol=1e-10, rtol=1e-8, verbose=verbose, shape_check=True)
         )
 
-    def test_spread_increases_mmd(self):
-        """A tight ensemble near the observation must have a higher kernel score
-        than a wide ensemble far from it."""
-        fn = GaussianMMDLoss(**_GEOM_KWARGS, squared=True)
+    @parameterized.expand([(1,), (5,)])
+    def test_perfect_forecast_scores_zero_and_a_distant_one_two(self, ensemble_size):
+        fn = GaussianMMDLoss(**_GEOM_KWARGS)
+        obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
+        perfect = obs.unsqueeze(1).expand(_BATCH, ensemble_size, _NUM_CH, _IMG_H, _IMG_W)
+        torch.testing.assert_close(fn(perfect, obs), torch.zeros(_BATCH, _NUM_CH), atol=1e-6, rtol=0.0)
+        # far away, k(X, y) = 0, while the members, all alike, keep k(X, X') = 1
+        torch.testing.assert_close(fn(perfect + 10.0, obs), torch.full((_BATCH, _NUM_CH), 2.0), atol=1e-6, rtol=0.0)
+
+    def test_a_closer_ensemble_scores_lower(self):
+        fn = GaussianMMDLoss(**_GEOM_KWARGS)
         obs = torch.zeros(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
-        set_seed(333)
-        noise = torch.randn(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W)
-        fc_tight = obs.unsqueeze(1) + 0.01 * noise
-        fc_wide = obs.unsqueeze(1) + 10.0 * noise
-        score_tight = fn(fc_tight, obs).mean().item()
-        score_wide = fn(fc_wide, obs).mean().item()
-        self.assertGreater(
-            score_tight,
-            score_wide,
-            f"Tight score ({score_tight:.4f}) should be > wide score ({score_wide:.4f})",
-        )
+        noise = torch.randn(_BATCH, 5, _NUM_CH, _IMG_H, _IMG_W)
+        scores = [fn(obs.unsqueeze(1) + 0.3 * noise + offset, obs).mean().item() for offset in (0.0, 0.5, 1.0, 2.0)]
+        self.assertEqual(scores, sorted(scores), f"the score has to grow with the distance, got {scores}")
+
+    @parameterized.expand([(1,), (5,)])
+    def test_minimizing_moves_the_members_to_the_observation(self, ensemble_size):
+        fn = GaussianMMDLoss(**_GEOM_KWARGS)
+        obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
+        fc = (obs.unsqueeze(1) + torch.randn(_BATCH, ensemble_size, _NUM_CH, _IMG_H, _IMG_W)).requires_grad_(True)
+
+        def error():
+            return ((fc - obs.unsqueeze(1)) ** 2).mean().item()
+
+        initial = error()
+        optimizer = torch.optim.SGD([fc], lr=5.0)
+        for _ in range(20):
+            optimizer.zero_grad()
+            fn(fc, obs).sum().backward()
+            optimizer.step()
+        self.assertLess(error(), initial)
 
     def test_backward(self):
         """Gradients through the double-loop MMD kernel must be finite and free of NaNs."""
-        fn = GaussianMMDLoss(**_GEOM_KWARGS, squared=True)
-        fc = torch.randn(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W, requires_grad=True)
+        fn = GaussianMMDLoss(**_GEOM_KWARGS)
+        fc = torch.randn(_BATCH, 5, _NUM_CH, _IMG_H, _IMG_W, requires_grad=True)
         obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
         fn(fc, obs).sum().backward()
         self.assertIsNotNone(fc.grad)
-        self.assertFalse(torch.isnan(fc.grad).any(), "NaN in fc.grad")
-        self.assertFalse(torch.isinf(fc.grad).any(), "Inf in fc.grad")
+        self.assertTrue(torch.isfinite(fc.grad).all(), "non-finite fc.grad")
 
-    def test_e1_special_case(self, verbose=False):
-        """With E=1 the code takes a direct kernel path: mmd = k(obs, fc).
-        When obs == fc the RBF kernel equals 1, so the spatially-averaged loss
-        must equal 1 (squared=True) or 1 (squared=False, sqrt(1)=1)."""
-        fn = GaussianMMDLoss(**_GEOM_KWARGS, squared=True)
-        obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
-        fc = obs.unsqueeze(1)  # E=1, all members = obs
-        loss = fn(fc, obs)
+
+class TestSpectralNormalization(unittest.TestCase):
+    """
+    The spectral losses score the coefficients of the orthonormal SHT with the weights of the mean over the sphere,
+    1 / (4 pi), doubled for the orders m > 0, so that by Parseval a spectral L2 score is the grid L2 score of a
+    band-limited field.
+    """
+
+    NLAT, NLON = 16, 32
+    LMAX = 8
+
+    def setUp(self):
+        from torch_harmonics import InverseRealSHT
+
+        disable_tf32()
+        set_seed(333)
+        self.grid = make_grid((self.NLAT, self.NLON), "legendre-gauss")
+        self.kwargs = dict(
+            grid=self.grid, crop_shape=(self.NLAT, self.NLON), crop_offset=(0, 0), channel_names=_CHANNEL_NAMES
+        )
+        self.isht = InverseRealSHT(
+            sht_grid((self.NLAT, self.NLON), "legendre-gauss"), lmax=self.LMAX, mmax=self.LMAX
+        ).to(torch.float64)
+
+    def _fields(self, *shape):
+        """Band-limited fields, real at m = 0, from random coefficients up to degree LMAX."""
+        coeffs = torch.randn(*shape, self.LMAX, self.LMAX, dtype=torch.complex128)
+        coeffs[..., 0] = coeffs[..., 0].real
+        coeffs = torch.tril(coeffs.real) + 1j * torch.tril(coeffs.imag)
+        return self.isht(coeffs).to(torch.float32)
+
+    @parameterized.expand([(1, 1.0), (3, 1.0), (1, 2.0), (3, 2.0)])
+    def test_energy_scores_match_the_grid(self, ensemble_size, beta, verbose=False):
+        obs = self._fields(_BATCH, _NUM_CH)
+        fc = obs.unsqueeze(1) + self._fields(_BATCH, ensemble_size, _NUM_CH)
+
+        grid_score = LpEnergyScoreLoss(**self.kwargs, p=2.0, beta=beta)(fc, obs)
+        scores = {
+            "sobolev, l2 term only": SobolevEnergyScoreLoss(**self.kwargs, beta=beta, relative_weight=0.0)(fc, obs),
+        }
+        # the spectral L2 scores apply beta to each degree and sum over the degrees, which for beta = 2 is the sum
+        # over the sphere
+        if beta == 2.0:
+            scores["spectral l2"] = SpectralL2EnergyScoreLoss(**self.kwargs, beta=beta)(fc, obs)
+        if ensemble_size == 1 and beta == 2.0:
+            # the correction rescales the spread, which a single member does not have
+            scores["corrected spectral l2"] = CorrectedSpectralL2EnergyScoreLoss(**self.kwargs, beta=beta)(
+                fc, obs
+            ).reshape(grid_score.shape)
+        for name, score in scores.items():
+            with self.subTest(loss=name):
+                self.assertTrue(compare_tensors(name, score, grid_score, atol=1e-5, rtol=1e-4, verbose=verbose))
+
+    def test_spectral_crps_of_one_member(self, verbose=False):
+        """With one member, the CRPS of each coefficient magnitude is its absolute error, weighted for the mean over the sphere."""
+        from torch_harmonics import RealSHT
+
+        fn = SpectralCRPSLoss(**self.kwargs, crps_type="cdf")
+        obs = self._fields(_BATCH, _NUM_CH)
+        fc = obs.unsqueeze(1) + self._fields(_BATCH, 1, _NUM_CH)
+
+        sht = RealSHT(sht_grid((self.NLAT, self.NLON), "legendre-gauss"), lmax=fn.sht.lmax, mmax=fn.sht.mmax)
+        error = torch.abs(sht(fc.squeeze(1)).abs() - sht(obs).abs())
+        m_weights = torch.full((fn.sht.mmax,), 2.0)
+        m_weights[0] = 1.0
+        expected = (error * m_weights / (4.0 * math.pi)).sum(dim=(-2, -1))
+        self.assertTrue(compare_tensors("spectral crps", fn(fc, obs), expected, atol=1e-6, rtol=1e-4, verbose=verbose))
+
+    _SPECTRAL_LOSSES = {
+        "spectral crps cdf": lambda kw: SpectralCRPSLoss(**kw, crps_type="cdf"),
+        "spectral crps pwm": lambda kw: SpectralCRPSLoss(**kw, crps_type="probability weighted moment"),
+        "spectral crps skillspread": lambda kw: SpectralCRPSLoss(**kw, crps_type="skillspread"),
+        "spectral crps gauss": lambda kw: SpectralCRPSLoss(**kw, crps_type="gauss"),
+        "sobolev energy score": lambda kw: SobolevEnergyScoreLoss(**kw, beta=1.0),
+        "spectral l2 energy score": lambda kw: SpectralL2EnergyScoreLoss(**kw, beta=1.0),
+        "spectral coherence": lambda kw: SpectralCoherenceLoss(**kw),
+        "relative spectral coherence": lambda kw: SpectralCoherenceLoss(**kw, relative=True),
+        "corrected spectral l2 energy score": lambda kw: CorrectedSpectralL2EnergyScoreLoss(**kw, beta=1.0),
+    }
+
+    @parameterized.expand([(name,) for name in _SPECTRAL_LOSSES])
+    def test_spectral_weights_select_the_coefficients(self, name, verbose=False):
+        """
+        Weights of 1 on the degrees up to L0 and 0 above give the loss of the fields truncated to those degrees, for
+        a cutoff L0 of every sample and channel.
+        """
+        from torch_harmonics import RealSHT
+
+        fn = self._SPECTRAL_LOSSES[name](self.kwargs)
+        obs = self._fields(_BATCH, _NUM_CH)
+        fc = obs.unsqueeze(1) + self._fields(_BATCH, 3, _NUM_CH)
+
+        lmax, mmax = fn.lm_weights.shape
+        cutoff = torch.randint(1, self.LMAX, (_BATCH, _NUM_CH, 1, 1))
+        weights = (torch.arange(lmax).reshape(1, 1, -1, 1) <= cutoff).float().expand(-1, -1, -1, mmax)
+
+        sht = RealSHT(sht_grid((self.NLAT, self.NLON), "legendre-gauss"), lmax=self.LMAX, mmax=self.LMAX).to(
+            torch.float64
+        )
+        keep = torch.arange(self.LMAX).reshape(1, 1, -1, 1) <= cutoff
+
+        def truncate(field):
+            keep_field = keep if field.dim() == 4 else keep.unsqueeze(1)
+            return self.isht(sht(field.double()) * keep_field).to(torch.float32)
+
+        # the weighted loss depends only on the degrees it keeps
+        weighted = fn(fc, obs, weights)
         self.assertTrue(
-            compare_tensors("e1 perfect", loss, torch.ones_like(loss), atol=1e-5, verbose=verbose),
+            compare_tensors(
+                name, weighted, fn(truncate(fc), truncate(obs), weights), atol=1e-5, rtol=1e-4, verbose=verbose
+            )
+        )
+        # and is the loss of the truncated fields. Not for the relative coherence: truncating on the grid leaves the
+        # roundoff of float32 in the cut degrees, and normalized by its own power, that noise has any coherence
+        if name != "relative spectral coherence":
+            expected = fn(truncate(fc), truncate(obs))
+            self.assertTrue(compare_tensors(name, weighted, expected, atol=1e-5, rtol=1e-4, verbose=verbose))
+
+    @parameterized.expand([(1,), (2,)])
+    def test_relative_coherence_ignores_the_removed_degrees(self, ensemble_size):
+        """
+        Degrees whose weights are all 0 do not add to the relative coherence, so a perfect forecast scores 0 with
+        any weights.
+        """
+        fn = SpectralCoherenceLoss(**self.kwargs, relative=True)
+        obs = self._fields(_BATCH, _NUM_CH)
+        fc = obs.unsqueeze(1).expand(-1, ensemble_size, -1, -1, -1)
+
+        lmax, mmax = fn.lm_weights.shape
+        weights = (torch.arange(lmax).reshape(-1, 1) <= self.LMAX // 2).float().expand(-1, mmax)
+        loss = fn(fc, obs, weights)
+        self.assertTrue(torch.allclose(loss, torch.zeros_like(loss), atol=1e-5), loss)
+
+    @parameterized.expand([(name,) for name in _SPECTRAL_LOSSES])
+    def test_grid_weights_are_refused(self, name):
+        """The spectral losses weight the coefficients, so weights on the grid are an error."""
+        fn = self._SPECTRAL_LOSSES[name](self.kwargs)
+        obs = self._fields(_BATCH, _NUM_CH)
+        fc = obs.unsqueeze(1) + self._fields(_BATCH, 3, _NUM_CH)
+        with self.assertRaises(ValueError):
+            fn(fc, obs, torch.ones(_BATCH, _NUM_CH, self.NLAT, self.NLON))
+
+
+_CHANNEL_REDUCED_LOSSES = {
+    "mmd": lambda **kw: GaussianMMDLoss(**_GEOM_KWARGS, channel_reduction=True, **kw),
+    "lp_energy_score": lambda **kw: LpEnergyScoreLoss(**_GEOM_KWARGS, channel_reduction=True, **kw),
+    "sobolev_energy_score": lambda **kw: SobolevEnergyScoreLoss(**_SPEC_KWARGS, channel_reduction=True, **kw),
+    "spectral_l2_energy_score": lambda **kw: SpectralL2EnergyScoreLoss(**_SPEC_KWARGS, channel_reduction=True, **kw),
+    "spectral_coherence": lambda **kw: SpectralCoherenceLoss(**_SPEC_KWARGS, channel_reduction=True, **kw),
+    "corrected_spectral_l2_energy_score": lambda **kw: CorrectedSpectralL2EnergyScoreLoss(
+        **_SPEC_KWARGS, channel_reduction=True, **kw
+    ),
+}
+
+
+class TestMultistepChannelReduction(unittest.TestCase):
+    """
+    In multistep training the lead steps are stacked along the channels, and a loss that reduces over its channels
+    gives one value per step: the value the loss gives each step on its own.
+    """
+
+    N_STEPS = 3
+
+    def setUp(self):
+        disable_tf32()
+        set_seed(333)
+
+    def _steps(self):
+        tar = [torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W) for _ in range(self.N_STEPS)]
+        prd = [t.unsqueeze(1) + 0.5 * torch.randn(_BATCH, 4, _NUM_CH, _IMG_H, _IMG_W) for t in tar]
+        return prd, tar
+
+    @parameterized.expand([(name,) for name in _CHANNEL_REDUCED_LOSSES])
+    def test_one_value_per_step(self, name, verbose=False):
+        fn = _CHANNEL_REDUCED_LOSSES[name]()
+        self.assertEqual(fn.n_channels, 1)
+        prd, tar = self._steps()
+
+        stacked = fn(torch.cat(prd, dim=2), torch.cat(tar, dim=1))
+        per_step = torch.cat([fn(p, t) for p, t in zip(prd, tar)], dim=-1)
+        self.assertTrue(
+            compare_tensors(name, stacked, per_step, atol=1e-5, rtol=1e-4, verbose=verbose, shape_check=True)
+        )
+
+    def test_spread_tempering_ramps_up_to_the_full_spread(self, verbose=False):
+        """In training, the spread of step k counts with min(k / T, 1): skill only at step 0, the full score from T."""
+        temper_steps = 2
+        fn = _CHANNEL_REDUCED_LOSSES["lp_energy_score"](spread_temper_steps=temper_steps)
+        prd, tar = self._steps()
+        prd, tar = torch.cat(prd, dim=2), torch.cat(tar, dim=1)
+        steps = torch.arange(self.N_STEPS)
+
+        # the full score, untempered outside of training, and the skill term, the mean L2 distance of the members to
+        # the observation, over the grid and the channels of each step (p = 2, beta = 1)
+        full = fn.eval()(prd, tar, lead_time_step=steps)
+        tempered = fn.train()(prd, tar, lead_time_step=steps)
+        squared = ((prd - tar.unsqueeze(1)) ** 2 * fn.quadrature.quad_weight.to(prd.dtype)).sum(dim=(-2, -1))
+        skill = squared.unflatten(-1, (self.N_STEPS, _NUM_CH)).sum(dim=-1).sqrt().mean(dim=1)
+
+        # score = skill - spread / 2, with the spread scaled by the factor of each step
+        factor = torch.clamp(steps / temper_steps, max=1.0).to(full.dtype)
+        expected = skill - factor * (skill - full)
+        self.assertTrue(compare_tensors("tempered", tempered, expected, atol=1e-6, rtol=1e-5, verbose=verbose))
+        self.assertTrue(compare_tensors("step T and later", tempered[:, temper_steps:], full[:, temper_steps:]))
+
+    def test_spread_tempering_per_step(self, verbose=False):
+        """Tempering scales the spread of each step by the factor of that step."""
+        fn = _CHANNEL_REDUCED_LOSSES["lp_energy_score"](spread_temper_steps=1).train()
+        prd, tar = self._steps()
+
+        stacked = fn(torch.cat(prd, dim=2), torch.cat(tar, dim=1), lead_time_step=torch.arange(self.N_STEPS))
+        per_step = torch.cat(
+            [fn(p, t, lead_time_step=torch.tensor([step])) for step, (p, t) in enumerate(zip(prd, tar))], dim=-1
+        )
+        self.assertTrue(
+            compare_tensors("tempered", stacked, per_step, atol=1e-5, rtol=1e-4, verbose=verbose, shape_check=True)
         )
 
 
@@ -1247,6 +1534,105 @@ class TestLossHandler(unittest.TestCase):
 
         self.assertTrue(compare_tensors("loss", out, out_weighted, verbose=verbose))
 
+    @parameterized.expand(
+        [
+            ([{"type": "gaussian_mmd", "channel_weights": "constant"}], 0),
+            ([{"type": "gaussian_mmd", "channel_weights": "constant"}], 1),
+            ([{"type": "gaussian_mmd", "channel_weights": "constant", "parameters": {"channel_reduction": True}}], 0),
+            (
+                [
+                    {"type": "gaussian_mmd", "channel_weights": "constant"},
+                    {"type": "ensemble_crps", "channel_weights": "constant", "parameters": {"crps_type": "cdf"}},
+                ],
+                0,
+            ),
+            (
+                [
+                    {"type": "gaussian_mmd", "channel_weights": "constant"},
+                    {"type": "ensemble_crps", "channel_weights": "constant", "parameters": {"crps_type": "cdf"}},
+                ],
+                1,
+            ),
+        ]
+    )
+    def test_mmd_in_handler(self, losses, n_future):
+        """The MMD loss weights its channels like the other losses, alone, next to another loss and over several steps."""
+        self.params.losses = losses
+        self.params.n_future = n_future
+        loss_obj = LossHandler(self.params, compile=self.compile)
+
+        num_channels = (n_future + 1) * self.params.N_out_channels
+        tar = torch.randn(self.params.batch_size, num_channels, self.params.img_shape_x, self.params.img_shape_y)
+        prd = (tar.unsqueeze(1) + torch.randn(self.params.batch_size, 4, *tar.shape[1:])).requires_grad_(True)
+
+        out = loss_obj(prd, tar)
+        self.assertEqual(torch.numel(out), 1)
+        self.assertTrue(torch.isfinite(out))
+        out.backward()
+        self.assertTrue(torch.isfinite(prd.grad).all())
+
+        # a perfect forecast scores zero
+        perfect = tar.unsqueeze(1).expand(self.params.batch_size, 4, *tar.shape[1:])
+        self.assertLess(abs(loss_obj(perfect, tar).item()), 1e-5)
+
+    @parameterized.expand(
+        [
+            (loss, others)
+            for loss in (
+                {"type": "l2_energy_score"},
+                {"type": "sobolev_energy_score"},
+                {"type": "spectral_l2_energy_score"},
+                {"type": "gaussian_mmd", "parameters": {"channel_reduction": True}},
+            )
+            for others in ([], [{"type": "l2", "channel_weights": "constant"}])
+        ]
+    )
+    def test_channel_reduced_loss_multistep(self, loss, others):
+        """A loss that reduces over its channels gives one value per lead step, next to other losses."""
+        self.params.losses = [loss] + others
+        self.params.n_future = 2
+        loss_obj = LossHandler(self.params, compile=self.compile)
+
+        num_channels = (self.params.n_future + 1) * self.params.N_out_channels
+        tar = torch.randn(self.params.batch_size, num_channels, self.params.img_shape_x, self.params.img_shape_y)
+        prd = (tar.unsqueeze(1) + torch.randn(self.params.batch_size, 4, *tar.shape[1:])).requires_grad_(True)
+
+        out = loss_obj(prd, tar)
+        self.assertEqual(torch.numel(out), 1)
+        self.assertTrue(torch.isfinite(out))
+        out.backward()
+        self.assertTrue(torch.isfinite(prd.grad).all())
+
+    @parameterized.expand([([],), ([{"type": "l2", "channel_weights": "constant"}],)])
+    def test_hydrostatic_in_handler(self, others, verbose=False):
+        """
+        The handler builds the hydrostatic loss, and over several lead steps it scores the residuals of each step:
+        with constant multistep weights, the loss of three steps is the mean of the losses of each step alone.
+        """
+        channel_names = ["z250", "t250", "z500", "t500", "z850", "t850"]
+        self.params.channel_names = channel_names
+        self.params.out_channels = list(range(len(channel_names)))
+        self.params.N_out_channels = len(channel_names)
+        self.params.losses = [{"type": "hydrostatic", "parameters": {"p_min": 200, "p_max": 900}}] + others
+
+        num_steps = 3
+        shape = (self.params.batch_size, len(channel_names), self.params.img_shape_x, self.params.img_shape_y)
+        tars = [torch.randn(shape) for _ in range(num_steps)]
+        prds = [tar + 0.1 * torch.randn(shape) for tar in tars]
+
+        self.params.n_future = 0
+        single = LossHandler(self.params, compile=self.compile)
+        expected = sum(single(prd, tar) for prd, tar in zip(prds, tars)) / num_steps
+
+        self.params.n_future = num_steps - 1
+        multi = LossHandler(self.params, compile=self.compile)
+        prd = torch.cat(prds, dim=1).requires_grad_(True)
+        out = multi(prd, torch.cat(tars, dim=1))
+        self.assertTrue(compare_tensors("hydrostatic", out, expected, atol=0.0, rtol=1e-5, verbose=verbose))
+
+        out.backward()
+        self.assertTrue(torch.isfinite(prd.grad).all())
+
     @parameterized.expand(_loss_zero_params)
     def test_zero_on_perfect_prediction(self, losses, uncertainty_weighting=False, verbose=False):
         """Loss must be exactly zero when prediction equals target."""
@@ -1273,7 +1659,7 @@ class TestLossHandler(unittest.TestCase):
 
         shape = (self.params.batch_size, self.params.N_out_channels, self.params.img_shape_x, self.params.img_shape_y)
 
-        # this needs to be sufficiently large to mitigarte the bias due to the initialization of the running stats
+        # the running stats over many batches
         num_samples = 100
         for i in range(num_samples):
 
@@ -1300,6 +1686,58 @@ class TestLossHandler(unittest.TestCase):
             self.assertTrue(compare_tensors("mean", mean, expected_mean, verbose=verbose))
         with self.subTest(desc="var"):
             self.assertTrue(compare_tensors("var", var, expected_var, verbose=verbose))
+
+    def test_running_stats_are_exact_from_the_start(self, verbose=False):
+        """
+        The running stats start from an empty sum, so after a few batches they are the mean and variance of every loss
+        value seen, however small their variance, and before any batch, or after a reset, they are 0.
+        """
+        self.params.losses = [{"type": "l2"}]
+        loss_obj = LossHandler(self.params, track_running_stats=True)
+        loss_obj.train()
+
+        with self.subTest(desc="before any batch"):
+            var, mean = loss_obj.get_running_stats()
+            self.assertTrue(compare_tensors("var", var, torch.zeros_like(var), atol=0.0, verbose=verbose))
+            self.assertTrue(compare_tensors("mean", mean, torch.zeros_like(mean), atol=0.0, verbose=verbose))
+
+        shape = (self.params.batch_size, self.params.N_out_channels, self.params.img_shape_x, self.params.img_shape_y)
+        values = []
+        for _ in range(3):
+            tar = torch.zeros(*shape)
+            prd = 0.01 * torch.randn(*shape)
+            loss_obj(prd, tar)
+            values.append(loss_obj.loss_fn[0](prd, tar))
+        expected_var, expected_mean = torch.var_mean(torch.cat(values, dim=0), dim=0, correction=0)
+
+        var, mean = loss_obj.get_running_stats()
+        with self.subTest(desc="mean"):
+            self.assertTrue(compare_tensors("mean", mean, expected_mean, atol=0.0, rtol=1e-4, verbose=verbose))
+        with self.subTest(desc="var"):
+            self.assertTrue(compare_tensors("var", var, expected_var, atol=0.0, rtol=1e-3, verbose=verbose))
+
+        with self.subTest(desc="after a reset"):
+            loss_obj.reset_running_stats()
+            var, mean = loss_obj.get_running_stats(correction=1)
+            self.assertTrue(compare_tensors("var", var, torch.zeros_like(var), atol=0.0, verbose=verbose))
+
+    @parameterized.expand([(False,), (True,)])
+    def test_channel_weights_as_a_list(self, temp_diff_normalization):
+        """Channel weights given as a flat list are the weights of the nested list, and a list of the wrong length is refused."""
+        C = self.params.N_out_channels
+        weights = [1.0 + c for c in range(C)]
+        loss = {"type": "l2", "temp_diff_normalization": temp_diff_normalization}
+
+        self.params.losses = [{**loss, "channel_weights": weights}]
+        flat = LossHandler(self.params, compile=self.compile)
+        self.params.losses = [{**loss, "channel_weights": [weights]}]
+        nested = LossHandler(self.params, compile=self.compile)
+        self.assertTrue(compare_tensors("channel weights", flat.channel_weights, nested.channel_weights))
+        self.assertEqual(tuple(flat.channel_weights.shape), (1, C))
+
+        self.params.losses = [{**loss, "channel_weights": weights[:-1]}]
+        with self.assertRaises(ValueError):
+            LossHandler(self.params, compile=self.compile)
 
     @parameterized.expand(
         [
@@ -1541,7 +1979,7 @@ class TestLossHandler(unittest.TestCase):
     # ------------------------------------------------------------------
 
     def test_reset_running_stats(self, verbose=False):
-        """reset_running_stats restores running_mean=0, running_var=1, and
+        """reset_running_stats restores running_mean=0, running_var=0 (the M2 of Welford's algorithm), and
         num_batches_tracked=0 after warm-up batches have populated them."""
         self.params.losses = [{"type": "l2"}]
         loss_obj = LossHandler(self.params, track_running_stats=True)
@@ -1563,7 +2001,7 @@ class TestLossHandler(unittest.TestCase):
         )
         self.assertTrue(
             compare_tensors(
-                "running_var reset", loss_obj.running_var, torch.ones_like(loss_obj.running_var), verbose=verbose
+                "running_var reset", loss_obj.running_var, torch.zeros_like(loss_obj.running_var), verbose=verbose
             )
         )
         self.assertEqual(loss_obj.num_batches_tracked.item(), 0)
@@ -2060,6 +2498,63 @@ class TestCRPSLossExtended(unittest.TestCase):
         obs = torch.randn(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
         with self.assertRaises(NotImplementedError):
             fn(fc, obs)
+
+    # ------ weighted fair and non-fair CRPS against the pairs ------
+
+    @staticmethod
+    def _weighted_pair_crps(fc, obs, weights, fair):
+        """
+        The CRPS of members fc [B, E, C] with weights [E] at observations obs [B, C], from the pairs: the skill
+        weights each member by w_i / W and the spread each pair by w_i w_j, normalized by W^2 or, for the fair
+        score, by the weight of the pairs i != j, W^2 - sum_i w_i^2.
+        """
+        fc, obs, w = fc.double(), obs.double(), weights.double()
+        total = w.sum()
+        skill = torch.einsum("e,bec->bc", w, (fc - obs.unsqueeze(1)).abs()) / total
+        pairs = torch.einsum("e,f,befc->bc", w, w, (fc.unsqueeze(2) - fc.unsqueeze(1)).abs())
+        norm = total**2 - (w**2).sum() if fair else total**2
+        return skill - 0.5 * pairs / norm
+
+    @parameterized.expand([("probability weighted moment", True), ("cdf", False)])
+    def test_ensemble_weights_match_the_pairs(self, crps_type, fair, verbose=False):
+        """
+        The CRPS with member weights against the CRPS from the pairs, on fields constant over the sphere, where the
+        score is its value at a point. The probability weighted moment is the fair score, the cdf the score of the
+        weighted empirical distribution.
+        """
+        ew = torch.rand(self._E) + 0.1
+        fc = torch.randn(_BATCH, self._E, _NUM_CH)
+        obs = torch.randn(_BATCH, _NUM_CH)
+
+        fn = self._fn(crps_type, ensemble_weights=ew)
+        out = fn(
+            fc[..., None, None].expand(-1, -1, -1, _IMG_H, _IMG_W), obs[..., None, None].expand(-1, -1, _IMG_H, _IMG_W)
+        )
+        expected = self._weighted_pair_crps(fc, obs, ew, fair) * fn.quad_weight_split.double().sum()
+        self.assertTrue(compare_tensors(crps_type, out, expected.float(), atol=1e-5, rtol=1e-5, verbose=verbose))
+
+    def test_pwm_with_equal_weights_is_unweighted(self, verbose=False):
+        """Equal member weights, of any size, give the probability weighted moment without weights."""
+        fc, obs = _rand_ensemble(self._E), _rand()
+        out = self._fn("probability weighted moment", ensemble_weights=torch.full((self._E,), 3.0))(fc, obs)
+        expected = self._fn("probability weighted moment")(fc, obs)
+        self.assertTrue(compare_tensors("pwm", out, expected, atol=1e-6, rtol=1e-5, verbose=verbose))
+
+    @parameterized.expand([(4, 100.0), (300, 1.0)])
+    def test_pwm_in_half_precision(self, num_ensemble, weight, verbose=False):
+        """
+        In half precision, the probability weighted moment stays finite for weights and ensembles whose squared total
+        weight exceeds the range of float16, and matches the score in single precision.
+        """
+        fc = torch.sort(torch.randn(num_ensemble, _BATCH, _NUM_CH, 8), dim=0).values
+        obs = torch.randn(_BATCH, _NUM_CH, 8)
+        weights = torch.full_like(fc, weight)
+
+        out = _crps_probability_weighted_moment_kernel(obs.half(), fc.half(), weights.half())
+        expected = _crps_probability_weighted_moment_kernel(obs.half().float(), fc.half().float(), weights)
+        self.assertEqual(out.dtype, torch.float16)
+        self.assertTrue(torch.isfinite(out).all())
+        self.assertTrue(compare_tensors("pwm half", out.float(), expected, atol=2e-3, rtol=2e-3, verbose=verbose))
 
     # ------ gauss + ensemble_weights ------
 
@@ -3157,6 +3652,23 @@ class TestSpectralRegularization(unittest.TestCase):
         out = fn(fc, obs)
         self.assertTrue(torch.isfinite(out).all())
 
+    def test_logarithmic_mode_without_power(self, verbose=False):
+        """
+        With logarithmic=True, degrees without power are floored by eps: fields without power score 0 against each
+        other, and a forecast without power scores finitely, with finite gradients, against an observation.
+        """
+        fn = self._fn(logarithmic=True)
+        zeros = torch.zeros(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W, requires_grad=True)
+
+        out = fn(zeros, torch.zeros(_BATCH, _NUM_CH, _IMG_H, _IMG_W))
+        self.assertTrue(compare_tensors("no power", out, torch.zeros_like(out), atol=0.0, verbose=verbose))
+
+        out = fn(zeros, _rand())
+        self.assertTrue(torch.isfinite(out).all())
+        self.assertTrue((out > 0).all())
+        out.sum().backward()
+        self.assertTrue(torch.isfinite(zeros.grad).all())
+
     def test_wrong_forecast_dims_raises(self):
         fn = self._fn()
         fc = torch.randn(1, 2, 3)
@@ -3192,6 +3704,22 @@ class TestGradientCRPSLoss(unittest.TestCase):
         obs = _rand()
         out = fn(fc, obs)
         self.assertEqual(tuple(out.shape), (_BATCH, _NUM_CH))
+
+    @parameterized.expand([("skillspread",), ("cdf",)])
+    def test_channel_weights_absolute_false(self, crps_type, verbose=False):
+        """
+        Without the absolute value, each channel scores the two components of its gradient, which both take the
+        channel's weights: a channel weighted 0 scores 0 in both, the others as without weights.
+        """
+        fn = self._fn(crps_type, absolute=False)
+        fc, obs = _rand_ensemble(self._E), _rand()
+        weights = torch.ones(_BATCH, _NUM_CH, _IMG_H, _IMG_W)
+        weights[:, 1] = 0.0
+
+        out = fn(fc, obs, weights)
+        expected = fn(fc, obs)
+        expected[:, 2:4] = 0.0
+        self.assertTrue(compare_tensors(crps_type, out, expected, atol=1e-6, rtol=1e-5, verbose=verbose))
 
     def test_output_shape_absolute_false(self):
         fn = self._fn("skillspread", absolute=False)
@@ -3440,15 +3968,15 @@ class TestSpectralCoherenceLoss(unittest.TestCase):
     def test_zero_on_perfect_prediction(self, relative, verbose=False):
         """All ensemble members == observation:
           - psd_skill = 0 exactly (same inputs through the same op)
-          - coherences = P / sqrt(P² + eps) → 1 only as eps → 0
+          - coherences = P / (sqrt(P) * sqrt(P)) = 1, with the default arguments
 
-        Setting eps=0 collapses ``1 - P/sqrt(P²)`` to algebraically zero, but
+        ``1 - P/(sqrt(P) sqrt(P))`` is algebraically zero, but
         the loss uses two paths to compute |X|²: ``X.abs().square()`` for the
         PSD term and ``Re(X.conj() * X)`` for coherence. These are equal in
         real arithmetic but differ by a sqrt-then-square ULP per mode in fp32,
         so after summing 75 (l, channel) modes the residual lands at ~1e-6 for
         the relative case. atol is set above that floor."""
-        fn = self._fn(relative=relative, eps=0.0)
+        fn = self._fn(relative=relative)
         obs = _rand()
         fc = obs.unsqueeze(1).expand(_BATCH, self._E, _NUM_CH, _IMG_H, _IMG_W).clone()
         out = fn(fc, obs)
@@ -4050,7 +4578,6 @@ class TestEnsembleLossE1FastPath(unittest.TestCase):
     def _coherence_regularization(self):
         return CoherenceRegularization(
             **_SPEC_KWARGS,
-            eps=1e-16,
             ensemble_coherence_weight=0.5,
             spatial_distributed=False,
             ensemble_distributed=False,
@@ -4283,7 +4810,7 @@ class TestCoherenceRegularization(unittest.TestCase):
     The loss penalizes low spectral coherence between each ensemble member and
     the observation over a wavenumber band:
 
-        Coh_l = CrossPSD_l / sqrt(PSD^f_l * PSD^y_l + eps)
+        Coh_l = CrossPSD_l / (sqrt(PSD^f_l) * sqrt(PSD^y_l))
         Loss  = mean_{l in band} (1 - mean_e Coh_l)
 
     Coherence is signed, so the loss has three reference points that anchor most
@@ -4292,12 +4819,6 @@ class TestCoherenceRegularization(unittest.TestCase):
         f = +y  -> Coh = +1 -> loss 0    (perfectly correlated)
         f random-> Coh ~  0 -> loss 1    (uncorrelated)
         f = -y  -> Coh = -1 -> loss 2    (anti-correlated)
-
-    Several tests use a tiny eps. The default eps=1e-6 is a stabilizer that
-    biases the ratio toward 0 wherever the PSD is small, which pulls the loss
-    toward the "uncorrelated" value of 1: at eps=1e-6 the perfectly-correlated
-    case scores 0.086 rather than 0. That is fine for training but makes the
-    exact reference points untestable, so the analytic tests shrink eps.
 
     This class also serves as the regression test for the three bugs reported in
     issue #95, each marked below.
@@ -4339,10 +4860,18 @@ class TestCoherenceRegularization(unittest.TestCase):
 
     # -- analytic reference points -------------------------------------------
 
+    def test_fully_correlated_red_spectrum_is_zero(self):
+        """Also where the small scales hold little power, as in a red spectrum, f = y has coherence 1."""
+        obs = _red_field()
+        out = self._fn()(self._broadcast(obs, self._E), obs)
+        self.assertTrue(
+            torch.allclose(out, torch.zeros_like(out), atol=1e-5), f"expected 0, got mean {out.mean().item()}"
+        )
+
     def test_fully_correlated_is_zero(self):
         """f = y is perfect coherence, so the loss must vanish."""
         obs = _rand()
-        out = self._fn(eps=1e-16)(self._broadcast(obs, self._E), obs)
+        out = self._fn()(self._broadcast(obs, self._E), obs)
         self.assertTrue(
             torch.allclose(out, torch.zeros_like(out), atol=1e-3), f"expected 0, got mean {out.mean().item()}"
         )
@@ -4355,7 +4884,7 @@ class TestCoherenceRegularization(unittest.TestCase):
         identically to a perfect forecast.
         """
         obs = _rand()
-        out = self._fn(eps=1e-16)(self._broadcast(obs, self._E, scale=-1.0), obs)
+        out = self._fn()(self._broadcast(obs, self._E, scale=-1.0), obs)
         self.assertTrue(
             torch.allclose(out, 2.0 * torch.ones_like(out), atol=1e-3), f"expected 2, got mean {out.mean().item()}"
         )
@@ -4365,13 +4894,13 @@ class TestCoherenceRegularization(unittest.TestCase):
 
         This one is statistical rather than exact, hence the loose tolerance.
         """
-        out = self._fn(eps=1e-16)(_rand_ensemble(self._E), _rand())
+        out = self._fn()(_rand_ensemble(self._E), _rand())
         self.assertAlmostEqual(out.mean().item(), 1.0, delta=0.1)
 
     def test_ordering_of_the_three_regimes(self):
         """correlated < uncorrelated < anti-correlated, without tolerance games."""
         obs = _rand()
-        fn = self._fn(eps=1e-16)
+        fn = self._fn()
         pos = fn(self._broadcast(obs, self._E), obs).mean().item()
         rnd = fn(_rand_ensemble(self._E), obs).mean().item()
         neg = fn(self._broadcast(obs, self._E, scale=-1.0), obs).mean().item()
@@ -4381,7 +4910,7 @@ class TestCoherenceRegularization(unittest.TestCase):
     def test_positive_scaling_is_invariant(self):
         """Coherence is normalized, so f = a*y scores 0 for any a > 0."""
         obs = _rand()
-        fn = self._fn(eps=1e-16)
+        fn = self._fn()
         for scale in (0.5, 1.0, 7.0):
             out = fn(self._broadcast(obs, self._E, scale=scale), obs)
             self.assertTrue(
@@ -4399,7 +4928,7 @@ class TestCoherenceRegularization(unittest.TestCase):
         invisible to the loss. A sign flip must move the result by 2.
         """
         obs = _rand()
-        fn = self._fn(eps=1e-16)
+        fn = self._fn()
         pos = fn(self._broadcast(obs, self._E), obs)
         neg = fn(self._broadcast(obs, self._E, scale=-1.0), obs)
         self.assertTrue(torch.allclose(neg - pos, 2.0 * torch.ones_like(pos), atol=1e-3))

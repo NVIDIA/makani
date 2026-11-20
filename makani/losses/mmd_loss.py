@@ -17,7 +17,7 @@ from typing import Optional, Tuple, List
 
 import torch
 
-from makani.losses.base_loss import GeometricBaseLoss, LossType, abs_pow
+from makani.losses.base_loss import GeometricBaseLoss, LossType, abs_pow, sum_channels_per_step
 from makani.distributed import comm
 
 
@@ -29,7 +29,17 @@ from makani.distributed.mappings import distributed_transpose
 
 class GaussianMMDLoss(GeometricBaseLoss):
     r"""
-    Computes the maximum mean discrepancy loss for a specific kernel. For details see [1]
+    The squared maximum mean discrepancy between the ensemble and the observation, with a Gaussian kernel, see [1].
+
+    .. math::
+        \mathrm{MMD}^2 = k(y, y) + \mathbb{E}\, k(X, X') - 2\, \mathbb{E}\, k(X, y),
+        \qquad k(x, y) = \exp\left(-\frac{d(x, y)^2}{2 \sigma^2}\right),
+
+    where :math:`d` is the :math:`L^\beta` distance over the grid, with the quadrature weights (and over the channels
+    with ``channel_reduction``), so that :math:`k(y, y) = 1`. A perfect forecast scores 0, and the score grows as the
+    members move away from the observation. ``alpha`` blends the fair estimate of :math:`\mathbb{E}\, k(X, X')`, over
+    the pairs of distinct members (``alpha = 1``), with the average over all pairs, including each member with itself
+    (``alpha = 0``); with a single member, only the latter exists.
 
     [1] Dziugaite, Gintare Karolina; Roy, Daniel M.; Ghahramani, Zhoubin; Training generative neural networks via Maximum Mean Discrepancy optimization; arXiv:1505.03906
     """
@@ -94,7 +104,9 @@ class GaussianMMDLoss(GeometricBaseLoss):
 
     @torch.compiler.disable(recursive=False)
     def compute_channel_weighting(self, channel_weight_type: str, time_diff_scale: str) -> torch.Tensor:
-        return torch.ones(1)
+        if self.channel_reduction:
+            return torch.ones(1)
+        return super().compute_channel_weighting(channel_weight_type, time_diff_scale)
 
     def forward(
         self,
@@ -173,33 +185,32 @@ class GaussianMMDLoss(GeometricBaseLoss):
             espread = reduce_from_parallel_region(espread, "spatial")
             eskill = reduce_from_parallel_region(eskill, "spatial")
 
-        # do the channel reduction
-        # if channel weights are required they should be added here to the reduction
+        # do the channel reduction, per lead step: espread is (E, E, B, C), eskill (E, B, C)
         if self.channel_reduction:
-            espread = espread.sum(dim=-2, keepdim=True)
-            eskill = eskill.sum(dim=-2, keepdim=True)
+            espread = sum_channels_per_step(espread, -1, len(self.channel_names))
+            eskill = sum_channels_per_step(eskill, -1, len(self.channel_names))
 
-        # apply the Gaussian kernel
-        espread = torch.exp(-0.5 * torch.square(espread) / self.sigma)
-        eskill = torch.exp(-0.5 * torch.square(eskill) / self.sigma)
+        # apply the Gaussian kernel to the squared distances, d^2 = (sum |x - y|^beta)^(2 / beta)
+        two_sigma_sq = 2.0 * self.sigma * self.sigma
+        kspread = torch.exp(-abs_pow(espread, 2.0 / self.beta) / two_sigma_sq)
+        kskill = torch.exp(-abs_pow(eskill, 2.0 / self.beta) / two_sigma_sq)
 
-        # mask out the diagonal elements in the spread term
-        espread = torch.where(
-            torch.eye(num_ensemble, device=espread.device).bool().reshape(num_ensemble, num_ensemble, 1, 1),
+        # E k(X, y)
+        kskill = kskill.sum(dim=0) / float(num_ensemble)
+
+        # E k(X, X'): the fair estimate over the pairs of distinct members, blended by alpha with the average over
+        # all pairs, which includes each member with itself, where k = 1
+        offdiagonal = torch.where(
+            torch.eye(num_ensemble, device=kspread.device, dtype=torch.bool).reshape(num_ensemble, num_ensemble, 1, 1),
             0.0,
-            espread,
-        )
-
-        # now we have reduced everything and need to sum appropriately
-        eskill = eskill.sum(dim=0) / float(num_ensemble)
+            kspread,
+        ).sum(dim=(0, 1))
+        all_pairs = (offdiagonal + float(num_ensemble)) / float(num_ensemble * num_ensemble)
         if num_ensemble > 1:
-            espread = (
-                espread.sum(dim=(0, 1))
-                * (float(num_ensemble) - 1.0 + self.alpha)
-                / float(num_ensemble * num_ensemble * (num_ensemble - 1))
-            )
+            fair = offdiagonal / float(num_ensemble * (num_ensemble - 1))
+            kspread = self.alpha * fair + (1.0 - self.alpha) * all_pairs
         else:
-            espread = torch.zeros_like(eskill)
+            kspread = all_pairs
 
-        # the resulting tensor should have dimension B, C which is what we return
-        return eskill - 0.5 * espread
+        # the result has the dimensions B, C (one per lead step with channel_reduction); k(y, y) = 1
+        return 1.0 + kspread - 2.0 * kskill

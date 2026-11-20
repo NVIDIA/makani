@@ -20,7 +20,7 @@ import math
 import torch
 from torch import amp
 
-from makani.losses.base_loss import GeometricBaseLoss, SpectralBaseLoss, LossType
+from makani.losses.base_loss import GeometricBaseLoss, SpectralBaseLoss, LossType, norm_product
 from makani.distributed import comm
 
 # distributed stuff
@@ -95,8 +95,7 @@ class SpectralRegularization(SpectralBaseLoss):
         lmax: Optional[int] = None,
         spatial_distributed: Optional[bool] = False,
         ensemble_distributed: Optional[bool] = False,
-        # eps is applied inside sqrt(psd_a * psd_b + eps); the output-scale floor is sqrt(eps) ≈ 1e-5,
-        # matching the 1e-5/1e-6 guards used by sibling losses
+        # with logarithmic, the floor of the power spectra in log(psd + eps), so that degrees without power stay finite
         eps: Optional[float] = 1.0e-10,
         logarithmic: Optional[bool] = False,
         **kwargs,
@@ -168,7 +167,8 @@ class SpectralRegularization(SpectralBaseLoss):
         # before anything else compute the transform
         # as the CDF definition doesn't generalize well to more than one-dimensional variables, we treat complex and imaginary part as the same
         with amp.autocast(device_type="cuda", enabled=False):
-            # TODO: check 4 pi normalization
+            # the powers of the orthonormal SHT, divided by 4 pi and with the m > 0 doubled below, sum to the mean
+            # over the sphere
             forecasts = self.sht(forecasts.float()).abs().pow(2) / (4.0 * math.pi)
             observations = self.sht(observations.float()).abs().pow(2) / (4.0 * math.pi)
 
@@ -184,9 +184,10 @@ class SpectralRegularization(SpectralBaseLoss):
             forecasts = reduce_from_parallel_region(forecasts, "w")
             observations = reduce_from_parallel_region(observations, "w")
 
+        # compare the logarithms of the power spectra, floored by eps where a degree has no power
         if self.logarithmic:
-            forecasts = torch.log(forecasts)
-            observations = torch.log(observations)
+            forecasts = torch.log(forecasts + self.eps)
+            observations = torch.log(observations + self.eps)
 
         diff = (forecasts - observations).abs()
 
@@ -218,7 +219,9 @@ class CoherenceRegularization(SpectralBaseLoss):
         CrossPSD_l  = sum_{m} w_m * Re( f^(e)_{c,l,m} * conj(y_{c,l,m}) )
         PSD^f_l     = sum_{m} w_m * |f^(e)_{c,l,m}|^2
         PSD^y_l     = sum_{m} w_m * |y_{c,l,m}|^2
-        Coh_l       = CrossPSD_l / sqrt(PSD^f_l * PSD^y_l + eps)
+        Coh_l       = CrossPSD_l / (sqrt(PSD^f_l) * sqrt(PSD^y_l))
+
+    with the powers clamped to the smallest positive number, so that the coherence is 0 where a field has no power.
 
     Loss = (1 / |band|) * sum_{l in band} (1 - mean_{e} Coh_l^(e))
 
@@ -250,7 +253,6 @@ class CoherenceRegularization(SpectralBaseLoss):
         ensemble_distributed: Optional[bool] = False,
         ensemble_weights: Optional[torch.Tensor] = None,
         ensemble_coherence_weight: Optional[float] = 0.0,
-        eps: Optional[float] = 1.0e-6,
         **kwargs,
     ):
         super().__init__(
@@ -267,7 +269,6 @@ class CoherenceRegularization(SpectralBaseLoss):
             ensemble_distributed and comm.is_distributed("ensemble") and (comm.get_size("ensemble") > 1)
         )
         self.ensemble_coherence_weight = ensemble_coherence_weight
-        self.eps = eps
 
         if ensemble_weights is not None:
             self.register_buffer("ensemble_weights", ensemble_weights, persistent=False)
@@ -381,14 +382,14 @@ class CoherenceRegularization(SpectralBaseLoss):
                 coh_inter = reduce_from_parallel_region(coh_inter, "ensemble")
 
         # signed coherence in [-1, 1] against the observation
-        coh_obs = cross_psd / torch.sqrt(psd_fcasts * psd_obs + self.eps)
+        coh_obs = cross_psd / norm_product(psd_fcasts, psd_obs)
 
         # (1 - Coh) averaged over the ensemble -> (B, C, L)
         loss = (1.0 - coh_obs).sum(dim=0) / float(num_ensemble)
 
         # optional inter-member decoherence penalty, diagonal excluded
         if compute_inter:
-            coh_inter = coh_inter / torch.sqrt(psd_fcasts.unsqueeze(0) * psd_fcasts.unsqueeze(1) + self.eps)
+            coh_inter = coh_inter / norm_product(psd_fcasts.unsqueeze(0), psd_fcasts.unsqueeze(1))
             eye = torch.eye(num_ensemble, device=coh_inter.device).bool().reshape(num_ensemble, num_ensemble, 1, 1, 1)
             coh_inter = torch.where(eye, 0.0, 1.0 - coh_inter)
             coh_inter = coh_inter.sum(dim=(0, 1)) / float(num_ensemble * (num_ensemble - 1))

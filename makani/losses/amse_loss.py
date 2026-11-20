@@ -18,7 +18,7 @@ from typing import Optional, Tuple, List
 import torch
 from torch import amp
 
-from makani.losses.base_loss import SpectralBaseLoss
+from makani.losses.base_loss import SpectralBaseLoss, clamped_sqrt
 
 
 # Adjusted Mean Squared Error Loss
@@ -34,7 +34,6 @@ class SpectralAMSELoss(SpectralBaseLoss):
         crop_offset: Tuple[int, int],
         channel_names: List[str],
         spatial_distributed: Optional[bool] = False,
-        eps: Optional[float] = 1.0e-6,
         **kwargs,
     ):
         super().__init__(
@@ -44,7 +43,6 @@ class SpectralAMSELoss(SpectralBaseLoss):
             channel_names=channel_names,
             spatial_distributed=spatial_distributed,
         )
-        self.eps = eps
 
     def forward(
         self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None, **kwargs
@@ -78,11 +76,11 @@ class SpectralAMSELoss(SpectralBaseLoss):
         ynorm2 = self.sum_over_m(ycoeffssq)
         xycoh_sum = self.sum_over_m(xycoh_prod)
 
-        # compute sqrt
-        xnorm = torch.sqrt(xnorm2)
-        ynorm = torch.sqrt(ynorm2)
-        # eps-guard: avoids NaN at degrees where either field has zero power
-        xycoh = xycoh_sum / torch.sqrt(xnorm2 * ynorm2 + self.eps)
+        # the norms of each degree, clamped where a field has no power, so that the coherence and the gradients stay
+        # finite there; a fixed eps would swamp the powers of the small scales, see clamped_sqrt
+        xnorm = clamped_sqrt(xnorm2)
+        ynorm = clamped_sqrt(ynorm2)
+        xycoh = xycoh_sum / (xnorm * ynorm)
 
         # compute equation (6) from the paper
         loss = torch.square(xnorm - ynorm) + 2 * torch.maximum(xnorm2, ynorm2) * (1 - xycoh)

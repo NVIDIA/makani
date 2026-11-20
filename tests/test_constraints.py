@@ -365,6 +365,32 @@ class TestConstraints(unittest.TestCase):
             # and it must be vastly larger than the balanced residual
             self.assertGreater(loss_pert, 1e3 * loss_bal)
 
+    def test_hydrostatic_balance_loss_weights_the_grid(self):
+        """Weights on the grid weight the residuals of every layer, and weights per channel are refused."""
+        C = len(self.channel_names)
+        nlat, nlon = 8, 16
+        hbloss = HydrostaticBalanceLoss(
+            grid=make_grid((nlat, nlon), "equiangular"),
+            crop_shape=(nlat, nlon),
+            crop_offset=(0, 0),
+            channel_names=self.channel_names,
+            bias=torch.zeros(1, C, 1, 1),
+            scale=torch.ones(1, C, 1, 1),
+            p_min=50,
+            p_max=900,
+        ).to(self.device)
+        prd = torch.randn(2, C, nlat, nlon, device=self.device)
+
+        self.assertTrue(
+            compare_tensors(
+                "weights",
+                hbloss(prd, None, torch.full((2, 1, nlat, nlon), 0.5, device=self.device)),
+                0.5 * hbloss(prd, None),
+            )
+        )
+        with self.assertRaises(ValueError):
+            hbloss(prd, None, torch.ones(2, C, nlat, nlon, device=self.device))
+
     def _water_names(self):
         from makani.data.features import get_water_channels
 
