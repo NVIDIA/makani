@@ -1072,6 +1072,27 @@ class TestMultistepChannelReduction(unittest.TestCase):
             compare_tensors(name, stacked, per_step, atol=1e-5, rtol=1e-4, verbose=verbose, shape_check=True)
         )
 
+    def test_spread_tempering_ramps_up_to_the_full_spread(self, verbose=False):
+        """In training, the spread of step k counts with min(k / T, 1): skill only at step 0, the full score from T."""
+        temper_steps = 2
+        fn = _CHANNEL_REDUCED_LOSSES["lp_energy_score"](spread_temper_steps=temper_steps)
+        prd, tar = self._steps()
+        prd, tar = torch.cat(prd, dim=2), torch.cat(tar, dim=1)
+        steps = torch.arange(self.N_STEPS)
+
+        # the full score, untempered outside of training, and the skill term, the mean L2 distance of the members to
+        # the observation, over the grid and the channels of each step (p = 2, beta = 1)
+        full = fn.eval()(prd, tar, lead_time_step=steps)
+        tempered = fn.train()(prd, tar, lead_time_step=steps)
+        squared = ((prd - tar.unsqueeze(1)) ** 2 * fn.quadrature.quad_weight.to(prd.dtype)).sum(dim=(-2, -1))
+        skill = squared.unflatten(-1, (self.N_STEPS, _NUM_CH)).sum(dim=-1).sqrt().mean(dim=1)
+
+        # score = skill - spread / 2, with the spread scaled by the factor of each step
+        factor = torch.clamp(steps / temper_steps, max=1.0).to(full.dtype)
+        expected = skill - factor * (skill - full)
+        self.assertTrue(compare_tensors("tempered", tempered, expected, atol=1e-6, rtol=1e-5, verbose=verbose))
+        self.assertTrue(compare_tensors("step T and later", tempered[:, temper_steps:], full[:, temper_steps:]))
+
     def test_spread_tempering_per_step(self, verbose=False):
         """Tempering scales the spread of each step by the factor of that step."""
         fn = _CHANNEL_REDUCED_LOSSES["lp_energy_score"](spread_temper_steps=1).train()

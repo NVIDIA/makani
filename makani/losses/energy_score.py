@@ -31,6 +31,10 @@ class LpEnergyScoreLoss(GeometricBaseLoss):
     """
     Lp Energy Score (Gneiting et al. 2005). Uses Lebesgue norm ||x||_p = (sum |x_i|^p)^(1/p).
     p=2 gives the standard L2/Euclidean energy score.
+
+    With ``spread_temper_steps = T > 0``, training tempers the spread term of lead step ``k`` (multistep training) by
+    ``min(k / T, 1)``: the first step is scored by its skill alone, and the spread comes in linearly until it has its
+    full weight from step ``T`` on, where the score is proper again.
     """
 
     def __init__(
@@ -240,7 +244,7 @@ class LpEnergyScoreLoss(GeometricBaseLoss):
         # one per step with channel_reduction
         if self.training and self.spread_temper_steps > 0 and lead_time_step is not None:
             scale = lead_time_step.float().to(espread.device) / self.spread_temper_steps
-            espread = espread * torch.maximum(scale, torch.ones_like(scale))
+            espread = espread * torch.clamp(scale, max=1.0)
 
         # the resulting tensor should have dimension B, C which is what we return
         loss = eskill - 0.5 * espread
