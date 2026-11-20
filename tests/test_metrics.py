@@ -1410,6 +1410,52 @@ class TestMetricsHandler(unittest.TestCase):
         for key, value in aucs.items():
             self.assertAlmostEqual(float(value), expected_auc, delta=1e-5, msg=key)
 
+    def test_dimensional_metrics_are_in_physical_units(self):
+        """
+        The handler sees normalized fields, (x - bias) / scale, and reports the dimensional metrics in the
+        units of the data. A prediction offset by a constant d per channel has an L1 and RMSE of |d| in
+        normalized units, so the handler must report |d| times the channel's scale.
+        """
+        names = self.params.channel_names
+        num_channels = len(names)
+        num_rollout_steps = 2
+        self.params.batch_size = 2
+        self.params.ensemble_size = 1
+        scale = np.arange(1, num_channels + 1, dtype=np.float64).reshape(1, -1, 1, 1) * 10.0
+        bias = np.zeros_like(scale)
+        with unittest.mock.patch("makani.metrics.handler.get_data_normalization", return_value=(bias, scale)):
+            handler = MetricsHandler(
+                self.params,
+                None,
+                num_rollout_steps,
+                self.device,
+                l1_var_names=names,
+                rmse_var_names=names,
+                acc_var_names=[],
+                crps_var_names=[],
+                spread_var_names=[],
+                ssr_var_names=[],
+                compile=False,
+            )
+        handler.initialize_buffers()
+        handler.zero_buffers()
+
+        shape = (self.params.batch_size, num_channels, self.params.img_local_shape_x, self.params.img_local_shape_y)
+        offset = torch.linspace(-1.0, 1.0, num_channels, device=self.device).reshape(1, -1, 1, 1) + 0.1
+        loss = torch.tensor(0.0, device=self.device)
+        for idt in range(num_rollout_steps):
+            tar = torch.randn(shape, dtype=torch.float32, device=self.device)
+            handler.update(tar + offset, tar, loss, idt)
+        metrics = handler.finalize()["metrics"]
+
+        for metric_name in ["L1", "RMSE"]:
+            for idc, name in enumerate(names):
+                expected = abs(offset.flatten()[idc].item()) * scale.flatten()[idc]
+                keys = [key for key in metrics if key.startswith(f"validation {metric_name} {name}(")]
+                self.assertTrue(keys, msg=f"no {metric_name} entry for {name}")
+                for key in keys:
+                    self.assertAlmostEqual(float(metrics[key]), expected, delta=1e-4 * expected, msg=key)
+
     @parameterized.expand(_metric_handler_params[:1], skip_on_empty=True)
     def test_save_metrics(self, grid_type, batch_size, ensemble_size, num_rollout_steps, bred):
 

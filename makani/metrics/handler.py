@@ -373,6 +373,7 @@ class MetricsHandler:
                     num_rollout_steps=self.num_rollout_steps,
                     dtphys=self.dtxdh,
                     device=self.device,
+                    scale=scale.reshape(-1),
                     integrate=False,
                     compile=self.compile,
                     report_metric=True,
