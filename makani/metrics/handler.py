@@ -128,7 +128,13 @@ class MetricRollout:
             self.rollout_integral_cpu = torch.zeros(
                 integral_shape, dtype=torch.float32, device="cpu", pin_memory=pin_memory
             )
-            self.simpquad = Quadrature(self.num_rollout_steps - 1, 1.0 / float(self.num_rollout_steps), self.device)
+            # the AUC is the mean of the curve over the rollout: the steps span the normalized time [0, 1], from
+            # the first to the last, and a rollout of a single step is its own mean
+            if self.num_rollout_steps > 1:
+                num_intervals = self.num_rollout_steps - 1
+                self.simpquad = Quadrature(num_intervals, 1.0 / float(num_intervals), self.device)
+            else:
+                self.simpquad = None
 
     @property
     def type(self):
@@ -215,7 +221,10 @@ class MetricRollout:
 
             # integrate
             if self.integrate:
-                self.rollout_integral.copy_(self.simpquad(rollout_curve_normalized, dim=0))
+                if self.simpquad is not None:
+                    self.rollout_integral.copy_(self.simpquad(rollout_curve_normalized, dim=0))
+                else:
+                    self.rollout_integral.copy_(rollout_curve_normalized[0])
                 self.rollout_integral_cpu.copy_(self.rollout_integral, non_blocking=non_blocking)
 
         return

@@ -38,6 +38,9 @@ from makani.metrics.geometric_metrics import (
     GeometricCRPS,
     GeometricSSR,
     GeometricRankHistogram,
+    Quadrature,
+    SimpsonQuadrature,
+    TrapezoidQuadrature,
 )
 from makani.data.data_helpers import get_lat_lon_grid
 from makani.data.missing_data import fill_missing, missing_values, missing_weights
@@ -788,6 +791,103 @@ class TestMetrics(unittest.TestCase):
 
 
 @parameterized_class(("device",), _devices)
+class TestRolloutQuadrature(unittest.TestCase):
+    """
+    The 1D rules the metrics handler integrates rollout curves with: Simpson's 1/3 rule on an even number of
+    intervals, the trapezoidal rule otherwise. Each is checked against closed forms on polynomials: exact up
+    to its degree of precision, and off by its error term on the first degree beyond, whose derivative of
+    that order is constant, so the error term is exact.
+    """
+
+    # an interval that starts away from zero, so that the rules see more than monomials at the origin
+    _START = 0.5
+    _END = 2.0
+
+    def _nodes(self, num_intervals):
+        return torch.linspace(self._START, self._END, num_intervals + 1, dtype=torch.float64, device=self.device)
+
+    def _width(self, num_intervals):
+        return (self._END - self._START) / num_intervals
+
+    def _integrate(self, rule, func, num_intervals):
+        quad = rule(num_intervals, self._width(num_intervals), self.device)
+        # the rules integrate along dim 1 by default
+        return quad(func(self._nodes(num_intervals)).unsqueeze(0)).item()
+
+    @staticmethod
+    def _poly(coeffs):
+        return lambda x: sum(c * x**k for k, c in enumerate(coeffs))
+
+    def _poly_integral(self, coeffs):
+        return sum(c * (self._END ** (k + 1) - self._START ** (k + 1)) / (k + 1) for k, c in enumerate(coeffs))
+
+    @parameterized.expand([(2,), (4,), (10,)])
+    def test_simpson_is_exact_for_cubics(self, num_intervals):
+        coeffs = [0.7, -1.3, 2.1, -0.9]
+        result = self._integrate(SimpsonQuadrature, self._poly(coeffs), num_intervals)
+        self.assertAlmostEqual(result, self._poly_integral(coeffs), delta=1e-6)
+
+    @parameterized.expand([(2,), (4,), (10,)])
+    def test_simpson_error_on_a_quartic(self, num_intervals):
+        # Simpson overestimates by (b - a) h^4 f/180, with f = 24 for x^4
+        h = self._width(num_intervals)
+        expected_error = (self._END - self._START) * h**4 * 24.0 / 180.0
+        result = self._integrate(SimpsonQuadrature, lambda x: x**4, num_intervals)
+        self.assertAlmostEqual(result - self._poly_integral([0, 0, 0, 0, 1]), expected_error, delta=1e-6)
+
+    @parameterized.expand([(1,), (3,), (4,), (7,)])
+    def test_trapezoid_is_exact_for_linear_functions(self, num_intervals):
+        coeffs = [0.7, -1.3]
+        result = self._integrate(TrapezoidQuadrature, self._poly(coeffs), num_intervals)
+        self.assertAlmostEqual(result, self._poly_integral(coeffs), delta=1e-6)
+
+    @parameterized.expand([(1,), (3,), (4,), (7,)])
+    def test_trapezoid_error_on_a_quadratic(self, num_intervals):
+        # the trapezoidal rule overestimates by (b - a) h^2 f''/12, with f'' = 2 for x^2
+        h = self._width(num_intervals)
+        expected_error = (self._END - self._START) * h**2 * 2.0 / 12.0
+        result = self._integrate(TrapezoidQuadrature, lambda x: x**2, num_intervals)
+        self.assertAlmostEqual(result - self._poly_integral([0, 0, 1]), expected_error, delta=1e-6)
+
+    @parameterized.expand([(SimpsonQuadrature, 4), (TrapezoidQuadrature, 2)])
+    def test_order_of_convergence(self, rule, order):
+        # on a smooth function that no rule integrates exactly, halving the width divides the error by 2^order
+        exact = math.sin(self._END) - math.sin(self._START)
+        errors = [abs(self._integrate(rule, torch.cos, n) - exact) for n in (4, 8)]
+        self.assertAlmostEqual(math.log2(errors[0] / errors[1]), order, delta=0.1)
+
+    def test_simpson_refuses_an_odd_number_of_intervals(self):
+        with self.assertRaises(NotImplementedError):
+            SimpsonQuadrature(3, 1.0, self.device)
+
+    @parameterized.expand(
+        [(2, SimpsonQuadrature), (8, SimpsonQuadrature), (1, TrapezoidQuadrature), (5, TrapezoidQuadrature)]
+    )
+    def test_quadrature_picks_the_rule(self, num_intervals, rule):
+        quad = Quadrature(num_intervals, self._width(num_intervals), self.device)
+        self.assertIsInstance(quad.quad, rule)
+        coeffs = [0.3, 1.1]
+        values = self._poly(coeffs)(self._nodes(num_intervals)).unsqueeze(0)
+        self.assertAlmostEqual(quad(values).item(), self._poly_integral(coeffs), delta=1e-6)
+
+    @parameterized.expand([(4,), (5,)])
+    def test_integrates_along_the_given_dim(self, num_intervals):
+        # rollout steps first and a channel per function, as the metrics handler integrates its curves (dim 0)
+        quad = Quadrature(num_intervals, self._width(num_intervals), self.device)
+        # polynomials the rule picked integrates exactly: up to cubics with Simpson, linear ones with the trapezoid
+        cubic_or_linear = [0.2, 0.0, -1.0, 0.4] if num_intervals % 2 == 0 else [-0.3, 1.2]
+        polys = [[1.0], [0.5, -2.0], cubic_or_linear]
+        nodes = self._nodes(num_intervals)
+        # (steps, channels)
+        values = torch.stack([self._poly(c)(nodes) for c in polys], dim=1)
+        expected = [self._poly_integral(c) for c in polys]
+        for dim, inp in ((0, values), (1, values.unsqueeze(0)), (-1, values.T)):
+            result = quad(inp, dim=dim).flatten().tolist()
+            for r, e in zip(result, expected):
+                self.assertAlmostEqual(r, e, delta=1e-6, msg=f"dim {dim}")
+
+
+@parameterized_class(("device",), _devices)
 class TestMetricsAggregation(unittest.TestCase):
     """
     A set of tests that test the aggregation
@@ -1256,6 +1356,59 @@ class TestMetricsHandler(unittest.TestCase):
         self.params.img_crop_offset_y = 0
 
         return
+
+    @parameterized.expand(
+        [
+            # a single step is its own mean
+            ([1.0], 1.0),
+            ([-1.0], -1.0),
+            # the trapezoid on one interval
+            ([1.0, 1.0], 1.0),
+            ([1.0, -1.0], 0.0),
+            # Simpson on two intervals of width 1/2: (1 + 4 - 1) / 6
+            ([1.0, 1.0, -1.0], 2.0 / 3.0),
+            # the trapezoid on three intervals of width 1/3: (1/2 - 1 - 1 + 1/2) / 3
+            ([1.0, -1.0, -1.0, 1.0], -1.0 / 3.0),
+            ([1.0, 1.0, 1.0, 1.0, 1.0], 1.0),
+        ]
+    )
+    def test_acc_auc_is_the_mean_over_the_rollout(self, signs, expected_auc):
+        """
+        The AUC of the ACC is the mean of the curve over the rollout, from the first to the last step. With a
+        zero climatology, a prediction of +-target has an ACC of +-1, so the AUC follows from the signs.
+        """
+        num_rollout_steps = len(signs)
+        names = self.params.channel_names
+        clim = torch.zeros(1, len(names), self.params.img_local_shape_x, self.params.img_local_shape_y)
+        self.params.batch_size = 2
+        self.params.ensemble_size = 1
+        handler = MetricsHandler(
+            self.params,
+            clim,
+            num_rollout_steps,
+            self.device,
+            l1_var_names=[],
+            rmse_var_names=[],
+            acc_var_names=names,
+            crps_var_names=[],
+            spread_var_names=[],
+            ssr_var_names=[],
+            compile=False,
+        )
+        handler.initialize_buffers()
+        handler.zero_buffers()
+
+        shape = (self.params.batch_size, len(names), self.params.img_local_shape_x, self.params.img_local_shape_y)
+        loss = torch.tensor(0.0, device=self.device)
+        for idt, sign in enumerate(signs):
+            tar = torch.randn(shape, dtype=torch.float32, device=self.device)
+            handler.update(sign * tar, tar, loss, idt)
+        metrics = handler.finalize()["metrics"]
+
+        aucs = {key: value for key, value in metrics.items() if " AUC " in key}
+        self.assertEqual(len(aucs), len(names))
+        for key, value in aucs.items():
+            self.assertAlmostEqual(float(value), expected_auc, delta=1e-5, msg=key)
 
     @parameterized.expand(_metric_handler_params[:1], skip_on_empty=True)
     def test_save_metrics(self, grid_type, batch_size, ensemble_size, num_rollout_steps, bred):
