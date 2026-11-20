@@ -1668,6 +1668,24 @@ class TestLossHandler(unittest.TestCase):
         with self.subTest(desc="var"):
             self.assertTrue(compare_tensors("var", var, expected_var, verbose=verbose))
 
+    @parameterized.expand([(False,), (True,)])
+    def test_channel_weights_as_a_list(self, temp_diff_normalization):
+        """Channel weights given as a flat list are the weights of the nested list, and a list of the wrong length is refused."""
+        C = self.params.N_out_channels
+        weights = [1.0 + c for c in range(C)]
+        loss = {"type": "l2", "temp_diff_normalization": temp_diff_normalization}
+
+        self.params.losses = [{**loss, "channel_weights": weights}]
+        flat = LossHandler(self.params, compile=self.compile)
+        self.params.losses = [{**loss, "channel_weights": [weights]}]
+        nested = LossHandler(self.params, compile=self.compile)
+        self.assertTrue(compare_tensors("channel weights", flat.channel_weights, nested.channel_weights))
+        self.assertEqual(tuple(flat.channel_weights.shape), (1, C))
+
+        self.params.losses = [{**loss, "channel_weights": weights[:-1]}]
+        with self.assertRaises(ValueError):
+            LossHandler(self.params, compile=self.compile)
+
     @parameterized.expand(
         [
             ("constant", {"weight_type": "constant"}, [1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0], (1.0, 10.0)),

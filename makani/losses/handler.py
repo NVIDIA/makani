@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional, List
+from typing import Optional
 from functools import partial
 
 import torch
@@ -194,14 +194,15 @@ class LossHandler(nn.Module):
                 time_diff_scale = None
 
             # get channel weights either directly or through the compute routine
-            if isinstance(channel_weight_type, List):
-                chw = torch.tensor(channel_weight_type, dtype=torch.float32)
+            if isinstance(channel_weight_type, (list, tuple)):
+                # one weight per channel of the loss, as a flat or nested list
+                chw = torch.tensor(channel_weight_type, dtype=torch.float32).flatten()
+                if chw.shape[0] != loss_fn.n_channels:
+                    raise ValueError(
+                        f"expected channel weights to have {loss_fn.n_channels} channels, but got {chw.shape[0]}"
+                    )
                 if time_diff_scale is not None:
                     chw = chw * time_diff_scale
-                if chw.shape[1] != loss_fn.n_channels:
-                    raise ValueError(
-                        f"expected channel weights to have {loss_fn.n_channels} channels, but got {chw.shape[1]}"
-                    )
             else:
                 chw = loss_fn.compute_channel_weighting(channel_weight_type, time_diff_scale=time_diff_scale)
 
