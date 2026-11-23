@@ -197,7 +197,7 @@ def compute_hydrostatic_balance_climatology(
     ``hydrostatic_balance_stds.npy``, and the matched pressure levels to
     ``hydrostatic_balance_pressures.npy`` so consumers can align the per-level values unambiguously.
 
-    Mirrors ``compute_stats.py``: spatial averages use spherical quadrature, and reductions across
+    Mirrors ``makani.datasets.compute_stats``: spatial averages use spherical quadrature, and reductions across
     ranks use parallel Welford combination. ``use_moist_air_formula`` selects virtual temperature
     and must match the setting used by the projection that consumes the offset.
     """

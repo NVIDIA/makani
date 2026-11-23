@@ -216,13 +216,13 @@ def compute_histograms(
     Parameters
     ----------
     input_path : str
-        Path which hosts the HDF5 files to compute the statistics on. Note, this routine supports virtual datasets genrated using concatenate_dataset.py.
+        Path which hosts the HDF5 files to compute the statistics on. Note, this routine supports virtual datasets generated with makani.datasets.concatenate_dataset.
         If you want to use a concatenated dataset, please specify the full path including the filename, e.g. <path-to-data>/train.h5v. In this case,
         the routine will ignore all the other files in the same folder.
     output_path : str
         Output path to specify where to store the computed statistics.
     stats_dir : str
-        Path which contains the stats computed by compute_stats.py.
+        Path which contains the stats computed by makani.datasets.compute_stats.
     metadata_file : str
         name of the file to read metadata from. The metadata is a json file, and after reading it should be a
         dictionary containing metadata describing the dataset. Most important entries are:
