@@ -41,6 +41,21 @@ from makani.datasets.helpers import (
 )
 
 
+#: How the paired wind components (u500 and v500, u10m and v10m, ...) are normalized, see :func:`compute_stats`.
+WIND_STATS = ("componentwise", "magnitude", "vector")
+
+
+def resolve_wind_stats(wind_stats: Optional[str] = None, wind_angle_aware: bool = False) -> str:
+    """The wind statistics mode, from ``wind_stats`` or the older ``wind_angle_aware`` flag, which means ``"magnitude"``."""
+    if wind_stats is None:
+        return "magnitude" if wind_angle_aware else "componentwise"
+    if wind_stats not in WIND_STATS:
+        raise ValueError(f"Unknown wind statistics {wind_stats!r}, expected one of {WIND_STATS}")
+    if wind_angle_aware and (wind_stats != "magnitude"):
+        raise ValueError(f"wind_angle_aware means wind_stats='magnitude', which contradicts wind_stats={wind_stats!r}")
+    return wind_stats
+
+
 def get_file_stats(
     filename,
     file_slice,
@@ -51,6 +66,7 @@ def get_file_stats(
     batch_size=16,
     device=torch.device("cpu"),
     progress=None,
+    wind_stats="magnitude",
 ):
 
     stats = None
@@ -187,7 +203,50 @@ def get_file_stats(
                     ).contiguous(),
                 }
 
-            if wind_indices is not None:
+            if (wind_indices is not None) and (wind_stats == "vector"):
+                # the wind is a tangent vector field: a constant vector field has no meaning on the sphere,
+                # so the mean is zero by definition and the scale is the second moment about zero, shared by
+                # both components. With all partial means zero the Welford merge reduces to summing m2.
+                u_tens = tdata[:, wind_indices[0]]
+                v_tens = tdata[:, wind_indices[1]]
+                wind_sq = torch.square(u_tens) + torch.square(v_tens)
+                wind_masked, wind_valid_mask = mask_data(wind_sq)
+                wind_valid_count = torch.sum(quadrature(wind_valid_mask), dim=0)
+                wind_mean = torch.zeros((1, wind_sq.shape[1], 1, 1), dtype=torch.float64, device=device)
+                wind_m2 = torch.sum(quadrature(wind_masked * wind_valid_mask), dim=0, keepdim=False).reshape(
+                    1, -1, 1, 1
+                )
+                tmpstats["wind_meanvar"] = {
+                    "type": "meanvar",
+                    "counts": wind_valid_count.clone(),
+                    "values": torch.stack([wind_mean, wind_m2], dim=0).contiguous(),
+                }
+
+                if counts_timediff != 0:
+                    # same treatment for the wind tendency
+                    udiff_tens = tdiff[:, wind_indices[0]]
+                    vdiff_tens = tdiff[:, wind_indices[1]]
+                    winddiff_sq = torch.square(udiff_tens) + torch.square(vdiff_tens)
+                    winddiff_masked, winddiff_valid_mask = mask_data(winddiff_sq)
+                    winddiff_valid_count = torch.sum(quadrature(winddiff_valid_mask), dim=0)
+                    winddiff_mean = torch.zeros((1, winddiff_sq.shape[1], 1, 1), dtype=torch.float64, device=device)
+                    winddiff_m2 = torch.sum(
+                        quadrature(winddiff_masked * winddiff_valid_mask), dim=0, keepdim=False
+                    ).reshape(1, -1, 1, 1)
+                    tmpstats["winddiff_meanvar"] = {
+                        "type": "meanvar",
+                        "counts": winddiff_valid_count.clone(),
+                        "values": torch.stack([winddiff_mean, winddiff_m2], dim=0).contiguous(),
+                    }
+                else:
+                    wdiffshape = wind_mean.shape
+                    tmpstats["winddiff_meanvar"] = {
+                        "type": "meanvar",
+                        "counts": torch.zeros(wdiffshape[1], dtype=torch.float64, device=device),
+                        "values": torch.zeros((2, *wdiffshape), dtype=torch.float64, device=device),
+                    }
+
+            elif wind_indices is not None:
                 u_tens = tdata[:, wind_indices[0]]
                 v_tens = tdata[:, wind_indices[1]]
                 wind_magnitude = torch.sqrt(torch.square(u_tens) + torch.square(v_tens))
@@ -262,10 +321,11 @@ def compute_stats(
     output_path: str,
     metadata_file: str,
     dt: int,
-    wind_angle_aware: bool,
+    wind_angle_aware: bool = False,
     fail_on_nan: bool = False,
     batch_size: Optional[int] = 16,
     reduction_group_size: Optional[int] = 8,
+    wind_stats: Optional[str] = None,
 ):
     """Function to compute various statistics of all variables of a makani HDF5 dataset.
 
@@ -304,7 +364,7 @@ def compute_stats(
     wind_angle_aware : bool
         If this flag is set to true, then wind channels will be grouped together (all u and v channels, e.g. u500 and v500, u10m and v10m, etc) and
         instead of computing stadard deviation component-wise, the standard deviation will be computed for the magnitude. This ensures that the direction of the
-        wind vectors will not change when normalized by the standard deviation during training.
+        wind vectors will not change when normalized by the standard deviation during training. Same as wind_stats="magnitude".
     fail_on_nan : bool
         If this flag is set to true, then the code will fail if NaN values are encountered.
     batch_size : int
@@ -312,7 +372,17 @@ def compute_stats(
         is merely a performance setting. Bigger batches are more efficient but require more memory.
     reduction_group_size : int
         Reduction group size for the parallel Welford reduction, clamped to a divisor of the number of ranks. The ranks are partitioned accordingly. Changing this value impacts performance but not numerical accuracy.
+    wind_stats : str, optional
+        How the paired wind components (u500 and v500, u10m and v10m, ...) are normalized, one of :data:`WIND_STATS`:
+        "componentwise" treats them like every other channel; "magnitude" keeps the componentwise means and gives both
+        components of a pair the standard deviation of the wind speed sqrt(u^2 + v^2), so that normalization keeps the
+        direction of the wind (the former wind_angle_aware); "vector" treats each pair as a tangent vector field: zero
+        mean, since a constant vector field is singular at the poles and not band-limited, and one shared scale
+        sqrt(E[u^2 + v^2] / 2), the RMS of a component. Models that encode the wind as a tangent vector field need
+        "vector". Defaults to "magnitude" with wind_angle_aware and to "componentwise" otherwise.
     """
+
+    wind_stats = resolve_wind_stats(wind_stats, wind_angle_aware)
 
     # disable gradients globally
     torch.set_grad_enabled(False)
@@ -370,7 +440,7 @@ def compute_stats(
     data_shape = comm.bcast(data_shape, root=0)
 
     # identify the wind channels
-    if wind_angle_aware:
+    if wind_stats != "componentwise":
         wind_channels, _ = get_wind_channels(channel_names)
 
     # get file offsets
@@ -461,6 +531,7 @@ def compute_stats(
             batch_size,
             device,
             progress,
+            wind_stats=wind_stats,
         )
         stats = welford_combine(stats, tmpstats)
 
@@ -507,8 +578,30 @@ def compute_stats(
             stats["time_diff_meanvar"]["values"][1, ...] / stats["time_diff_meanvar"]["counts"][None, :, None, None]
         )
 
-        # overwrite the wind channels
-        if wind_channels is not None:
+        # overwrite the wind channels: zero mean and, per component, the RMS sqrt(E[u^2 + v^2] / 2), so that
+        # normalization rescales the wind vectors without subtracting a constant vector field
+        if (wind_channels is not None) and (wind_stats == "vector"):
+            stats["wind_meanvar"]["values"][1, ...] = np.sqrt(
+                stats["wind_meanvar"]["values"][1, ...] / stats["wind_meanvar"]["counts"][None, :, None, None] / 2.0
+            )
+            # there is a numpy bug here: if the leading dim is singleton and the second dim gets selected, the
+            # dims are swapped afterwards. Working around this by making use of the fact that batch dim is singleton:
+            for comp in wind_channels:
+                stats["global_meanvar"]["values"][0, 0, comp, ...] = 0.0
+                stats["global_meanvar"]["values"][1, 0, comp, ...] = stats["wind_meanvar"]["values"][1, 0, ...]
+
+            # same for wind diffs
+            stats["winddiff_meanvar"]["values"][1, ...] = np.sqrt(
+                stats["winddiff_meanvar"]["values"][1, ...]
+                / stats["winddiff_meanvar"]["counts"][None, :, None, None]
+                / 2.0
+            )
+            for comp in wind_channels:
+                stats["time_diff_meanvar"]["values"][0, 0, comp, ...] = 0.0
+                stats["time_diff_meanvar"]["values"][1, 0, comp, ...] = stats["winddiff_meanvar"]["values"][1, 0, ...]
+
+        # overwrite the wind channels: the standard deviation of the wind speed for both components
+        elif wind_channels is not None:
             stats["wind_meanvar"]["values"][1, ...] = np.sqrt(
                 stats["wind_meanvar"]["values"][1, ...] / stats["wind_meanvar"]["counts"][None, :, None, None]
             )
@@ -572,6 +665,7 @@ def main(args):
         metadata_file=args.metadata_file,
         dt=args.dt,
         wind_angle_aware=args.wind_angle_aware,
+        wind_stats=args.wind_stats,
         fail_on_nan=args.fail_on_nan,
         batch_size=args.batch_size,
         reduction_group_size=args.reduction_group_size,
@@ -596,7 +690,17 @@ if __name__ == "__main__":
     parser.add_argument(
         "--wind_angle_aware",
         action="store_true",
-        help="Just compute mean and magnitude of wind vectors and not componentwise stats",
+        help="Just compute mean and magnitude of wind vectors and not componentwise stats; same as --wind_stats magnitude",
+    )
+    parser.add_argument(
+        "--wind_stats",
+        type=str,
+        default=None,
+        choices=WIND_STATS,
+        help="Normalization of the paired wind components: 'componentwise' like every other channel (default), "
+        "'magnitude' componentwise means and the std of the wind speed for both components (= --wind_angle_aware), "
+        "'vector' zero mean and one shared scale sqrt(E[u^2 + v^2] / 2) per pair, for models that encode the wind as "
+        "a tangent vector field",
     )
     parser.add_argument(
         "--fail_on_nan", action="store_true", help="When computing stats, code will fail if NaN values are encountered."

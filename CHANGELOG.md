@@ -31,6 +31,7 @@
 - Inference can read through DALI: `makani.inference --dataloader dali` (default `multifiles`), or `multifiles: False` in the parameters. The new `DaliInferenceLoader` reads the batches of the rollout schedule through the multifiles dataset in DALI's worker processes, so the batches are bit for bit those of the multifiles loader; it needs `num_data_workers >= 1`. The inferencer no longer forces `multifiles` and only defaults it, to the multifiles loader for real data and to the synthetic loader with `enable_synthetic_data`. New `MultifilesDataset.read_window`, which returns a sample as numpy arrays.
 - The DALI loader takes the order, the names and the layouts of its outputs from one list, `SampleSource.outputs()`, and passes on any dynamic feature it names. New `batch_nbytes` and `without_target` helpers; the trainers and the inferencer move batches with `non_blocking=True`, and the autoencoder trainer no longer moves the targets it does not use.
 - `Rollout` folds the ensemble into the dynamic features and timestamps of a target step once.
+- `compute_stats --wind_stats {componentwise,magnitude,vector}` picks how the paired wind components are normalized. `magnitude` is the former `--wind_angle_aware`, which still works; the new `vector` treats each u/v pair as a tangent vector field, with zero mean and one shared scale `sqrt(E[u^2 + v^2] / 2)` for both components, also for the tendencies.
 
 **Models**
 - Networks can own noise processes, e.g. in latent space, listed through `noise_processes()`; rollouts drive them like the input noise.

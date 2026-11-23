@@ -1365,6 +1365,66 @@ class TestGetStats(unittest.TestCase):
             for name in ["global_means.npy", "global_stds.npy", "time_means.npy", "time_diff_stds_dt1.npy"]:
                 self.assertTrue(np.all(np.isfinite(np.load(os.path.join(output_path, name)))), name)
 
+    def test_script_vector_wind(self):
+        # the whole script with --wind_stats vector, with channels renamed to two u/v pairs: the wind channels get
+        # zero means and, per pair, the shared scale sqrt(E[u^2 + v^2] / 2); the other channels are untouched
+        import json
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(self.metadata_path, "data.json"), "r") as f:
+                metadata = json.load(f)
+            metadata["coords"]["channel"] = ["u10m", "v10m", "u500", "v500", "t2m"]
+            metadata_file = os.path.join(tmp, "data.json")
+            with open(metadata_file, "w") as f:
+                json.dump(metadata, f)
+
+            outputs = {}
+            for wind_stats in ["componentwise", "vector"]:
+                output_path = os.path.join(tmp, wind_stats)
+                os.makedirs(output_path)
+                env = dict(os.environ, CUDA_VISIBLE_DEVICES="", MASTER_PORT="29532")
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "makani.datasets.compute_stats",
+                        "--input_path",
+                        self.train_path,
+                        "--metadata_file",
+                        metadata_file,
+                        "--output_path",
+                        output_path,
+                        "--wind_stats",
+                        wind_stats,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                    cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                )
+                self.assertEqual(result.returncode, 0, result.stderr[-3000:])
+                outputs[wind_stats] = {
+                    name: np.load(os.path.join(output_path, f"{name}.npy")).reshape(-1)
+                    for name in ["global_means", "global_stds", "time_diff_means_dt1", "time_diff_stds_dt1"]
+                }
+
+            vec, comp = outputs["vector"], outputs["componentwise"]
+            for name in ["global", "time_diff"]:
+                suffix = "_dt1" if name == "time_diff" else ""
+                means, stds = vec[f"{name}_means{suffix}"], vec[f"{name}_stds{suffix}"]
+                np.testing.assert_array_equal(means[:4], 0.0)
+                np.testing.assert_array_equal(stds[0], stds[1])
+                np.testing.assert_array_equal(stds[2], stds[3])
+                # the shared scale is the RMS of the components: with the componentwise moments,
+                # E[u^2] + E[v^2] = mu_u^2 + sigma_u^2 + mu_v^2 + sigma_v^2
+                cmeans, cstds = comp[f"{name}_means{suffix}"], comp[f"{name}_stds{suffix}"]
+                for u, v in [(0, 1), (2, 3)]:
+                    expected = np.sqrt((cmeans[u] ** 2 + cstds[u] ** 2 + cmeans[v] ** 2 + cstds[v] ** 2) / 2.0)
+                    np.testing.assert_allclose(stds[u], expected, rtol=1e-5)
+                np.testing.assert_array_equal(means[4], cmeans[4])
+                np.testing.assert_array_equal(stds[4], cstds[4])
+
     @parameterized.expand(
         [
             (8, False),
@@ -1473,6 +1533,70 @@ class TestGetStats(unittest.TestCase):
                     verbose=verbose,
                 )
             )
+
+    @parameterized.expand([("magnitude",), ("vector",)], skip_on_empty=False)
+    @unittest.skipUnless(importlib.util.find_spec("mpi4py") is not None, "mpi4py needs to be installed for this test")
+    def test_get_stats_wind(self, wind_stats):
+        # the wind statistics of each mode against a direct evaluation over the whole dataset, with channels
+        # (0, 1) and (2, 3) taken as two u/v pairs
+        from makani.datasets.compute_stats import welford_combine, get_file_stats
+
+        train_files = sorted(
+            [os.path.join(self.train_path, f) for f in os.listdir(self.train_path) if f.endswith(".h5")]
+        )
+        quadrature = GridQuadrature(make_grid((IMG_SIZE_H, IMG_SIZE_W), "equiangular"), normalize=False)
+        wind_indices = ([0, 2], [1, 3])
+
+        stats = None
+        for file_path in train_files:
+            file_stats = get_file_stats(
+                filename=file_path,
+                file_slice=slice(0, None),
+                wind_indices=wind_indices,
+                quadrature=quadrature,
+                dt=1,
+                batch_size=8,
+                wind_stats=wind_stats,
+            )
+            stats = file_stats if stats is None else welford_combine(stats, file_stats)
+
+        data = []
+        for file_path in train_files:
+            with h5.File(file_path, "r") as f:
+                data.append(torch.as_tensor(f[H5_PATH][...].astype(np.float64)))
+        tdata = torch.cat(data, dim=0)
+        # the tendencies are taken within each file, and get_file_stats skips those that end in its first batch
+        # (batch_start >= dt, the TODO there), so only the ones ending at a sample >= batch_size count
+        tdiff = torch.cat([x[8:] - x[7:-1] for x in data], dim=0)
+
+        for key, x in [("wind_meanvar", tdata), ("winddiff_meanvar", tdiff)]:
+            sq = torch.square(x[:, wind_indices[0]]) + torch.square(x[:, wind_indices[1]])
+            field = sq if wind_stats == "vector" else torch.sqrt(sq)
+            count = torch.sum(quadrature(torch.ones_like(field)), dim=0)
+            if wind_stats == "vector":
+                # zero mean by definition, and the second moment about zero
+                mean = torch.zeros(1, field.shape[1], 1, 1, dtype=torch.float64)
+                m2 = torch.sum(quadrature(field), dim=0).reshape(1, -1, 1, 1)
+            else:
+                mean = (torch.sum(quadrature(field), dim=0) / count).reshape(1, -1, 1, 1)
+                m2 = torch.sum(quadrature(torch.square(field - mean)), dim=0).reshape(1, -1, 1, 1)
+            with self.subTest(key=key):
+                torch.testing.assert_close(stats[key]["counts"], count)
+                torch.testing.assert_close(stats[key]["values"][0], mean)
+                torch.testing.assert_close(stats[key]["values"][1], m2)
+
+    @unittest.skipUnless(importlib.util.find_spec("mpi4py") is not None, "mpi4py needs to be installed for this test")
+    def test_get_stats_wind_option(self):
+        from makani.datasets.compute_stats import resolve_wind_stats
+
+        self.assertEqual(resolve_wind_stats(), "componentwise")
+        self.assertEqual(resolve_wind_stats(wind_angle_aware=True), "magnitude")
+        self.assertEqual(resolve_wind_stats("vector"), "vector")
+        self.assertEqual(resolve_wind_stats("magnitude", wind_angle_aware=True), "magnitude")
+        with self.assertRaises(ValueError):
+            resolve_wind_stats("vector", wind_angle_aware=True)
+        with self.assertRaises(ValueError):
+            resolve_wind_stats("angle")
 
 
 # conversion scripts, with the extras each needs to be importable at all

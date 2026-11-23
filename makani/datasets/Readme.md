@@ -237,6 +237,7 @@ Key flags:
 - `--output_path`: directory where the `.npy` outputs are written.
 - `--dt`: time-step (in units of `dhours`) for difference stats.
 - `--wind_angle_aware`: treat paired wind components as magnitudes for mean/std. This conserves the angle of the wind vector and just normalizes its magnitudes.
+- `--wind_stats`: how the paired wind components (`u500`/`v500`, ...) are normalized: `componentwise` (default) like every other channel; `magnitude` is the same as `--wind_angle_aware`; `vector` treats each pair as a tangent vector field, with zero mean and one shared scale `sqrt(E[u^2 + v^2] / 2)`. A constant vector field is singular at the poles and not band-limited, so models that encode the wind as a tangent vector field need `vector`.
 - `--fail_on_nan`: abort if NaNs appear instead of masking them. This should not be used when computing stats for fields with missing numbers such as `sst`.
 - `--batch_size`: samples per read; tune for memory.
 - `--reduction_group_size`: size of the groups of the parallel reduction (performance tuning). It is clamped to the largest divisor of the number of ranks that does not exceed it, so the default of 8 works on any number of ranks, also on one.
