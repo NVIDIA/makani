@@ -1535,7 +1535,6 @@ class TestGetStats(unittest.TestCase):
             )
 
     @parameterized.expand([("magnitude",), ("vector",)], skip_on_empty=False)
-    @unittest.skipUnless(importlib.util.find_spec("mpi4py") is not None, "mpi4py needs to be installed for this test")
     def test_get_stats_wind(self, wind_stats):
         # the wind statistics of each mode against a direct evaluation over the whole dataset, with channels
         # (0, 1) and (2, 3) taken as two u/v pairs
@@ -1585,7 +1584,6 @@ class TestGetStats(unittest.TestCase):
                 torch.testing.assert_close(stats[key]["values"][0], mean)
                 torch.testing.assert_close(stats[key]["values"][1], m2)
 
-    @unittest.skipUnless(importlib.util.find_spec("mpi4py") is not None, "mpi4py needs to be installed for this test")
     def test_get_stats_wind_option(self):
         from makani.datasets.compute_stats import resolve_wind_stats
 
