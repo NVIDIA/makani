@@ -15,7 +15,7 @@
 
 """The makani layout concatenated into a single HDF5 file.
 
-What ``makani/datasets/concatenate_dataset.py`` produces: every year in one file,
+What ``python -m makani.datasets.concatenate_dataset`` produces: every year in one file,
 usually as a virtual dataset over the per-year files. The array is identical to
 the one the per-year layout uses, so only discovery differs -- there is one file
 instead of many, and its timestamps have to be read rather than derived, since
@@ -74,7 +74,7 @@ class MakaniConcatBackend(MakaniHDF5Backend):
                 raise ValueError(
                     f"{files[0]} has no '{self.timestamp_name}' dimension scale. A concatenated dataset "
                     "cannot have its sample times inferred, so it has to be annotated; see "
-                    "makani/datasets/annotate_dataset.py."
+                    "python -m makani.datasets.annotate_dataset."
                 )
 
             timestamps = timezone_fn(dset.dims[0][self.timestamp_name][...])

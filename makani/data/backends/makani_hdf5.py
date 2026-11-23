@@ -239,7 +239,7 @@ class MakaniHDF5Backend(StructuredChunkMixin, DatasetBackend):
                 elif labels[file_idx] is None:
                     raise ValueError(
                         f"{path} carries no '{self.timestamp_name}' dimension scale, and its name is not a year "
-                        "to derive the sample times from. Annotate it; see makani/datasets/annotate_dataset.py."
+                        "to derive the sample times from. Annotate it; see python -m makani.datasets.annotate_dataset."
                     )
                 else:
                     # unannotated file: derive the times from the year in its name.

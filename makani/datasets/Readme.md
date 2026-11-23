@@ -221,7 +221,7 @@ The script `compute_stats.py` computes per-channel statistics for a Makani datas
 Run, here on 8 ranks; without `mpirun -n 8` it runs serially, see [Running the scripts](#running-the-scripts). It works on a VDS or a directory of yearly `.h5`:
 ```
 mpirun -n 8 python -m makani.datasets.compute_stats \
-  --input_path /mnt/era5/makani_era5_train_vds.h5v \   # or a folder with .h5 files
+  --input_path /mnt/era5/makani_era5_train_vds.h5v \
   --metadata_file /mnt/era5/metadata.json \
   --output_path /mnt/era5/stats/train \
   --dt 1 \
@@ -232,7 +232,7 @@ mpirun -n 8 python -m makani.datasets.compute_stats \
 ```
 
 Key flags:
-- `--input_path`: folder of yearly `.h5` files or a single VDS `.h5v`.
+- `--input_path`: a folder of yearly `.h5` files or a single VDS `.h5v`.
 - `--metadata_file`: matches the dataset/VDS (channels/lat/lon/dhours must align).
 - `--output_path`: directory where the `.npy` outputs are written.
 - `--dt`: time-step (in units of `dhours`) for difference stats.
