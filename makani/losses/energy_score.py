@@ -19,7 +19,14 @@ import math
 import torch
 from torch import amp
 
-from makani.losses.base_loss import GeometricBaseLoss, SpectralBaseLoss, LossType, abs_pow
+from makani.losses.base_loss import (
+    GeometricBaseLoss,
+    SpectralBaseLoss,
+    LossType,
+    abs_pow,
+    norm_product,
+    sum_channels_per_step,
+)
 from makani.distributed import comm
 
 # distributed stuff
@@ -31,6 +38,10 @@ class LpEnergyScoreLoss(GeometricBaseLoss):
     """
     Lp Energy Score (Gneiting et al. 2005). Uses Lebesgue norm ||x||_p = (sum |x_i|^p)^(1/p).
     p=2 gives the standard L2/Euclidean energy score.
+
+    With ``spread_temper_steps = T > 0``, training tempers the spread term of lead step ``k`` (multistep training) by
+    ``min(k / T, 1)``: the first step is scored by its skill alone, and the spread comes in linearly until it has its
+    full weight from step ``T`` on, where the score is proper again.
     """
 
     def __init__(
@@ -192,11 +203,11 @@ class LpEnergyScoreLoss(GeometricBaseLoss):
             diff = reduce_from_parallel_region(diff, "spatial")
             eskill = reduce_from_parallel_region(eskill, "spatial")
 
-        # do the channel reduction
+        # do the channel reduction, per lead step
         # if channel weights are required they should be added here to the reduction
         if self.channel_reduction:
-            diff = diff.sum(dim=-1, keepdim=True)  # (P, B, 1)
-            eskill = eskill.sum(dim=-1, keepdim=True)
+            diff = sum_channels_per_step(diff, -1, len(self.channel_names))  # (P, B, steps)
+            eskill = sum_channels_per_step(eskill, -1, len(self.channel_names))
 
         # get the masks
         diff_mask = diff < self.eps
@@ -236,10 +247,11 @@ class LpEnergyScoreLoss(GeometricBaseLoss):
         # sum over ensemble
         eskill = eskill.sum(dim=0) / float(num_ensemble)
 
-        # apply spread tempering (lead_time_step shape (C,) for channel-wise weighting)
+        # apply spread tempering; lead_time_step holds the step of each output column, one per channel and step, or
+        # one per step with channel_reduction
         if self.training and self.spread_temper_steps > 0 and lead_time_step is not None:
             scale = lead_time_step.float().to(espread.device) / self.spread_temper_steps
-            espread = espread * torch.maximum(scale, torch.ones_like(scale))
+            espread = espread * torch.clamp(scale, max=1.0)
 
         # the resulting tensor should have dimension B, C which is what we return
         loss = eskill - 0.5 * espread
@@ -338,7 +350,7 @@ class SobolevEnergyScoreLoss(SpectralBaseLoss):
         self,
         forecasts: torch.Tensor,
         observations: torch.Tensor,
-        ensemble_weights: Optional[torch.Tensor] = None,
+        spectral_weights: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> torch.Tensor:
 
@@ -352,7 +364,7 @@ class SobolevEnergyScoreLoss(SpectralBaseLoss):
         # before anything else compute the transform
         # as the CDF definition doesn't generalize well to more than one-dimensional variables, we treat complex and imaginary part as the same
         with amp.autocast(device_type="cuda", enabled=False):
-            # TODO: check 4 pi normalization
+            # the lm_weights of this loss carry no 1 / (4 pi), so the coefficients are scaled to the mean over the sphere
             forecasts = self.sht(forecasts.float()) / math.sqrt(4 * math.pi)
             observations = self.sht(observations.float()) / math.sqrt(4 * math.pi)
 
@@ -371,7 +383,8 @@ class SobolevEnergyScoreLoss(SpectralBaseLoss):
                 forecasts, (-1, 0), ensemble_shapes, "ensemble"
             )  # for correct spatial reduction we need to do the same with spatial weights
 
-        lm_weights_split = self.lm_weights.flatten(start_dim=-2, end_dim=-1)
+        # the lm_weights, times the weights of the coefficients if given
+        lm_weights_split = self.weighted_lm_weights(spectral_weights).flatten(start_dim=-2, end_dim=-1)
         if self.ensemble_distributed:
             lm_weights_split = scatter_to_parallel_region(lm_weights_split, -1, "ensemble")
 
@@ -386,10 +399,10 @@ class SobolevEnergyScoreLoss(SpectralBaseLoss):
         espread = lm_weights_split * (forecasts.unsqueeze(1) - forecasts.unsqueeze(0)).abs().square()
         eskill = lm_weights_split * (observations - forecasts).abs().square()
 
-        # do the channel reduction first
+        # do the channel reduction first, per lead step
         if self.channel_reduction:
-            espread = espread.sum(dim=-2, keepdim=True)
-            eskill = eskill.sum(dim=-2, keepdim=True)
+            espread = sum_channels_per_step(espread, -2, len(self.channel_names))
+            eskill = sum_channels_per_step(eskill, -2, len(self.channel_names))
 
         # do the spatial reduction
         espread = espread.sum(dim=-1, keepdim=False)
@@ -505,7 +518,7 @@ class SpectralL2EnergyScoreLoss(SpectralBaseLoss):
         self,
         forecasts: torch.Tensor,
         observations: torch.Tensor,
-        ensemble_weights: Optional[torch.Tensor] = None,
+        spectral_weights: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> torch.Tensor:
 
@@ -518,9 +531,9 @@ class SpectralL2EnergyScoreLoss(SpectralBaseLoss):
         forecasts = forecasts.float()
         observations = observations.float()
         with amp.autocast(device_type="cuda", enabled=False):
-            # TODO: check 4 pi normalization
-            forecasts = self.sht(forecasts) / math.sqrt(4.0 * math.pi)
-            observations = self.sht(observations) / math.sqrt(4.0 * math.pi)
+            # the coefficients of the orthonormal SHT; lm_weights hold the 1 / (4 pi) of the mean over the sphere
+            forecasts = self.sht(forecasts)
+            observations = self.sht(observations)
 
         # the SH coefficients stay COMPLEX from here on. Casting them back to the input
         # (real) dtype would silently discard the imaginary part, and the score below is
@@ -543,7 +556,8 @@ class SpectralL2EnergyScoreLoss(SpectralBaseLoss):
                 forecasts, (-1, 0), ensemble_shapes, "ensemble"
             )  # for correct spatial reduction we need to do the same with spatial weights
 
-        lm_weights_split = self.lm_weights
+        # the lm_weights, times the weights of the coefficients if given
+        lm_weights_split = self.weighted_lm_weights(spectral_weights)
         if self.ensemble_distributed:
             lm_weights_split = scatter_to_parallel_region(lm_weights_split, -1, "ensemble")
 
@@ -556,10 +570,10 @@ class SpectralL2EnergyScoreLoss(SpectralBaseLoss):
         espread = lm_weights_split * (forecasts.unsqueeze(1) - forecasts.unsqueeze(0)).abs().square()
         eskill = lm_weights_split * (observations - forecasts).abs().square()
 
-        # do the channel reduction first
+        # do the channel reduction first, per lead step
         if self.channel_reduction:
-            espread = espread.sum(dim=-3, keepdim=True)
-            eskill = eskill.sum(dim=-3, keepdim=True)
+            espread = sum_channels_per_step(espread, -3, len(self.channel_names))
+            eskill = sum_channels_per_step(eskill, -3, len(self.channel_names))
 
         # do the spatial m reduction
         espread = espread.sum(dim=-1, keepdim=False)
@@ -701,7 +715,7 @@ class SpectralCoherenceLoss(SpectralBaseLoss):
         self,
         forecasts: torch.Tensor,
         observations: torch.Tensor,
-        ensemble_weights: Optional[torch.Tensor] = None,
+        spectral_weights: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> torch.Tensor:
 
@@ -715,7 +729,7 @@ class SpectralCoherenceLoss(SpectralBaseLoss):
         # before anything else compute the transform
         # as the CDF definition doesn't generalize well to more than one-dimensional variables, we treat complex and imaginary part as the same
         with amp.autocast(device_type="cuda", enabled=False):
-            # TODO: check 4 pi normalization
+            # the lm_weights of this loss carry no 1 / (4 pi), so the coefficients are scaled to the mean over the sphere
             forecasts = self.sht(forecasts.float()) / math.sqrt(4.0 * math.pi)
             observations = self.sht(observations.float()) / math.sqrt(4.0 * math.pi)
 
@@ -733,7 +747,18 @@ class SpectralCoherenceLoss(SpectralBaseLoss):
                 forecasts, (-1, 0), ensemble_shapes, "ensemble"
             )  # for correct spatial reduction we need to do the same with spatial weights
 
-        lm_weights_split = self.lm_weights
+        # the lm_weights, times the weights of the coefficients if given
+        lm_weights_split = self.weighted_lm_weights(spectral_weights)
+
+        # the relative loss scores each degree by its coherence, which is 0 where the weights remove all coefficients
+        # of the degree. Such a degree would add a constant to the loss, so keep only the degrees with weights.
+        degree_mask = None
+        if self.relative and (spectral_weights is not None):
+            degree_mask = (lm_weights_split != 0).to(dtype=lm_weights_split.dtype).sum(dim=-1)
+            if self.spatial_distributed:
+                degree_mask = reduce_from_parallel_region(degree_mask, "w")
+            degree_mask = degree_mask > 0
+
         if self.ensemble_distributed:
             lm_weights_split = scatter_to_parallel_region(lm_weights_split, -1, "ensemble")
 
@@ -772,11 +797,9 @@ class SpectralCoherenceLoss(SpectralBaseLoss):
             coherence_forecasts = reduce_from_parallel_region(coherence_forecasts, "w")
             coherence_observations = reduce_from_parallel_region(coherence_observations, "w")
 
-        # divide the coherence by the product of the norms (with epsilon for numerical stability)
-        coherence_observations = coherence_observations / torch.sqrt(psd_forecasts * psd_observations + self.eps)
-        coherence_forecasts = coherence_forecasts / torch.sqrt(
-            psd_forecasts.unsqueeze(0) * psd_forecasts.unsqueeze(1) + self.eps
-        )
+        # divide the coherence by the product of the norms, clamped where a field has no power
+        coherence_observations = coherence_observations / norm_product(psd_forecasts, psd_observations)
+        coherence_forecasts = coherence_forecasts / norm_product(psd_forecasts.unsqueeze(0), psd_forecasts.unsqueeze(1))
 
         # compute the error in the power spectral density
         psd_skill = (psd_forecasts - psd_observations).square()
@@ -806,6 +829,8 @@ class SpectralCoherenceLoss(SpectralBaseLoss):
         # compute the loss
         if self.relative:
             loss = psd_skill + 2.0 * (coherence_skill - 0.5 * coherence_spread)
+            if degree_mask is not None:
+                loss = torch.where(degree_mask, loss, 0.0)
         else:
             loss = psd_skill + 2.0 * psd_observations.squeeze(0) * (coherence_skill - 0.5 * coherence_spread)
 
@@ -814,11 +839,11 @@ class SpectralCoherenceLoss(SpectralBaseLoss):
         if self.spatial_distributed:
             loss = reduce_from_parallel_region(loss, "h")
 
-        # reduce over the channel dimension if requested; matches sibling loss
-        # contract: output has shape (B, n_channels) where n_channels is 1 if
+        # reduce over the channels of each lead step if requested; matches sibling loss
+        # contract: output has shape (B, n_channels) per step, where n_channels is 1 if
         # reduction is on, else len(channel_names)
         if self.channel_reduction:
-            loss = loss.sum(dim=-1, keepdim=True)
+            loss = sum_channels_per_step(loss, -1, len(self.channel_names))
 
         return loss
 
@@ -895,7 +920,7 @@ class CorrectedSpectralL2EnergyScoreLoss(SpectralBaseLoss):
         self,
         forecasts: torch.Tensor,
         observations: torch.Tensor,
-        ensemble_weights: Optional[torch.Tensor] = None,
+        spectral_weights: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> torch.Tensor:
         if forecasts.dim() != 5:
@@ -904,8 +929,9 @@ class CorrectedSpectralL2EnergyScoreLoss(SpectralBaseLoss):
         forecasts = forecasts.float()
         observations = observations.float()
         with amp.autocast(device_type="cuda", enabled=False):
-            forecasts = self.sht(forecasts) / math.sqrt(4.0 * math.pi)
-            observations = self.sht(observations) / math.sqrt(4.0 * math.pi)
+            # the coefficients of the orthonormal SHT; lm_weights hold the 1 / (4 pi) of the mean over the sphere
+            forecasts = self.sht(forecasts)
+            observations = self.sht(observations)
 
         # the SH coefficients stay COMPLEX from here on -- see the note in
         # SpectralL2EnergyScoreLoss.forward for why casting back to a real dtype is wrong.
@@ -917,7 +943,8 @@ class CorrectedSpectralL2EnergyScoreLoss(SpectralBaseLoss):
             ensemble_shapes = [forecasts.shape[0] for _ in range(comm.get_size("ensemble"))]
             forecasts = distributed_transpose(forecasts, (-1, 0), ensemble_shapes, "ensemble")
 
-        lm_weights_split = self.lm_weights
+        # the lm_weights, times the weights of the coefficients if given
+        lm_weights_split = self.weighted_lm_weights(spectral_weights)
         if self.ensemble_distributed:
             lm_weights_split = scatter_to_parallel_region(lm_weights_split, -1, "ensemble")
 
@@ -944,10 +971,10 @@ class CorrectedSpectralL2EnergyScoreLoss(SpectralBaseLoss):
         eskill = lm_weights_split * (observations - forecasts).abs().square()
 
         if self.channel_reduction:
-            espread = espread.sum(dim=-3, keepdim=True)
-            eskill = eskill.sum(dim=-3, keepdim=True)
-            psd_pred = psd_pred.sum(dim=-2, keepdim=True)
-            psd_true = psd_true.sum(dim=-2, keepdim=True)
+            espread = sum_channels_per_step(espread, -3, len(self.channel_names))
+            eskill = sum_channels_per_step(eskill, -3, len(self.channel_names))
+            psd_pred = sum_channels_per_step(psd_pred, -2, len(self.channel_names))
+            psd_true = sum_channels_per_step(psd_true, -2, len(self.channel_names))
 
         espread = espread.sum(dim=-1, keepdim=False)
         eskill = eskill.sum(dim=-1, keepdim=False)

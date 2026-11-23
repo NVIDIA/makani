@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional, List
+from typing import Optional
 from functools import partial
 
 import torch
@@ -194,14 +194,15 @@ class LossHandler(nn.Module):
                 time_diff_scale = None
 
             # get channel weights either directly or through the compute routine
-            if isinstance(channel_weight_type, List):
-                chw = torch.tensor(channel_weight_type, dtype=torch.float32)
+            if isinstance(channel_weight_type, (list, tuple)):
+                # one weight per channel of the loss, as a flat or nested list
+                chw = torch.tensor(channel_weight_type, dtype=torch.float32).flatten()
+                if chw.shape[0] != loss_fn.n_channels:
+                    raise ValueError(
+                        f"expected channel weights to have {loss_fn.n_channels} channels, but got {chw.shape[0]}"
+                    )
                 if time_diff_scale is not None:
                     chw = chw * time_diff_scale
-                if chw.shape[1] != loss_fn.n_channels:
-                    raise ValueError(
-                        f"expected channel weights to have {loss_fn.n_channels} channels, but got {chw.shape[1]}"
-                    )
             else:
                 chw = loss_fn.compute_channel_weighting(channel_weight_type, time_diff_scale=time_diff_scale)
 
@@ -221,12 +222,11 @@ class LossHandler(nn.Module):
         channel_weights = torch.cat(channel_weights, dim=1)
         self.register_buffer("channel_weights", channel_weights, persistent=False)
 
-        # set up tensor to track running stats
-        # those need to have the same dimensions as the
-        # the m2 buffer is filled with a very small non-zero value to avoid division by zero early on
+        # set up tensors to track the running stats of every loss value, see _update_running_stats. running_var
+        # holds the sum of the squared deviations, M2 of Welford's algorithm, which starts at 0 like the mean
         stats_buffer_shape = (self.n_future + 1) * channel_weights.shape[-1]
         self.register_buffer("running_mean", torch.zeros(stats_buffer_shape), persistent=True)
-        self.register_buffer("running_var", torch.ones(stats_buffer_shape), persistent=True)
+        self.register_buffer("running_var", torch.zeros(stats_buffer_shape), persistent=True)
         self.register_buffer("num_batches_tracked", torch.tensor([0], dtype=torch.long), persistent=True)
 
         # weighting factor for multistep, by default a uniform weight is used
@@ -339,7 +339,8 @@ class LossHandler(nn.Module):
         if not self.track_running_stats:
             raise ValueError("Module does not track running stats")
 
-        var = self.running_var / (self.num_batches_tracked - int(correction))
+        # the variance from M2, which is 0 until there are more samples than the correction
+        var = self.running_var / torch.clamp(self.num_batches_tracked - int(correction), min=1)
         mean = self.running_mean
 
         return var, mean
@@ -347,7 +348,7 @@ class LossHandler(nn.Module):
     def reset_running_stats(self):
         with torch.no_grad():
             self.running_mean.zero_()
-            self.running_var.fill_(1)
+            self.running_var.zero_()
             self.num_batches_tracked.zero_()
 
     def _ensemble_mean(self, prd: torch.Tensor) -> torch.Tensor:
@@ -557,7 +558,8 @@ class LossHandler(nn.Module):
             var, _ = self.get_running_stats()
             if self.num_batches_tracked.item() <= 100:
                 var = torch.ones_like(var)
-            chw = chw / (torch.sqrt(2 * var) + self.eps)
+            # floored, so that a loss that does not vary between samples does not get an unbounded weight
+            chw = chw / (torch.sqrt(2 * torch.clamp(var, min=self.eps)) + self.eps)
         elif self.balanced_weighting and self.training:
             _, mean = self.get_running_stats()
             if self.num_batches_tracked.item() <= 100:

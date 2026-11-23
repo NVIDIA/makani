@@ -122,20 +122,21 @@ class HydrostaticBalanceLoss(GeometricBaseLoss):
         return self.cmat.shape[0]
 
     @torch.compiler.disable(recursive=False)
-    def compute_channel_weighting(self, channel_weight_type: str) -> torch.Tensor:
+    def compute_channel_weighting(self, channel_weight_type: str, time_diff_scale: torch.Tensor = None) -> torch.Tensor:
         """
-        auxiliary routine for predetermining channel weighting
+        auxiliary routine for predetermining channel weighting. The channels of this loss are the residuals of the
+        layers between two pressure levels, so they are weighted equally.
         """
-
-        # initialize empty tensor
-        channel_weights = torch.ones(self.n_channels, dtype=torch.float32)
 
         if not channel_weight_type == "constant":
             raise NotImplementedError(
                 f"Error, channel_weight_type {channel_weight_type} not supported for hydrostatic loss"
             )
+        if time_diff_scale is not None:
+            raise NotImplementedError("Error, temp_diff_normalization is not supported for hydrostatic loss")
 
-        # normalize
+        # initialize and normalize
+        channel_weights = torch.ones(self.n_channels, dtype=torch.float32)
         channel_weights = channel_weights / torch.sum(channel_weights)
 
         return channel_weights
@@ -143,27 +144,41 @@ class HydrostaticBalanceLoss(GeometricBaseLoss):
     def forward(
         self, prd: torch.Tensor, tar: torch.Tensor, wgt: Optional[torch.Tensor] = None, **kwargs
     ) -> torch.Tensor:
+        """
+        The squared hydrostatic residual of every layer, integrated over the sphere. In multistep training the lead
+        steps are stacked along the channels, [step 0: C, step 1: C, ...], and the loss gives the residuals of each
+        step, [step 0: layers, step 1: layers, ...]. The weights wgt weight the points of the grid, so they have one
+        channel.
+        """
 
         ptype = prd.dtype
+        B, CS, H, W = prd.shape
+        C = self.cmat.shape[1]
+        if CS % C != 0:
+            raise ValueError(f"Error, expected a multiple of {C} channels for the hydrostatic loss, but got {CS}")
+        num_steps = CS // C
+
+        if (wgt is not None) and (wgt.dim() == 4) and (wgt.shape[-3] != 1):
+            raise ValueError(
+                "Error, the hydrostatic loss combines channels into residuals, so its weights can only weight the points of the grid"
+            )
 
         # The residual is a catastrophic cancellation of large geopotential terms
         # (Z / R_d), so it must be evaluated in fp32. matmul is autocast-eligible and
         # would otherwise run in low precision under AMP, destroying the residual.
         with amp.autocast(device_type=prd.device.type, enabled=False):
-            # undo normalization
-            prdun = prd.to(torch.float32) * self.scale + self.bias
+            # undo normalization, for each lead step
+            prdun = prd.to(torch.float32).reshape(B, num_steps, C, H, W) * self.scale.unsqueeze(
+                1
+            ) + self.bias.unsqueeze(1)
 
             if self.use_moist_air_formula:
-                prdun[:, self.t_idx, ...] = prdun[:, self.t_idx, ...] * (
-                    1.0 + self.q_prefact * prdun[:, self.q_idx, ...]
+                prdun[:, :, self.t_idx, ...] = prdun[:, :, self.t_idx, ...] * (
+                    1.0 + self.q_prefact * prdun[:, :, self.q_idx, ...]
                 )
 
-            # use sparse matmul
-            prdf = prdun.permute([1, 0, 2, 3])
-            C, B, H, W = prdf.shape
-            prdf = prdf.reshape(C, B * H * W)
-
-            res = torch.square(torch.matmul(self.cmat, prdf).reshape(-1, B, H, W).permute([1, 0, 2, 3])).contiguous()
+            # the residuals of each layer and lead step
+            res = torch.square(torch.einsum("kc,bschw->bskhw", self.cmat, prdun)).reshape(B, -1, H, W)
 
             if wgt is not None:
                 res = res * wgt
