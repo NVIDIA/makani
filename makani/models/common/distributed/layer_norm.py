@@ -71,8 +71,12 @@ def distributed_welford_variance(
     var_mean_count = torch.stack([var, mean, count], dim=0).unsqueeze(1).contiguous()
 
     # gather
-    # this has the shape [3, spatial_size, ...], we split it up directly into individual tensors again
-    vars_means_counts = gather_from_parallel_region(var_mean_count, dim=1, shapes=None, comm_id=comm_id)
+    # this has the shape [3, spatial_size, ...], we split it up directly into individual tensors again.
+    # Every rank contributes exactly one entry along dim 1. Passing the shapes keeps the gather from
+    # all-gathering them first and reading them back with one blocking .item() per rank.
+    vars_means_counts = gather_from_parallel_region(
+        var_mean_count, dim=1, shapes=[1] * comm.get_size(comm_id), comm_id=comm_id
+    )
 
     # split up
     vars = vars_means_counts[0, ...]
