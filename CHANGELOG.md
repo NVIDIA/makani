@@ -35,6 +35,7 @@
 
 **Models**
 - Networks can own noise processes, e.g. in latent space, listed through `noise_processes()`; rollouts drive them like the input noise.
+- The instance norms `DistributedInstanceNorm2d`, `DistributedGeometricInstanceNormS2` and `GeometricInstanceNormS2` share one autograd function with an analytic backward, `makani.models.common.layer_norm.instance_norm`. It keeps only the input in its own dtype and two `(B, C)` fp32 tensors for the backward, where the layers kept two fp32 copies of the input, so under bf16 autocast a norm on 256 channels at 721 x 1440 held 1.5 (plain) to 2.5 GiB (spherical) on top of its output until the backward, and now holds nothing beyond the input. The casts to fp32 and back happen inside fused kernels. Under spatial parallelism the backward does one allreduce of a `[2, B, C]` tensor, and the Welford reduction gathers the statistics and the count of each rank in one buffer and combines them in one vectorized step (Chan et al.) instead of a loop over the ranks. Results agree with before to fp32 rounding. `GeometricInstanceNormS2` now divides by the sum of its quadrature weights, as the distributed version does, which changes its statistics on crops, whose weights do not sum to one.
 - The stochastic interpolant is brought up to speed with the rest of the codebase: a `StepWrapper` driven by rollouts and the noise controller, configured by a `stochastic_interpolant` block. Breaking: earlier interpolant checkpoints do not load, and `n_future > 0` is refused.
 
 **Fixed**
