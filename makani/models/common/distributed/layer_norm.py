@@ -16,82 +16,25 @@
 import torch
 import torch.nn as nn
 
-from torch import amp
-
 from typing import Tuple, Optional
 
 # for spatial model-parallelism
 from makani.distributed import comm
-from makani.distributed.mappings import gather_from_parallel_region, copy_to_parallel_region
 
 # quadrature stuff
 from makani.utils.grids import GridQuadrature
 
-# the normalization kernels of the serial layers
-from makani.models.common.layer_norm import _normalize_kernel, _normalize_transform_kernel
-
-
-@torch.compile
-def _welford_kernel(
-    vars: torch.Tensor, means: torch.Tensor, counts: torch.Tensor
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-
-    # for weighted welford, replace counts by
-    # omega = sum_i w_i, where w_i are the individual weights
-
-    # get m2s
-    m2s = vars * counts
-
-    # do welford update
-    mean = means[0, ...]
-    m2 = m2s[0, ...]
-    count = counts[0, ...]
-
-    # use Welford's algorithm to accumulate them into a single mean and variance
-    for i in range(1, means.shape[0]):
-        delta = means[i, ...] - mean
-        mean = mean + delta * counts[i, ...] / (count + counts[i, ...])
-        m2 = m2 + m2s[i, ...] + delta**2 * count * counts[i, ...] / (count + counts[i, ...])
-
-        # update the current count
-        count = count + counts[i, ...]
-
-    var = m2 / count
-
-    return var, mean, count
-
-
-def distributed_welford_variance(
-    var: torch.Tensor, mean: torch.Tensor, count: torch.Tensor, comm_id: str
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Computes the statistics locally, then uses the Welford online algorithm to reduce them"""
-
-    # concatenate:
-    # this has the shape [3, 1, ...]
-    var_mean_count = torch.stack([var, mean, count], dim=0).unsqueeze(1).contiguous()
-
-    # gather
-    # this has the shape [3, spatial_size, ...], we split it up directly into individual tensors again.
-    # Every rank contributes exactly one entry along dim 1. Passing the shapes keeps the gather from
-    # all-gathering them first and reading them back with one blocking .item() per rank.
-    vars_means_counts = gather_from_parallel_region(
-        var_mean_count, dim=1, shapes=[1] * comm.get_size(comm_id), comm_id=comm_id
-    )
-
-    # split up
-    vars = vars_means_counts[0, ...]
-    means = vars_means_counts[1, ...]
-    counts = vars_means_counts[2, ...]
-
-    # do welford update
-    var, mean, count = _welford_kernel(vars, means, counts)
-
-    return var, mean, count
+# the instance norm shared with the serial layers; distributed_welford_variance is re-exported from here
+from makani.models.common.layer_norm import instance_norm, distributed_welford_variance  # noqa: F401
 
 
 class DistributedInstanceNorm2d(nn.Module):
     """
-    Computes a distributed instance norm using Welford's online algorithm
+    Instance norm over a grid split across the ``"spatial"`` ranks.
+
+    Each rank computes the statistics of its part of the grid, which a Welford (Chan et al.) combine reduces to the
+    global ones. The backward is analytic, see :func:`~makani.models.common.layer_norm.instance_norm`, and keeps only
+    the input and two ``(B, C)`` tensors.
     """
 
     def __init__(self, num_features, eps=1e-05, affine=False):
@@ -105,53 +48,13 @@ class DistributedInstanceNorm2d(nn.Module):
             self.weight.is_shared_mp = {"spatial": "sum", "matmul": "avg"}
             self.bias.is_shared_mp = {"spatial": "sum", "matmul": "avg"}
 
-    def _stats_welford(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Computes the statistics locally, then uses the Welford online algorithm to reduce them"""
-
-        # extract shapes
-        B, C, _, _ = x.shape
-
-        # those have the shapes [B, C]
-        var, mean = torch.var_mean(x, dim=(-2, -1), unbiased=False, keepdim=False)
-
-        # workaround to not use shapes, as otherwise cuda graphs won't work
-        # those have the shapes [B, C]
-        count = torch.ones_like(x, requires_grad=False)
-        count = torch.sum(count, dim=(-2, -1), keepdim=False)
-        var, mean, _ = distributed_welford_variance(var, mean, count, "spatial")
-
-        # reshape
-        var = var.reshape(B, C, 1, 1)
-        mean = mean.reshape(B, C, 1, 1)
-
-        return var, mean
+    def _quad_weight(self) -> Optional[torch.Tensor]:
+        return None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-
-        xtype = x.dtype
-        with amp.autocast(device_type=x.device.type, enabled=False):
-            xf = x.to(torch.float32)
-
-            # start by computing std and mean
-            var, mean = self._stats_welford(xf)
-
-            # this is absolutely necessary to get the correct graph in the backward pass
-            mean = copy_to_parallel_region(mean, "spatial")
-            var = copy_to_parallel_region(var, "spatial")
-
-            # normalize (and affine) in fp32 for numerical stability, matching the
-            # behaviour of PyTorch's native (autocast-fp32) norm ops
-            if self.affine:
-                xf = _normalize_transform_kernel(
-                    xf, mean, var, self.weight.reshape(-1, 1, 1), self.bias.reshape(-1, 1, 1), self.eps
-                )
-            else:
-                xf = _normalize_kernel(xf, mean, var, self.eps)
-
-        # cast back to the input dtype so the layer is faithful to its input
-        x = xf.to(xtype)
-
-        return x
+        if self.affine:
+            return instance_norm(x, self.weight, self.bias, self._quad_weight(), self.eps, "spatial")
+        return instance_norm(x, quad_weight=self._quad_weight(), eps=self.eps, comm_id="spatial")
 
 
 class DistributedGeometricInstanceNormS2(DistributedInstanceNorm2d):
@@ -184,53 +87,8 @@ class DistributedGeometricInstanceNormS2(DistributedInstanceNorm2d):
 
         self.register_buffer("quad_weight", quad_weight, persistent=False)
 
-    def _stats_welford(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Computes the statistics locally, then uses the Welford online algorithm to reduce them"""
-
-        # extract shapes
-        B, C, _, _ = x.shape
-
-        # compute var, mean locally: those have the shapes [B, C]; the weights in the dtype of x, as in the serial norm
-        quad_weight = self.quad_weight.to(dtype=x.dtype)
-        count = torch.tile(torch.sum(quad_weight, dim=(-2, -1), keepdim=False), (B, C))
-        mean = torch.sum(x * quad_weight, dim=(-2, -1), keepdim=False) / count
-        var = torch.sum(torch.square(x - mean.reshape(B, C, 1, 1)) * quad_weight, dim=(-2, -1), keepdim=False) / count
-
-        # compute welford variance
-        var, mean, _ = distributed_welford_variance(var, mean, count, "spatial")
-
-        # reshape
-        var = var.reshape(B, C, 1, 1)
-        mean = mean.reshape(B, C, 1, 1)
-
-        return var, mean
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-
-        xtype = x.dtype
-        with amp.autocast(device_type=x.device.type, enabled=False):
-            xf = x.to(torch.float32)
-
-            # start by computing std and mean
-            var, mean = self._stats_welford(xf)
-
-            # this is absolutely necessary to get the correct graph in the backward pass
-            mean = copy_to_parallel_region(mean, "spatial")
-            var = copy_to_parallel_region(var, "spatial")
-
-            # normalize (and affine) in fp32 for numerical stability, matching the
-            # behaviour of PyTorch's native (autocast-fp32) norm ops
-            if self.affine:
-                xf = _normalize_transform_kernel(
-                    xf, mean, var, self.weight.reshape(-1, 1, 1), self.bias.reshape(-1, 1, 1), self.eps
-                )
-            else:
-                xf = _normalize_kernel(xf, mean, var, self.eps)
-
-        # cast back to the input dtype so the layer is faithful to its input
-        x = xf.to(xtype)
-
-        return x
+    def _quad_weight(self) -> Optional[torch.Tensor]:
+        return self.quad_weight
 
 
 class DistributedLayerNorm(nn.Module):
