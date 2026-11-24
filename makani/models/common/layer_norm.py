@@ -17,6 +17,7 @@ import torch
 import torch.nn as nn
 
 from torch import amp
+from torch.autograd.function import once_differentiable
 
 from typing import Tuple, Optional
 
@@ -174,13 +175,18 @@ class _InstanceNormFunction(torch.autograd.Function):
     gradient reduction hooks of the shared parameters sum them over the ranks.
 
     Only ``x`` in its own dtype, the ``(B, C)`` fp32 ``mean`` and ``rstd`` and the global count are saved for the
-    backward, besides the parameters and the quadrature weights.
+    backward, besides the parameters and the quadrature weights. The backward treats the saved statistics as
+    constants, so it is not differentiable itself: double backward raises.
     """
 
     @staticmethod
     def forward(ctx, x, weight, bias, quad_weight, eps, comm_id):
         B, C, H, W = x.shape
         distributed = (comm_id is not None) and (comm.get_size(comm_id) > 1)
+
+        # weights over the full local grid, so that their sum counts every point; a view, not a copy
+        if quad_weight is not None:
+            quad_weight = quad_weight.expand(1, 1, H, W)
 
         with amp.autocast(device_type=x.device.type, enabled=False):
             # local statistics
@@ -207,6 +213,7 @@ class _InstanceNormFunction(torch.autograd.Function):
         return y
 
     @staticmethod
+    @once_differentiable
     def backward(ctx, g):
         x, mean, rstd, weight, quad_weight, count = ctx.saved_tensors
         grad_x = grad_weight = grad_bias = None

@@ -124,6 +124,37 @@ class TestInstanceNorm(unittest.TestCase):
                 atol, rtol = (1e-4, 1e-5) if new.dtype == torch.float32 else (1e-2, 1e-2)
                 self.assertTrue(compare_tensors(name, new.float(), ref.float(), atol=atol, rtol=rtol, verbose=verbose))
 
+    def test_broadcast_weights(self):
+        """Weights given per latitude, of shape (H, 1), count every point of a row, so all-one weights are the uniform
+        norm and latitude weights are the same as their expansion to the full grid."""
+        B, C, H, W = 2, 3, 9, 16
+        inp = torch.randn(B, C, H, W, device=self.device)
+        ograd = torch.randn(B, C, H, W, device=self.device)
+        lat_weight = torch.rand(H, 1, device=self.device) + 0.1
+
+        cases = [
+            ("ones", torch.ones(H, 1, device=self.device), None),
+            ("latitude", lat_weight, lat_weight.expand(H, W).reshape(1, 1, H, W).contiguous()),
+        ]
+        for name, quad_weight, quad_weight_ref in cases:
+            results = []
+            for qw in [quad_weight, quad_weight_ref]:
+                x = inp.clone().requires_grad_(True)
+                y = instance_norm(x, quad_weight=qw, eps=1e-5)
+                y.backward(ograd)
+                results.append((y.detach(), x.grad))
+            for desc, new, ref in zip(["output", "input grad"], *results):
+                with self.subTest(desc=f"{name}: {desc}"):
+                    self.assertTrue(compare_tensors(f"{name} {desc}", new, ref, atol=1e-5, rtol=1e-5))
+
+    def test_double_backward_raises(self):
+        """The backward is not differentiable, and says so instead of returning a wrong second derivative."""
+        x = torch.randn(2, 3, 5, 7, device=self.device, requires_grad=True)
+        y = instance_norm(x, eps=1e-5)
+        (grad_x,) = torch.autograd.grad(y, x, torch.randn_like(y), create_graph=True)
+        with self.assertRaises(RuntimeError):
+            grad_x.sum().backward()
+
     def test_matches_torch_instance_norm(self):
         """The plain distributed layer on a single rank is torch's instance norm."""
         B, C, H, W = 3, 5, 16, 24
