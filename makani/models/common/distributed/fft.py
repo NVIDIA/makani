@@ -20,13 +20,13 @@ from torch import nn
 import torch.nn.functional as F
 
 from makani.distributed import comm
-from makani.utils.functions import contiguous_complex_safe
 from torch_harmonics.distributed import compute_split_shapes
 from torch_harmonics.distributed import distributed_transpose_azimuth as distributed_transpose_w
 from torch_harmonics.distributed import distributed_transpose_polar as distributed_transpose_h
 
-# zeroes the imaginary parts of the DC and Nyquist bins before the inverse, which cuFFT does not do
-from torch_harmonics.fft import irfft
+# the real transforms of the serial layers: a backward that keeps only the length of the input, and an inverse that
+# zeroes the imaginary parts of the DC and Nyquist bins without synchronizing
+from makani.models.common.fft import rfft, irfft
 
 
 class DistributedRealFFT1(nn.Module):
@@ -63,12 +63,8 @@ class DistributedRealFFT1(nn.Module):
         if self.comm_size_w > 1:
             x = distributed_transpose_w(x, (channel_dim, -1), self.lon_shapes)
 
-        # do first FFT
-        x = torch.fft.rfft(x, n=self.nlon, dim=-1, norm=norm)
-
-        # mode truncation. The slice is over a complex tensor, so the copy goes through the
-        # real view -- inductor cannot codegen a copy on a complex buffer (KeyError: 'complex64')
-        x = contiguous_complex_safe(x[..., : self.mmax])
+        # do first FFT, with mode truncation
+        x = rfft(x, n=self.nlon, nmodes=self.mmax, dim=-1, norm=norm)
 
         # transpose: after this, m is split and c is local
         if self.comm_size_w > 1:
@@ -161,12 +157,8 @@ class DistributedRealFFT2(nn.Module):
         if self.comm_size_w > 1:
             x = distributed_transpose_w(x, (channel_dim, -1), self.lon_shapes)
 
-        # do first FFT
-        x = torch.fft.rfft(x, n=self.nlon, dim=-1, norm=norm)
-
-        # mode truncation. The slice is over a complex tensor, so the copy goes through the
-        # real view -- inductor cannot codegen a copy on a complex buffer (KeyError: 'complex64')
-        x = contiguous_complex_safe(x[..., : self.mmax])
+        # do first FFT, with mode truncation
+        x = rfft(x, n=self.nlon, nmodes=self.mmax, dim=-1, norm=norm)
 
         # transpose: after this, m is split and c is local
         if self.comm_size_w > 1:
@@ -306,11 +298,9 @@ class DistributedRealFFT3(nn.Module):
         if self.comm_size_w > 1:
             x = distributed_transpose_w(x, (1, -1), self.lon_shapes)
 
-        # do first 2D FFT
-        x = torch.fft.rfft2(x, s=(self.nd, self.nw), dim=(-3, -1), norm="ortho")
-
-        # truncate width-modes
-        x = x[..., : self.lwmax]
+        # do first 2D FFT: the real transform in w, with the w truncation, then the complex one in d
+        x = rfft(x, n=self.nw, nmodes=self.lwmax, dim=-1, norm="ortho")
+        x = torch.fft.fft(x, n=self.nd, dim=-3, norm="ortho")
 
         # truncate depth-modes
         x = torch.cat([x[..., : self.ldmax_high, :, :], x[..., -self.ldmax_low :, :, :]], dim=-3)
