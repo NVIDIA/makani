@@ -63,17 +63,25 @@ class _RealFFT(torch.autograd.Function):
     bins itself. Half the transform size, and a contiguous real gradient.
     """
 
+    # forward and setup_context apart, and a generated vmap rule, so that torch.func (grad, vmap, jacrev) can
+    # transform it; the forward and backward see one sample, so the dimension needs no shift under vmap
+    generate_vmap_rule = True
+
     @staticmethod
-    def forward(ctx, x: torch.Tensor, nmodes: int, dim: int, norm: Optional[str]) -> torch.Tensor:
-        ctx.n = x.shape[dim]
-        ctx.dim = dim % x.dim()
-        ctx.norm = norm
+    def forward(x: torch.Tensor, nmodes: int, dim: int, norm: Optional[str]) -> torch.Tensor:
         y = torch.fft.rfft(x, dim=dim, norm=norm)
         if nmodes < y.shape[dim]:
             # the slice is over a complex tensor, so the copy goes through the real view: inductor cannot
             # codegen a copy on a complex buffer
             y = contiguous_complex_safe(y.narrow(dim, 0, nmodes))
         return y
+
+    @staticmethod
+    def setup_context(ctx, inputs, output):
+        x, _, dim, norm = inputs
+        ctx.n = x.shape[dim]
+        ctx.dim = dim % x.dim()
+        ctx.norm = norm
 
     @staticmethod
     def backward(ctx, grad: torch.Tensor):
