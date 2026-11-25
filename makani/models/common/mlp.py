@@ -27,6 +27,9 @@ from torch.utils.checkpoint import checkpoint
 # checked without importing it; the module is imported lazily where used.
 from makani.utils.te_helpers import TE_AVAILABLE as _TE_AVAILABLE, get_te
 
+# 1x1 convolutions as matmuls, see PointwiseConv2d for the gradient layout
+from makani.models.common.pointwise_conv import PointwiseConv2d
+
 
 def flatten_biases(state_dict, keys) -> None:
     r"""Flatten the biases of earlier versions kept as ``(1, C, 1, 1)`` to ``(C,)``, in place, where they are so."""
@@ -123,7 +126,7 @@ class EncoderDecoder(nn.Module):
         for i in range(num_layers):
             # fully connected layer
             if input_format == "nchw":
-                encoder_modules.append(nn.Conv2d(current_dim, hidden_dim, 1, bias=True, groups=groups))
+                encoder_modules.append(PointwiseConv2d(current_dim, hidden_dim, bias=True, groups=groups))
             elif input_format == "traditional":
                 encoder_modules.append(nn.Linear(current_dim, hidden_dim, bias=True))
             else:
@@ -145,7 +148,7 @@ class EncoderDecoder(nn.Module):
 
         # final output layer
         if input_format == "nchw":
-            encoder_modules.append(nn.Conv2d(current_dim, output_dim, 1, bias=False, groups=groups))
+            encoder_modules.append(PointwiseConv2d(current_dim, output_dim, bias=False, groups=groups))
         elif input_format == "traditional":
             encoder_modules.append(nn.Linear(current_dim, output_dim, bias=False))
 
@@ -307,8 +310,8 @@ class MLP(nn.Module):
             fc1 = te.Linear(in_features, hidden_features, bias=True)
             fc2 = te.Linear(hidden_features, out_features, bias=output_bias)
         elif input_format == "nchw":
-            fc1 = nn.Conv2d(in_features, hidden_features, 1, bias=True)
-            fc2 = nn.Conv2d(hidden_features, out_features, 1, bias=output_bias)
+            fc1 = PointwiseConv2d(in_features, hidden_features, bias=True)
+            fc2 = PointwiseConv2d(hidden_features, out_features, bias=output_bias)
         elif input_format == "traditional":
             fc1 = nn.Linear(in_features, hidden_features, bias=True)
             fc2 = nn.Linear(hidden_features, out_features, bias=output_bias)

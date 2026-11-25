@@ -17,7 +17,8 @@ import numpy as np
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+
+from makani.models.common.pointwise_conv import pointwise_conv2d
 from torch import amp
 
 import makani.models.constants as const
@@ -201,7 +202,7 @@ class _HydrostaticBalanceWrapper(nn.Module):
         itype = inp.dtype
 
         # The hydrostatic recursion sums over ~11 pressure levels of large, un-normalized
-        # geopotentials (O(1e5) m^2/s^2) with alternating signs. F.conv2d is autocast-eligible,
+        # geopotentials (O(1e5) m^2/s^2) with alternating signs. The channel mapping is autocast-eligible,
         # so under AMP it would quantize those geopotentials to bf16/fp16 and corrupt the
         # recovered temperatures by tens of K. Run the whole physical-units computation in
         # fp32, from the un-normalization onward.
@@ -221,7 +222,7 @@ class _HydrostaticBalanceWrapper(nn.Module):
                 inp_un_scale = inp_un
 
             # expand:
-            out_un = F.conv2d(inp_un_scale, self.mapping.unsqueeze(-1).unsqueeze(-1))
+            out_un = pointwise_conv2d(inp_un_scale, self.mapping)
 
             # unscale temperatures if specific humidity is used
             if self.use_moist_air_formula:

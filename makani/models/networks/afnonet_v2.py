@@ -24,6 +24,7 @@ from makani.models.common.fft import rfft, irfft
 
 # helpers
 from makani.models.common import ComplexReLU, PatchEmbed2D, DropPath, MLP
+from makani.models.common.pointwise_conv import PointwiseConv2d
 
 
 @torch.compile
@@ -298,7 +299,7 @@ class Block(nn.Module):
 
         elif skip_fno == "linear":
             # self.skip_layer = nn.Linear(dim, dim)
-            self.skip_layer = nn.Conv2d(dim, dim, 1, 1)
+            self.skip_layer = PointwiseConv2d(dim, dim)
             if verbose:
                 print("Using Linear skip connection around FNO.")
 
@@ -514,7 +515,7 @@ class AdaptiveFourierNeuralOperatorNet(nn.Module):
         )
 
         # head
-        self.head = nn.Conv2d(embed_dim, self.out_chans * self.patch_size[0] * self.patch_size[1], 1, bias=False)
+        self.head = PointwiseConv2d(embed_dim, self.out_chans * self.patch_size[0] * self.patch_size[1], bias=False)
 
         with torch.no_grad():
             nn.init.trunc_normal_(self.pos_embed, std=0.02)

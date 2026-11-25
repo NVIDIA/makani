@@ -22,6 +22,8 @@ import torch.nn.functional as F
 from makani.distributed import comm
 from makani.distributed.mappings import reduce_from_parallel_region, copy_to_parallel_region
 
+from makani.models.common.pointwise_conv import pointwise_conv2d
+
 # transformer engine is an optional dependency: it is only used for the
 # (optional) FP8/FP4 path and must not be required for import. availability is
 # checked without importing it; the module is imported lazily where used.
@@ -141,7 +143,8 @@ class DistributedMatmul(nn.Module):
             self.weight = nn.Parameter(torch.ones(out_dim_local, inp_dim_local, 1, 1))
             self.weight.is_shared_mp = {"spatial": "sum"}
             self.weight.sharded_dims_mp = [weight_out_shard, weight_inp_shard, None, None]
-            self.matmul_handle = F.conv2d
+            # a 1x1 convolution as a matmul, see pointwise_conv2d for the gradient layout
+            self.matmul_handle = pointwise_conv2d
         else:  # traditional
             self.weight = nn.Parameter(torch.ones(out_dim_local, inp_dim_local))
             self.weight.is_shared_mp = {"spatial": "sum"}

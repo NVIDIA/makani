@@ -203,6 +203,34 @@ class TestLayers(unittest.TestCase):
         out = layer(x)
         self.assertTrue(compare_tensors("layerscale init v*x", out, v * x, atol=1e-6, rtol=1e-5, verbose=verbose))
 
+    def test_layerscale_matches_grouped_conv(self, verbose=False):
+        """LayerScale computes the grouped 1x1 convolution it was, in its dtype, with and without autocast."""
+        C, H, W = 6, 5, 7
+        layer = LayerScale(num_chans=C).to(self.device)
+        with torch.no_grad():
+            layer.weight.normal_()
+        inp = torch.randn(3, C, H, W, device=self.device)
+        ograd = torch.randn(3, C, H, W, device=self.device)
+
+        for autocast in [False, True]:
+            results = []
+            for func in [layer, lambda x: torch.nn.functional.conv2d(x, layer.weight, groups=C)]:
+                layer.weight.grad = None
+                x = inp.clone().requires_grad_(True)
+                with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16, enabled=autocast):
+                    y = func(x)
+                y.backward(ograd.to(y.dtype))
+                results.append((y.detach(), x.grad, layer.weight.grad.clone()))
+
+            tol = 1e-6 if not autocast else 1e-2
+            for name, new, ref in zip(["output", "input grad", "weight grad"], *results):
+                with self.subTest(desc=f"autocast={autocast}: {name}"):
+                    self.assertEqual(new.dtype, ref.dtype)
+                    atol = tol * ref.float().abs().max().item()
+                    self.assertTrue(
+                        compare_tensors(name, new.float(), ref.float(), atol=atol, rtol=tol, verbose=verbose)
+                    )
+
     def test_layerscale_per_channel_weight(self, verbose=False):
         """Setting a distinct weight per channel scales each channel independently."""
         C, H, W = 3, 4, 6
@@ -1098,6 +1126,7 @@ class TestCheckpointLayout(unittest.TestCase):
                 old = _old_layout(reference.state_dict(), distributed=True)
                 upgrade_state_dict(encoder, old)
                 encoder.load_state_dict(old, strict=True)
+                # the serial and the distributed layer both compute their 1x1 convolutions with pointwise_conv2d
                 self.assertTrue(torch.equal(encoder(self.x), reference(self.x)))
 
     def test_upgrading_is_idempotent(self):
