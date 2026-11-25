@@ -2011,7 +2011,7 @@ class TestLossHandler(unittest.TestCase):
     # ------------------------------------------------------------------
 
     def test_random_slice_loss_ensemble_path(self):
-        """random_slice_loss with 5-D prd reshapes to (B*E, ...) for the conv2d
+        """random_slice_loss with 5-D prd reshapes to (B*E, ...) for the 1x1 convolution
         and reshapes back. Use a probabilistic loss (ensemble_crps) so the
         ensemble dim is preserved through the loss dispatch."""
         self.params.losses = [

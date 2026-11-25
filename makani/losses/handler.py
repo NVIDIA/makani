@@ -34,6 +34,7 @@ from makani.losses import DriftRegularization, HydrostaticBalanceLoss, SpectralR
 from makani.data.grid_types import DEFAULT_GRID_TYPE
 from makani.utils.grids import make_grid
 from makani.utils.jit import compiles_metrics
+from makani.models.common.pointwise_conv import pointwise_conv2d
 
 _LOSS_REGISTRY = {
     "l1": partial(GeometricLpLoss, p=1),
@@ -463,11 +464,13 @@ class LossHandler(nn.Module):
             if prd.dim() == 5:
                 batch_size, ensemble_size = prd.shape[0:2]
                 prd = prd.reshape(batch_size * ensemble_size, *prd.shape[2:])
-                prd = nn.functional.conv2d(prd, rslice)
+                prd = pointwise_conv2d(prd, rslice)
                 prd = prd.reshape(batch_size, ensemble_size, *prd.shape[1:])
             else:
-                prd = nn.functional.conv2d(prd, rslice)
-            tar = nn.functional.conv2d(tar, rslice)
+                prd = pointwise_conv2d(prd, rslice)
+            # a matmul, not conv2d: a convolution makes inductor switch the compiled loss to channels-last, and the
+            # gradient it hands to the model then has to be copied back
+            tar = pointwise_conv2d(tar, rslice)
 
             # the slice mixes channels, so the ensemble average has to follow it
             # TODO: change the behavior to instead compute the expected value of the deterministic losses
