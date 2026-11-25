@@ -767,6 +767,10 @@ class Driver(metaclass=abc.ABCMeta):
         # checkpoints of earlier format versions; before the scatter, which looks the parameters up by name
         upgrade_checkpoint(checkpoint, model, optimizer)
 
+        # the extra states of a flexible checkpoint, which this restore takes as well, are stored per model rank;
+        # those of a legacy checkpoint are left as they are
+        scatter_extra_states(state_dict)
+
         # load state dict
         model.load_state_dict(state_dict, strict=strict)
 

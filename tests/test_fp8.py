@@ -333,11 +333,12 @@ class TestFP8Compute(unittest.TestCase):
                 # without checkpointing, each layer keeps its quantized input, of at least one byte per element
                 self.assertGreater(held, output + 4 * x.numel())
 
-    @parameterized.expand([["legacy"], ["flexible"]], skip_on_empty=True)
-    def test_checkpoints_keep_the_scaling_state(self, checkpoint_mode):
+    @parameterized.expand([["legacy", "legacy"], ["flexible", "flexible"], ["flexible", "legacy"]], skip_on_empty=True)
+    def test_checkpoints_keep_the_scaling_state(self, save_mode, restore_mode):
         """Delayed scaling continues from a checkpoint, in either checkpoint format: the restored model computes the
         next step as the saved one, and has its amax histories and scales after it. transformer_engine's own format
-        of the state is a pickle, which it refuses to load by default."""
+        of the state is a pickle, which it refuses to load by default. The default, legacy, restore also takes a
+        flexible checkpoint of a single model rank, as model packages are loaded."""
         params = _model_params("bf16-fp8_delayed")
         set_seed(333)
         model = model_registry.get_model(params).to(self.device)
@@ -352,8 +353,8 @@ class TestFP8Compute(unittest.TestCase):
         restored = model_registry.get_model(params).to(self.device)
         with tempfile.TemporaryDirectory() as tmpdir:
             path = os.path.join(tmpdir, "ckpt_mp{mp_rank}_v0.tar")
-            Driver.save_checkpoint(path, model, checkpoint_mode=checkpoint_mode)
-            Driver.restore_from_checkpoint(path, restored, checkpoint_mode=checkpoint_mode, strict=True)
+            Driver.save_checkpoint(path, model, checkpoint_mode=save_mode)
+            Driver.restore_from_checkpoint(path, restored, checkpoint_mode=restore_mode, strict=True)
 
         # one more step on both, which the restored model computes with the restored scales
         outs = []
