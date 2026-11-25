@@ -1098,7 +1098,11 @@ class TestCheckpointLayout(unittest.TestCase):
                 old = _old_layout(reference.state_dict(), distributed=True)
                 upgrade_state_dict(encoder, old)
                 encoder.load_state_dict(old, strict=True)
-                self.assertTrue(torch.equal(encoder(self.x), reference(self.x)))
+                if cls is EncoderDecoder:
+                    # the serial layer computes its 1x1 convolutions as matmuls, the distributed one with conv2d
+                    torch.testing.assert_close(encoder(self.x), reference(self.x))
+                else:
+                    self.assertTrue(torch.equal(encoder(self.x), reference(self.x)))
 
     def test_upgrading_is_idempotent(self):
         state_dict = _old_layout(self._mlp(MLP).state_dict())
