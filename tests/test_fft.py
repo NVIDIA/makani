@@ -134,9 +134,26 @@ class TestRealFFT(unittest.TestCase):
         xg = x.clone().requires_grad_(True)
         (gref,) = torch.autograd.grad(loss(xg), xg)
         torch.testing.assert_close(torch.func.grad(loss)(x), gref)
-        # per sample: vmap over the leading dimension, the transform along the last one of each sample
+        # vmap over the leading dimension, the transform along the last dimension of each sample
         torch.testing.assert_close(torch.func.vmap(torch.func.grad(loss))(x), gref)
         torch.testing.assert_close(torch.func.vmap(lambda t: rfft(t, dim=1))(x), torch.fft.rfft(x, dim=2))
+
+        # along the first dimension of each sample, not its last: a dimension saved for backward in the
+        # batched rank, or not normalized, would pick the wrong axis or length (7 and 10 differ)
+        x = torch.randn(3, 7, 10, dtype=torch.float64)
+        for dim in (0, -2):
+
+            def loss_first(t):
+                return torch.view_as_real(rfft(t, nmodes=3, dim=dim, norm="ortho")).square().sum()
+
+            ref = torch.fft.rfft(x, dim=1, norm="ortho")[:, :3]
+            torch.testing.assert_close(torch.func.vmap(lambda t: rfft(t, nmodes=3, dim=dim, norm="ortho"))(x), ref)
+            xg = x.clone().requires_grad_(True)
+            (gref,) = torch.autograd.grad(
+                torch.view_as_real(rfft(xg, nmodes=3, dim=1, norm="ortho")).square().sum(), xg
+            )
+            torch.testing.assert_close(torch.func.vmap(torch.func.grad(loss_first))(x), gref)
+
         sg = s.clone().requires_grad_(True)
         (sref,) = torch.autograd.grad(irfft(sg, n=10).square().sum(), sg)
         torch.testing.assert_close(torch.func.grad(lambda t: irfft(t, n=10).square().sum())(s), sref)
