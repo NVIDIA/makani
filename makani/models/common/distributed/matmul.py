@@ -205,6 +205,9 @@ class DistributedMatmul(nn.Module):
             x = reduce_from_parallel_region(x, self.comm_name)
 
         if self.bias is not None:
-            x = x + (self.bias.reshape(1, -1, 1, 1) if self.input_format == "nchw" else self.bias)
+            # in the dtype of the product, as conv2d and linear add it under autocast and the serial layers do: an
+            # fp32 bias would promote the output, and the activations after it, to fp32
+            bias = self.bias.to(x.dtype)
+            x = x + (bias.reshape(1, -1, 1, 1) if self.input_format == "nchw" else bias)
 
         return x
