@@ -124,6 +124,49 @@ class TestRealFFT(unittest.TestCase):
         for norm in _NORMS:
             torch.testing.assert_close(irfft(rfft(x, norm=norm), n=16, norm=norm), x)
 
+    def test_torch_func(self):
+        x = torch.randn(3, 4, 10, dtype=torch.float64)
+        s = torch.randn(3, 4, 6, dtype=torch.complex128)
+
+        def loss(t):
+            return torch.view_as_real(rfft(t, nmodes=4, dim=-1, norm="ortho")).square().sum()
+
+        xg = x.clone().requires_grad_(True)
+        (gref,) = torch.autograd.grad(loss(xg), xg)
+        torch.testing.assert_close(torch.func.grad(loss)(x), gref)
+        # vmap over the leading dimension, the transform along the last dimension of each sample
+        torch.testing.assert_close(torch.func.vmap(torch.func.grad(loss))(x), gref)
+        torch.testing.assert_close(torch.func.vmap(lambda t: rfft(t, dim=1))(x), torch.fft.rfft(x, dim=2))
+
+        # along the first dimension of each sample, not its last: a dimension saved for backward in the
+        # batched rank, or not normalized, would pick the wrong axis or length (7 and 10 differ)
+        x = torch.randn(3, 7, 10, dtype=torch.float64)
+        for dim in (0, -2):
+
+            def loss_first(t):
+                return torch.view_as_real(rfft(t, nmodes=3, dim=dim, norm="ortho")).square().sum()
+
+            ref = torch.fft.rfft(x, dim=1, norm="ortho")[:, :3]
+            torch.testing.assert_close(torch.func.vmap(lambda t: rfft(t, nmodes=3, dim=dim, norm="ortho"))(x), ref)
+            xg = x.clone().requires_grad_(True)
+            (gref,) = torch.autograd.grad(
+                torch.view_as_real(rfft(xg, nmodes=3, dim=1, norm="ortho")).square().sum(), xg
+            )
+            torch.testing.assert_close(torch.func.vmap(torch.func.grad(loss_first))(x), gref)
+
+        sg = s.clone().requires_grad_(True)
+        (sref,) = torch.autograd.grad(irfft(sg, n=10).square().sum(), sg)
+        torch.testing.assert_close(torch.func.grad(lambda t: irfft(t, n=10).square().sum())(s), sref)
+
+    def test_conjugated_spectrum(self):
+        # a conjugate view, which view_as_real rejects; irfft reads real and imaginary parts instead
+        s = torch.randn(3, 4, 6, dtype=torch.complex128, requires_grad=True)
+        y = irfft(s.conj(), n=10)
+        ref = _torch_irfft(s.conj().resolve_conj(), n=10)
+        torch.testing.assert_close(y, ref)
+        g = torch.randn_like(y)
+        torch.testing.assert_close(torch.autograd.grad(y, s, g)[0], torch.autograd.grad(ref, s, g)[0])
+
     def test_compiles(self):
         def f(x):
             return irfft(rfft(x, nmodes=9, norm="ortho"), n=x.shape[-1], norm="ortho")
