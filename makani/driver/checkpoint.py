@@ -404,11 +404,12 @@ def _model_layout() -> Dict[str, int]:
 def gather_extra_states(model: nn.Module, state_dict: OrderedDict) -> OrderedDict:
     """Store the extra states of the modules of every model rank in ``state_dict``, in place.
 
-    The extra state of a module, such as the FP8 scaling state of a layer with its amax history, describes the part
-    of the model and of the grid of its model rank: the weight shard of a matmul rank, the activations of a spatial
-    rank. It is the same on the data-parallel ranks, which reduce it. Each key thus stores the states of all model
-    ranks, under their model rank, and the decomposition they were written in; :func:`scatter_extra_states` picks a
-    rank's on restore.
+    The extra state of a module can describe the part of the model and of the grid of its model rank, the weight
+    shard of a matmul rank or the activations of a spatial rank, and is then assumed to be the same on the data-
+    parallel ranks. Each key thus stores the states of all model ranks, under their model rank, and the decomposition
+    they were written in; :func:`scatter_extra_states` picks a rank's on restore. The FP8 scaling state under delayed
+    scaling is the same on all ranks, as the trainers reduce the amaxes over all of them, see
+    :class:`~makani.utils.precision.AutocastManager`.
 
     ..note::
         This is a collective over the model group when it has more than one rank.

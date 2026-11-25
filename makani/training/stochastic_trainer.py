@@ -97,7 +97,9 @@ class StochasticTrainer(Driver):
         # set up mixed precision (amp dtype + optional transformer-engine fp8 recipe).
         # the manager parses the mode once and hands out a single nested autocast cm.
         amp_mode = self.params.amp_mode if hasattr(self.params, "amp_mode") else "none"
-        self.autocast = AutocastManager(amp_mode, device_type="cuda", fp8_group=comm.get_group("data"))
+        # without fp8_group, the FP8 amaxes are reduced over all ranks, the world group: the scaling state is that of
+        # the serial run over the global batch, and the same on every rank, see AutocastManager
+        self.autocast = AutocastManager(amp_mode, device_type="cuda")
         self.amp_dtype = self.autocast.amp_dtype
         self.amp_enabled = self.autocast.amp_enabled
         if self.amp_enabled and self.log_to_screen:

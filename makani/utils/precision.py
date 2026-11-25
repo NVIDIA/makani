@@ -31,7 +31,7 @@ AMP dtype with an optional transformer-engine FP8 recipe:
 nests the AMP autocast and (if requested) the FP8 autocast at the right level, so call
 sites stay flat:
 
-    self.autocast = AutocastManager(params.amp_mode, fp8_group=comm.get_group("data"))
+    self.autocast = AutocastManager(params.amp_mode)
     self.gscaler  = amp.GradScaler("cuda", enabled=self.autocast.grad_scaler_enabled)
     ...
     with self.autocast():
@@ -116,16 +116,14 @@ class AutocastManager:
     device_type : str
         Device type passed to ``torch.autocast`` (default ``"cuda"``).
     fp8_group : Optional[torch.distributed.ProcessGroup]
-        Process group for FP8 amax / scale synchronization (delayed scaling). Pass the
-        data-parallel group; ignored when no FP8 recipe is selected.
-
-        NOTE: fp8_group must exclude the tensor-parallel/matmul group. The column/row
-        ``DistributedMatmul`` shards weights across matmul, so each matmul rank owns a
-        distinct weight shard with its own legitimate amax/scale -- reducing amax over
-        matmul would couple independent shards and clamp them to a common (over-
-        conservative) scale. The data group is orthogonal to model (spatial x matmul),
-        so it already excludes matmul. Current scaling / MXFP8 derive scales locally and
-        do not use this group.
+        Process group over which delayed scaling reduces the amaxes, ignored without an FP8 recipe. ``None``
+        (default), which the trainers and the inferencer pass, is transformer_engine's default, the world group.
+        A distributed layer's tensors are parts of the tensors of the serial layer, split over the spatial and
+        matmul ranks, and the batch is split over the data ranks, so the max over all ranks is the amax of the serial
+        run over the global batch: the scaling state is that of the serial run and the same on every rank. A smaller
+        group gives the ranks scales of their own parts, which makes the numerics depend on the decomposition.
+        All ranks of the group have to run the same FP8 layers in the same order, as the amaxes of all layers are
+        reduced in one buffer. Current scaling and MXFP8 derive their scales locally and do not use this group.
     """
 
     def __init__(self, mode, device_type="cuda", fp8_group=None):
