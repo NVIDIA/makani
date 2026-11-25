@@ -1119,28 +1119,33 @@ class TestDistributedLayers(unittest.TestCase):
         [
             # over 2 x 2 ranks, the parts of 17 x 24 points are padded to a multiple of 16, those of 16 x 24 are not;
             # the serial grid of 1584 points is not either
-            [33, 48, 2, 64, 128, "bf16-fp8_delayed", 2e-2],
-            [33, 48, 2, 64, 128, "bf16-fp8_current", 2e-2],
+            [33, 48, 2, 64, 128, "bf16-fp8_delayed"],
+            [33, 48, 2, 64, 128, "bf16-fp8_current"],
             # 17 x 30 points are padded on any decomposition, a single rank as well
-            [17, 30, 2, 64, 128, "bf16-fp8_delayed", 2e-2],
+            [17, 30, 2, 64, 128, "bf16-fp8_delayed"],
         ],
         skip_on_empty=True,
     )
     # below the expansion, so that every generated case carries the skip, not only the original function
     @unittest.skipUnless(_fp8_available(), "transformer_engine with an FP8 GPU is not available")
-    def test_distributed_mlp_fp8(
-        self, nlat, nlon, batch_size, num_chan, hidden_dim, amp_mode, tol, steps=3, verbose=False
-    ):
+    def test_distributed_mlp_fp8(self, nlat, nlon, batch_size, num_chan, hidden_dim, amp_mode, steps=3, verbose=False):
         """
-        The distributed MLP in FP8 against the serial one in FP8, on grids whose parts the FP8 GEMMs pad.
+        The distributed MLP in FP8 against the serial one, on grids whose parts the FP8 GEMMs pad.
 
         All ranks run the same layers in FP8, whether their part of the grid is padded or not, as the amax
-        reduction of delayed scaling over all ranks needs: the test finishes, rather than hangs. With the amaxes
-        reduced over all ranks, the scales are those of the serial layers, and so are the outputs and the gradients,
-        up to the order of the reductions over the matmul ranks.
+        reduction of delayed scaling over all ranks needs: the test finishes, rather than hangs.
+
+        FP8 rounds to a few percent, so the tensors are compared by their relative error over the whole tensor, not
+        element by element: the distributed MLP in FP8 is as close to the serial one in bf16 as the serial one in FP8
+        is. Under delayed scaling the scales are those of the serial layers, as the amaxes are reduced over all
+        ranks, so the distributed MLP computes what the serial one does in FP8, up to the bf16 rounding of the
+        partial sums over the matmul ranks. Under current scaling each rank scales its own part, the shard of a
+        matmul rank and the part of the grid of a spatial rank, which rounds to other FP8 values than the serial
+        layers do, as accurately.
         """
         if hidden_dim % comm.get_size("matmul") != 0:
             self.skipTest(f"hidden_dim {hidden_dim} not divisible by matmul size {comm.get_size('matmul')}")
+        delayed = amp_mode == "bf16-fp8_delayed"
 
         set_seed(333)
         with fp8_layers(True):
@@ -1157,47 +1162,48 @@ class TestDistributedLayers(unittest.TestCase):
         with torch.no_grad():
             mlp_dist.load_state_dict(checkpoint_helpers.scatter_model_state_dict(mlp_dist, weights), strict=False)
 
+        def run(mlp, inp, ograd, mode):
+            # each in its own autocast, whose first FP8 module updates the scales of all in its backward
+            inp = inp.clone().requires_grad_(True)
+            mlp.zero_grad()
+            with AutocastManager(mode)():
+                out = mlp(inp)
+            out.backward(ograd)
+            return out.float(), inp.grad
+
+        def relative_error(tensor, reference):
+            return ((tensor.float() - reference.float()).norm() / reference.float().norm()).item()
+
+        def check(desc, dist_fp8, full_fp8, full_bf16):
+            error, error_serial = relative_error(dist_fp8, full_bf16), relative_error(full_fp8, full_bf16)
+            ok = error <= 1.25 * error_serial + 1e-3
+            if delayed:
+                ok = ok and relative_error(dist_fp8, full_fp8) <= 1e-2
+            if verbose:
+                print(f"{desc}: {error:.3e} from bf16 (serial FP8 {error_serial:.3e})")
+            with self.subTest(desc=desc):
+                self.assertTrue(reduce_success(ok, self.device), desc)
+
         for step in range(steps):
             inp_full = torch.randn(batch_size, num_chan, nlat, nlon, device=self.device) * (1 + step)
             ograd_full = torch.randn(batch_size, num_chan, nlat, nlon, device=self.device)
 
-            # each in its own FP8 context, whose first module updates the scales of all in its backward
-            inp = inp_full.clone().requires_grad_(True)
-            mlp_full.zero_grad()
-            with AutocastManager(amp_mode)():
-                out_full = mlp_full(inp)
-            out_full.backward(ograd_full)
-            igrad_full = inp.grad
-
-            inp_local = self._split_helper(inp_full).requires_grad_(True)
-            mlp_dist.zero_grad()
-            with AutocastManager(amp_mode)():
-                out_local = mlp_dist(inp_local)
-            out_local.backward(self._split_helper(ograd_full))
+            # the serial MLP in bf16, outside the FP8 context, and in FP8
+            out_bf16, igrad_bf16 = run(mlp_full, inp_full, ograd_full, "bf16")
+            grads_bf16 = {name: param.grad.clone() for name, param in mlp_full.named_parameters()}
+            out_full, igrad_full = run(mlp_full, inp_full, ograd_full, amp_mode)
+            out_local, igrad_local = run(
+                mlp_dist, self._split_helper(inp_full), self._split_helper(ograd_full), amp_mode
+            )
 
             with self.subTest(desc="FP8 on all ranks", step=step):
                 ran = all(fc.fp8_gemm.forwarded_at_least_once for fc in [mlp_dist.fc1, mlp_dist.fc2])
                 self.assertTrue(reduce_success(ran, self.device))
 
-            with self.subTest(desc="output", step=step):
-                out_gather = self._gather_helper(out_local)
-                self.assertTrue(
-                    reduce_success(
-                        compare_tensors("output", out_gather.float(), out_full.float(), tol, tol, verbose=verbose),
-                        self.device,
-                    )
-                )
+            check(f"output, step {step}", self._gather_helper(out_local), out_full, out_bf16)
+            check(f"input gradients, step {step}", self._gather_helper(igrad_local), igrad_full, igrad_bf16)
 
-            with self.subTest(desc="input gradients", step=step):
-                igrad_gather = self._gather_helper(inp_local.grad)
-                self.assertTrue(
-                    reduce_success(
-                        compare_tensors("input gradients", igrad_gather, igrad_full, tol, tol, verbose=verbose),
-                        self.device,
-                    )
-                )
-
-            if amp_mode == "bf16-fp8_delayed":
+            if delayed:
                 for name in ["fc1", "fc2"]:
                     for direction in ["scaling_fwd", "scaling_bwd"]:
                         meta_dist = getattr(mlp_dist, name).fp8_gemm.fp8_meta[direction]
@@ -1206,7 +1212,7 @@ class TestDistributedLayers(unittest.TestCase):
                             self.assertTrue(
                                 reduce_success(
                                     compare_tensors(
-                                        f"{name} {direction} scales", meta_dist.scale, meta_full.scale, tol, tol
+                                        f"{name} {direction} scales", meta_dist.scale, meta_full.scale, 1e-2, 1e-2
                                     ),
                                     self.device,
                                 )
@@ -1217,15 +1223,7 @@ class TestDistributedLayers(unittest.TestCase):
             param.grad = self._sum_gradient(param.grad, "spatial")
         grads = checkpoint_helpers.gather_model_state_dict(mlp_dist, grads=True)
         for name, param in mlp_full.named_parameters():
-            with self.subTest(desc=f"{name} gradient"):
-                self.assertTrue(
-                    reduce_success(
-                        compare_tensors(
-                            f"{name} gradient", grads[name + ".grad"], param.grad.cpu(), tol, tol, verbose=verbose
-                        ),
-                        self.device,
-                    )
-                )
+            check(f"{name} gradient", grads[name + ".grad"], param.grad.cpu(), grads_bf16[name].cpu())
 
 
 if __name__ == "__main__":
