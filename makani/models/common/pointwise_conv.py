@@ -15,11 +15,76 @@
 
 """1x1 convolutions computed as matmuls over the channels."""
 
+import contextlib
+import contextvars
 from typing import Optional
 
 import torch
 import torch.nn as nn
 from torch.autograd.function import once_differentiable
+
+from makani.utils.precision import fp8_active
+
+# whether the 1x1 convolutions built now take an FP8 engine, see fp8_layers
+_FP8_LAYERS = contextvars.ContextVar("makani_fp8_layers", default=False)
+
+
+@contextlib.contextmanager
+def fp8_layers(enabled: bool = True):
+    """
+    Build the 1x1 convolutions within with FP8 GEMMs of transformer_engine, where their shape allows.
+
+    :func:`~makani.models.model_registry.get_model` builds the model inside it when the precision mode asks for an
+    FP8 recipe, so that the layers follow ``amp_mode`` without a flag of their own. The layers run in FP8 only inside
+    an enabled ``te.fp8_autocast``, as :class:`~makani.utils.precision.AutocastManager` opens it, and in the
+    precision of the surrounding autocast otherwise.
+    """
+    token = _FP8_LAYERS.set(bool(enabled))
+    try:
+        yield
+    finally:
+        _FP8_LAYERS.reset(token)
+
+
+def fp8_layers_enabled() -> bool:
+    """Whether layers built now take an FP8 engine, see :func:`fp8_layers`."""
+    return _FP8_LAYERS.get()
+
+
+def make_fp8_gemm_if(fp8: Optional[bool], in_channels: int, out_channels: int, groups: int = 1):
+    """
+    The FP8 engine of a 1x1 convolution, or ``None``: with ``fp8=None`` the layer follows :func:`fp8_layers`, and it
+    gets an engine only if its shape is eligible, see :func:`~makani.models.common.pointwise_conv_te.fp8_gemm_eligible`.
+    """
+    if fp8 is None:
+        fp8 = fp8_layers_enabled()
+    if not fp8:
+        return None
+    from makani.models.common.pointwise_conv_te import fp8_gemm_eligible, make_fp8_gemm
+
+    if not fp8_gemm_eligible(in_channels, out_channels, groups):
+        return None
+    return make_fp8_gemm()
+
+
+@torch.compiler.disable
+def fp8_pointwise(engine: nn.Module, x: torch.Tensor, weight: torch.Tensor) -> Optional[torch.Tensor]:
+    """
+    ``engine(x, weight)`` inside an enabled FP8 context and for an eligible input, ``None`` otherwise, when the
+    caller computes in the precision of the autocast. transformer_engine is not traceable, so a compiled model breaks
+    its graph here; models without FP8 layers never call it.
+    """
+    from makani.models.common.pointwise_conv_te import fp8_input_eligible
+
+    if not (fp8_active() and fp8_input_eligible(x)):
+        return None
+    return engine(x, weight)
+
+
+def drop_fp8_state(module: nn.Module, state_dict: dict, prefix: str, name: str = "fp8_gemm") -> None:
+    """Drop the FP8 scaling state of a checkpoint written with FP8 layers when ``module`` has none to load it."""
+    if getattr(module, name, None) is None:
+        state_dict.pop(prefix + name + "._extra_state", None)
 
 
 def _gemm_out_dtype_kwargs(a: torch.Tensor) -> dict:
@@ -132,10 +197,24 @@ class PointwiseConv2d(nn.Conv2d):
 
     Same parameters, initialization and state dict as ``nn.Conv2d(in_channels, out_channels, 1, groups=groups)``,
     and an instance of it, so initializations that look for ``nn.Conv2d`` find it.
+
+    With ``fp8``, or inside :func:`fp8_layers` for ``fp8=None``, the layer takes an FP8 engine of transformer_engine
+    (:mod:`~makani.models.common.pointwise_conv_te`) if its shape allows, and computes in FP8 inside an enabled
+    ``te.fp8_autocast``. The engine holds the FP8 scaling state, ``fp8_gemm._extra_state`` in the state dict, and no
+    parameter; checkpoints load with and without it.
     """
 
-    def __init__(self, in_channels, out_channels, bias=True, groups=1, device=None, dtype=None):
+    def __init__(self, in_channels, out_channels, bias=True, groups=1, device=None, dtype=None, fp8=None):
         super().__init__(in_channels, out_channels, 1, bias=bias, groups=groups, device=device, dtype=dtype)
+        self.fp8_gemm = make_fp8_gemm_if(fp8, in_channels, out_channels, groups)
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        drop_fp8_state(self, state_dict, prefix)
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.fp8_gemm is not None:
+            y = fp8_pointwise(self.fp8_gemm, x, self.weight)
+            if y is not None:
+                return y if self.bias is None else y + self.bias.to(y.dtype).reshape(-1, 1, 1)
         return pointwise_conv2d(x, self.weight, self.bias, self.groups)

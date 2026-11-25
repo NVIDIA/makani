@@ -18,7 +18,9 @@ import os
 
 import torch
 import torch.nn as nn
-from torch.utils.checkpoint import checkpoint
+
+# keeps the FP8 layers in FP8 in the recompute
+from makani.models.common.activation_checkpoint import checkpoint
 
 from makani.models.model_input import (
     FlatInputAdapter,

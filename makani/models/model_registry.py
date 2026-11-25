@@ -29,6 +29,8 @@ import torch
 import torch.nn as nn
 
 from makani.utils.params import ParamsBase, ensure_resampled_shapes
+from makani.utils.precision import fp8_requested
+from makani.models.common.pointwise_conv import fp8_layers
 from makani.models import StepWrapper
 from makani.models import StochasticInterpolantWrapper
 from makani.models.stochastic_interpolant import interpolant_input_channels
@@ -284,10 +286,13 @@ def get_model(
             model_handle=model_handle,
         )
 
-    if not use_stochastic_interpolation:
-        model = StepWrapper(params, model_handle)
-    else:
-        model = StochasticInterpolantWrapper(params, model_handle)
+    # an FP8 precision mode builds the 1x1 convolutions with FP8 engines of transformer_engine; they compute in FP8
+    # inside the te.fp8_autocast of the AutocastManager, the encoders and decoders excepted
+    with fp8_layers(fp8_requested(params.get("amp_mode", "none"))):
+        if not use_stochastic_interpolation:
+            model = StepWrapper(params, model_handle)
+        else:
+            model = StochasticInterpolantWrapper(params, model_handle)
 
     return model
 

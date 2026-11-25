@@ -22,12 +22,7 @@ import torch.nn.functional as F
 from makani.distributed import comm
 from makani.distributed.mappings import reduce_from_parallel_region, copy_to_parallel_region
 
-from makani.models.common.pointwise_conv import pointwise_conv2d
-
-# transformer engine is an optional dependency: it is only used for the
-# (optional) FP8/FP4 path and must not be required for import. availability is
-# checked without importing it; the module is imported lazily where used.
-from makani.utils.te_helpers import TE_AVAILABLE as _TE_AVAILABLE, get_te
+from makani.models.common.pointwise_conv import pointwise_conv2d, make_fp8_gemm_if, drop_fp8_state, fp8_pointwise
 
 
 class DistributedMatmul(nn.Module):
@@ -68,10 +63,10 @@ class DistributedMatmul(nn.Module):
         ``"column"`` (default) or ``"row"``; see above.
     bias : bool, optional
         Whether to add a bias, by default ``True``.
-    use_te : bool, optional
-        Use a TransformerEngine linear for the local GEMM, enabling the FP8/FP4
-        path. Falls back to the standard path if TransformerEngine is not
-        installed. By default ``False``.
+    fp8 : bool, optional
+        Give the local GEMM of the ``"nchw"`` format an FP8 engine of transformer_engine on NCHW, without permutes,
+        see :class:`~makani.models.common.pointwise_conv.PointwiseConv2d`. ``None`` (default) follows
+        :func:`~makani.models.common.pointwise_conv.fp8_layers`, as the model is built for an FP8 ``amp_mode``.
 
     Raises
     ------
@@ -81,7 +76,14 @@ class DistributedMatmul(nn.Module):
     """
 
     def __init__(
-        self, inp_dim, out_dim, input_format="nchw", comm_name="matmul", parallel_mode="column", bias=True, use_te=False
+        self,
+        inp_dim,
+        out_dim,
+        input_format="nchw",
+        comm_name="matmul",
+        parallel_mode="column",
+        bias=True,
+        fp8=None,
     ):
         super(DistributedMatmul, self).__init__()
 
@@ -94,15 +96,6 @@ class DistributedMatmul(nn.Module):
         self.comm_name = comm_name
         self.parallel_mode = parallel_mode
         self.input_format = input_format
-
-        # only use transformer engine if it was requested and is actually available
-        self.use_te = use_te and _TE_AVAILABLE
-        if use_te and not _TE_AVAILABLE:
-            import warnings
-
-            warnings.warn(
-                "use_te=True was requested but transformer_engine is not installed; falling back to the standard matmul."
-            )
 
         comm_size = comm.get_size(comm_name)
 
@@ -127,19 +120,8 @@ class DistributedMatmul(nn.Module):
         weight_inp_shard = None if parallel_mode == "column" else comm_name
         weight_out_shard = comm_name if parallel_mode == "column" else None
 
-        # weight. transformer engine keeps the (2D) weight inside a te.Linear and
-        # performs the local matmul in FP8/FP4; the tensor-parallel communication
-        # (copy/reduce, see forward) and the gradient reduction stay in makani, so
-        # te.Linear is used purely as a local GEMM (no tp_group). The bias is
-        # always owned here (te.Linear bias=False) so the row-parallel bias can be
-        # added AFTER the all-reduce, matching the native path.
-        if self.use_te:
-            te = get_te()
-            self.te_linear = te.Linear(inp_dim_local, out_dim_local, bias=False)
-            # te weight is always 2D (out_local, in_local) regardless of input_format
-            self.weight.is_shared_mp = {"spatial": "sum"}
-            self.weight.sharded_dims_mp = [weight_out_shard, weight_inp_shard]
-        elif input_format == "nchw":
+        # weight
+        if input_format == "nchw":
             self.weight = nn.Parameter(torch.ones(out_dim_local, inp_dim_local, 1, 1))
             self.weight.is_shared_mp = {"spatial": "sum"}
             self.weight.sharded_dims_mp = [weight_out_shard, weight_inp_shard, None, None]
@@ -166,6 +148,9 @@ class DistributedMatmul(nn.Module):
             self.bias.is_shared_mp = bias_sharing
             self.bias.sharded_dims_mp = [bias_shard]
 
+        # FP8 GEMMs on NCHW for the local shard, see PointwiseConv2d
+        self.fp8_gemm = make_fp8_gemm_if(fp8, inp_dim_local, out_dim_local) if input_format == "nchw" else None
+
     @staticmethod
     def upgrade_state_dict(state_dict, prefix=""):
         r"""
@@ -182,48 +167,15 @@ class DistributedMatmul(nn.Module):
         if (key in state_dict) and (state_dict[key] is not None) and (state_dict[key].dim() == 4):
             state_dict[key] = state_dict[key].reshape(-1)
 
-    @property
-    def weight(self):
-        r"""
-        The local weight shard, regardless of which backend holds it.
-
-        TransformerEngine's linear owns its weight internally; exposing it under
-        the same attribute name keeps external initialization, the model-parallel
-        annotations, and the gradient reduction hook uniform across both paths.
-
-        Returns
-        -------
-        torch.nn.Parameter
-            The local weight shard.
-
-        Raises
-        ------
-        AttributeError
-            If the native weight is not registered yet. This must be
-            ``AttributeError`` specifically: ``register_parameter`` probes
-            ``hasattr(self, "weight")`` while registering, and ``hasattr`` only
-            swallows that exception type.
-        """
-        # te.Linear owns the weight in the TE path; expose it through the same
-        # attribute so external init / annotation / the gradient hook are uniform.
-        # raise AttributeError (not KeyError) when the native weight is not yet
-        # registered: register_parameter() probes hasattr(self, "weight") while
-        # registering, and hasattr only swallows AttributeError.
-        if self.use_te:
-            return self.te_linear.weight
-        weight = self._parameters.get("weight")
-        if weight is None:
-            raise AttributeError("weight")
-        return weight
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        drop_fp8_state(self, state_dict, prefix)
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
 
     def _local_matmul(self, x):
-        if self.use_te:
-            # te.Linear operates on the last (channel) dim; for nchw we transpose
-            # to channels-last around the GEMM
-            if self.input_format == "nchw":
-                x = self.te_linear(x.permute(0, 2, 3, 1).contiguous())
-                return x.permute(0, 3, 1, 2).contiguous()
-            return self.te_linear(x)
+        if self.fp8_gemm is not None:
+            y = fp8_pointwise(self.fp8_gemm, x, self.weight)
+            if y is not None:
+                return y
         return self.matmul_handle(x, self.weight, bias=None)
 
     def forward(self, x):

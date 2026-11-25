@@ -160,8 +160,50 @@ class AutocastManager:
                 amp.autocast(device_type=self.device_type, enabled=self.amp_enabled, dtype=self.amp_dtype)
             )
             if self.fp8_enabled:
-                te = get_te()
-                stack.enter_context(
-                    te.fp8_autocast(enabled=True, fp8_recipe=self._fp8_recipe, fp8_group=self.fp8_group)
-                )
+                stack.enter_context(_te_autocast(enabled=True, recipe=self._fp8_recipe, group=self.fp8_group))
             yield
+
+
+def _te_autocast(enabled: bool, recipe=None, group=None):
+    """TE's FP8 context: ``te.autocast`` where it exists, ``te.fp8_autocast`` (deprecated since TE 2.x) before."""
+    te = get_te()
+    if hasattr(te, "autocast"):
+        return te.autocast(enabled=enabled, recipe=recipe, amax_reduction_group=group)
+    return te.fp8_autocast(enabled=enabled, fp8_recipe=recipe, fp8_group=group)
+
+
+def fp8_requested(mode) -> bool:
+    """Whether the precision ``mode`` asks for an FP8 recipe, e.g. ``"bf16-fp8_delayed"``."""
+    return parse_precision_mode(mode)[1] is not None
+
+
+def _fp8_global_state_manager():
+    """TE's ``FP8GlobalStateManager``, which moved from ``fp8`` to ``quantization`` in TE 2.x."""
+    try:
+        from transformer_engine.pytorch.quantization import FP8GlobalStateManager
+    except ImportError:
+        from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
+    return FP8GlobalStateManager
+
+
+def fp8_active() -> bool:
+    """Whether the code runs inside an enabled ``te.fp8_autocast``; ``False`` without transformer_engine."""
+    if not TE_AVAILABLE:
+        return False
+    return _fp8_global_state_manager().is_fp8_enabled()
+
+
+@contextlib.contextmanager
+def fp8_disabled():
+    """
+    Run the enclosed layers without FP8, in the precision of the surrounding ``torch.autocast``.
+
+    Nests a ``te.fp8_autocast(enabled=False)`` inside the FP8 context of :class:`AutocastManager`, so the TE layers
+    within compute in bf16 (or fp16) and leave the scaling state of the others alone. A no-op outside FP8, and
+    without transformer_engine.
+    """
+    if not fp8_active():
+        yield
+        return
+    with _te_autocast(enabled=False):
+        yield
