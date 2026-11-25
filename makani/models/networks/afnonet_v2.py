@@ -20,7 +20,7 @@ import torch.nn.functional as F
 import torch.fft
 
 # zeroes the imaginary parts of the DC and Nyquist bins before the inverse, which cuFFT does not do
-from torch_harmonics.fft import irfft
+from makani.models.common.fft import rfft, irfft
 
 # helpers
 from makani.models.common import ComplexReLU, PatchEmbed2D, DropPath, MLP
@@ -180,7 +180,8 @@ class AFNO2D(nn.Module):
         kept_modes_H = int(total_modes_H * self.hard_thresholding_fraction)
         kept_modes_W = int(total_modes_W * self.hard_thresholding_fraction)
 
-        x = torch.fft.rfft2(x, dim=(-2, -1), norm="ortho")
+        # rfft2 over (H, W), as a real transform in W and a complex one in H: see makani.models.common.fft.rfft
+        x = torch.fft.fft(rfft(x, dim=-1, norm="ortho"), dim=-2, norm="ortho")
         x = x.view(B, self.num_blocks, self.block_size, H, W // 2 + 1)
 
         # do spectral conv

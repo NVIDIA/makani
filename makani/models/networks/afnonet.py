@@ -20,7 +20,7 @@ import torch.nn.functional as F
 import torch.fft
 
 # zeroes the imaginary parts of the DC and Nyquist bins before the inverse, which cuFFT does not do
-from torch_harmonics.fft import irfft
+from makani.models.common.fft import rfft, irfft
 from makani.models.common import DropPath, PatchEmbed2D
 
 
@@ -207,7 +207,8 @@ class AFNO2D(nn.Module):
         x = x.float()
         B, H, W, C = x.shape
 
-        x = torch.fft.rfft2(x, dim=(1, 2), norm="ortho")
+        # rfft2 over (H, W), as a real transform in W and a complex one in H: see makani.models.common.fft.rfft
+        x = torch.fft.fft(rfft(x, dim=2, norm="ortho"), dim=1, norm="ortho")
         x = x.reshape(B, H, W // 2 + 1, self.num_blocks, self.block_size)
 
         o1_real = torch.zeros(
