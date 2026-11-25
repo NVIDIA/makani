@@ -37,7 +37,10 @@ scales of both directions.
 transformer_engine is optional: the engine class is defined on first use.
 """
 
+import warnings
+
 import torch
+import torch.nn.functional as F
 
 from makani.utils.te_helpers import TE_AVAILABLE, get_te
 from makani.utils.precision import _fp8_global_state_manager
@@ -48,9 +51,49 @@ def fp8_gemm_eligible(in_channels: int, out_channels: int, groups: int = 1) -> b
     return groups == 1 and in_channels % 16 == 0 and out_channels % 16 == 0
 
 
-def fp8_input_eligible(x: torch.Tensor) -> bool:
-    """Whether the input of a 1x1 convolution can be quantized: an NCHW CUDA tensor whose grid is divisible by 16."""
-    return x.is_cuda and x.dim() == 4 and (x.shape[-2] * x.shape[-1]) % 16 == 0
+# the padding of the grid above which the layers warn, relative to the grid
+PADDING_WARNING_FRACTION = 0.05
+_PADDING_WARNED = set()
+
+
+def fp8_multiple() -> int:
+    """The multiple the dimensions of the GEMM operands need under the active recipe: 32 for MXFP8, which scales
+    blocks of 32 elements in both directions, 16 otherwise."""
+    recipe = _fp8_global_state_manager().get_fp8_recipe()
+    return 32 if getattr(recipe, "mxfp8", lambda: False)() else 16
+
+
+def fp8_input_eligible(x: torch.Tensor, weight: torch.Tensor) -> bool:
+    """
+    Whether a 1x1 convolution runs in FP8 under the active recipe: an NCHW CUDA input, and channels divisible by
+    :func:`fp8_multiple`.
+
+    The grid does not count: the engine pads it, see :func:`padded_grid`. Everything this depends on is the same on
+    all ranks, the recipe, the channels and the layout, so that all ranks run the same layers in FP8. Under delayed
+    scaling they reduce the amaxes of all FP8 layers in one buffer, which a layer in FP8 on some ranks only, e.g.
+    those whose part of an unevenly split grid is divisible, would break.
+    """
+    multiple = fp8_multiple()
+    return x.is_cuda and x.dim() == 4 and x.shape[1] % multiple == 0 and weight.shape[0] % multiple == 0
+
+
+def padded_grid(points: int, multiple: int) -> int:
+    """
+    The number of grid points the engine computes on: ``points`` rounded up to ``multiple``, with zero columns.
+
+    Zeros change no amax, the output and the input gradient are cropped, and the zero columns add nothing to the
+    weight gradient, so the layer computes what it computes on the grid. It warns once per grid when the padding
+    exceeds :data:`PADDING_WARNING_FRACTION` of it, for grids of a few points, such as those of a fine
+    decomposition.
+    """
+    padded = -(-points // multiple) * multiple
+    if (padded - points > PADDING_WARNING_FRACTION * points) and ((points, multiple) not in _PADDING_WARNED):
+        _PADDING_WARNED.add((points, multiple))
+        warnings.warn(
+            f"the FP8 1x1 convolutions pad the local grid of {points} points to {padded}, a multiple of {multiple}, "
+            f"which computes {(padded - points) / points:.0%} more"
+        )
+    return padded
 
 
 _ENGINE_CLASS = None
@@ -107,21 +150,29 @@ def _build_engine_class():
         """The three GEMMs of a 1x1 convolution on NCHW in FP8, one per sample; see the module docstring."""
 
         @staticmethod
-        def forward(ctx, x, weight, input_quantizer, weight_quantizer, grad_output_quantizer, split_acc, dtype):
+        def forward(
+            ctx, x, weight, input_quantizer, weight_quantizer, grad_output_quantizer, split_acc, dtype, multiple
+        ):
             B, C, H, W = x.shape
             O, N = weight.shape[0], H * W
+            # the grid padded with zero columns to the multiple of the GEMMs, see padded_grid
+            Np = padded_grid(N, multiple)
 
             weight_quantizer.set_usage(rowwise=True, columnwise=True)
             input_quantizer.set_usage(rowwise=True, columnwise=True)
             weight_q = weight_quantizer(weight)
             xc = x.reshape(B, C, N)
+            if Np != N:
+                xc = F.pad(xc, (0, Np - N))
             # one quantization per sample, each the (C, H * W) operand of its GEMM; under delayed scaling they share
             # the scale of the step and their amaxes are combined
             xs = [input_quantizer(xc[b]) for b in range(B)]
 
-            y = torch.empty(B, O, N, dtype=dtype, device=x.device)
+            y = torch.empty(B, O, Np, dtype=dtype, device=x.device)
             for b in range(B):
                 general_gemm(xs[b], weight_q, out_dtype=dtype, layout="NN", out=y[b])
+            if Np != N:
+                y = y[..., :N].contiguous()
 
             # through save_for_backward, as te.Linear saves them, so that activation checkpointing can drop them
             # after the forward and recompute them in the backward; the objects keep the metadata, not the data
@@ -129,6 +180,7 @@ def _build_engine_class():
             ctx.save_for_backward(*tensors)
             ctx.grad_output_quantizer = grad_output_quantizer
             ctx.shape, ctx.out_channels, ctx.dtype, ctx.weight_dtype = (B, C, H, W), O, dtype, weight.dtype
+            ctx.padded = Np
             ctx.split_acc = split_acc
             ctx.reduce_and_update_bwd = _check_fp8_reduce_and_update()
             return y.reshape(B, O, H, W)
@@ -136,18 +188,20 @@ def _build_engine_class():
         @staticmethod
         def backward(ctx, grad):
             B, C, H, W = ctx.shape
-            O, N = ctx.out_channels, H * W
+            O, N, Np = ctx.out_channels, H * W, ctx.padded
             dgrad_split_acc, wgrad_split_acc = ctx.split_acc
             *xs, weight_q = restore_from_saved(ctx.tensor_objects, ctx.saved_tensors)
             ctx.tensor_objects = None
 
             ctx.grad_output_quantizer.set_usage(rowwise=True, columnwise=True)
             gc = grad.reshape(B, O, N)
+            if Np != N:
+                gc = F.pad(gc, (0, Np - N))
             gs = [ctx.grad_output_quantizer(gc[b]) for b in range(B)]
 
             grad_x = grad_weight = None
             if ctx.needs_input_grad[0]:
-                grad_x = torch.empty(B, C, N, dtype=ctx.dtype, device=grad.device)
+                grad_x = torch.empty(B, C, Np, dtype=ctx.dtype, device=grad.device)
                 for b in range(B):
                     general_gemm(
                         gs[b],
@@ -158,6 +212,8 @@ def _build_engine_class():
                         grad=True,
                         use_split_accumulator=dgrad_split_acc,
                     )
+                if Np != N:
+                    grad_x = grad_x[..., :N].contiguous()
                 grad_x = grad_x.reshape(B, C, H, W)
             if ctx.needs_input_grad[1]:
                 # summed over the batch in fp32 and rounded once, as the bf16 layer does
@@ -178,7 +234,7 @@ def _build_engine_class():
             if ctx.reduce_and_update_bwd:
                 FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
 
-            return grad_x, grad_weight, None, None, None, None, None
+            return grad_x, grad_weight, None, None, None, None, None, None
 
     class TEPointwiseGemm(TransformerEngineBaseModule):
         """
@@ -279,6 +335,7 @@ def _build_engine_class():
                         grad_output_quantizer,
                         split_acc,
                         self.activation_dtype,
+                        fp8_multiple(),
                     )
             finally:
                 self._weight = None

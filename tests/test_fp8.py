@@ -22,6 +22,7 @@ import os
 import sys
 import tempfile
 import unittest
+import warnings
 from parameterized import parameterized
 
 import torch
@@ -376,6 +377,61 @@ class TestFP8Compute(unittest.TestCase):
                 self.assertTrue(meta.amax_history.abs().max() > 0)
                 self.assertTrue(torch.equal(meta.scale, meta_restored.scale.to(meta.scale.device)))
                 self.assertTrue(torch.equal(meta.amax_history, meta_restored.amax_history.to(meta.scale.device)))
+
+    def test_padded_grid_computes_as_on_the_grid(self):
+        """A grid that the GEMMs do not take, 5 x 7 points, is padded with zero columns: outputs, gradients and the
+        delayed-scaling state are those of the same layer on the grid padded to 48 points by hand."""
+        set_seed(333)
+        layer = PointwiseConv2d(64, 128, fp8=True).to(self.device)
+        reference = PointwiseConv2d(64, 128, fp8=True).to(self.device)
+        reference.load_state_dict(layer.state_dict())
+
+        for step in range(3):
+            x = torch.randn(2, 64, 5, 7, device=self.device) * (1 + step)
+            x_ref = torch.nn.functional.pad(x.reshape(2, 64, 1, 35), (0, 13)).requires_grad_(True)
+            x.requires_grad_(True)
+            grad = torch.randn(2, 128, 5, 7, device=self.device)
+            grad_ref = torch.nn.functional.pad(grad.reshape(2, 128, 1, 35), (0, 13))
+            # each in its own FP8 context, whose first module updates the scales of all in its backward
+            outputs = []
+            for module, inp, g in [(layer, x, grad), (reference, x_ref, grad_ref)]:
+                module.zero_grad()
+                with AutocastManager("bf16-fp8_delayed")():
+                    out = module(inp)
+                out.backward(g)
+                outputs.append(out)
+            y, y_ref = outputs
+
+            self.assertTrue(layer.fp8_gemm.forwarded_at_least_once)
+            self.assertTrue(torch.equal(y.reshape(2, 128, 35), y_ref.reshape(2, 128, 48)[..., :35]))
+            self.assertTrue(torch.equal(x.grad.reshape(2, 64, 35), x_ref.grad.reshape(2, 64, 48)[..., :35]))
+            self.assertTrue(torch.equal(layer.weight.grad, reference.weight.grad))
+            for direction in ["scaling_fwd", "scaling_bwd"]:
+                meta, meta_ref = layer.fp8_gemm.fp8_meta[direction], reference.fp8_gemm.fp8_meta[direction]
+                self.assertTrue(torch.equal(meta.scale, meta_ref.scale))
+                self.assertTrue(torch.equal(meta.amax_history, meta_ref.amax_history))
+
+    def test_uneven_split_grids_run_fp8(self):
+        """The parts of an unevenly split grid run the same layers in FP8, whether their grid is divisible or not:
+        e.g. 721 x 1440 points over 2 h and 16 w ranks give 361 x 90 and 360 x 90 points."""
+        layer = PointwiseConv2d(64, 64, fp8=True).to(self.device)
+        for shape in [(361, 90), (360, 90)]:
+            with self.subTest(shape=shape):
+                layer.fp8_gemm = type(layer.fp8_gemm)()
+                with AutocastManager("bf16-fp8_delayed")():
+                    y = layer(torch.randn(1, 64, *shape, device=self.device))
+                self.assertTrue(layer.fp8_gemm.forwarded_at_least_once)
+                self.assertEqual(tuple(y.shape), (1, 64, *shape))
+
+    def test_extensive_padding_warns(self):
+        """Padding more than a small fraction of the grid warns, e.g. 3 x 3 points padded to 16; 361 x 90 does not."""
+        layer = PointwiseConv2d(64, 64, fp8=True).to(self.device)
+        with AutocastManager("bf16-fp8_current")():
+            with self.assertWarnsRegex(UserWarning, "pad the local grid of 9 points to 16"):
+                layer(torch.randn(1, 64, 3, 3, device=self.device))
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+                layer(torch.randn(1, 64, 361, 90, device=self.device))
 
     def test_compiled_model_runs_fp8_layers(self):
         """A compiled model breaks its graph at the FP8 layers and computes what it computes eagerly."""

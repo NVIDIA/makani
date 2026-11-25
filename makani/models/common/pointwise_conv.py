@@ -76,7 +76,7 @@ def fp8_pointwise(engine: nn.Module, x: torch.Tensor, weight: torch.Tensor) -> O
     """
     from makani.models.common.pointwise_conv_te import fp8_input_eligible
 
-    if not (fp8_active() and fp8_input_eligible(x)):
+    if not (fp8_active() and fp8_input_eligible(x, weight)):
         return None
     return engine(x, weight)
 
