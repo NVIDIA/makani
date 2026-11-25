@@ -16,6 +16,7 @@
 from .activations import ComplexReLU, ComplexActivation
 from .regularization import DropPath, LayerScale
 from .patch import PatchEmbed2D, PatchEmbed3D, PatchRecovery2D, PatchRecovery3D
+from .pointwise_conv import PointwiseConv2d, pointwise_conv2d
 from .mlp import EncoderDecoder, MLP
 from .resample import UpSample3D, DownSample3D, UpSample2D, DownSample2D
 from .bandlimit import BandLimitMask

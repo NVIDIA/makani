@@ -27,6 +27,9 @@ from torch.utils.checkpoint import checkpoint
 # checked without importing it; the module is imported lazily where used.
 from makani.utils.te_helpers import TE_AVAILABLE as _TE_AVAILABLE, get_te
 
+# 1x1 convolutions as matmuls, see PointwiseConv2d for the gradient layout
+from makani.models.common.pointwise_conv import PointwiseConv2d
+
 
 def flatten_biases(state_dict, keys) -> None:
     r"""Flatten the biases of earlier versions kept as ``(1, C, 1, 1)`` to ``(C,)``, in place, where they are so."""
@@ -50,38 +53,6 @@ def upgrade_mlp_state_dict(state_dict, prefix: str = "") -> None:
                 state_dict[new + key[len(old) :]] = state_dict.pop(key)
                 break
     flatten_biases(state_dict, [prefix + "fc1.bias", prefix + "fc2.bias"])
-
-
-class PointwiseConv2d(nn.Conv2d):
-    r"""
-    A 1x1 convolution on ``(B, C, H, W)`` computed as a matmul over the channels.
-
-    Same parameters, initialization and state dict as ``nn.Conv2d(in_channels, out_channels, 1)``.
-    The forward is ``weight @ x`` on the ``(B, C, H * W)`` view, a plain GEMM on the NCHW layout.
-    Under ``torch.compile``, a convolution makes inductor's layout optimization switch the graph
-    to channels-last, and the gradient of the input then leaves the compiled backward
-    channels-last; every compiled region that receives it has to copy it back into the layout it
-    traced, a full transposing copy of the activation per block. A matmul keeps the gradient in
-    the layout of the input.
-    """
-
-    def __init__(self, in_channels, out_channels, bias=True, groups=1, device=None, dtype=None):
-        super().__init__(in_channels, out_channels, 1, bias=bias, groups=groups, device=device, dtype=dtype)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        B, C, H, W = x.shape
-        G = self.groups
-        if G == 1:
-            y = torch.matmul(self.weight.reshape(self.out_channels, C), x.reshape(B, C, H * W))
-        else:
-            # (G, O/G, C/G) @ (B, G, C/G, HW) -> (B, G, O/G, HW)
-            w = self.weight.reshape(G, self.out_channels // G, C // G)
-            y = torch.matmul(w, x.reshape(B, G, C // G, H * W))
-        y = y.reshape(B, self.out_channels, H * W)
-        if self.bias is not None:
-            # in the dtype of the product, as conv2d does under autocast: an fp32 bias would promote the output
-            y = y + self.bias.to(y.dtype).reshape(-1, 1)
-        return y.reshape(B, self.out_channels, H, W)
 
 
 class EncoderDecoder(nn.Module):
@@ -339,7 +310,6 @@ class MLP(nn.Module):
             fc1 = te.Linear(in_features, hidden_features, bias=True)
             fc2 = te.Linear(hidden_features, out_features, bias=output_bias)
         elif input_format == "nchw":
-            # 1x1 convolutions computed as matmuls: see PointwiseConv2d for the gradient layout
             fc1 = PointwiseConv2d(in_features, hidden_features, bias=True)
             fc2 = PointwiseConv2d(hidden_features, out_features, bias=output_bias)
         elif input_format == "traditional":
