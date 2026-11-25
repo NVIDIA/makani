@@ -1174,11 +1174,16 @@ class TestDistributedLayers(unittest.TestCase):
         def relative_error(tensor, reference):
             return ((tensor.float() - reference.float()).norm() / reference.float().norm()).item()
 
+        # the bf16 rounding of what the ranks reduce, their partial sums over the matmul ranks and over their parts
+        # of the grid: a few 1e-3, also where FP8 does not enter and the serial MLP in FP8 computes what it computes
+        # in bf16, as for the gradient of the output bias, the sum of the output gradient
+        rounding = 1e-2
+
         def check(desc, dist_fp8, full_fp8, full_bf16):
             error, error_serial = relative_error(dist_fp8, full_bf16), relative_error(full_fp8, full_bf16)
-            ok = error <= 1.25 * error_serial + 1e-3
+            ok = error <= 1.25 * error_serial + rounding
             if delayed:
-                ok = ok and relative_error(dist_fp8, full_fp8) <= 1e-2
+                ok = ok and relative_error(dist_fp8, full_fp8) <= rounding
             if verbose:
                 print(f"{desc}: {error:.3e} from bf16 (serial FP8 {error_serial:.3e})")
             with self.subTest(desc=desc):
