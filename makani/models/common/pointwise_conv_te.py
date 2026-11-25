@@ -79,13 +79,24 @@ def _import_tensor_indices():
     return tex.FP8FwdTensors, tex.FP8BwdTensors
 
 
+def _import_saving_helpers():
+    """TE's ``prepare_for_saving`` and ``restore_from_saved``, which moved out of ``tensor`` in TE 2.x."""
+    try:
+        from transformer_engine.pytorch.quantized_tensor import prepare_for_saving, restore_from_saved
+    except ImportError:
+        from transformer_engine.pytorch.tensor.quantized_tensor import prepare_for_saving, restore_from_saved
+    return prepare_for_saving, restore_from_saved
+
+
 def _build_engine_class():
     te = get_te()
     from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
     from transformer_engine.pytorch.cpp_extensions import general_gemm
+    from transformer_engine.common.recipe import DelayedScaling
 
     FP8FwdTensorIdx, FP8BwdTensorIdx = _import_tensor_indices()
     FP8GlobalStateManager = _fp8_global_state_manager()
+    prepare_for_saving, restore_from_saved = _import_saving_helpers()
 
     try:
         from transformer_engine.pytorch.module.linear import _check_fp8_reduce_and_update
@@ -112,7 +123,11 @@ def _build_engine_class():
             for b in range(B):
                 general_gemm(xs[b], weight_q, out_dtype=dtype, layout="NN", out=y[b])
 
-            ctx.xs, ctx.weight_q, ctx.grad_output_quantizer = xs, weight_q, grad_output_quantizer
+            # through save_for_backward, as te.Linear saves them, so that activation checkpointing can drop them
+            # after the forward and recompute them in the backward; the objects keep the metadata, not the data
+            tensors, ctx.tensor_objects = prepare_for_saving(*xs, weight_q)
+            ctx.save_for_backward(*tensors)
+            ctx.grad_output_quantizer = grad_output_quantizer
             ctx.shape, ctx.out_channels, ctx.dtype, ctx.weight_dtype = (B, C, H, W), O, dtype, weight.dtype
             ctx.split_acc = split_acc
             ctx.reduce_and_update_bwd = _check_fp8_reduce_and_update()
@@ -123,6 +138,8 @@ def _build_engine_class():
             B, C, H, W = ctx.shape
             O, N = ctx.out_channels, H * W
             dgrad_split_acc, wgrad_split_acc = ctx.split_acc
+            *xs, weight_q = restore_from_saved(ctx.tensor_objects, ctx.saved_tensors)
+            ctx.tensor_objects = None
 
             ctx.grad_output_quantizer.set_usage(rowwise=True, columnwise=True)
             gc = grad.reshape(B, O, N)
@@ -134,7 +151,7 @@ def _build_engine_class():
                 for b in range(B):
                     general_gemm(
                         gs[b],
-                        ctx.weight_q,
+                        weight_q,
                         out_dtype=ctx.dtype,
                         layout="NT",
                         out=grad_x[b],
@@ -147,7 +164,7 @@ def _build_engine_class():
                 grad_weight = torch.zeros(O, C, dtype=torch.float32, device=grad.device)
                 for b in range(B):
                     general_gemm(
-                        ctx.xs[b],
+                        xs[b],
                         gs[b],
                         out_dtype=torch.float32,
                         layout="TN",
@@ -158,7 +175,6 @@ def _build_engine_class():
                     )
                 grad_weight = grad_weight.to(ctx.weight_dtype)
 
-            ctx.xs = ctx.weight_q = None
             if ctx.reduce_and_update_bwd:
                 FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
 
@@ -184,6 +200,47 @@ def _build_engine_class():
             quantizer = self.quantizers["scaling_fwd"][FP8FwdTensorIdx.GEMM1_WEIGHT]
             quantizer.internal = True
             return [quantizer]
+
+        def get_extra_state(self):
+            """
+            The delayed-scaling state, the scales and amax histories of both directions, as a dict of CPU tensors.
+
+            transformer_engine pickles its state into a byte tensor, which it refuses to load by default, since
+            unpickling can run arbitrary code. These tensors load with ``torch.load(weights_only=True)``. Stateless
+            recipes, and a layer that has not run in FP8, store an empty tensor, as transformer_engine does.
+            """
+            fwd, bwd = self.fp8_meta.get("scaling_fwd"), self.fp8_meta.get("scaling_bwd")
+            if not all(hasattr(meta, "amax_history") for meta in [fwd, bwd]):
+                return torch.empty(0, dtype=torch.uint8)
+            return {
+                "scale_fwd": fwd.scale.detach().cpu(),
+                "amax_history_fwd": fwd.amax_history.detach().cpu(),
+                "scale_bwd": bwd.scale.detach().cpu(),
+                "amax_history_bwd": bwd.amax_history.detach().cpu(),
+            }
+
+        def set_extra_state(self, state):
+            """Restore the delayed-scaling state of :meth:`get_extra_state`, or transformer_engine's own format."""
+            if not isinstance(state, dict):
+                return super().set_extra_state(state)
+
+            # the meta tensors of a delayed-scaling recipe with the stored history, which the first forward keeps
+            # under delayed scaling, adjusting the history to the length of its recipe, as after transformer_engine's
+            # own restore
+            recipe = self.fp8_meta.get("recipe", None)
+            history_len = state["amax_history_fwd"].shape[0]
+            if not (getattr(recipe, "delayed", lambda: False)() and recipe.amax_history_len == history_len):
+                recipe = DelayedScaling(amax_history_len=history_len)
+            self.fp8_meta["recipe"] = recipe
+            self.fp8_meta.setdefault("num_gemms", 1)
+            self.init_fp8_meta_tensors(recipe)
+
+            fwd, bwd = self.fp8_meta["scaling_fwd"], self.fp8_meta["scaling_bwd"]
+            with torch.no_grad():
+                fwd.scale.copy_(state["scale_fwd"])
+                fwd.amax_history.copy_(state["amax_history_fwd"])
+                bwd.scale.copy_(state["scale_bwd"])
+                bwd.amax_history.copy_(state["amax_history_bwd"])
 
         def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, *args, **kwargs):
             # a checkpoint without FP8 layers has no scaling state for this one, which then starts afresh

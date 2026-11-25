@@ -84,6 +84,29 @@ class _DivergentPlanModel(_ShardedTestModel):
             self.extra.sharded_dims_mp = ["w"]
 
 
+class _ExtraState(nn.Module):
+    """A module with an extra state and no parameter, as the FP8 engines of transformer_engine hold their scaling state."""
+
+    def __init__(self, value: torch.Tensor):
+        super().__init__()
+        self.value = value
+
+    def get_extra_state(self):
+        return self.value
+
+    def set_extra_state(self, state):
+        self.value = state
+
+
+class _ExtraStateModel(_ShardedTestModel):
+    """The sharded test model with an extra state that differs between the model ranks, as the FP8 scaling state of a
+    weight shard or of the part of the grid of a rank does, and is the same on the data-parallel ranks."""
+
+    def __init__(self, local_weight: torch.Tensor, num_features: int):
+        super().__init__(local_weight, num_features)
+        self.state = _ExtraState(torch.tensor([float(comm.get_rank("model"))]))
+
+
 class TestDistributedCheckpoint(unittest.TestCase):
     """
     Round-trip tests for the legacy and flexible checkpoint formats under
@@ -257,6 +280,22 @@ class TestDistributedCheckpoint(unittest.TestCase):
         # 4. Per-rank shard must match the pre-save snapshot.
         with self.subTest(desc="weights match after flexible restore"):
             self._verify_match(model, snapshot, label="flexible", verbose=verbose)
+
+    def test_flexible_extra_states_roundtrip(self, verbose=False):
+        """The extra states of the modules, which are no parameters, come back to the model rank that saved them."""
+        ckpt_path = os.path.join(self.tmpdir, "flexible_extra_ckpt_mp{mp_rank}_v0.tar")
+
+        local_weight = self._build_local_slice()
+        model = _ExtraStateModel(local_weight, num_features=self.num_features).to(self.device)
+        Driver.save_checkpoint(ckpt_path, model, checkpoint_mode="flexible")
+        if dist.is_initialized():
+            dist.barrier()
+
+        model.state.value = torch.tensor([-1.0])
+        Driver._restore_checkpoint_flexible(ckpt_path, model, strict=True)
+
+        expected = torch.tensor([float(comm.get_rank("model"))])
+        self.assertTrue(reduce_success(torch.equal(model.state.value.cpu(), expected), self.device))
 
     # ----------------------------------------------------------------------
     # Cross-format compatibility: a flexible-saved file can be restored on

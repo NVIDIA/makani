@@ -48,6 +48,8 @@ from makani.driver.checkpoint import (
     checkpoint_format_tag,
     check_checkpoint_format,
     run_has_checkpoint,
+    gather_extra_states,
+    scatter_extra_states,
     setup_training_run,
 )
 from makani.models.common import MLP
@@ -995,6 +997,50 @@ class TestRunHasCheckpoint(unittest.TestCase):
             open(self.params.checkpoint_path.format(mp_rank=0, checkpoint_version=0), "w").close()
             setup_training_run(self.params, exp_dir)
             self.assertTrue(self.params.resuming)
+
+
+class _ExtraState(nn.Module):
+    """A module with an extra state, as the FP8 engines of transformer_engine hold their scaling state."""
+
+    def __init__(self, value):
+        super().__init__()
+        self.value = value
+
+    def get_extra_state(self):
+        return self.value
+
+    def set_extra_state(self, state):
+        self.value = state
+
+
+class TestExtraStates(unittest.TestCase):
+    """The extra states of the modules in flexible checkpoints, stored per model rank."""
+
+    def test_roundtrip(self):
+        model = nn.Sequential(nn.Linear(2, 2), _ExtraState(torch.tensor([3.0])))
+        state_dict = gather_extra_states(model, model.state_dict())
+        self.assertEqual(state_dict["1._extra_state"], {"model_ranks": [torch.tensor([3.0])], "layout": {}})
+
+        model[1].value = None
+        model.load_state_dict(scatter_extra_states(state_dict), strict=True)
+        self.assertTrue(torch.equal(model[1].value, torch.tensor([3.0])))
+
+    def test_other_decomposition_starts_afresh(self):
+        state_dict = OrderedDict(
+            [
+                ("0.weight", torch.ones(2, 2)),
+                (
+                    "1._extra_state",
+                    {"model_ranks": [torch.tensor([0.0]), torch.tensor([1.0])], "layout": {"matmul": 2}},
+                ),
+                ("2._extra_state", torch.tensor([5.0])),
+            ]
+        )
+        with self.assertWarns(UserWarning):
+            scatter_extra_states(state_dict)
+        self.assertNotIn("1._extra_state", state_dict)
+        # stored as it is, by a checkpoint of an earlier version
+        self.assertTrue(torch.equal(state_dict["2._extra_state"], torch.tensor([5.0])))
 
 
 if __name__ == "__main__":

@@ -20,12 +20,15 @@ without a GPU that supports FP8; those that only build the layers need transform
 
 import os
 import sys
+import tempfile
 import unittest
 from parameterized import parameterized
 
 import torch
 
+from makani.driver.base import Driver
 from makani.models import model_registry
+from makani.models.common.activation_checkpoint import checkpoint
 from makani.models.common.mlp import EncoderDecoder, MLP
 from makani.models.common.pointwise_conv import PointwiseConv2d, pointwise_conv2d
 from makani.utils.precision import AutocastManager, fp8_active, fp8_disabled, _fp8_global_state_manager
@@ -302,6 +305,76 @@ class TestFP8Compute(unittest.TestCase):
                     meta, meta_ckpt = engine.fp8_meta[direction], engine_ckpt.fp8_meta[direction]
                     self.assertTrue(torch.equal(meta.scale, meta_ckpt.scale))
                     self.assertTrue(torch.equal(meta.amax_history, meta_ckpt.amax_history))
+
+    @parameterized.expand([["bf16-fp8_delayed"], ["bf16-fp8_current"]], skip_on_empty=True)
+    def test_activation_checkpointing_frees_fp8_inputs(self, amp_mode):
+        """A checkpointed block keeps only its output after the forward, not the quantized inputs of its FP8 layers,
+        which the backward recomputes."""
+        block = torch.nn.Sequential(
+            *[layer for _ in range(4) for layer in (PointwiseConv2d(256, 256, fp8=True), torch.nn.GELU())]
+        ).to(self.device)
+        x = torch.randn(2, 256, 32, 64, device=self.device, requires_grad=True)
+        for checkpointed in [False, True]:
+            torch.cuda.synchronize()
+            before = torch.cuda.memory_allocated()
+            with AutocastManager(amp_mode)():
+                y = checkpoint(block, x) if checkpointed else block(x)
+            torch.cuda.synchronize()
+            held = torch.cuda.memory_allocated() - before
+            output = y.numel() * y.element_size()
+            y.float().sum().backward()
+            del y
+            if checkpointed:
+                # besides the output only metadata, such as the scales of the forward that transformer_engine keeps
+                # for the recompute under delayed scaling; a quantized input takes two bytes per element, row- and
+                # columnwise
+                self.assertLess(held, output + x.numel() // 8)
+            else:
+                # without checkpointing, each layer keeps its quantized input, of at least one byte per element
+                self.assertGreater(held, output + 4 * x.numel())
+
+    @parameterized.expand([["legacy"], ["flexible"]], skip_on_empty=True)
+    def test_checkpoints_keep_the_scaling_state(self, checkpoint_mode):
+        """Delayed scaling continues from a checkpoint, in either checkpoint format: the restored model computes the
+        next step as the saved one, and has its amax histories and scales after it. transformer_engine's own format
+        of the state is a pickle, which it refuses to load by default."""
+        params = _model_params("bf16-fp8_delayed")
+        set_seed(333)
+        model = model_registry.get_model(params).to(self.device)
+        x = torch.randn(2, params.N_in_channels, 36, 72, device=self.device)
+        for step in range(3):
+            model.zero_grad()
+            with AutocastManager("bf16-fp8_delayed")():
+                out = model(single_step_rollout((x * (1 + step)).unsqueeze(1)))
+            out.float().square().mean().backward()
+
+        set_seed(334)
+        restored = model_registry.get_model(params).to(self.device)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "ckpt_mp{mp_rank}_v0.tar")
+            Driver.save_checkpoint(path, model, checkpoint_mode=checkpoint_mode)
+            Driver.restore_from_checkpoint(path, restored, checkpoint_mode=checkpoint_mode, strict=True)
+
+        # one more step on both, which the restored model computes with the restored scales
+        outs = []
+        for m in [model, restored]:
+            m.zero_grad()
+            with AutocastManager("bf16-fp8_delayed")():
+                out = m(single_step_rollout((x * 4).unsqueeze(1)))
+            out.float().square().mean().backward()
+            outs.append(out)
+        self.assertTrue(torch.equal(outs[0], outs[1]))
+
+        engines = [m.fp8_gemm for m in model.modules() if getattr(m, "fp8_gemm", None) is not None]
+        engines_restored = [m.fp8_gemm for m in restored.modules() if getattr(m, "fp8_gemm", None) is not None]
+        self.assertGreater(len(engines), 0)
+        self.assertEqual(len(engines), len(engines_restored))
+        for engine, engine_restored in zip(engines, engines_restored):
+            for direction in ["scaling_fwd", "scaling_bwd"]:
+                meta, meta_restored = engine.fp8_meta[direction], engine_restored.fp8_meta[direction]
+                self.assertTrue(meta.amax_history.abs().max() > 0)
+                self.assertTrue(torch.equal(meta.scale, meta_restored.scale.to(meta.scale.device)))
+                self.assertTrue(torch.equal(meta.amax_history, meta_restored.amax_history.to(meta.scale.device)))
 
     def test_compiled_model_runs_fp8_layers(self):
         """A compiled model breaks its graph at the FP8 layers and computes what it computes eagerly."""

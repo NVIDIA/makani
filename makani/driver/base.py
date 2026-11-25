@@ -52,6 +52,8 @@ from makani.driver.checkpoint import (
     load_checkpoint,
     gather_model_state_dict,
     scatter_model_state_dict,
+    gather_extra_states,
+    scatter_extra_states,
     gather_optimizer_state_dict,
     scatter_optimizer_state_dict,
     prepend_prefix_to_state_dict,
@@ -822,6 +824,9 @@ class Driver(metaclass=abc.ABCMeta):
         if comm.get_size("model") > 1:
             state_dict = scatter_model_state_dict(model, state_dict, strict)
 
+        # the extra states of this rank's modules, such as the FP8 scaling state, which are stored per model rank
+        scatter_extra_states(state_dict)
+
         # load state dict
         model.load_state_dict(state_dict, strict=strict)
 
@@ -975,10 +980,11 @@ class Driver(metaclass=abc.ABCMeta):
         checkpoint_fname = checkpoint_path.format(mp_rank=0)
 
         # iterate over parameters and gather them from the ranks
+        # the extra states of the modules, such as the FP8 scaling state, are stored per model rank in either case
         if comm.get_size("model") > 1:
             state_dict = gather_model_state_dict(model)
         else:
-            state_dict = model.state_dict()
+            state_dict = gather_extra_states(model, model.state_dict())
 
         # strip all wrapper prefixes (torch.compile -> "_orig_mod.", DDP -> "module.")
         # so checkpoints are always stored in canonical form without wrapper-specific keys
