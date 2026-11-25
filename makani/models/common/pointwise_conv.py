@@ -98,7 +98,7 @@ def pointwise_conv2d(
     Parameters
     ----------
     x : torch.Tensor
-        Input of shape ``(B, C, H, W)``.
+        Input of shape ``(B, C, H, W)``, or ``(C, H, W)`` without a batch, as conv2d takes.
     weight : torch.Tensor
         Weight of shape ``(O, C / groups)`` or ``(O, C / groups, 1, 1)``.
     bias : torch.Tensor, optional
@@ -109,8 +109,11 @@ def pointwise_conv2d(
     Returns
     -------
     torch.Tensor
-        Output of shape ``(B, O, H, W)``.
+        Output of shape ``(B, O, H, W)``, or ``(O, H, W)`` without a batch.
     """
+    if x.dim() == 3:
+        return pointwise_conv2d(x.unsqueeze(0), weight, bias, groups).squeeze(0)
+
     device_type = x.device.type
     if torch.is_autocast_enabled(device_type):
         dtype = torch.get_autocast_dtype(device_type)

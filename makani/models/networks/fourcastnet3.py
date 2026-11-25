@@ -21,6 +21,7 @@ from torch.utils.checkpoint import checkpoint
 
 # helpers
 from makani.models.common import DropPath, LayerScale, MLP, EncoderDecoder, spectral_conv_s2
+from makani.models.common.pointwise_conv import PointwiseConv2d
 from makani.data.features import get_water_channels, get_channel_groups
 from makani.models.constraints import NonNegativeConstraint
 
@@ -526,7 +527,7 @@ class NeuralOperatorBlock(nn.Module):
         # skip connection
         if skip == "linear":
             gain_factor = 1.0
-            self.skip = nn.Conv2d(inp_chans, out_chans, 1, 1, bias=False)
+            self.skip = PointwiseConv2d(inp_chans, out_chans, bias=False)
             torch.nn.init.normal_(self.skip.weight, std=math.sqrt(gain_factor / inp_chans))
             self.skip.weight.is_shared_mp = {"spatial": "sum", "matmul": "avg"}
             self.skip.weight.sharded_dims_mp = [None, None, None, None]
@@ -802,7 +803,7 @@ class AtmoSphericNeuralOperatorNet(nn.Module):
 
         # residual prediction
         if self.big_skip:
-            self.residual_transform = nn.Conv2d(self.n_out_chans, self.n_out_chans, 1, bias=False)
+            self.residual_transform = PointwiseConv2d(self.n_out_chans, self.n_out_chans, bias=False)
             self.residual_transform.weight.is_shared_mp = {"spatial": "sum", "matmul": "avg"}
             self.residual_transform.weight.sharded_dims_mp = [None, None, None, None]
             if self.residual_transform.bias is not None:

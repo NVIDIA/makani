@@ -24,6 +24,7 @@ from torch.utils.checkpoint import checkpoint
 from makani.distributed import comm
 from makani.models.common.mlp import upgrade_mlp_state_dict
 from makani.models.common.distributed.matmul import DistributedMatmul
+from makani.models.common.pointwise_conv import pointwise_conv2d
 
 # transformer engine is an optional dependency: it is only used for the
 # (optional) FP8/FP4 path and must not be required for import. availability is
@@ -591,7 +592,7 @@ class StochasticMLP(nn.Module):
         weight1 = std1 * weight1 + self.fc1_weight_mean
 
         # fully connected 1
-        x = nn.functional.conv2d(x, weight1, bias=self.fc1_bias)
+        x = pointwise_conv2d(x, weight1, bias=self.fc1_bias)
 
         # activation
         x = self.act(x)
@@ -606,7 +607,7 @@ class StochasticMLP(nn.Module):
         weight2 = std2 * weight2 + self.fc2_weight_mean
 
         # fully connected 2
-        x = nn.functional.conv2d(x, weight2, bias=self.fc2_bias)
+        x = pointwise_conv2d(x, weight2, bias=self.fc2_bias)
 
         # dropout
         x = self.drop(x)

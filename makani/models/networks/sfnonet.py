@@ -23,6 +23,7 @@ from functools import partial
 
 # helpers
 from makani.models.common import DropPath, MLP, EncoderDecoder
+from makani.models.common.pointwise_conv import PointwiseConv2d
 
 # import global convolution and non-linear spectral layers
 from makani.models.common import SpectralConv, SpectralAttention, spectral_conv_s2
@@ -352,7 +353,7 @@ class NeuralOperatorBlock(nn.Module):
             gain_factor = 2.0
 
         if inner_skip == "linear":
-            self.inner_skip = nn.Conv2d(embed_dim, embed_dim, 1, 1, bias=False)
+            self.inner_skip = PointwiseConv2d(embed_dim, embed_dim, bias=False)
             gain_factor /= 2.0
             nn.init.normal_(self.inner_skip.weight, std=math.sqrt(gain_factor / embed_dim))
         elif inner_skip == "identity":
@@ -390,7 +391,7 @@ class NeuralOperatorBlock(nn.Module):
             gain_factor = 1.0
 
         if outer_skip == "linear":
-            self.outer_skip = nn.Conv2d(embed_dim, embed_dim, 1, 1, bias=False)
+            self.outer_skip = PointwiseConv2d(embed_dim, embed_dim, bias=False)
             gain_factor /= 2.0
             torch.nn.init.normal_(self.outer_skip.weight, std=math.sqrt(gain_factor / embed_dim))
         elif outer_skip == "identity":
@@ -788,7 +789,7 @@ class SphericalFourierNeuralOperatorNet(nn.Module):
 
         # output transform
         if self.big_skip:
-            self.residual_transform = nn.Conv2d(self.inp_chans, self.out_chans, 1, bias=False)
+            self.residual_transform = PointwiseConv2d(self.inp_chans, self.out_chans, bias=False)
             self.residual_transform.weight.is_shared_mp = {"spatial": "sum", "matmul": "avg"}
             self.residual_transform.weight.sharded_dims_mp = [None, None, None, None]
             scale = math.sqrt(0.5 / self.inp_chans)

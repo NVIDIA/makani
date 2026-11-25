@@ -40,6 +40,7 @@ import torch_harmonics.distributed as thd
 # get pre-formulated layers
 from makani.models.common.distributed.mlp import DistributedMLP
 from makani.models.common.norm_layers import get_norm_layer_handle
+from makani.models.common.pointwise_conv import PointwiseConv2d
 
 # more distributed stuff
 from makani.distributed import comm
@@ -506,7 +507,7 @@ class NeuralOperatorBlock(nn.Module):
         # skip connection
         if skip == "linear":
             gain_factor = 1.0
-            self.skip = nn.Conv2d(inp_chans, out_chans, 1, 1, bias=False)
+            self.skip = PointwiseConv2d(inp_chans, out_chans, bias=False)
             torch.nn.init.normal_(self.skip.weight, std=math.sqrt(gain_factor / inp_chans))
             self.skip.weight.is_shared_mp = {"spatial": "sum", "matmul": "avg"}
             self.skip.weight.sharded_dims_mp = [None, None, None, None]

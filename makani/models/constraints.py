@@ -23,6 +23,8 @@ from torch import amp
 
 import makani.models.constants as const
 
+from makani.models.common.pointwise_conv import pointwise_conv2d
+
 
 class NonNegativeConstraint(nn.Module):
     """Enforce nonnegativity on a named subset of channels (dim -3, nchw layout).
@@ -323,7 +325,7 @@ class HydrostaticBalanceProjection(nn.Module):
                 x_phys = x_phys * mult
 
             # minimum-(weighted-)norm correction onto the (affine) balance manifold
-            corr = F.conv2d(x_phys, self.proj.unsqueeze(-1).unsqueeze(-1)) - self.off
+            corr = pointwise_conv2d(x_phys, self.proj) - self.off
             x_phys = x_phys - self.strength * corr
 
             # recover temperature from virtual temperature (q held fixed)

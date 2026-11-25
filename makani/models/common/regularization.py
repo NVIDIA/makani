@@ -155,9 +155,11 @@ class LayerScale(nn.Module):
     of each branch to admit, which is what makes very deep residual stacks train
     stably.
 
-    Implemented as a grouped 1x1 convolution with one group per channel, which
-    is equivalent to a broadcast multiply but keeps the parameter in the layout
-    the surrounding conv-based blocks expect.
+    Computed as a broadcast multiply. The parameter keeps the ``(C, 1, 1, 1)``
+    shape of the grouped 1x1 convolution it was before, so checkpoints load, and
+    the product takes the dtype that convolution had, the autocast dtype under
+    autocast. A convolution would make inductor switch a compiled graph to
+    channels-last, see :func:`~makani.models.common.pointwise_conv.pointwise_conv2d`.
 
     Parameters
     ----------
@@ -187,4 +189,6 @@ class LayerScale(nn.Module):
         torch.Tensor
             Tensor of the same shape as ``x``.
         """
-        return nn.functional.conv2d(x, self.weight, groups=self.num_chans)
+        device_type = x.device.type
+        dtype = torch.get_autocast_dtype(device_type) if torch.is_autocast_enabled(device_type) else x.dtype
+        return x.to(dtype) * self.weight.reshape(1, -1, 1, 1).to(dtype)
