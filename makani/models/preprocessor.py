@@ -141,24 +141,25 @@ class HistoryNormalization(nn.Module):
                 std=torch.ones((1, 1, 1, 1, 1), dtype=torch.float32, device=x.device),
             )
 
+        # The quadrature all-reduces over the spatial ranks in the forward and passes the gradient through in the
+        # backward. Every statistic is used on each rank's own part of the grid, the mean also in the variance, so
+        # it is copied to the parallel region right away: the copy all-reduces its gradient, which is the sum of the
+        # contributions of all ranks.
         if self.history_normalization_mode == "timediff":
-            # time difference mean:
-            diff_mean = torch.mean(self.quadrature(x[:, 1:, ...] - x[:, 0:-1, ...]), dim=(1, 2))
+            diff = x[:, 1:, ...] - x[:, 0:-1, ...]
 
-            # time difference std
-            diff_var = torch.mean(
-                self.quadrature(torch.square((x[:, 1:, ...] - x[:, 0:-1, ...]) - diff_mean)), dim=(1, 2)
-            )
+            # time difference mean, one per sample, (B,)
+            diff_mean = copy_to_parallel_region(torch.mean(self.quadrature(diff), dim=(1, 2)), "spatial")
 
-            return HistoryStats(
-                diff_mean=copy_to_parallel_region(diff_mean, "spatial"),
-                diff_var=copy_to_parallel_region(diff_var, "spatial"),
-            )
+            # time difference variance, about the mean of the sample
+            diff_var = torch.mean(self.quadrature(torch.square(diff - diff_mean.reshape(-1, 1, 1, 1, 1))), dim=(1, 2))
+
+            return HistoryStats(diff_mean=diff_mean, diff_var=copy_to_parallel_region(diff_var, "spatial"))
 
         # quadrature reduces (H, W) -> (B, T, C); the weighted sum over T -> (B, 1, C)
         mean = torch.sum(self.quadrature(x * self.history_normalization_weights), dim=1, keepdim=True)
         b_, _, c_ = mean.shape
-        mean = mean.reshape(b_, 1, c_, 1, 1)
+        mean = copy_to_parallel_region(mean.reshape(b_, 1, c_, 1, 1), "spatial")
 
         std = torch.sum(
             self.quadrature(torch.square(x - mean) * self.history_normalization_weights),
@@ -167,8 +168,7 @@ class HistoryNormalization(nn.Module):
         )
         std = torch.sqrt(std.reshape(b_, 1, c_, 1, 1))
 
-        # copy to parallel region
-        return HistoryStats(mean=copy_to_parallel_region(mean, "spatial"), std=copy_to_parallel_region(std, "spatial"))
+        return HistoryStats(mean=mean, std=copy_to_parallel_region(std, "spatial"))
 
     def _check_history_stats(self, x, caller: str, stats: HistoryStats):
         # the batch is the only dimension of the statistics that is not a broadcast singleton
