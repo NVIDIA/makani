@@ -26,7 +26,17 @@ from makani.utils.argument_parser import get_default_argument_parser
 
 from ..test_trainers import init_params
 from ..testutils import disable_tf32, set_seed, init_hdf5_dataset
-from .distributed_helpers import _init_grid, make_shared_tmpdir, remove_shared_tmpdir, sync_and_barrier, teardown_comms
+from .distributed_helpers import (
+    _init_grid,
+    make_shared_tmpdir,
+    reduce_success,
+    remove_shared_tmpdir,
+    sync_and_barrier,
+    teardown_comms,
+)
+
+# a small dataset, so that an epoch is a few steps: 8 training samples over two years, 4 validation samples
+_SAMPLES_PER_YEAR = 4
 
 
 class TestDistributedTrainerCheckpoints(unittest.TestCase):
@@ -48,7 +58,7 @@ class TestDistributedTrainerCheckpoints(unittest.TestCase):
         cls.tmpdir = make_shared_tmpdir("makani_trainer_checkpoints_", cls.device)
         paths = [None]
         if cls.world_rank == 0:
-            paths = [init_hdf5_dataset(os.path.join(cls.tmpdir, "data"))]
+            paths = [init_hdf5_dataset(os.path.join(cls.tmpdir, "data"), num_samples_per_year=_SAMPLES_PER_YEAR)]
         if dist.is_initialized():
             dist.broadcast_object_list(paths, src=0)
         cls.train_path, cls.n_train_samples, cls.valid_path, cls.n_eval_samples, cls.stats_path, _, _ = paths[0]
@@ -80,8 +90,9 @@ class TestDistributedTrainerCheckpoints(unittest.TestCase):
             num_data_workers=0,
         )
         params.multifiles = True
-        params.n_train_samples = 2 * comm.get_size("data")
-        params.n_eval_samples = comm.get_size("data")
+        params.dhours = 365 * 24 // _SAMPLES_PER_YEAR
+        params.n_train_samples = self.n_train_samples
+        params.n_eval_samples = self.n_eval_samples
         params.print_timings_frequency = 0
         params["save_checkpoint"] = checkpoint_mode
         params["max_epochs"] = 2
@@ -123,18 +134,25 @@ class TestDistributedTrainerCheckpoints(unittest.TestCase):
 
         trainer.validate_one_epoch = validate_with_loss
         trainer.train()
-        self.assertEqual(trainer.epoch, 2)
 
+        # the writers of the checkpoints check them, and every rank asserts the verdict of all of them, so that a
+        # failure fails the test on all ranks instead of leaving the others waiting in a collective
         sync_and_barrier()
+        success = trainer.epoch == 2
         if (comm.get_rank("data") == 0) and (checkpoint_mode == "legacy" or comm.get_rank("model") == 0):
             mp_rank = comm.get_rank("model") if checkpoint_mode == "legacy" else 0
-            best = torch.load(
-                params.best_checkpoint_path.format(mp_rank=mp_rank), map_location="cpu", weights_only=False
-            )
-            latest = torch.load(params.checkpoint_path.format(mp_rank=mp_rank), map_location="cpu", weights_only=False)
-            self.assertEqual(best["epoch"], 1)
-            self.assertEqual(latest["epoch"], 2)
-        sync_and_barrier()
+            try:
+                epochs = [
+                    torch.load(path.format(mp_rank=mp_rank), map_location="cpu", weights_only=False)["epoch"]
+                    for path in (params.best_checkpoint_path, params.checkpoint_path)
+                ]
+            except (OSError, KeyError) as error:
+                epochs = [None, None]
+                print(f"rank {self.world_rank}: cannot read the checkpoints: {error}")
+            success = success and (epochs == [1, 2])
+            if not success:
+                print(f"rank {self.world_rank}: epoch {trainer.epoch}, best and latest checkpoints of epochs {epochs}")
+        self.assertTrue(reduce_success(success, self.device))
 
 
 if __name__ == "__main__":
