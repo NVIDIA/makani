@@ -133,13 +133,25 @@ class TestDistributedModel(unittest.TestCase):
     def _checkpoint_path(self, name):
         return os.path.join(self.tmpdir, f"{name}_{self.id().split('.')[-1]}.pt")
 
-    def _build_serial_reference(self):
-        """Build the serial model and save its checkpoint, on every rank alike."""
+    def _build_serial_reference(self, perturb=0.0):
+        """
+        Build the serial model and save its checkpoint, on every rank alike.
+
+        With ``perturb``, every parameter gets Gaussian noise of that size, drawn alike on every rank, so that paths a
+        zero initialization closes, such as a zero gate or a zero layer scale, carry gradients: a gradient reduction
+        missing behind them would otherwise compare zeros with zeros.
+        """
         # the checkpoint gathers over the model group when it is distributed, so
         # saving the serial model is serial too, and only rank 0 writes
         checkpoint_path = self._checkpoint_path("serial")
         with comm.serial():
             model = model_registry.get_model(self.params).to(self.device)
+            if perturb > 0.0:
+                generator = torch.Generator(device="cpu").manual_seed(4321)
+                with torch.no_grad():
+                    for param in model.parameters():
+                        noise = torch.randn(param.shape, generator=generator, dtype=param.dtype)
+                        param.add_(perturb * noise.to(param.device))
             if self.world_rank == 0:
                 driver.Driver.save_checkpoint(checkpoint_path=checkpoint_path, model=model, checkpoint_mode="flexible")
         sync_and_barrier()
@@ -306,7 +318,8 @@ class TestDistributedModel(unittest.TestCase):
         # fix seed
         set_seed(333)
 
-        model, checkpoint_path = self._build_serial_reference()
+        # perturbed, so that no zero-initialized path hides a gradient
+        model, checkpoint_path = self._build_serial_reference(perturb=0.1)
 
         inp_shape = (
             self.params.batch_size,

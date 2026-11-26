@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 import gc
 import time
 from typing import Optional
@@ -57,7 +56,7 @@ from makani.distributed.mappings import reduce_from_parallel_region
 # checkpoint helpers
 
 # weight normalizing helper
-from makani.training.training_helpers import normalize_weights, clip_grads, NonFiniteLossCheck
+from makani.training.training_helpers import normalize_weights, clip_grads, NonFiniteLossCheck, save_as_best_checkpoint
 from makani.driver.helpers import get_memory_usage
 
 
@@ -378,10 +377,12 @@ class StochasticTrainer(Driver):
                 )
 
                 # save best checkpoint
-                best_checkpoint_path = self.params.best_checkpoint_path.format(mp_rank=comm.get_rank("model"))
-                best_checkpoint_saved = os.path.isfile(best_checkpoint_path)
-                if (not self.params.get("skip_validation", False)) and (
-                    (not best_checkpoint_saved) or (valid_logs["base"]["validation loss"] <= best_valid_loss)
+                # the same decision on every rank: saving takes collectives over the model ranks
+                if (not self.params.get("skip_validation", False)) and save_as_best_checkpoint(
+                    self.params.best_checkpoint_path,
+                    valid_logs["base"]["validation loss"],
+                    best_valid_loss,
+                    self.device,
                 ):
                     self.save_checkpoint(
                         self.params.best_checkpoint_path,
