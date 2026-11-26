@@ -453,6 +453,9 @@ def main():
     # benchmark bypasses. Printing it here is what tells a long model init apart from a hang.
     driver_obj._log_timers()
 
+    # which pointwise layers run in FP8, counted on the first call of each
+    fp8_usage = benchmark_utils.FP8LayerUsage(driver_obj.model)
+
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
     _barrier()
@@ -494,6 +497,8 @@ def main():
     memory = benchmark_utils.gather_memory_record()
 
     num_parameters, param_bytes, _ = count_parameters(driver_obj.model, driver_obj.device)
+
+    precision = benchmark_utils.get_precision_record(params.get("amp_mode"), fp8_usage.record())
 
     # Throughput. What one timed step covers differs by mode, because the timers sit where each
     # loop's natural unit is: the trainer's eval loop brackets a whole rollout episode, while the
@@ -570,6 +575,7 @@ def main():
             "jit_mode": params.get("jit_mode"),
             "checkpointing_level": params.get("checkpointing_level"),
         },
+        "precision": precision,
         "decomposition": decomposition,
         "batching": {
             "global_batch_size": params["global_batch_size"],

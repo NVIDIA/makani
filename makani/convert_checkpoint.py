@@ -28,7 +28,7 @@ from makani.models import model_registry
 
 # distributed computing stuff
 from makani.driver.base import Driver
-from makani.driver.checkpoint import load_checkpoint, upgrade_checkpoint
+from makani.driver.checkpoint import load_checkpoint, upgrade_checkpoint, is_extra_state
 from makani.utils.params import ParamsBase
 
 
@@ -132,6 +132,14 @@ def consolidate_checkpoints(input_path, output_path, checkpoint_version=0):
     parameter_keys = model_states[checkpoint_paths[0]].keys()
     for pname in parameter_keys:
 
+        # the extra states of the modules, such as the FP8 scaling state, describe the part of the model of their
+        # rank: those of a single rank are the consolidated model's, those of several ranks are dropped, and the
+        # consolidated model starts them afresh
+        if is_extra_state(pname):
+            if len(model_states) == 1:
+                gathered_state_dict[pname] = model_states[checkpoint_paths[0]][pname]
+            continue
+
         p = model_states[checkpoint_paths[0]][pname]
         if not hasattr(p, "sharded_dims_mp"):
             gathered_state_dict[pname] = p.clone()
@@ -229,13 +237,18 @@ def average_checkpoints(input_path, output_path):
         current_model_state = current_checkpoint["model_state"]
 
         for k, v in model_state_dict.items():
+            # extra states of the modules, such as the FP8 scaling state, are not averaged: those of the first
+            # checkpoint are kept
+            if is_extra_state(k):
+                continue
             if k in current_model_state.keys():
                 model_state_dict[k] += current_model_state[k]
             else:
                 raise ValueError(f"key {k} not present in current state dict.")
 
     for k, v in model_state_dict.items():
-        model_state_dict[k] /= len(checkpoint_paths)
+        if not is_extra_state(k):
+            model_state_dict[k] /= len(checkpoint_paths)
 
     # save the model
     print(f"Saving averaged checkpoint to {checkpoint_output_path}")

@@ -72,8 +72,6 @@ class MultiHeadAttention(nn.Module):
         default :class:`torch.nn.LayerNorm`.
     comm_name : str, optional
         Group to split the heads over, by default ``"matmul"``.
-    use_te : bool, optional
-        Use TransformerEngine linears for the split projections, by default ``False``.
 
     Raises
     ------
@@ -92,7 +90,6 @@ class MultiHeadAttention(nn.Module):
         proj_drop_rate=0.0,
         norm_layer=nn.LayerNorm,
         comm_name="matmul",
-        use_te=False,
     ):
         super().__init__()
 
@@ -110,7 +107,7 @@ class MultiHeadAttention(nn.Module):
         def projection(bias, parallel_mode):
             if comm_size > 1:
                 return DistributedMatmul(
-                    dim, dim, "traditional", comm_name=comm_name, parallel_mode=parallel_mode, bias=bias, use_te=use_te
+                    dim, dim, "traditional", comm_name=comm_name, parallel_mode=parallel_mode, bias=bias
                 )
             linear = nn.Linear(dim, dim, bias=bias)
             for param in linear.parameters():

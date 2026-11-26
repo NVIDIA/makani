@@ -402,6 +402,80 @@ def scatter_noise_rng_state(stored: Dict[str, Any]) -> Dict[str, Any]:
     return stored["states"][(comm.get_rank("model"), comm.get_rank("data"))]
 
 
+EXTRA_STATE_SUFFIX = "_extra_state"
+
+
+def is_extra_state(key: str) -> bool:
+    """Whether a key of a state dict holds the extra state of a module, such as the FP8 scaling state of a layer."""
+    return key.endswith(EXTRA_STATE_SUFFIX)
+
+
+def _model_layout() -> Dict[str, int]:
+    # the decomposition of the model over its ranks, by the groups of more than one rank, so that a serial run and one
+    # with single-rank groups agree
+    return {name: comm.get_size(name) for name in comm.get_model_comm_names() if comm.get_size(name) > 1}
+
+
+def gather_extra_states(model: nn.Module, state_dict: OrderedDict) -> OrderedDict:
+    """Store the extra states of the modules of every model rank in ``state_dict``, in place.
+
+    The extra state of a module can describe the part of the model and of the grid of its model rank, the weight
+    shard of a matmul rank or the activations of a spatial rank, and is then assumed to be the same on the data-
+    parallel ranks. Each key thus stores the states of all model ranks, under their model rank, and the decomposition
+    they were written in; :func:`scatter_extra_states` picks a rank's on restore. The FP8 scaling state under delayed
+    scaling is the same on all ranks, as the trainers reduce the amaxes over all of them, see
+    :class:`~makani.utils.precision.AutocastManager`.
+
+    ..note::
+        This is a collective over the model group when it has more than one rank.
+    """
+    local = OrderedDict((key, value) for key, value in model.state_dict().items() if is_extra_state(key))
+    if not local:
+        return state_dict
+    local = OrderedDict((key, value.cpu() if torch.is_tensor(value) else value) for key, value in local.items())
+
+    if comm.get_size("model") > 1:
+        gathered = [None for _ in range(comm.get_size("model"))]
+        dist.all_gather_object(gathered, local, group=comm.get_group("model"))
+    else:
+        gathered = [local]
+
+    layout = _model_layout()
+    for key in local:
+        state_dict[key] = {"model_ranks": [states[key] for states in gathered], "layout": layout}
+
+    return state_dict
+
+
+def scatter_extra_states(state_dict: OrderedDict) -> OrderedDict:
+    """Pick this rank's extra states out of what :func:`gather_extra_states` stored, in place.
+
+    The states of a checkpoint written in another decomposition of the model do not describe the parts of this one,
+    so they are dropped with a warning: the modules start their state afresh, e.g. the FP8 layers their amax history.
+    Extra states stored as they are, by earlier checkpoints, are left as they are.
+    """
+    layout = _model_layout()
+    dropped = []
+    for key in [key for key in state_dict.keys() if is_extra_state(key)]:
+        value = state_dict[key]
+        if not (isinstance(value, dict) and "model_ranks" in value):
+            continue
+        if value["layout"] == layout:
+            state_dict[key] = value["model_ranks"][comm.get_rank("model")]
+        else:
+            del state_dict[key]
+            dropped.append(key)
+            stored_layout = value["layout"]
+
+    if dropped:
+        warn(
+            f"the checkpoint stores the extra states of {len(dropped)} modules, such as the FP8 scaling state, for the "
+            f"model decomposition {stored_layout}, the current run has {layout}: they start afresh"
+        )
+
+    return state_dict
+
+
 def gather_model_state_dict(model: nn.Module, grads: Optional[bool] = False) -> OrderedDict:
     # precondition: every rank in the model group must issue the SAME ordered
     # sequence of gather_uneven calls, otherwise the all_gather inside
@@ -454,6 +528,9 @@ def gather_model_state_dict(model: nn.Module, grads: Optional[bool] = False) -> 
                 grad = None
 
             state_dict[name + ".grad"] = grad
+
+    # the extra states of the modules, which are no parameters
+    gather_extra_states(model, state_dict)
 
     return state_dict
 

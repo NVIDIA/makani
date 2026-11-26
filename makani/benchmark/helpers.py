@@ -45,6 +45,8 @@ import torch
 import torch.distributed as dist
 
 from makani.distributed import comm
+from makani.utils.precision import parse_precision_mode
+from makani.utils.te_helpers import TE_AVAILABLE
 
 
 def summarize_timings(times_ms: Sequence[float]) -> Dict[str, Any]:
@@ -141,6 +143,64 @@ def check_decomposition():
         )
 
     return dec
+
+
+class FP8LayerUsage:
+    """Which FP8 engines of a model's pointwise layers run in FP8, counted over the measured pass.
+
+    The pointwise layers are those with an ``fp8_gemm``: :class:`~makani.models.common.pointwise_conv.PointwiseConv2d`
+    and :class:`~makani.models.common.distributed.matmul.DistributedMatmul`. A layer has an engine under an FP8
+    ``amp_mode`` unless it is built without one, as the encoder and the decoder are, or its channels are not eligible,
+    see :func:`~makani.models.common.pointwise_conv.make_fp8_gemm_if`. An engine runs only inside an enabled FP8 context
+    and on an eligible input, see :func:`~makani.models.common.pointwise_conv.fp8_pointwise`; otherwise its layer
+    computes in the precision of the autocast. Each engine gets a forward hook, which therefore fires only when the
+    layer runs in FP8, and removes itself on its first call, so that the steps after it pay nothing.
+    """
+
+    def __init__(self, model: torch.nn.Module):
+        layers = [module for module in model.modules() if hasattr(module, "fp8_gemm")]
+        engines = [layer.fp8_gemm for layer in layers if layer.fp8_gemm is not None]
+
+        self.num_layers = len(layers)
+        self.num_engines = len(engines)
+        self.ran = set()
+        self.handles = [engine.register_forward_hook(self._make_hook(index)) for index, engine in enumerate(engines)]
+
+    def _make_hook(self, index: int):
+        def hook(module, args, output):
+            self.ran.add(index)
+            self.handles[index].remove()
+
+        return hook
+
+    def record(self) -> Dict[str, int]:
+        """The counts, after the hooks still in place are removed."""
+        for handle in self.handles:
+            handle.remove()
+
+        return {"pointwise_layers": self.num_layers, "fp8_layers": self.num_engines, "fp8_layers_run": len(self.ran)}
+
+
+def get_transformer_engine_version() -> Optional[str]:
+    """The version of transformer_engine, None if it is not installed."""
+    if not TE_AVAILABLE:
+        return None
+
+    import transformer_engine
+
+    return getattr(transformer_engine, "__version__", None)
+
+
+def get_precision_record(amp_mode: Optional[str], fp8_usage: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
+    """The precision of a run: the amp mode, its FP8 recipe (None without one), and the counts of
+    :meth:`FP8LayerUsage.record`."""
+    amp_mode = amp_mode or "none"
+    _, fp8_recipe = parse_precision_mode(amp_mode)
+
+    record = {"amp_mode": amp_mode, "fp8_recipe": fp8_recipe}
+    record.update(fp8_usage or {})
+
+    return record
 
 
 def _run_git(args: List[str]) -> Optional[str]:
@@ -265,6 +325,7 @@ def get_environment_record(gpu_label: Optional[str] = None) -> Dict[str, Any]:
         "torch_version": torch.__version__,
         "cuda_version": torch.version.cuda,
         "cudnn_version": torch.backends.cudnn.version() if torch.backends.cudnn.is_available() else None,
+        "transformer_engine_version": get_transformer_engine_version(),
         "git_commit": _run_git(["rev-parse", "HEAD"]),
         "git_dirty": bool(_run_git(["status", "--porcelain", "--untracked-files=no"])),
         # CPU affinity, because a run launched under a pinning wrapper (bindpcie and friends)
@@ -577,6 +638,18 @@ def append_record(path: str, record: Dict[str, Any]):
         f.write(json.dumps(record, default=str) + "\n")
 
 
+def _format_precision(precision: Dict[str, Any]) -> str:
+    """The amp mode, and for an FP8 recipe how many pointwise layers ran in FP8."""
+    text = f"amp={precision.get('amp_mode')}"
+    if precision.get("fp8_recipe") is not None:
+        text += (
+            f", {precision.get('fp8_layers_run')} of {precision.get('pointwise_layers')} pointwise layers in FP8 "
+            f"({precision.get('fp8_layers')} with an FP8 engine)"
+        )
+
+    return text
+
+
 def format_record(record: Dict[str, Any]) -> str:
     """Human-readable one-run summary for the log."""
     dec = record["decomposition"]
@@ -595,6 +668,7 @@ def format_record(record: Dict[str, Any]) -> str:
         f"{record['model']['n_in_channels']} in / {record['model']['n_out_channels']} out",
         f"  decomposition       : h={dec['h']} w={dec['w']} matmul={dec['matmul']} "
         f"ensemble={dec['ensemble']} batch={dec['batch']} (world={dec['world_size']})",
+        f"  precision           : {_format_precision(record.get('precision') or {})}",
         f"  global batch size   : {batching['global_batch_size']} " f"(local {batching['local_batch_size']})",
         f"  ensemble size       : {batching['ensemble_size']} (local {batching['local_ensemble_size']})",
         f"  steps               : {timing['num_steps']} measured, {record['benchmark']['warmup_steps']} warmup",

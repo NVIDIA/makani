@@ -25,6 +25,13 @@ from the ``MAKANI_*_PARALLEL_SIZE`` environment variables either way.
 
     python scripts/benchmark/sweep.py --gpus 8 --ensemble-size 4 \\
         --yaml-config config/fourcastnet3.yaml --config fcn3_sc2_edim45_layers10_pretrain1
+
+Several ``--amp-mode`` values give one run per mode and decomposition, e.g. bf16 against FP8, which
+``report.py --across-precision`` then tabulates side by side:
+
+    python scripts/benchmark/sweep.py --gpus 8 --ensemble-size 4 \\
+        --yaml-config config/fourcastnet3.yaml --config fcn3_sc2_edim45_layers10_pretrain1 \\
+        --amp-mode bf16 bf16-fp8_delayed bf16-fp8_current
 """
 
 import sys
@@ -74,7 +81,13 @@ def main():
     parser.add_argument("--global-batch-size", type=int, default=None, help="Overrides the config's batch size.")
     parser.add_argument("--benchmark-steps", type=int, default=20)
     parser.add_argument("--benchmark-warmup-steps", type=int, default=5)
-    parser.add_argument("--amp-mode", default=None)
+    parser.add_argument(
+        "--amp-mode",
+        default=None,
+        nargs="+",
+        help="Precision modes, one run per mode and decomposition, e.g. 'bf16 bf16-fp8_delayed'. The config's "
+        "amp_mode when omitted.",
+    )
     parser.add_argument("--jit-mode", default=None)
     parser.add_argument("--run-tag", default=None)
     parser.add_argument("--output-dir", default=None)
@@ -119,7 +132,9 @@ def main():
 
     launcher = args.launcher.format(gpus=args.gpus)
 
-    for dec in decompositions:
+    amp_modes = args.amp_mode if args.amp_mode is not None else [None]
+
+    for dec, amp_mode in ((dec, amp_mode) for dec in decompositions for amp_mode in amp_modes):
         cmd = [
             *shlex.split(launcher),
             "python",
@@ -139,8 +154,8 @@ def main():
             f"--benchmark_warmup_steps={args.benchmark_warmup_steps}",
         ]
 
-        if args.amp_mode is not None:
-            cmd.append(f"--amp_mode={args.amp_mode}")
+        if amp_mode is not None:
+            cmd.append(f"--amp_mode={amp_mode}")
         if args.jit_mode is not None:
             cmd.append(f"--jit_mode={args.jit_mode}")
         if args.run_tag is not None:

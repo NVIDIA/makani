@@ -18,6 +18,10 @@ import sys
 import json
 import tempfile
 import unittest
+from parameterized import parameterized
+
+import torch
+import torch.nn as nn
 
 sys.path.append(os.path.join(os.path.dirname(os.path.dirname(__file__)), "scripts", "benchmark"))
 
@@ -25,9 +29,15 @@ from makani.benchmark import helpers as benchmark_utils
 from makani.utils.profiling import StepTimer
 from makani.data.parse_dataset_metadata import parse_dataset_metadata
 
-from .testutils import get_default_parameters
+from makani.models import model_registry
+from makani.models.common.pointwise_conv import PointwiseConv2d
+from makani.utils.precision import AutocastManager, fp8_disabled
+
+from .testutils import get_default_parameters, single_step_rollout
+from .test_fp8 import requires_fp8, _model_params
 
 import sweep  # noqa: E402  (scripts/benchmark is appended to sys.path above)
+import report  # noqa: E402
 
 
 class TestStepTimer(unittest.TestCase):
@@ -187,6 +197,131 @@ class TestGeneratedMetadata(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             benchmark_utils.generate_metadata_json(params, os.path.join(self.tmpdir.name, "m.json"))
+
+
+class _Engine(nn.Module):
+    def forward(self, x, weight):
+        return x
+
+
+class _Layer(nn.Module):
+    """A pointwise layer as the benchmark sees it: an fp8_gemm attribute, an engine or None."""
+
+    def __init__(self, engine, run_engine=True):
+        super().__init__()
+        self.fp8_gemm = engine
+        self.run_engine = run_engine
+
+    def forward(self, x):
+        # an engine that does not run, as in an fp8_disabled region or on an ineligible input
+        return self.fp8_gemm(x, None) if (self.fp8_gemm is not None and self.run_engine) else x
+
+
+class TestPrecision(unittest.TestCase):
+    def test_fp8_layer_usage_counts_the_engines_that_run(self):
+        model = nn.Sequential(_Layer(_Engine()), _Layer(_Engine(), run_engine=False), _Layer(None), nn.Identity())
+        usage = benchmark_utils.FP8LayerUsage(model)
+
+        x = torch.zeros(1)
+        for _ in range(3):
+            model(x)
+
+        self.assertEqual(usage.record(), {"pointwise_layers": 3, "fp8_layers": 2, "fp8_layers_run": 1})
+        # the hooks remove themselves
+        self.assertTrue(all(len(layer.fp8_gemm._forward_hooks) == 0 for layer in model[:2]))
+
+    def test_precision_record_names_the_recipe(self):
+        record = benchmark_utils.get_precision_record("bf16-fp8_delayed", {"fp8_layers_run": 4})
+        self.assertEqual(record, {"amp_mode": "bf16-fp8_delayed", "fp8_recipe": "fp8_delayed", "fp8_layers_run": 4})
+
+        self.assertIsNone(benchmark_utils.get_precision_record("bf16")["fp8_recipe"])
+        self.assertEqual(benchmark_utils.get_precision_record(None)["amp_mode"], "none")
+
+    def test_precision_changes_the_hash(self):
+        params = get_default_parameters()
+        params.amp_mode = "bf16"
+        bf16 = benchmark_utils.hash_dict(benchmark_utils.get_comparability_keys(params))
+        params.amp_mode = "bf16-fp8_delayed"
+        fp8 = benchmark_utils.hash_dict(benchmark_utils.get_comparability_keys(params))
+
+        self.assertNotEqual(bf16, fp8)
+
+
+@requires_fp8
+class TestPrecisionInFP8(unittest.TestCase):
+    """The counts on FP8 layers of transformer_engine, which need FP8 hardware."""
+
+    def setUp(self):
+        self.device = torch.device("cuda")
+
+    @parameterized.expand([["bf16-fp8_delayed"], ["bf16-fp8_current"]], skip_on_empty=True)
+    def test_fp8_layer_usage_counts_the_layers_in_fp8(self, amp_mode):
+        """Of three layers with an engine, one runs in FP8: one runs in fp8_disabled, one on an input on the CPU,
+        which is not eligible; a layer with 24 channels has no engine."""
+        fp8, disabled, cpu = [PointwiseConv2d(32, 32, 1, fp8=True) for _ in range(3)]
+        no_engine = PointwiseConv2d(24, 32, 1, fp8=True)
+        model = nn.ModuleList([fp8, disabled, cpu, no_engine])
+        fp8.to(self.device), disabled.to(self.device), no_engine.to(self.device)
+        self.assertIsNone(no_engine.fp8_gemm)
+
+        usage = benchmark_utils.FP8LayerUsage(model)
+        x = torch.randn(2, 32, 16, 16, device=self.device)
+        with AutocastManager(amp_mode)():
+            fp8(x)
+            with fp8_disabled():
+                disabled(x)
+            cpu(x.cpu())
+            no_engine(torch.randn(2, 24, 16, 16, device=self.device))
+
+        self.assertEqual(usage.record(), {"pointwise_layers": 4, "fp8_layers": 3, "fp8_layers_run": 1})
+
+    @parameterized.expand([["bf16-fp8_delayed"], ["bf16-fp8_current"]], skip_on_empty=True)
+    def test_model_runs_all_its_engines_in_fp8(self, amp_mode):
+        """A training step of SFNO runs every engine in FP8; the encoder and decoder layers have none."""
+        params = _model_params(amp_mode)
+        model = model_registry.get_model(params).to(self.device)
+        usage = benchmark_utils.FP8LayerUsage(model)
+
+        x = torch.randn(2, params.N_in_channels, 36, 72, device=self.device)
+        with AutocastManager(amp_mode)():
+            out = model(single_step_rollout(x.unsqueeze(1)))
+        out.float().square().mean().backward()
+
+        record = benchmark_utils.get_precision_record(amp_mode, usage.record())
+        self.assertGreater(record["fp8_layers"], 0)
+        self.assertEqual(record["fp8_layers_run"], record["fp8_layers"])
+        self.assertGreater(record["pointwise_layers"], record["fp8_layers"])
+        self.assertEqual(record["fp8_recipe"], amp_mode.split("-")[1])
+
+
+class TestReportAcrossPrecision(unittest.TestCase):
+    @staticmethod
+    def _record(amp_mode, spec, median_ms):
+        return {
+            "config": {"comparability_keys": {"nettype": "SFNO", "amp_mode": amp_mode}},
+            "model": {"amp_mode": amp_mode},
+            "precision": {"amp_mode": amp_mode, "fp8_recipe": "fp8_delayed" if "fp8" in amp_mode else None},
+            "decomposition": {"spec": spec, "h": 1, "w": 1, "matmul": 1, "ensemble": 1, "batch": 1},
+            "batching": {"local_batch_size": 1, "local_ensemble_size": 1},
+            "timing": {"median_ms": median_ms, "p10_ms": median_ms, "p90_ms": median_ms},
+            "throughput": {"samples_per_second": 1000.0 / median_ms},
+        }
+
+    def test_runs_differing_in_precision_share_a_group(self):
+        bf16, fp8 = self._record("bf16", "a", 10.0), self._record("bf16-fp8_delayed", "a", 8.0)
+        self.assertEqual(report.precision_free_hash(bf16), report.precision_free_hash(fp8))
+
+        other = self._record("bf16", "a", 10.0)
+        other["config"]["comparability_keys"]["nettype"] = "FCN3"
+        self.assertNotEqual(report.precision_free_hash(bf16), report.precision_free_hash(other))
+
+    def test_speedup_over_the_reference_precision(self):
+        records = [self._record("bf16", "a", 10.0), self._record("bf16-fp8_delayed", "a", 8.0)]
+        references = report.reference_times(records, "bf16")
+
+        rows = [report.record_row(r, reference_ms=references.get(r["decomposition"]["spec"])) for r in records]
+        self.assertEqual([row["vs_reference"] for row in rows], [1.0, 1.25])
+        self.assertEqual([row["amp"] for row in rows], ["bf16", "bf16-fp8_delayed"])
 
 
 class TestSweepEnumeration(unittest.TestCase):

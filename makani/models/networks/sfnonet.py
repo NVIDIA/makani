@@ -16,7 +16,9 @@
 import math
 import torch
 import torch.nn as nn
-from torch.utils.checkpoint import checkpoint
+
+# keeps the FP8 layers in FP8 in the recompute
+from makani.models.common.activation_checkpoint import checkpoint
 from torch import amp
 
 from functools import partial

@@ -33,9 +33,13 @@ from makani.distributed import comm
 from makani.utils.grids import make_grid, sht_grid
 from makani.driver import checkpoint as checkpoint_helpers
 
+from makani.utils.precision import AutocastManager, _fp8_global_state_manager
+from makani.utils.te_helpers import TE_AVAILABLE
 
-# distributed mlp + transformer engine availability flag
-from makani.models.common.distributed.mlp import DistributedMLP, _TE_AVAILABLE
+# mlps
+from makani.models.common.mlp import MLP
+from makani.models.common.distributed.mlp import DistributedMLP
+from makani.models.common.pointwise_conv import fp8_layers
 
 # layer norm imports
 from makani.models.common.layer_norm import GeometricInstanceNormS2
@@ -44,6 +48,14 @@ from makani.models.common.distributed.layer_norm import DistributedGeometricInst
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 from .distributed_helpers import _init_grid, _split_helper, _gather_helper, reduce_success, teardown_comms
 from ..testutils import disable_tf32, set_seed, compare_tensors
+
+
+def _fp8_available() -> bool:
+    """Whether transformer_engine is installed and the GPU computes in FP8."""
+    if not (TE_AVAILABLE and torch.cuda.is_available()):
+        return False
+    available = _fp8_global_state_manager().is_fp8_available()
+    return available[0] if isinstance(available, tuple) else bool(available)
 
 
 class TestDistributedLayers(unittest.TestCase):
@@ -1105,139 +1117,118 @@ class TestDistributedLayers(unittest.TestCase):
 
     @parameterized.expand(
         [
-            # nlat, nlon, batch, channels, hidden, input_format, bias, amp_mode, atol, rtol
-            [32, 64, 2, 16, 64, "nchw", True, "bf16", 4e-2, 4e-2],
-            [32, 64, 2, 16, 64, "nchw", True, "fp16", 2e-2, 2e-2],
-            [32, 64, 2, 16, 64, "nchw", False, "bf16", 4e-2, 4e-2],
-            [1, 64, 2, 16, 64, "traditional", True, "bf16", 4e-2, 4e-2],
-            [1, 64, 2, 16, 64, "traditional", True, "fp16", 2e-2, 2e-2],
+            # over 2 x 2 ranks, the parts of 17 x 24 points are padded to a multiple of 16, those of 16 x 24 are not;
+            # the serial grid of 1584 points is not either
+            [33, 48, 2, 64, 128, "bf16-fp8_delayed"],
+            [33, 48, 2, 64, 128, "bf16-fp8_current"],
+            # 17 x 30 points are padded on any decomposition, a single rank as well
+            [17, 30, 2, 64, 128, "bf16-fp8_delayed"],
         ],
         skip_on_empty=True,
     )
     # below the expansion, so that every generated case carries the skip, not only the original function
-    @unittest.skipUnless(_TE_AVAILABLE and torch.cuda.is_available(), "transformer_engine (with CUDA) is not available")
-    def test_distributed_mlp_te(
-        self, nlat, nlon, batch_size, num_chan, hidden_dim, input_format, bias, amp_mode, atol, rtol, verbose=False
-    ):
-        """The transformer-engine MLP path must match the native distributed MLP under
-        the same (reduced) precision.
-
-        ``use_te`` only swaps the local GEMM for a ``te.Linear`` while the column/row
-        tensor-parallel communication and the bias-after-reduce semantics stay in
-        makani. We build the TE and native ``DistributedMLP`` with identical weights and
-        run both forward passes inside the SAME ``autocast(bf16/fp16)`` context, then
-        compare rank-locally: output, input grad and per-layer weight grad must agree.
-        Running both sides at the same precision is the fair comparison (te.Linear has no
-        fp32 compute path); the residual gap is the te.Linear-vs-conv2d/linear kernel
-        difference at bf16/fp16, hence the loose, precision-appropriate tolerances. A
-        wiring bug (bad transpose/bias/reduction) would produce O(1) errors instead.
+    @unittest.skipUnless(_fp8_available(), "transformer_engine with an FP8 GPU is not available")
+    def test_distributed_mlp_fp8(self, nlat, nlon, batch_size, num_chan, hidden_dim, amp_mode, steps=3, verbose=False):
         """
-        # column-parallel fc1 shards the hidden dim over the matmul group
+        The distributed MLP in FP8 against the serial one, on grids whose parts the FP8 GEMMs pad.
+
+        All ranks run the same layers in FP8, whether their part of the grid is padded or not, as the amax
+        reduction of delayed scaling over all ranks needs: the test finishes, rather than hangs.
+
+        FP8 rounds to a few percent, so the tensors are compared by their relative error over the whole tensor, not
+        element by element: the distributed MLP in FP8 is as close to the serial one in bf16 as the serial one in FP8
+        is. Under delayed scaling the scales are those of the serial layers, as the amaxes are reduced over all
+        ranks, so the distributed MLP computes what the serial one does in FP8, up to the bf16 rounding of the
+        partial sums over the matmul ranks. Under current scaling each rank scales its own part, the shard of a
+        matmul rank and the part of the grid of a spatial rank, which rounds to other FP8 values than the serial
+        layers do, as accurately.
+        """
         if hidden_dim % comm.get_size("matmul") != 0:
             self.skipTest(f"hidden_dim {hidden_dim} not divisible by matmul size {comm.get_size('matmul')}")
-
-        B, C, H, W = batch_size, num_chan, nlat, nlon
-        amp_dtype = torch.bfloat16 if amp_mode == "bf16" else torch.float16
+        delayed = amp_mode == "bf16-fp8_delayed"
 
         set_seed(333)
+        with fp8_layers(True):
+            with comm.serial():
+                mlp_full = MLP(num_chan, hidden_dim, num_chan, act_layer=nn.GELU, input_format="nchw").to(self.device)
+            mlp_dist = DistributedMLP(
+                num_chan, hidden_dim, num_chan, input_format="nchw", comm_name="matmul", act_layer=nn.GELU
+            ).to(self.device)
+        for mlp in [mlp_full, mlp_dist]:
+            self.assertTrue(all(fc.fp8_gemm is not None for fc in [mlp.fc1, mlp.fc2]))
 
-        common = dict(
-            in_features=C,
-            hidden_features=hidden_dim,
-            out_features=C,
-            output_bias=bias,
-            input_format=input_format,
-            act_layer=nn.GELU,
-            drop_rate=0.0,  # this is important, otherwise RNG differences will spoil the test
-            drop_type="iid",
-            comm_name="matmul",
-        )
-        mlp_native = DistributedMLP(**common, use_te=False).to(self.device)
-        mlp_te = DistributedMLP(**common, use_te=True).to(self.device)
-
-        # copy the native weights/biases into the te module so the only difference is the
-        # GEMM implementation. params stay fp32; autocast casts them on the fly. the te
-        # path runs channels-last ("traditional"), so its weight is 2D (out_local, in_local)
-        # and its bias is 1D (out_local,); the native nchw weight/bias carry trailing
-        # singleton dims -- reshape into the target shape on copy.
+        # the serial weights, split over the matmul ranks
+        weights = OrderedDict((name, param.detach()) for name, param in mlp_full.named_parameters())
         with torch.no_grad():
-            mlp_te.fc1.weight.copy_(mlp_native.fc1.weight.reshape(mlp_te.fc1.weight.shape))
-            mlp_te.fc2.weight.copy_(mlp_native.fc2.weight.reshape(mlp_te.fc2.weight.shape))
-            if mlp_native.fc1.bias is not None:
-                mlp_te.fc1.bias.copy_(mlp_native.fc1.bias.reshape(mlp_te.fc1.bias.shape))
-            if mlp_native.fc2.bias is not None:
-                mlp_te.fc2.bias.copy_(mlp_native.fc2.bias.reshape(mlp_te.fc2.bias.shape))
+            mlp_dist.load_state_dict(checkpoint_helpers.scatter_model_state_dict(mlp_dist, weights), strict=False)
 
-        # identical input to both modules
-        if input_format == "nchw":
-            inp = torch.randn((B, C, H, W), dtype=torch.float32, device=self.device)
-        else:
-            inp = torch.randn((B, H * W, C), dtype=torch.float32, device=self.device)
+        def run(mlp, inp, ograd, mode):
+            # each in its own autocast, whose first FP8 module updates the scales of all in its backward
+            inp = inp.clone().requires_grad_(True)
+            mlp.zero_grad()
+            with AutocastManager(mode)():
+                out = mlp(inp)
+            out.backward(ograd)
+            return out.float(), inp.grad
 
-        inp_native = inp.clone().requires_grad_(True)
-        inp_te = inp.clone().requires_grad_(True)
+        def relative_error(tensor, reference):
+            return ((tensor.float() - reference.float()).norm() / reference.float().norm()).item()
 
-        # FWD under a shared bf16/fp16 autocast so both GEMMs run at the same precision
-        with torch.autocast(device_type="cuda", dtype=amp_dtype):
-            out_native = mlp_native(inp_native)
-        with torch.autocast(device_type="cuda", dtype=amp_dtype):
-            out_te = mlp_te(inp_te)
+        # the bf16 rounding of what the ranks reduce, their partial sums over the matmul ranks and over their parts
+        # of the grid: a few 1e-3, also where FP8 does not enter and the serial MLP in FP8 computes what it computes
+        # in bf16, as for the gradient of the output bias, the sum of the output gradient
+        rounding = 1e-2
 
-        # BWD with identical upstream grad (backward runs outside autocast)
-        ograd = torch.randn_like(out_native)
-        out_native.backward(ograd)
-        out_te.backward(ograd.clone())
+        def check(desc, dist_fp8, full_fp8, full_bf16):
+            error, error_serial = relative_error(dist_fp8, full_bf16), relative_error(full_fp8, full_bf16)
+            ok = error <= 1.25 * error_serial + rounding
+            if delayed:
+                ok = ok and relative_error(dist_fp8, full_fp8) <= rounding
+            if verbose:
+                print(f"{desc}: {error:.3e} from bf16 (serial FP8 {error_serial:.3e})")
+            with self.subTest(desc=desc):
+                self.assertTrue(reduce_success(ok, self.device), desc)
 
-        # cast to fp32 for the comparison (grads are fp32 already; outputs are low precision)
-        with self.subTest(desc="te output"):
-            self.assertTrue(
-                reduce_success(
-                    compare_tensors("te output", out_te.float(), out_native.float(), atol, rtol, verbose=verbose),
-                    self.device,
-                )
+        for step in range(steps):
+            inp_full = torch.randn(batch_size, num_chan, nlat, nlon, device=self.device) * (1 + step)
+            ograd_full = torch.randn(batch_size, num_chan, nlat, nlon, device=self.device)
+
+            # the serial MLP in bf16, outside the FP8 context, and in FP8
+            out_bf16, igrad_bf16 = run(mlp_full, inp_full, ograd_full, "bf16")
+            grads_bf16 = {name: param.grad.clone() for name, param in mlp_full.named_parameters()}
+            out_full, igrad_full = run(mlp_full, inp_full, ograd_full, amp_mode)
+            out_local, igrad_local = run(
+                mlp_dist, self._split_helper(inp_full), self._split_helper(ograd_full), amp_mode
             )
 
-        with self.subTest(desc="te input gradients"):
-            self.assertTrue(
-                reduce_success(
-                    compare_tensors("te input gradients", inp_te.grad, inp_native.grad, atol, rtol, verbose=verbose),
-                    self.device,
-                )
-            )
+            with self.subTest(desc="FP8 on all ranks", step=step):
+                ran = all(fc.fp8_gemm.forwarded_at_least_once for fc in [mlp_dist.fc1, mlp_dist.fc2])
+                self.assertTrue(reduce_success(ran, self.device))
 
-        with self.subTest(desc="te fc1 weight gradients"):
-            te_wgrad = mlp_te.fc1.weight.grad.reshape(mlp_native.fc1.weight.grad.shape)
-            self.assertTrue(
-                reduce_success(
-                    compare_tensors(
-                        "te fc1 weight gradients", te_wgrad, mlp_native.fc1.weight.grad, atol, rtol, verbose=verbose
-                    ),
-                    self.device,
-                )
-            )
+            check(f"output, step {step}", self._gather_helper(out_local), out_full, out_bf16)
+            check(f"input gradients, step {step}", self._gather_helper(igrad_local), igrad_full, igrad_bf16)
 
-        with self.subTest(desc="te fc2 weight gradients"):
-            te_wgrad = mlp_te.fc2.weight.grad.reshape(mlp_native.fc2.weight.grad.shape)
-            self.assertTrue(
-                reduce_success(
-                    compare_tensors(
-                        "te fc2 weight gradients", te_wgrad, mlp_native.fc2.weight.grad, atol, rtol, verbose=verbose
-                    ),
-                    self.device,
-                )
-            )
+            if delayed:
+                for name in ["fc1", "fc2"]:
+                    for direction in ["scaling_fwd", "scaling_bwd"]:
+                        meta_dist = getattr(mlp_dist, name).fp8_gemm.fp8_meta[direction]
+                        meta_full = getattr(mlp_full, name).fp8_gemm.fp8_meta[direction]
+                        with self.subTest(desc=f"{name} {direction} scales", step=step):
+                            self.assertTrue(
+                                reduce_success(
+                                    compare_tensors(
+                                        f"{name} {direction} scales", meta_dist.scale, meta_full.scale, 1e-2, 1e-2
+                                    ),
+                                    self.device,
+                                )
+                            )
 
-        if bias:
-            with self.subTest(desc="te fc2 bias gradients"):
-                te_bgrad = mlp_te.fc2.bias.grad.reshape(mlp_native.fc2.bias.grad.shape)
-                self.assertTrue(
-                    reduce_success(
-                        compare_tensors(
-                            "te fc2 bias gradients", te_bgrad, mlp_native.fc2.bias.grad, atol, rtol, verbose=verbose
-                        ),
-                        self.device,
-                    )
-                )
+        # the weight gradients of the last step, summed over the spatial ranks and gathered over the matmul ranks
+        for param in mlp_dist.parameters():
+            param.grad = self._sum_gradient(param.grad, "spatial")
+        grads = checkpoint_helpers.gather_model_state_dict(mlp_dist, grads=True)
+        for name, param in mlp_full.named_parameters():
+            check(f"{name} gradient", grads[name + ".grad"], param.grad.cpu(), grads_bf16[name].cpu())
 
 
 if __name__ == "__main__":

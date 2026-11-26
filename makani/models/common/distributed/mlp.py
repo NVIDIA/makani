@@ -19,17 +19,15 @@ import math
 
 import torch
 import torch.nn as nn
-from torch.utils.checkpoint import checkpoint
+
+# keeps the FP8 layers in FP8 in the recompute
+from makani.models.common.activation_checkpoint import checkpoint
 
 from makani.distributed import comm
 from makani.models.common.mlp import upgrade_mlp_state_dict
 from makani.models.common.distributed.matmul import DistributedMatmul
+from makani.utils.precision import fp8_disabled
 from makani.models.common.pointwise_conv import pointwise_conv2d
-
-# transformer engine is an optional dependency: it is only used for the
-# (optional) FP8/FP4 path and must not be required for import. availability is
-# checked without importing it; the module is imported lazily where used.
-from makani.utils.te_helpers import TE_AVAILABLE as _TE_AVAILABLE
 
 
 # distributed encoder/decoder
@@ -74,8 +72,6 @@ class DistributedEncoderDecoder(nn.Module):
         ``"nchw"`` (default) or ``"traditional"``.
     comm_name : str, optional
         Communicator group to shard over, by default ``"matmul"``.
-    use_te : bool, optional
-        Use TransformerEngine linears for the local GEMMs, by default ``False``.
 
     Raises
     ------
@@ -93,7 +89,6 @@ class DistributedEncoderDecoder(nn.Module):
         gain=1.0,
         input_format="nchw",
         comm_name="matmul",
-        use_te=False,
     ):
         super(DistributedEncoderDecoder, self).__init__()
 
@@ -124,7 +119,7 @@ class DistributedEncoderDecoder(nn.Module):
                     comm_name=comm_name,
                     parallel_mode=modes[i],
                     bias=True,
-                    use_te=use_te,
+                    fp8=False,
                 )
             )
 
@@ -146,7 +141,7 @@ class DistributedEncoderDecoder(nn.Module):
                 comm_name=comm_name,
                 parallel_mode=modes[-1],
                 bias=False,
-                use_te=use_te,
+                fp8=False,
             )
         )
 
@@ -174,7 +169,9 @@ class DistributedEncoderDecoder(nn.Module):
         torch.Tensor
             Replicated output with ``output_dim`` features.
         """
-        return self.fwd(x)
+        # encoders and decoders stay in the precision of the surrounding autocast, without FP8
+        with fp8_disabled():
+            return self.fwd(x)
 
 
 class DistributedMLP(nn.Module):
@@ -213,10 +210,6 @@ class DistributedMLP(nn.Module):
         activations, by default ``False``.
     gain : float, optional
         Scales the variance of the output layer's initialization, by default ``1.0``.
-    use_te : bool, optional
-        Use TransformerEngine linears for the GEMMs, by default ``False``. On
-        this path the matmuls are built channels-last and the block permutes
-        once at its boundaries rather than around every GEMM.
 
     Raises
     ------
@@ -238,7 +231,6 @@ class DistributedMLP(nn.Module):
         drop_type="iid",
         checkpointing=False,
         gain=1.0,
-        use_te=False,
     ):
         super().__init__()
         self.checkpointing = checkpointing
@@ -251,24 +243,14 @@ class DistributedMLP(nn.Module):
                 "Error, traditional input format and feature dropout cannot be selected simultaneously"
             )
 
-        # TE GEMMs operate on the last (channel) dim. Rather than permuting
-        # nchw<->nhwc around *each* matmul, when the TE path is active we build the
-        # matmuls in "traditional" (channels-last) mode and permute once at the MLP
-        # boundaries (see fwd) -- two permutes for the whole MLP instead of one pair
-        # per matmul. Feature dropout (Dropout2d) drops channels at dim=1 and so
-        # needs the nchw layout, so keep the standard nchw path in that case.
-        self.channels_last = use_te and _TE_AVAILABLE and (input_format == "nchw") and (drop_type != "features")
-        matmul_format = "traditional" if self.channels_last else input_format
-
         # column-parallel: replicated input -> hidden sharded over the matmul group
         self.fc1 = DistributedMatmul(
             in_features,
             hidden_features,
-            input_format=matmul_format,
+            input_format=input_format,
             comm_name=comm_name,
             parallel_mode="column",
             bias=True,
-            use_te=use_te,
         )
 
         # initialize the weights correctly
@@ -280,11 +262,10 @@ class DistributedMLP(nn.Module):
         self.fc2 = DistributedMatmul(
             hidden_features,
             out_features,
-            input_format=matmul_format,
+            input_format=input_format,
             comm_name=comm_name,
             parallel_mode="row",
             bias=output_bias,
-            use_te=use_te,
         )
 
         # gain factor for the output determines the scaling of the output init
@@ -330,12 +311,6 @@ class DistributedMLP(nn.Module):
         torch.Tensor
             Replicated output with ``out_features`` features.
         """
-        # on the TE path the matmuls are channels-last ("traditional"): permute
-        # nchw -> nhwc once here and back at the end, keeping act/iid-dropout
-        # channels-last in between.
-        if self.channels_last:
-            x = x.permute(0, 2, 3, 1).contiguous()
-
         # do the mlp
         # first layer
         x = self.fc1(x)
@@ -345,9 +320,6 @@ class DistributedMLP(nn.Module):
         # second layer
         x = self.fc2(x)
         x = self.drop(x)
-
-        if self.channels_last:
-            x = x.permute(0, 3, 1, 2).contiguous()
 
         return x
 

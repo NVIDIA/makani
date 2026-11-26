@@ -25,15 +25,21 @@ together -- ``--force`` puts them in one table anyway.
 
     python scripts/benchmark/report.py benchmark_results/results.jsonl
     python scripts/benchmark/report.py benchmark_results/results.jsonl --csv table.csv
+
+The precision is part of the comparability hash, so runs in bf16 and in FP8 land in separate tables.
+``--across-precision`` puts them in one, with a column of the speedup of each run over the run of the same
+decomposition in the reference precision, ``--reference-amp`` (bf16 by default):
+
+    python scripts/benchmark/report.py benchmark_results/results.jsonl --across-precision
 """
 
 import os
 import csv
 import sys
 import json
+import hashlib
 import argparse
 from collections import defaultdict
-
 
 COLUMNS = [
     ("spec", "decomposition"),
@@ -47,11 +53,14 @@ COLUMNS = [
     ("median_ms", "step [ms]"),
     ("p10_ms", "p10 [ms]"),
     ("p90_ms", "p90 [ms]"),
+    ("amp", "amp"),
+    ("fp8", "fp8 layers"),
     ("samples_per_s", "samples/s"),
     ("mem_max_gb", "peak max [GiB]"),
     ("mem_mean_gb", "peak mean [GiB]"),
     ("dev_max_gb", "device max [GiB]"),
     ("speedup", "speedup"),
+    ("vs_reference", "vs ref amp"),
     ("gpu", "gpu"),
     ("cpu", "cpu"),
 ]
@@ -135,7 +144,27 @@ def _memory_columns(memory):
     }
 
 
-def record_row(record, baseline_ms=None):
+def _amp_mode(record):
+    return (record.get("model") or {}).get("amp_mode") or "none"
+
+
+def _fp8_column(precision):
+    """The pointwise layers that ran in FP8, of all of them, for a run with an FP8 recipe."""
+    if not precision or precision.get("fp8_recipe") is None:
+        return None
+
+    return f"{precision.get('fp8_layers_run')}/{precision.get('pointwise_layers')}"
+
+
+def precision_free_hash(record):
+    """The comparability hash without the precision, to group runs that differ only in their amp mode."""
+    keys = dict(record["config"].get("comparability_keys") or {})
+    keys.pop("amp_mode", None)
+
+    return hashlib.sha256(json.dumps(keys, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
+
+
+def record_row(record, baseline_ms=None, reference_ms=None):
     dec = record["decomposition"]
     batching = record["batching"]
     timing = record["timing"]
@@ -152,6 +181,8 @@ def record_row(record, baseline_ms=None):
         "median_ms": round(timing["median_ms"], 1),
         "p10_ms": round(timing["p10_ms"], 1),
         "p90_ms": round(timing["p90_ms"], 1),
+        "amp": _amp_mode(record),
+        "fp8": _fp8_column(record.get("precision")),
         "samples_per_s": round(record["throughput"]["samples_per_second"], 2),
         **_memory_columns(record.get("memory") or {}),
         **_device_columns(record.get("environment") or {}),
@@ -161,6 +192,9 @@ def record_row(record, baseline_ms=None):
     # decomposition made the step faster than the baseline layout did, below 1 that the
     # added communication cost more than the split saved.
     row["speedup"] = round(baseline_ms / timing["median_ms"], 3) if baseline_ms else None
+
+    # step time of the same decomposition in the reference precision over this one, with --across-precision
+    row["vs_reference"] = round(reference_ms / timing["median_ms"], 3) if reference_ms else None
 
     return row
 
@@ -203,7 +237,8 @@ def format_markdown(rows):
     return "\n".join(lines)
 
 
-def describe_group(record):
+def describe_group(record, amp=None):
+    """The configuration the runs of a group share; ``amp`` names the amp modes of a group across precisions."""
     config = record["config"]
     model = record["model"]
 
@@ -214,8 +249,19 @@ def describe_group(record):
         f"{config['yaml_path']}:{config['config_name']}  [{record['mode']}]  {dataset}"
         f"{model['nettype']} {model['img_shape_x']}x{model['img_shape_y']}x{model['n_in_channels']}, "
         f"global batch {record['batching']['global_batch_size']}, ensemble {record['batching']['ensemble_size']}, "
-        f"amp={model['amp_mode']}, jit={model['jit_mode']}"
+        f"amp={amp or model['amp_mode']}, jit={model['jit_mode']}"
     )
+
+
+def reference_times(records, reference_amp):
+    """The median step time of each decomposition in the reference precision, that of the last run in the result
+    files if there are several."""
+    times = {}
+    for record in records:
+        if _amp_mode(record) == reference_amp:
+            times[record["decomposition"]["spec"]] = record["timing"]["median_ms"]
+
+    return times
 
 
 def main():
@@ -226,6 +272,17 @@ def main():
         "--force",
         action="store_true",
         help="Put runs with differing comparability hashes in one table anyway.",
+    )
+    parser.add_argument(
+        "--across-precision",
+        action="store_true",
+        help="Put runs that differ only in their amp mode in one table, with their speedup over the reference "
+        "precision.",
+    )
+    parser.add_argument(
+        "--reference-amp",
+        default="bf16",
+        help="The amp mode the speedups of --across-precision are taken over, by default bf16.",
     )
     parser.add_argument("--tag", default=None, help="Only include runs with this run_tag.")
     args = parser.parse_args()
@@ -242,23 +299,28 @@ def main():
     if args.force:
         groups = {"all runs (--force)": records}
     else:
+        group_hash = precision_free_hash if args.across_precision else (lambda r: r["config"]["comparability_hash"])
         grouped = defaultdict(list)
         for record in records:
-            grouped[record["config"]["comparability_hash"]].append(record)
+            grouped[group_hash(record)].append(record)
         groups = {h: rs for h, rs in sorted(grouped.items())}
 
     all_rows = []
     for group_key, group_records in groups.items():
-        baseline = pick_baseline(group_records)
-        baseline_ms = baseline["timing"]["median_ms"]
+        # the decomposition speedup within each precision, so that it stays a speedup of the decomposition
+        baselines = {}
+        for amp in {_amp_mode(r) for r in group_records}:
+            baselines[amp] = pick_baseline([r for r in group_records if _amp_mode(r) == amp])["timing"]["median_ms"]
+        references = reference_times(group_records, args.reference_amp) if args.across_precision else {}
 
         rows = sorted(
-            (record_row(r, baseline_ms) for r in group_records),
-            key=lambda row: (row["h"] * row["w"] * row["m"] * row["e"], row["spec"]),
+            (record_row(r, baselines[_amp_mode(r)], references.get(r["decomposition"]["spec"])) for r in group_records),
+            key=lambda row: (row["h"] * row["w"] * row["m"] * row["e"], row["spec"], row["amp"]),
         )
 
         print()
-        print(f"## {describe_group(group_records[0])}")
+        amp = ", ".join(sorted({_amp_mode(r) for r in group_records})) if args.across_precision else None
+        print(f"## {describe_group(group_records[0], amp)}")
         print(f"   comparability hash: {group_key}  ({len(group_records)} runs)")
         if args.force:
             divergent = diverging_keys(group_records)
