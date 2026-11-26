@@ -864,13 +864,18 @@ class AtmoSphericNeuralOperatorNet31(nn.Module):
         atmo_chans_in = atmo_chans.copy()
         surf_chans_in = surf_chans.copy()
         sst_chans_in = sst_chans.copy()
+        # offsets of the dynamic aux channels of the first step, not of the list as it grows
+        dyn_aux_chans_step = dyn_aux_chans.copy()
         for ih in range(1, n_history + 1):
             atmo_chans_in += [(c + ih * n_dyn_chans) for c in atmo_chans]
             surf_chans_in += [(c + ih * n_dyn_chans) for c in surf_chans]
             sst_chans_in += [(c + ih * n_dyn_chans) for c in sst_chans]
-            dyn_aux_chans += [(c + ih * n_dyn_chans) for c in dyn_aux_chans]
-        # account for the history offset in the static aux channels
+            dyn_aux_chans += [(c + ih * n_dyn_chans) for c in dyn_aux_chans_step]
+        # account for the history offset in the static aux channels, the land-sea mask among them
         stat_aux_chans = [c + n_history * n_dyn_chans for c in stat_aux_chans]
+        lsml_chans = [c + n_history * n_dyn_chans for c in lsml_chans]
+        # the big skip adds the latest state of the window, which is stacked oldest first
+        pred_chans_in = [c + n_history * n_dyn_chans for c in surf_chans + atmo_chans]
 
         self.register_buffer("atmo_channels_in", torch.tensor(atmo_chans_in, dtype=torch.long), persistent=False)
         self.register_buffer("atmo_channels_out", torch.tensor(atmo_chans, dtype=torch.long), persistent=False)
@@ -887,7 +892,7 @@ class AtmoSphericNeuralOperatorNet31(nn.Module):
         self.register_buffer(
             "aux_channels", torch.tensor(dyn_aux_chans + stat_aux_chans, dtype=torch.long), persistent=False
         )
-        self.register_buffer("pred_channels", torch.tensor(surf_chans + atmo_chans, dtype=torch.long), persistent=False)
+        self.register_buffer("pred_channels", torch.tensor(pred_chans_in, dtype=torch.long), persistent=False)
 
         return
 
