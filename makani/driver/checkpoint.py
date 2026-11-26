@@ -141,14 +141,14 @@ def checkpoint_files(checkpoint_path: str, checkpoint_mode: str) -> str:
 
     A flexible restore reads the file of model rank 0 only, a legacy one the file of each model rank.
     """
-    if checkpoint_mode == "flexible":
-        return checkpoint_path.format(mp_rank=0)
-    num_files = comm.get_size("model")
-    if num_files == 1:
-        return checkpoint_path.format(mp_rank=0)
+    num_files = 1 if checkpoint_mode == "flexible" else comm.get_size("model")
+
     # integer ranks, as the restore formats them, so that a template such as {mp_rank:02d} works here too
-    first, last = checkpoint_path.format(mp_rank=0), checkpoint_path.format(mp_rank=num_files - 1)
-    return f"{first} to {last} ({num_files} files, one per model rank)"
+    files = checkpoint_path.format(mp_rank=0)
+    if num_files > 1:
+        files = f"{files} to {checkpoint_path.format(mp_rank=num_files - 1)} ({num_files} files, one per model rank)"
+
+    return files
 
 
 # the version of the checkpoint layout, bumped whenever an entry changes incompatibly; a checkpoint without a
