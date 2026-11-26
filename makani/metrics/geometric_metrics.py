@@ -489,6 +489,11 @@ class GeometricKineticEnergyRatio(GeometricBaseMetric):
     rollout). The fields are denormalized with ``bias`` and ``scale`` first, so that the wind is in physical units
     and the energy of a pair does not depend on how its components were normalized.
 
+    A spectrum is a property of the whole field, so with weights, which mark missing values with zeros, a pair
+    counts for a sample only where both of its components are valid at every point of the grid; otherwise it is
+    left out of the ratio and of the counts. Unlike the area weighting of the SSR, a wind field with holes, or one
+    whose v component is missing and filled with zeros, is not scored at all.
+
     Parameters
     ----------
     grid : torch_harmonics.RegularGridS2
@@ -597,14 +602,14 @@ class GeometricKineticEnergyRatio(GeometricBaseMetric):
         return tuple(f"[{a},{b})" for a, b in zip(self.bands[:-1], self.bands[1:]))
 
     def compute_counts(self, inp: torch.Tensor, weight: Optional[torch.Tensor] = None) -> torch.Tensor:
-        # one count per pair, from the u component, and a singleton for the bands
+        # one count per pair, and a singleton for the bands
         num_pairs = inp.shape[2] // 2
         if weight is not None:
             if self.batch_reduction != "sum":
                 raise ValueError(
                     "Batch reduction mode 'mean' is not supported when weights are provided. Use 'sum' instead."
                 )
-            counts = torch.sum(self.quadrature(weight[:, 0::2].to(dtype=inp.dtype)), dim=0)
+            counts = torch.sum(self.complete_pairs(weight).to(dtype=inp.dtype), dim=0)
         elif self.batch_reduction == "mean":
             counts = torch.ones(size=(num_pairs,), device=inp.device, dtype=inp.dtype)
         else:
@@ -616,6 +621,17 @@ class GeometricKineticEnergyRatio(GeometricBaseMetric):
             counts = torch.sum(counts, dim=0)
 
         return counts.unsqueeze(-1)
+
+    def complete_pairs(self, weight: torch.Tensor) -> torch.Tensor:
+        r"""
+        Whether both components of a pair are valid (nonzero weight) at every point of the grid, for the weights
+        ``(B, 2 * num_pairs, H, W)`` of the pairs; returns ``(B, num_pairs)`` booleans.
+        """
+        invalid = (weight[:, 0::2] <= 0) | (weight[:, 1::2] <= 0)
+        num_invalid = torch.sum(invalid.to(torch.float32), dim=(-2, -1))
+        if self.spatial_distributed and (comm.get_size("spatial") > 1):
+            num_invalid = reduce_from_parallel_region(num_invalid.contiguous(), "spatial")
+        return num_invalid == 0
 
     def band_energy(self, x: torch.Tensor) -> torch.Tensor:
         r"""
@@ -658,8 +674,8 @@ class GeometricKineticEnergyRatio(GeometricBaseMetric):
         ratio = ratio / float(ens_size)
 
         if weight is not None:
-            # weight the ratio of every sample by its valid area, compute_counts counts it with that area
-            ratio = ratio * self.quadrature(weight[:, 0::2].to(dtype=ratio.dtype)).unsqueeze(-1)
+            # a pair with a missing value in either component is left out, compute_counts does not count it either
+            ratio = torch.where(self.complete_pairs(weight).unsqueeze(-1), ratio, 0.0)
 
         # reduce
         if self.channel_reduction == "mean":

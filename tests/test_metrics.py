@@ -2404,13 +2404,20 @@ class TestKineticEnergyRatio(unittest.TestCase):
         expected = np.mean([(1.0 + 4.0) / 2.0, (1.0 + 4.0) / 2.0, (0.25 + 1.0) / 2.0])
         self.assertAlmostEqual(ratio, expected, places=4)
 
-        # weights count every sample with its valid area, as for the SSR: a sample of half the area counts half
+        # with weights, a pair counts for a sample only if both components are valid everywhere: a sample with a hole
+        # in u, and one whose v is missing (zero filled, as the handler does) are left out of the ratio and the counts
         weight = torch.ones(3, 2, 17, 32, device=self.device)
-        weight[2, :, : 17 // 2 + 1] = 0.0
-        area = metric.quadrature(weight[:, :1]).reshape(-1).cpu().numpy()
-        ratio = metric.finalize(metric(fct, obs, weight), metric.compute_counts(fct, weight)).item()
-        expected = np.sum(area * np.array([2.5, 2.5, 0.625])) / np.sum(area)
-        self.assertAlmostEqual(ratio, expected, places=4)
+        weight[1, 0, :4, :4] = 0.0
+        weight[2, 1] = 0.0
+        fct_masked, obs_masked = fct.clone(), obs.clone()
+        fct_masked[2, :, 1] = 0.0
+        obs_masked[2, 1] = 0.0
+        for scale in (1.0, 0.25):
+            with self.subTest(weights_scaled_by=scale):
+                vals = metric(fct_masked, obs_masked, scale * weight)
+                counts = metric.compute_counts(fct_masked, scale * weight)
+                self.assertEqual(counts.flatten().tolist(), [1.0])
+                self.assertAlmostEqual(metric.finalize(vals, counts).item(), 2.5, places=4)
 
     def test_compiles(self):
         grid = make_grid((17, 32), "equiangular")
