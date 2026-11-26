@@ -36,7 +36,10 @@ from makani.metrics.geometric_metrics import (
     GeometricSSR,
     GeometricCRPS,
     GeometricRankHistogram,
+    GeometricKineticEnergyRatio,
     Quadrature,
+    resolved_degree,
+    kinetic_energy_bands,
 )
 import torch.distributed as dist
 from torch_harmonics.distributed import compute_split_shapes
@@ -59,6 +62,8 @@ class MetricRollout:
         device,
         aux_shape=None,
         aux_shape_finalized=None,
+        aux_labels=None,
+        input_channels=None,
         scale=None,
         integrate=False,
         report_metric=True,
@@ -78,6 +83,8 @@ class MetricRollout:
         # it will be inserted after the channels dim
         self.aux_shape = aux_shape
         self.aux_shape_finalized = aux_shape_finalized
+        # labels of the entries of a one dimensional aux_shape, reported as metrics of their own
+        self.aux_labels = aux_labels
 
         # instantiate handle
         self.metric_func = metric_handle().to(self.device)
@@ -91,8 +98,10 @@ class MetricRollout:
         if self.metric_func.batch_reduction == "none":
             raise ValueError("Batch reduction mode 'none' is not supported for rollout handlers")
 
-        # get mapping from channels to all channels
-        self.channel_mask = [channel_names.index(c) for c in metric_channels]
+        # get mapping from channels to all channels. A metric of several input channels per reported channel,
+        # such as the kinetic energy of a wind pair, names its inputs in input_channels
+        self.input_channels = metric_channels if input_channels is None else input_channels
+        self.channel_mask = [channel_names.index(c) for c in self.input_channels]
 
         # deal with scale
         if scale is not None:
@@ -229,13 +238,23 @@ class MetricRollout:
 
         return
 
+    def _report_names(self):
+        """The reported names and the index of their values in the curve of one step."""
+        if self.aux_labels is None:
+            return [(var_name, (idx,)) for idx, var_name in enumerate(self.metric_channels)]
+        return [
+            (f"{var_name}{label}", (idx, aidx))
+            for idx, var_name in enumerate(self.metric_channels)
+            for aidx, label in enumerate(self.aux_labels)
+        ]
+
     def report(self, index=0, table=False):
         log = {}
 
         if self.report_metric:
             rollout_curve_arr = self.rollout_curve_cpu.numpy()
-            for idx, var_name in enumerate(self.metric_channels):
-                log[f"{self.metric_name} {var_name}({(index+1) * self.dtphys})"] = rollout_curve_arr[index, idx]
+            for var_name, vidx in self._report_names():
+                log[f"{self.metric_name} {var_name}({(index+1) * self.dtphys})"] = rollout_curve_arr[(index, *vidx)]
 
             if self.integrate:
                 rollout_integral_arr = self.rollout_integral_cpu.numpy()
@@ -250,9 +269,9 @@ class MetricRollout:
             if self.report_metric:
                 table_data = []
                 for d in range(0, self.num_rollout_steps):
-                    for idx, var_name in enumerate(self.metric_channels):
+                    for var_name, vidx in self._report_names():
                         table_data.append(
-                            [self.metric_name, var_name, (d + 1) * self.dtphys, rollout_curve_arr[d, idx]]
+                            [self.metric_name, var_name, (d + 1) * self.dtphys, rollout_curve_arr[(d, *vidx)]]
                         )
 
                 report = (log, table_data)
@@ -280,6 +299,8 @@ class MetricsHandler:
         spread_var_names=["u10m", "t2m", "sp", "sst", "u500", "z500", "q500", "q50"],
         ssr_var_names=["u10m", "t2m", "sp", "sst", "u500", "z500", "q500", "q50"],
         rh_var_names=[],
+        ke_ratio_var_names=None,
+        ke_ratio_bands=None,
         mask_target_nan=True,
         compile=None,
     ):
@@ -314,6 +335,17 @@ class MetricsHandler:
         self.spread_var_names = [x for x in spread_var_names if x in self.channel_names] if is_ensemble else []
         self.ssr_var_names = [x for x in ssr_var_names if x in self.channel_names] if is_ensemble else []
         self.rh_var_names = [x for x in rh_var_names if x in self.channel_names]
+        # kinetic energy ratio: named by the u component of a wind pair whose v component is present too, from the
+        # configuration (ke_ratio_var_names, ke_ratio_bands) unless given; off by default, it holds the Legendre
+        # tables of a vector SHT
+        if ke_ratio_var_names is None:
+            ke_ratio_var_names = params.get("ke_ratio_var_names", [])
+        self.ke_ratio_bands = params.get("ke_ratio_bands", None) if ke_ratio_bands is None else ke_ratio_bands
+        self.ke_ratio_var_names = [
+            x
+            for x in ke_ratio_var_names
+            if x.startswith("u") and (x in self.channel_names) and (("v" + x[1:]) in self.channel_names)
+        ]
 
         # split channels not supported atm
         self.split_data_channels = params.split_data_channels
@@ -574,6 +606,46 @@ class MetricsHandler:
             )
             self.rh_curve = self.metric_handles[-1].rollout_curve
 
+        if self.ke_ratio_var_names:
+            input_channels = [c for x in self.ke_ratio_var_names for c in (x, "v" + x[1:])]
+            input_mask = [self.channel_names.index(c) for c in input_channels]
+            ke_bands = kinetic_energy_bands(resolved_degree(self.grid), self.ke_ratio_bands)
+            handle = partial(
+                GeometricKineticEnergyRatio,
+                grid=self.grid,
+                crop_shape=self.crop_shape,
+                crop_offset=self.crop_offset,
+                normalize=True,
+                channel_reduction="none",
+                batch_reduction="sum",
+                bands=ke_bands,
+                bias=bias.reshape(-1)[input_mask],
+                scale=scale.reshape(-1)[input_mask],
+                spatial_distributed=self.spatial_distributed,
+                ensemble_distributed=self.ensemble_distributed,
+            )
+
+            num_bands = len(ke_bands) - 1
+            self.metric_handles.append(
+                MetricRollout(
+                    metric_name="KE ratio",
+                    metric_channels=["uv" + x[1:] for x in self.ke_ratio_var_names],
+                    input_channels=input_channels,
+                    metric_handle=handle,
+                    channel_names=self.channel_names,
+                    num_rollout_steps=self.num_rollout_steps,
+                    dtphys=self.dtxdh,
+                    device=self.device,
+                    aux_shape=(num_bands,),
+                    aux_shape_finalized=(num_bands,),
+                    aux_labels=[f"[{a},{b})" for a, b in zip(ke_bands[:-1], ke_bands[1:])],
+                    integrate=False,
+                    compile=self.compile,
+                    report_metric=True,
+                )
+            )
+            self.ke_ratio_curve = self.metric_handles[-1].rollout_curve
+
         # we need gather shapes
         if comm.get_size("spatial") > 1:
             self.gather_shapes_h = compute_split_shapes(self.crop_shape[0], comm.get_size("h"))
@@ -743,6 +815,11 @@ class MetricsHandler:
             handle_group["metric_data"].dims[0].label = "Lead time relative to timestamp"
             handle_group["metric_data"].dims[1].attach_scale(handle_group["channel"])
             handle_group["metric_data"].dims[1].label = "Channel name"
+            if handle.aux_labels is not None:
+                dset = handle_group.create_dataset("aux", data=list(handle.aux_labels))
+                dset.make_scale("aux")
+                handle_group["metric_data"].dims[2].attach_scale(handle_group["aux"])
+                handle_group["metric_data"].dims[2].label = "Degree band"
 
         metrics_file.close()
 

@@ -163,6 +163,9 @@ class TestDistributedMetricHandler(unittest.TestCase):
         # consistently — see set_image_shape for the rationale.
         set_image_shape(self.params, h=36, w=72)
 
+        # a wind pair for the kinetic energy ratio, whose spectra are reduced over the degrees (h) and orders (w)
+        self.params.channel_names = ["u10m", "t2m", "u500", "z500", "v500"]
+
         return
 
     @parameterized.expand(_metric_handler_params, skip_on_empty=True)
@@ -196,6 +199,8 @@ class TestDistributedMetricHandler(unittest.TestCase):
             spread_var_names=self.params.channel_names,
             ssr_var_names=self.params.channel_names,
             rh_var_names=self.params.channel_names,
+            ke_ratio_var_names=["u500"],
+            ke_ratio_bands=[0, 8, 24],
         )
         metric_handler_local.initialize_buffers()
         metric_handler_local.zero_buffers()
@@ -283,6 +288,8 @@ class TestDistributedMetricHandler(unittest.TestCase):
             spread_var_names=self.params.channel_names,
             ssr_var_names=self.params.channel_names,
             rh_var_names=self.params.channel_names,
+            ke_ratio_var_names=["u500"],
+            ke_ratio_bands=[0, 8, 24],
         )
         metric_handler_dist.initialize_buffers()
         metric_handler_dist.zero_buffers()
