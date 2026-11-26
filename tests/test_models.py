@@ -338,6 +338,90 @@ class TestModelOptions(unittest.TestCase):
         self._forward_backward()
 
 
+class TestBigSkipWithHistory(unittest.TestCase):
+    """
+    The big skip of a model with a history window adds the latest state of the window.
+
+    The window is stacked oldest first, so the latest state is the last step of it. Adding an older one would turn
+    the rollout into a two-level scheme, x(n + 1) = x(n - 1) + F(x(n - 1), x(n)), whose computational mode, an
+    error that changes sign from step to step, one-step training does not see.
+    """
+
+    _CHANNEL_NAMES = ["u10m", "v10m", "t2m", "z500", "t500", "z850", "t850"]
+
+    def setUp(self):
+        self.device = torch.device("cpu")
+        TestModels.setUp(self)
+        self.params.channel_names = self._CHANNEL_NAMES
+        self.params.add_zenith = True
+        self.params.big_skip = True
+
+    def _network(self, nettype, n_history):
+        from makani.data.features import get_auxiliary_channels
+
+        num_channels = len(self._CHANNEL_NAMES)
+        self.params.nettype = nettype
+        self.params.n_history = n_history
+        self.params.aux_channel_names = get_auxiliary_channels(**self.params.to_dict())
+        self.assertEqual(len(self.params.aux_channel_names), 1)
+        # per step the state and the zenith angle, as the driver counts them
+        self.params.N_in_channels = (num_channels + 1) * (n_history + 1)
+        self.params.N_out_channels = num_channels
+        self.params.in_channels = list(range(num_channels))
+        self.params.out_channels = list(range(num_channels))
+        model = model_registry.get_model(self.params)
+        return next(m for m in model.modules() if hasattr(m, "big_skip") and m.big_skip)
+
+    @parameterized.expand([(nettype, n_history) for nettype in ("FCN3.1", "SNO") for n_history in (0, 1, 2)])
+    def test_skip_adds_the_latest_state(self, nettype, n_history):
+        net = self._network(nettype, n_history)
+        num_channels = len(self._CHANNEL_NAMES)
+        batch, nlat, nlon = 2, self.params.img_shape_x, self.params.img_shape_y
+
+        # without the decoder, the output is the skipped state
+        class Zeros(nn.Module):
+            def forward(self, x):
+                return torch.zeros(batch, num_channels, nlat, nlon, dtype=x.dtype)
+
+        # both networks run their decoder submodule; the big skip of SNO goes through a learned 1x1 map
+        net.decoder = Zeros()
+        if nettype == "SNO":
+            with torch.no_grad():
+                net.residual_transform.weight.copy_(torch.eye(num_channels).reshape(num_channels, num_channels, 1, 1))
+
+        x = torch.randn(batch, self.params.N_in_channels, nlat, nlon)
+        with torch.no_grad():
+            out = net(x)
+        latest = n_history * (num_channels + 1)
+        self.assertTrue(compare_tensors("skip", out, x[:, latest : latest + num_channels]))
+
+    @parameterized.expand([(0,), (1,), (2,)])
+    def test_fcn31_land_mask_of_the_static_channels(self, n_history):
+        # the land class of a one-hot land-sea mask is a static channel, after the steps of the window
+        from makani.data.features import is_static_aux_channel
+
+        self.params.channel_names = self._CHANNEL_NAMES + ["sst"]
+        aux = ["xd_zen", "xs_z", "xs_lsm0", "xs_lsm1"]
+        num_channels = len(self.params.channel_names)
+        num_static = len([c for c in aux if is_static_aux_channel(c)])
+        step = num_channels + len(aux) - num_static
+        self.params.nettype = "FCN3.1"
+        self.params.n_history = n_history
+        self.params.aux_channel_names = aux
+        self.params.N_in_channels = step * (n_history + 1) + num_static
+        self.params.N_out_channels = num_channels
+        self.params.in_channels = list(range(num_channels))
+        self.params.out_channels = list(range(num_channels))
+        net = next(m for m in model_registry.get_model(self.params).modules() if hasattr(m, "land_mask_channels"))
+        self.assertEqual(net.land_mask_channels.tolist(), [step * (n_history + 1) + 2])
+
+    def test_fcn31_aux_channels_of_every_step(self):
+        # the dynamic channels of every step of the window, and only those, reach the auxiliary encoder
+        net = self._network("FCN3.1", 2)
+        step = len(self._CHANNEL_NAMES) + 1
+        self.assertEqual(net.dyn_aux_channels.tolist(), [step - 1, 2 * step - 1, 3 * step - 1])
+
+
 def _soft_clamp_reference(x):
     # 0 below zero, x^2 on [0, 0.5) and x - 0.25 above: continuous with a continuous first derivative
     return torch.where(x >= 0.5, x - 0.25, torch.where(x > 0.0, x**2, torch.zeros_like(x)))

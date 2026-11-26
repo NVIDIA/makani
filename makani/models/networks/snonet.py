@@ -24,7 +24,7 @@ from makani.models.common.activation_checkpoint import checkpoint
 # helpers
 from makani.models.common import DropPath, LayerScale, MLP, EncoderDecoder, spectral_conv_s2
 from makani.models.common.pointwise_conv import PointwiseConv2d
-from makani.data.features import get_water_channels
+from makani.data.features import get_water_channels, is_dynamic_aux_channel
 
 # get spectral transforms and spherical convolutions from torch_harmonics
 import torch_harmonics as th
@@ -552,6 +552,10 @@ class SphericalNeuralOperatorNet(nn.Module):
     ``inp_grid``, ``out_grid`` and ``internal_grid``, and hands them to its layers. Any regular grid of
     torch-harmonics will do, see :func:`~makani.utils.grids.sht_grid`.
 
+    The input stacks the ``n_history + 1`` steps of the window oldest first, each as the ``channel_names`` and the
+    dynamic channels among ``aux_channel_names``, then the static ones. The big skip adds the latest state of the
+    window, the ``out_chans`` channels at the start of the last step.
+
     References:
     [1] Bonev et al., Spherical Fourier Neural Operators: Learning Stable Dynamics on the Sphere
     [2] Ocampo et al., Scalable and Equivariant Spherical CNNs by Discrete-Continuous (DISCO) Convolutions
@@ -594,6 +598,8 @@ class SphericalNeuralOperatorNet(nn.Module):
         checkpointing_level=0,
         freeze_encoder=False,
         freeze_processor=False,
+        n_history=0,
+        aux_channel_names=[],
         **kwargs,
     ):
         super().__init__()
@@ -605,6 +611,16 @@ class SphericalNeuralOperatorNet(nn.Module):
         self.embed_dim = embed_dim
         self.big_skip = big_skip
         self.checkpointing_level = checkpointing_level
+
+        # the big skip adds the latest state of the window, which is stacked oldest first: each step holds the
+        # predicted channels and the dynamic auxiliary ones
+        step_chans = len(channel_names) + len([c for c in aux_channel_names if is_dynamic_aux_channel(c)])
+        self.residual_offset = n_history * step_chans
+        if self.big_skip and self.residual_offset + out_chans > inp_chans:
+            raise ValueError(
+                f"The latest step of a window of {n_history + 1} steps of {step_chans} channels does not fit into "
+                f"{inp_chans} input channels"
+            )
 
         # compute the downscaled image size
         self.h = int(self.inp_shape[0] // scale_factor)
@@ -825,7 +841,7 @@ class SphericalNeuralOperatorNet(nn.Module):
 
         # save big skip
         if self.big_skip:
-            residual = x[..., : self.out_chans, :, :].contiguous()
+            residual = x[..., self.residual_offset : self.residual_offset + self.out_chans, :, :].contiguous()
 
         if self.checkpointing_level >= 1:
             x = checkpoint(self.encoder, x, use_reentrant=False)
