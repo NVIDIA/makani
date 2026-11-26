@@ -49,6 +49,7 @@ from makani.utils.jit import compiles_model
 from makani.driver.checkpoint import (
     upgrade_checkpoint,
     get_latest_checkpoint_version,
+    checkpoint_files,
     load_checkpoint,
     gather_model_state_dict,
     scatter_model_state_dict,
@@ -504,7 +505,10 @@ class Driver(metaclass=abc.ABCMeta):
             )
             checkpoint_mode = params.get("save_checkpoint", "legacy")
             if self.log_to_screen:
-                self.logger.info(f"Resuming the run from its checkpoint {checkpoint_path}, in {checkpoint_mode} mode")
+                self.logger.info(
+                    f"Resuming the run from its checkpoint {checkpoint_files(checkpoint_path, checkpoint_mode)}, "
+                    f"in {checkpoint_mode} mode"
+                )
                 if params.get("pretrained", False):
                     self.logger.info("The pretrained checkpoint is not used, since the run resumes")
             with Timer() as timer:
@@ -530,8 +534,9 @@ class Driver(metaclass=abc.ABCMeta):
             flags = {flag: bool(params.get(flag, False)) for flag in self._WARM_START_FLAGS}
             if self.log_to_screen:
                 taken = ["weights"] + [flag.removeprefix("load_") for flag, on in flags.items() if on]
+                files = checkpoint_files(checkpoint_path, params.load_checkpoint)
                 self.logger.info(
-                    f"Warm-starting from the pretrained checkpoint {checkpoint_path}, in {params.load_checkpoint} mode, "
+                    f"Warm-starting from the pretrained checkpoint {files}, in {params.load_checkpoint} mode, "
                     f"taking over: {', '.join(taken)}"
                 )
             with Timer() as timer:

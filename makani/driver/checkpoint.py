@@ -136,6 +136,21 @@ def get_latest_checkpoint_version(checkpoint_path, verbose: bool = True):
     return latest_version
 
 
+def checkpoint_files(checkpoint_path: str, checkpoint_mode: str) -> str:
+    """The files a restore of a path template reads, for the log.
+
+    A flexible restore reads the file of model rank 0 only, a legacy one the file of each model rank.
+    """
+    num_files = 1 if checkpoint_mode == "flexible" else comm.get_size("model")
+
+    # integer ranks, as the restore formats them, so that a template such as {mp_rank:02d} works here too
+    files = checkpoint_path.format(mp_rank=0)
+    if num_files > 1:
+        files = f"{files} to {checkpoint_path.format(mp_rank=num_files - 1)} ({num_files} files, one per model rank)"
+
+    return files
+
+
 # the version of the checkpoint layout, bumped whenever an entry changes incompatibly; a checkpoint without a
 # format tag counts as version 0. Version 1 tags the checkpoint and adds the noise generators, noise_rng_state
 # The format version of the checkpoints the driver writes. A checkpoint of an earlier version is upgraded on restore,
