@@ -146,7 +146,9 @@ def checkpoint_files(checkpoint_path: str, checkpoint_mode: str) -> str:
     num_files = comm.get_size("model")
     if num_files == 1:
         return checkpoint_path.format(mp_rank=0)
-    return f"{checkpoint_path.format(mp_rank='*')} ({num_files} files, one per model rank)"
+    # integer ranks, as the restore formats them, so that a template such as {mp_rank:02d} works here too
+    first, last = checkpoint_path.format(mp_rank=0), checkpoint_path.format(mp_rank=num_files - 1)
+    return f"{first} to {last} ({num_files} files, one per model rank)"
 
 
 # the version of the checkpoint layout, bumped whenever an entry changes incompatibly; a checkpoint without a
