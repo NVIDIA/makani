@@ -38,8 +38,11 @@ from makani.metrics.geometric_metrics import (
     GeometricCRPS,
     GeometricSSR,
     GeometricRankHistogram,
+    GeometricKineticEnergyRatio,
     Quadrature,
     SimpsonQuadrature,
+    kinetic_energy_bands,
+    resolved_degree,
     TrapezoidQuadrature,
 )
 from makani.data.data_helpers import get_lat_lon_grid
@@ -2298,6 +2301,214 @@ class ComparetMetricsWB2(unittest.TestCase):
         ssr_wb2 = ssr_spread_wb2 / ssr_skill_wb2
 
         self.assertTrue(compare_arrays("ssr", ssr, ssr_wb2, rtol=5e-2, atol=5e-2, verbose=verbose))
+
+
+def _random_wind(grid, lmax, batch_shape, band_scale=None, dtype=torch.float64):
+    """
+    A wind field band-limited to lmax, as (..., 2, nlat, nlon), with random coefficients; band_scale maps a band
+    (lo, hi) of degrees to a factor on its coefficients. Returns the wind and its coefficients.
+    """
+    import torch_harmonics as th
+
+    l = torch.arange(lmax).reshape(-1, 1)
+    m = torch.arange(lmax).reshape(1, -1)
+    coeffs = torch.randn(*batch_shape, 2, lmax, lmax, dtype=torch.complex128) * ((m <= l) & (l >= 1))
+    coeffs[..., 0] = coeffs[..., 0].real.to(coeffs.dtype)
+    # a red spectrum, roughly like the atmosphere's, so that the bands differ by orders of magnitude
+    coeffs = coeffs / (1.0 + l.to(torch.float64)) ** 1.5
+    if band_scale is not None:
+        for (lo, hi), factor in band_scale.items():
+            coeffs[..., lo:hi, :] *= factor
+    isht = th.InverseRealVectorSHT(grid, lmax=lmax, mmax=lmax).double()
+    with torch.no_grad():
+        wind = isht(coeffs)
+    return wind.to(dtype), coeffs
+
+
+@parameterized_class(("device",), _devices)
+class TestKineticEnergyRatio(unittest.TestCase):
+    """The kinetic energy ratio: its energy is that of the wind, and its ratio averages like the SSR."""
+
+    def setUp(self):
+        disable_tf32()
+        set_seed(333)
+
+    def _metric(self, grid, **kwargs):
+        args = dict(normalize=True, channel_reduction="none", batch_reduction="sum")
+        args.update(kwargs)
+        return GeometricKineticEnergyRatio(grid=grid, crop_shape=tuple(grid.shape), **args).to(self.device)
+
+    @parameterized.expand([("equiangular", 33, 64), ("legendre-gauss", 32, 64)])
+    def test_energy_is_that_of_the_wind(self, grid_type, nlat, nlon):
+        # the bands partition the degrees, so their energies sum to the mean of |u|^2 / 2 over the sphere,
+        # whatever the scale of each component
+        grid = make_grid((nlat, nlon), grid_type)
+        lmax = resolved_degree(grid)
+        scale = torch.tensor([10.0, 4.0])
+        metric = self._metric(grid, bands=(0, 4, 12, lmax), scale=scale)
+
+        # band-limited to half the degree, so that |u|^2 is within what the quadrature of the grid integrates exactly
+        wind, _ = _random_wind(grid, lmax // 2, (3,))
+        normalized = (wind / scale.to(wind.dtype).reshape(2, 1, 1)).to(torch.float32)
+        energy = metric.band_energy(normalized.to(self.device)).sum(dim=-1).squeeze(-1).cpu()
+
+        quad = GridQuadrature(grid, normalize=True)
+        expected = 0.5 * quad(wind.square().sum(dim=-3, keepdim=True).to(torch.float32)).reshape(-1)
+        self.assertTrue(compare_arrays("energy", energy.numpy(), expected.numpy(), rtol=1e-4, atol=0))
+
+        # the bias is undone before the transform: normalized fields give the energy of the physical wind
+        bias = torch.tensor([3.0, -1.0])
+        physical = self._metric(grid, bands=(0, 4, 12, lmax))
+        with_bias = self._metric(grid, bands=(0, 4, 12, lmax), bias=bias, scale=scale)
+        wind = wind.to(torch.float32) + bias.reshape(2, 1, 1)
+        normalized = (wind - bias.reshape(2, 1, 1)) / scale.reshape(2, 1, 1)
+        torch.testing.assert_close(
+            with_bias.band_energy(normalized.to(self.device)),
+            physical.band_energy(wind.to(self.device)),
+            rtol=1e-4,
+            atol=1e-6,
+        )
+
+    def test_ratio_of_a_scaled_band(self):
+        # the forecast is the observation with the coefficients of one band scaled by 3: the ratio is 9 in that band
+        # and 1 in the others
+        grid = make_grid((33, 64), "equiangular")
+        lmax = resolved_degree(grid)
+        bands = (0, 4, 12, lmax)
+        metric = self._metric(grid, bands=bands)
+        torch.manual_seed(0)
+        obs, coeffs = _random_wind(grid, lmax, (2, 1))
+        torch.manual_seed(0)
+        fct, _ = _random_wind(grid, lmax, (2, 1), band_scale={(4, 12): 3.0})
+
+        obs = obs.reshape(2, 2, *obs.shape[-2:]).to(torch.float32).to(self.device)
+        fct = fct.reshape(2, 1, 2, *fct.shape[-2:]).to(torch.float32).to(self.device)
+        ratio = metric.finalize(metric(fct, obs), metric.compute_counts(fct)).cpu().numpy()
+        self.assertEqual(ratio.shape, (1, 3))
+        self.assertTrue(compare_arrays("ratio", ratio, np.array([[1.0, 9.0, 1.0]]), rtol=1e-4, atol=0))
+
+    def test_members_and_samples_are_averaged(self):
+        # members scaled by a and b have the ratios a^2 and b^2, averaged over the members; the samples are averaged
+        # with the counts, as the SSR is
+        grid = make_grid((17, 32), "equiangular")
+        metric = self._metric(grid, bands=(0, resolved_degree(grid)))
+        obs, _ = _random_wind(grid, resolved_degree(grid), (3, 1), dtype=torch.float32)
+        obs = obs.reshape(3, 2, 17, 32).to(self.device)
+        members = torch.tensor([1.0, 2.0], device=self.device).reshape(1, 2, 1, 1, 1)
+        samples = torch.tensor([1.0, 1.0, 0.5], device=self.device).reshape(3, 1, 1, 1, 1)
+        fct = obs.unsqueeze(1) * members * samples
+
+        vals = metric(fct, obs)
+        counts = metric.compute_counts(fct)
+        ratio = metric.finalize(vals, counts).item()
+        expected = np.mean([(1.0 + 4.0) / 2.0, (1.0 + 4.0) / 2.0, (0.25 + 1.0) / 2.0])
+        self.assertAlmostEqual(ratio, expected, places=4)
+
+        # with weights, a pair counts for a sample only if both components are valid everywhere: a sample with a hole
+        # in u, and one whose v is missing (zero filled, as the handler does) are left out of the ratio and the counts
+        weight = torch.ones(3, 2, 17, 32, device=self.device)
+        weight[1, 0, :4, :4] = 0.0
+        weight[2, 1] = 0.0
+        fct_masked, obs_masked = fct.clone(), obs.clone()
+        fct_masked[2, :, 1] = 0.0
+        obs_masked[2, 1] = 0.0
+        for scale in (1.0, 0.25):
+            with self.subTest(weights_scaled_by=scale):
+                vals = metric(fct_masked, obs_masked, scale * weight)
+                counts = metric.compute_counts(fct_masked, scale * weight)
+                self.assertEqual(counts.flatten().tolist(), [1.0])
+                self.assertAlmostEqual(metric.finalize(vals, counts).item(), 2.5, places=4)
+
+    def test_compiles(self):
+        grid = make_grid((17, 32), "equiangular")
+        metric = self._metric(grid)
+        obs = torch.randn(2, 4, 17, 32, device=self.device)
+        fct = obs.unsqueeze(1) + 0.1 * torch.randn(2, 3, 4, 17, 32, device=self.device)
+        torch.testing.assert_close(torch.compile(metric, dynamic=False)(fct, obs), metric(fct, obs))
+
+    def test_bands(self):
+        self.assertEqual(kinetic_energy_bands(720), (0, 60, 360, 720))
+        self.assertEqual(kinetic_energy_bands(360), (0, 60, 360))
+        self.assertEqual(kinetic_energy_bands(32), (0, 32))
+        self.assertEqual(kinetic_energy_bands(720, [10, 100]), (10, 100))
+        for edges in ([0], [0, 0, 10], [0, 800], [-1, 10]):
+            with self.subTest(edges=edges), self.assertRaises(ValueError):
+                kinetic_energy_bands(720, edges)
+        # ERA5's grid resolves 720, above the 360 of the spectral layers
+        self.assertEqual(resolved_degree(make_grid((721, 1440), "equiangular")), 720)
+
+
+@parameterized_class(("device",), _devices)
+class TestKineticEnergyRatioHandler(unittest.TestCase):
+    """The kinetic energy ratio in the metrics handler: configured by its u channels, reported per band."""
+
+    def setUp(self):
+        set_seed(333)
+        self.params = get_default_parameters()
+        self.params["dhours"] = 1
+        self.params.channel_names = ["u10m", "v10m", "t2m", "u500", "z500"]
+        self.params.img_shape_x = self.params.img_crop_shape_x = self.params.img_local_shape_x = 17
+        self.params.img_shape_y = self.params.img_crop_shape_y = self.params.img_local_shape_y = 32
+        self.params.img_shape_x_resampled = self.params.img_shape_x
+        self.params.img_shape_y_resampled = self.params.img_shape_y
+        self.params.img_local_offset_x = self.params.img_local_offset_y = 0
+        self.params.img_crop_offset_x = self.params.img_crop_offset_y = 0
+
+    def _handler(self, num_rollout_steps, compile, **kwargs):
+        return MetricsHandler(
+            self.params,
+            None,
+            num_rollout_steps,
+            self.device,
+            l1_var_names=[],
+            rmse_var_names=["t2m"],
+            acc_var_names=[],
+            crps_var_names=[],
+            spread_var_names=[],
+            ssr_var_names=[],
+            compile=compile,
+            **kwargs,
+        )
+
+    def test_off_by_default(self):
+        handler = self._handler(1, compile=False)
+        self.assertFalse(any(h.metric_name == "KE ratio" for h in handler.metric_handles))
+
+    @parameterized.expand([(False,), (True,)])
+    def test_reported_per_band(self, compile):
+        # u500 has no v500, so only the 10 m wind is reported; from the configuration, as a run would set it
+        self.params["ke_ratio_var_names"] = ["u10m", "u500", "t2m"]
+        self.params["ke_ratio_bands"] = [0, 4, 16]
+        num_rollout_steps, batch_size = 2, 2
+        handler = self._handler(num_rollout_steps, compile=compile)
+        handler.initialize_buffers()
+        handler.zero_buffers()
+
+        shape = (batch_size, len(self.params.channel_names), 17, 32)
+        loss = torch.tensor(0.0, device=self.device)
+        factor = torch.ones(1, len(self.params.channel_names), 1, 1, device=self.device)
+        factor[:, :2] = 2.0
+        for idt in range(num_rollout_steps):
+            tar = torch.randn(shape, device=self.device)
+            handler.update(tar * factor, tar, loss, idt)
+        metrics = handler.finalize()["metrics"]
+
+        keys = sorted(k for k in metrics if k.startswith("validation KE ratio"))
+        self.assertEqual(
+            keys,
+            sorted(f"validation KE ratio uv10m{band}({t})" for band in ("[0,4)", "[4,16)") for t in (1, 2)),
+        )
+        for key in keys:
+            self.assertAlmostEqual(float(metrics[key]), 4.0, places=3, msg=key)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "metrics.h5")
+            handler.save(path)
+            import h5py as h5
+
+            with h5.File(path, "r") as f:
+                self.assertEqual(f["KE ratio"]["metric_data"].shape, (num_rollout_steps, 1, 2))
+                self.assertEqual([x.decode() for x in f["KE ratio"]["aux"][...]], ["[0,4)", "[4,16)"])
 
 
 if __name__ == "__main__":
