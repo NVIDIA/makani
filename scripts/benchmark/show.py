@@ -129,6 +129,18 @@ def format_record(record):
         f"{model.get('n_in_channels')} in / {model.get('n_out_channels')} out",
         f"  precision           : amp={model.get('amp_mode')}, jit={model.get('jit_mode')}, "
         f"checkpointing={model.get('checkpointing_level')}",
+    ]
+
+    # records written before the precision block have none
+    precision = _get(record, "precision", default={})
+    if precision.get("fp8_recipe") is not None:
+        lines.append(
+            f"  fp8                 : {precision.get('fp8_layers_run')} of {precision.get('pointwise_layers')} pointwise "
+            f"layers in FP8 ({precision.get('fp8_layers')} with an FP8 engine), "
+            f"transformer_engine {_get(record, 'environment', 'transformer_engine_version')}"
+        )
+
+    lines += [
         f"  decomposition       : h={dec.get('h')} w={dec.get('w')} matmul={dec.get('matmul')} "
         f"ensemble={dec.get('ensemble')} batch={dec.get('batch')} (world={dec.get('world_size')})",
         f"  global batch size   : {batching.get('global_batch_size')} (local {batching.get('local_batch_size')})",
