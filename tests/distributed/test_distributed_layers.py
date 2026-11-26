@@ -970,6 +970,89 @@ class TestDistributedLayers(unittest.TestCase):
 
     @parameterized.expand(
         [
+            [33, 64, 2, 1, 3, "equiangular", "mean", 1e-5],
+            [33, 64, 2, 2, 3, "equiangular", "exponential", 1e-5],
+            [32, 64, 2, 1, 3, "legendre-gauss", "exponential", 1e-5],
+            [33, 64, 3, 2, 3, "equiangular", "timediff", 1e-5],
+        ],
+        skip_on_empty=True,
+    )
+    def test_distributed_history_normalization(
+        self, nlat, nlon, batch_size, n_history, num_chan, grid_type, mode, tol, verbose=False
+    ):
+        """
+        The history normalization, distributed over the spatial ranks, against the serial one, with the gradient
+        flowing through its statistics, as it does where the window holds predictions (multistep training).
+        """
+        from makani.models.preprocessor import HistoryNormalization
+        from ..testutils import get_default_parameters
+
+        params = get_default_parameters()
+        params.img_shape_x_resampled, params.img_shape_y_resampled = nlat, nlon
+        params.n_history = n_history
+        params.history_normalization_mode = mode
+        params.history_normalization_decay = 0.5
+        params.model_grid_type = grid_type
+
+        set_seed(333)
+        with comm.serial():
+            norm_local = HistoryNormalization(params).to(self.device)
+        norm_dist = HistoryNormalization(params).to(self.device)
+
+        # a window whose statistics differ from sample to sample and channel to channel
+        shape = (batch_size, n_history + 1, num_chan, nlat, nlon)
+        x_full = 2.0 * torch.randn(shape, device=self.device) + torch.randn(
+            batch_size, 1, num_chan, 1, 1, device=self.device
+        )
+        x_full.requires_grad_(True)
+        ograd_full = torch.randn_like(x_full)
+        # the serial reference runs as a single process: its copies to the parallel region must not reduce
+        with comm.serial():
+            stats_full = norm_local.compute_stats(x_full)
+            out_full = norm_local.normalize(x_full, stats_full)
+        x_local = self._split_helper(x_full.detach()).requires_grad_(True)
+        stats_local = norm_dist.compute_stats(x_local)
+        out_local = norm_dist.normalize(x_local, stats_local)
+
+        if mode == "timediff":
+            # normalize leaves the window as it is; the statistics, one mean and variance of the time differences per
+            # sample, are compared, and the gradient flows through them
+            with self.subTest(desc="statistics"):
+                for name in ("diff_mean", "diff_var"):
+                    local, full = getattr(stats_local, name), getattr(stats_full, name)
+                    self.assertEqual(tuple(full.shape), (batch_size,))
+                    self.assertTrue(
+                        reduce_success(compare_tensors(name, local, full, tol, tol, verbose=verbose), self.device)
+                    )
+
+            # used on each rank's own part of the grid, as normalize uses the statistics of the other modes
+            def use(x, stats):
+                return x * stats.diff_mean.reshape(-1, 1, 1, 1, 1) + stats.diff_var.reshape(-1, 1, 1, 1, 1)
+
+            with comm.serial():
+                use(x_full, stats_full).backward(ograd_full)
+            use(x_local, stats_local).backward(self._split_helper(ograd_full))
+        else:
+            with comm.serial():
+                out_full.backward(ograd_full)
+            out_local.backward(self._split_helper(ograd_full))
+
+        with self.subTest(desc="output"):
+            out_gather = self._gather_helper(out_local)
+            self.assertTrue(
+                reduce_success(compare_tensors("output", out_gather, out_full, tol, tol, verbose=verbose), self.device)
+            )
+        with self.subTest(desc="input gradients"):
+            igrad_gather = self._gather_helper(x_local.grad)
+            self.assertTrue(
+                reduce_success(
+                    compare_tensors("input gradients", igrad_gather, x_full.grad, tol, tol, verbose=verbose),
+                    self.device,
+                )
+            )
+
+    @parameterized.expand(
+        [
             [65, 128, 1, 4, "equiangular", True, 1e-4],
             [65, 128, 1, 4, "equiangular", False, 1e-4],
             [64, 128, 1, 10, "legendre-gauss", True, 1e-4],
