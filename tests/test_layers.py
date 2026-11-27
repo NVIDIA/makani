@@ -21,6 +21,7 @@ from collections import OrderedDict
 from parameterized import parameterized, parameterized_class
 
 import torch
+import torch.nn as nn
 
 from makani.utils.grids import make_grid
 
@@ -29,7 +30,10 @@ from makani.models.common.regularization import DropPath, SeededDropout2d, Layer
 from makani.models.common.resample import UpSample2D, DownSample2D, UpSample3D, DownSample3D
 from makani.models.common.mlp import EncoderDecoder, MLP
 from makani.models.common.imputation import MLPImputation, ConstantImputation
-from makani.models.common.pos_embedding import LearnablePositionEmbedding
+from makani.models.common.pos_embedding import LearnablePositionEmbedding, SpectralPositionEmbedding
+from makani.driver.helpers import get_no_weight_decay_parameters
+from makani.distributed.helpers import get_sharing
+import torch_harmonics as th
 from makani.models.common.distributed.matmul import DistributedMatmul
 from makani.models.common.distributed.mlp import DistributedEncoderDecoder, DistributedMLP, StochasticMLP
 from makani.models import model_registry
@@ -956,6 +960,102 @@ class TestLearnablePositionEmbedding(unittest.TestCase):
         )
         self.assertEqual(emb.position_embeddings.is_shared_mp, {"matmul": "avg"})
         self.assertEqual(emb.position_embeddings.sharded_dims_mp, [None, None, "h", "w"])
+
+
+@parameterized_class(("device",), _devices)
+class TestSpectralPositionEmbedding(unittest.TestCase):
+    """The position embedding of learned spherical harmonic coefficients."""
+
+    def setUp(self):
+        disable_tf32()
+        set_seed(333)
+        self.grid = make_grid((25, 48), "legendre-gauss")
+        self.C = 3
+
+    def _embedding(self, lmax=8, mmax=1, random=True):
+        emb = SpectralPositionEmbedding(self.grid, num_chans=self.C, lmax=lmax, mmax=mmax).to(self.device)
+        if random:
+            with torch.no_grad():
+                emb.coeffs.normal_()
+        return emb
+
+    def test_starts_at_zero(self):
+        """Zero-initialized, so that a network starts as without the embedding."""
+        out = self._embedding(random=False)()
+        self.assertEqual(tuple(out.shape), (1, self.C, 25, 48))
+        self.assertTrue(torch.all(out == 0.0).item())
+
+    def test_zonal_embedding_depends_on_the_latitude_alone(self):
+        out = self._embedding(mmax=1)()
+        self.assertTrue(torch.all(out == out[..., :1]).item())
+
+        out = self._embedding(mmax=4)()
+        self.assertFalse(torch.allclose(out, out[..., :1].expand_as(out)))
+
+    def test_analysis_returns_the_coefficients(self):
+        """The forward SHT of the embedding gives its coefficients back, those of the spherical harmonics only."""
+        lmax, mmax = 8, 4
+        emb = self._embedding(lmax=lmax, mmax=mmax)
+        out = emb()
+        sht = th.RealSHT(self.grid, lmax=lmax, mmax=mmax).to(self.device)
+        coeffs = torch.view_as_real(sht(out.double())).squeeze(0)
+
+        expected = (emb.coeffs * emb.mask).double()
+        self.assertTrue(compare_tensors("coefficients", coeffs, expected, atol=1e-5, rtol=1e-5))
+
+    def test_smooth_towards_the_poles(self):
+        """With degrees well below those of the grid, the change between neighboring rings at the poles, where a free
+        embedding per ring is the least constrained, is below the largest elsewhere."""
+        grid = make_grid((97, 192), "legendre-gauss")
+        emb = SpectralPositionEmbedding(grid, num_chans=16, lmax=16).to(self.device)
+        with torch.no_grad():
+            emb.coeffs.normal_()
+        out = emb()[0, :, :, 0]
+        steps = (out[:, 1:] - out[:, :-1]).abs().amax(dim=0)
+        polar = torch.stack([steps[0], steps[-1]]).max()
+        self.assertLess(polar.item(), 0.75 * steps[1:-1].max().item())
+
+    def test_gradient_reaches_the_harmonics_only(self):
+        emb = self._embedding(lmax=8, mmax=4, random=False)
+        emb().square().sum().backward()
+        mask = emb.mask.expand_as(emb.coeffs)
+        self.assertTrue(torch.all(emb.coeffs.grad[mask == 0] == 0).item())
+
+        emb = self._embedding(lmax=8, mmax=4, random=False)
+        weight = torch.randn(1, self.C, 25, 48, device=self.device)
+        (emb() * weight).sum().backward()
+        self.assertTrue(torch.all(emb.coeffs.grad[emb.mask.expand_as(emb.coeffs) > 0] != 0).item())
+
+    def test_coefficients_are_shared_over_the_model_groups(self):
+        """Summed over the spatial ranks, which transform a block of the coefficients each, averaged over the matmul
+        ranks, which compute the same, and sharded over none."""
+        emb = self._embedding(random=False)
+        self.assertEqual(get_sharing(emb.coeffs), {"h": "sum", "w": "sum", "matmul": "avg"})
+        self.assertTrue(all(group is None for group in emb.coeffs.sharded_dims_mp))
+
+    def test_coefficients_are_not_weight_decayed(self):
+        emb = self._embedding(random=False)
+        self.assertEqual(list(get_no_weight_decay_parameters(nn.Sequential(emb))), ["0.coeffs"])
+
+    def test_computes_in_the_dtype_of_the_coefficients(self):
+        """In float32 under a bf16 autocast, and in float64 for a module in float64, where it matches the float32 one."""
+        emb = self._embedding()
+        with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
+            out = emb()
+        self.assertEqual(out.dtype, torch.float32)
+
+        out64 = emb.double()()
+        self.assertEqual(out64.dtype, torch.float64)
+        self.assertTrue(compare_tensors("float64", out64, out.double(), atol=1e-5, rtol=1e-5))
+
+    def test_invalid_options_raise(self):
+        for desc, options in {
+            "no degrees": dict(lmax=0),
+            "more orders than degrees": dict(lmax=4, mmax=5),
+            "more degrees than the grid resolves": dict(lmax=64),
+        }.items():
+            with self.subTest(desc=desc), self.assertRaises(ValueError):
+                SpectralPositionEmbedding(self.grid, num_chans=self.C, **options)
 
 
 class TestStochasticMLP(unittest.TestCase):
