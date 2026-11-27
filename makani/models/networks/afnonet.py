@@ -556,16 +556,17 @@ class AdaptiveFourierNeuralOperatorNet(nn.Module):
         r"""
         Parameters that should be excluded from weight decay.
 
-        Position embeddings and class tokens encode location and identity
-        rather than a learned transformation, so decaying them toward zero
-        degrades the model instead of regularizing it.
+        The position embedding encodes location rather than a learned
+        transformation, so decaying it toward zero degrades the model instead of
+        regularizing it. See
+        :func:`~makani.driver.helpers.get_no_weight_decay_parameters`.
 
         Returns
         -------
         set of str
-            Names of the parameters to exclude.
+            Names of the parameters to exclude, relative to the network.
         """
-        return {"pos_embed", "cls_token"}
+        return {"pos_embed"}
 
     def forward_features(self, x):
         r"""

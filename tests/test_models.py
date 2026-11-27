@@ -26,6 +26,7 @@ import torch.nn as nn
 
 from makani.distributed.helpers import MODEL_GROUPS, get_sharing
 from makani.models import model_registry
+from makani.driver.helpers import get_no_weight_decay_parameters
 from makani.driver import checkpoint as checkpoint_helpers
 from makani.losses import LossHandler
 
@@ -85,6 +86,24 @@ class TestModels(unittest.TestCase):
                 sharded = {group for group in getattr(param, "sharded_dims_mp", []) if group is not None}
                 self.assertEqual(shared & sharded, set(), "shared over a group it is sharded over")
                 self.assertEqual(shared | sharded, set(MODEL_GROUPS), "neither shared nor sharded over a group")
+
+    @parameterized.expand(model_registry.list_models(), skip_on_empty=True)
+    def test_weight_decay_declarations_name_parameters(self, nettype):
+        """The parameters every network declares not to be weight decayed exist, see get_no_weight_decay_parameters."""
+        self.params.nettype = nettype
+        model = model_registry.get_model(self.params)
+        declared = get_no_weight_decay_parameters(model)
+        parameters = dict(model.named_parameters())
+        for name, param in declared.items():
+            self.assertIs(parameters[name], param, name)
+
+    @parameterized.expand([("direct", ["pos_embed"]), ("frequency", ["pos_embed.0", "pos_embed.1"]), ("none", [])])
+    def test_sfno_position_embedding_is_not_decayed(self, pos_embed, expected):
+        self.params.nettype = "SFNO"
+        self.params.pos_embed = pos_embed
+        model = model_registry.get_model(self.params)
+        declared = sorted(name.rsplit("model.", 1)[-1] for name in get_no_weight_decay_parameters(model))
+        self.assertEqual(declared, expected)
 
     @parameterized.expand(model_registry.list_models(), skip_on_empty=True)
     def test_model(self, nettype):

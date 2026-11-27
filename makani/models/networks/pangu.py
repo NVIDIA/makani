@@ -398,6 +398,19 @@ class EarthAttention3D(nn.Module):
         self.earth_position_bias_table = nn.init.trunc_normal_(self.earth_position_bias_table, std=0.02)
         self.softmax = nn.Softmax(dim=-1)
 
+    def no_weight_decay(self):
+        r"""
+        Parameters that should be excluded from weight decay: the earth-specific position bias, which encodes location
+        rather than a learned transformation, as Swin keeps its relative position bias out of weight decay; see
+        :func:`~makani.driver.helpers.get_no_weight_decay_parameters`.
+
+        Returns
+        -------
+        set of str
+            Names of the parameters to exclude, relative to the layer.
+        """
+        return {"earth_position_bias_table"}
+
     def calculate_attn(self, q, k):
         r"""
         Compute raw attention logits from queries and keys.

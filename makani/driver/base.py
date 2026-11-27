@@ -43,7 +43,7 @@ from makani.data.grid_types import DEFAULT_GRID_TYPE
 from makani.distributed import comm
 from makani.utils.profiling import StepTimer
 from makani.data.data_helpers import get_data_normalization
-from makani.driver.helpers import get_parameter_groups
+from makani.driver.helpers import get_parameter_groups, get_no_weight_decay_parameters
 from makani.utils.profiling import Timer
 from makani.utils.jit import compiles_model
 from makani.driver.checkpoint import (
@@ -1070,6 +1070,13 @@ class Driver(metaclass=abc.ABCMeta):
         weight_decay = params.get("weight_decay", 0)
         weight_decay_mode = params.get("weight_decay_mode", "full")
         all_parameters = get_parameter_groups(model, weight_decay, weight_decay_mode)
+        if self.log_to_screen and (weight_decay != 0):
+            num_exempt = sum(len(g["params"]) for g in all_parameters if g["weight_decay"] == 0.0)
+            declared = list(get_no_weight_decay_parameters(model))
+            self.logger.info(
+                f"weight decay {weight_decay} ({weight_decay_mode} mode): {num_exempt} parameters are not decayed, of "
+                f"which their layers declare {declared if declared else 'none'}"
+            )
         if params.optimizer_type == "Adam":
             if self.log_to_screen:
                 self.logger.info(f"using Adam optimizer (weight_decay_mode={weight_decay_mode})")

@@ -132,6 +132,18 @@ class LearnablePositionEmbedding(PositionEmbedding):
         else:
             raise ValueError(f"Unknown learnable position embedding type {embed_type}")
 
+    def no_weight_decay(self):
+        r"""
+        Parameters that should be excluded from weight decay: the embedding, which encodes location rather than a
+        learned transformation, see :func:`~makani.driver.helpers.get_no_weight_decay_parameters`.
+
+        Returns
+        -------
+        set of str
+            Names of the parameters to exclude, relative to the layer.
+        """
+        return {"position_embeddings"}
+
     def forward(self):
         r"""
         Return the learned embedding, expanded to the local grid shape.
