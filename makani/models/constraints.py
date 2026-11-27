@@ -285,15 +285,21 @@ class SoftClip(nn.Module):
             )
 
     def _factor(self, components, threshold: torch.Tensor) -> torch.Tensor:
-        # (1 + (|w|/s)^p)^(-1/p) for the components of w, rewritten with c = max(|w_i|, s) and k = c/s >= 1 as
-        # (1/k) (k^-p + (|w|/c)^p)^(-1/p), which is the same for any c > 0: no square or power overflows, as
-        # (|w|/c)^2 <= len(components), and below the threshold c = s, so that the clip is smooth at w = 0
+        # (1 + (|w|/s)^p)^(-1/p) for the components of w, rewritten so that no square or power overflows, whatever
+        # the order: with c = max(|w_i|, s) and k = c/s >= 1, it is (1/k) (k^-p + a^(p/2))^(-1/p) with
+        # a = (|w|/c)^2 <= len(components), and with q = max(k^-2, a) > 0 it is
+        # (1/k) q^(-1/2) ((k^-2/q)^(p/2) + (a/q)^(p/2))^(-1/p), whose sum lies in [1, 2]. Both rewritings hold for
+        # any c and q, and below the threshold c = s and q = 1, so that the clip is smooth at w = 0.
         c = threshold.expand_as(components[0])
         for w in components:
             c = torch.maximum(c, w.abs())
         a = sum((w / c).square() for w in components)
         k = c / threshold
-        return (k.pow(-self.order) + a.pow(self.order // 2)).pow(-1.0 / self.order) / k
+        k2 = k.pow(-2)
+        q = torch.maximum(k2, a)
+        half = self.order // 2
+        inner = (k2 / q).pow(half) + (a / q).pow(half)
+        return torch.rsqrt(q) * inner.pow(-1.0 / self.order) / k
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         r"""

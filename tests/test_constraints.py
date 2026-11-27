@@ -1084,10 +1084,6 @@ class TestHydrostaticBalanceProjection(unittest.TestCase):
             HydrostaticBalanceProjection(names, p_min=self.P_MIN, p_max=self.P_MAX, climatology_offset=bad_offset)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 def _soft_clip_reference(x, s, p):
     """The soft clip in float64, x (1 + (x/s)^p)^(-1/p), for a magnitude x."""
     x = x.double()
@@ -1165,6 +1161,22 @@ class TestSoftClip(unittest.TestCase):
         self.assertTrue(torch.isfinite(out).all().item())
         self.assertTrue(torch.allclose(out[:, 2], torch.full_like(out[:, 2], 8.0)))
         self.assertTrue(torch.allclose(out[:, 0], torch.full_like(out[:, 0], 8.0 / np.sqrt(2.0))))
+
+    def test_large_orders_do_not_overflow(self):
+        """At a large order, a wind of the threshold in both components keeps its factor of about 1/sqrt(2)."""
+        for order in [64, 256, 1024]:
+            with self.subTest(order=order):
+                clip = SoftClip(self.channel_names, ["u10m", "v10m", "q100"], threshold=4.0, order=order)
+                x = torch.zeros(1, len(self.channel_names), 1, 1, device=self.device)
+                x[:, :3] = 4.0
+                out = clip.to(self.device)(x)
+                magnitude = torch.tensor(4.0 * np.sqrt(2.0), dtype=torch.float64)
+                expected = _soft_clip_reference(magnitude, 4.0, order) / np.sqrt(2.0)
+                self.assertAlmostEqual(out[0, 0, 0, 0].item(), expected.item(), places=5)
+                self.assertAlmostEqual(out[0, 1, 0, 0].item(), expected.item(), places=5)
+                self.assertAlmostEqual(
+                    out[0, 2, 0, 0].item(), _soft_clip_reference(x[0, 2, 0, 0], 4.0, order).item(), places=5
+                )
 
     def test_keeps_the_dtype(self):
         clip = SoftClip(self.channel_names, ["q100"]).to(self.device)
@@ -1270,3 +1282,7 @@ class TestInputSoftClip(unittest.TestCase):
     def test_needs_the_channels(self):
         with self.assertRaises(ValueError):
             self._wrapper(self._params(input_soft_clip={"threshold": 3.0}))
+
+
+if __name__ == "__main__":
+    unittest.main()
