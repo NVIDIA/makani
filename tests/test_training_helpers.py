@@ -327,9 +327,14 @@ class TestWeightDecayDeclarations(unittest.TestCase):
         self.wd = 0.1
 
     def _groups(self, mode):
-        groups = get_parameter_groups(self.model, self.wd, mode)
-        decay = next((g for g in groups if g["weight_decay"] == self.wd), {"params": []})
-        no_decay = next((g for g in groups if g["weight_decay"] == 0.0), {"params": []})
+        return self._groups_at(self.wd, mode)
+
+    def _groups_at(self, wd, mode):
+        # the first group decays, the second does not, by the order get_parameter_groups builds them in
+        groups = get_parameter_groups(self.model, wd, mode)
+        if len(groups) == 1:
+            return sorted(n for n, _ in self.model.named_parameters()), []
+        decay, no_decay = groups
         named = {id(p): name for name, p in self.model.named_parameters()}
         return sorted(named[id(p)] for p in decay["params"]), sorted(named[id(p)] for p in no_decay["params"])
 
@@ -367,6 +372,26 @@ class TestWeightDecayDeclarations(unittest.TestCase):
         groups = get_parameter_groups(model, self.wd, "full")
         self.assertEqual(len(groups), 1)
         self.assertEqual(groups[0]["weight_decay"], self.wd)
+
+    def test_without_weight_decay_the_groups_are_those_of_the_mode(self):
+        """Without weight decay, the declarations are left out, so that the optimizer state of earlier runs loads."""
+        groups = get_parameter_groups(self.model, 0.0, "full")
+        self.assertEqual(len(groups), 1)
+
+        # the groups of the mode alone: the declared embedding and coefficients, 4-D and 2-D, in the first group
+        decay, no_decay = self._groups_at(0.0, "transformer")
+        self.assertEqual(
+            decay,
+            [
+                "block.0.embedding",
+                "block.0.weight",
+                "block.1.weight",
+                "plain.weight",
+                "spectral.coeffs.0",
+                "spectral.coeffs.1",
+            ],
+        )
+        self.assertEqual(no_decay, ["block.0.bias", "block.1.bias", "plain.bias"])
 
     def test_a_shared_parameter_counts_once(self):
         """A parameter declared by a layer that is used twice is exempt once, and in no other group."""

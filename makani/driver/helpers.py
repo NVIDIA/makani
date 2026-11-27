@@ -103,13 +103,20 @@ def get_parameter_groups(model: nn.Module, weight_decay: float, mode: str = "ful
     Returns
     -------
     list of dict
-        A group with ``weight_decay`` and one with ``weight_decay = 0``, each only if it has parameters.
+        A group with ``weight_decay`` and one with ``weight_decay = 0``, each only if it has parameters. Without
+        weight decay, the declarations are left out, and the groups are those of the mode alone, as before.
     """
     if mode not in ("full", "transformer"):
         raise ValueError(f"Unknown weight_decay_mode '{mode}', expected 'full' or 'transformer'.")
 
     trainable = [(name, p) for name, p in model.named_parameters() if p.requires_grad]
-    exempt_ids = {id(p) for p in get_no_weight_decay_parameters(model).values()}
+
+    # without weight decay the declarations change nothing but the groups: they are left out, so that the groups are
+    # those of earlier versions, whose optimizer state then loads
+    if weight_decay == 0:
+        exempt_ids = set()
+    else:
+        exempt_ids = {id(p) for p in get_no_weight_decay_parameters(model).values()}
 
     if mode == "transformer":
         # parameters owned by normalization modules (their affine gain / shift)
