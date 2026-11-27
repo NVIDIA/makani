@@ -24,4 +24,4 @@ from .fft import RealFFT1, InverseRealFFT1, RealFFT2, InverseRealFFT2, RealFFT3,
 from .imputation import MLPImputation, ConstantImputation
 from .layer_norm import GeometricInstanceNormS2
 from .spectral_convolution import SpectralConv, SpectralAttention, spectral_conv_s2
-from .pos_embedding import LearnablePositionEmbedding
+from .pos_embedding import LearnablePositionEmbedding, SpectralPositionEmbedding

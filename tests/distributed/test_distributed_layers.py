@@ -43,6 +43,7 @@ from makani.models.common.pointwise_conv import fp8_layers
 
 # layer norm imports
 from makani.models.common.layer_norm import GeometricInstanceNormS2
+from makani.models.common.pos_embedding import SpectralPositionEmbedding
 from makani.models.common.distributed.layer_norm import DistributedGeometricInstanceNormS2, DistributedInstanceNorm2d
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
@@ -1312,6 +1313,55 @@ class TestDistributedLayers(unittest.TestCase):
         grads = checkpoint_helpers.gather_model_state_dict(mlp_dist, grads=True)
         for name, param in mlp_full.named_parameters():
             check(f"{name} gradient", grads[name + ".grad"], param.grad.cpu(), grads_bf16[name].cpu())
+
+    @parameterized.expand(
+        [
+            # even and odd latitudes, zonal and longitude-dependent, and fewer degrees than ranks of most grids, so
+            # that the transform keeps more degrees and orders than the embedding
+            [48, 96, 16, 1, "legendre-gauss"],
+            [49, 96, 16, 4, "legendre-gauss"],
+            [25, 48, 2, 1, "legendre-gauss"],
+            [37, 72, 8, 8, "equiangular"],
+        ],
+        skip_on_empty=True,
+    )
+    def test_distributed_spectral_position_embedding(self, nlat, nlon, lmax, mmax, grid_type, verbose=False):
+        """The embedding on each rank's part of the grid, and the gradient of its coefficients summed over the spatial
+        ranks, against the inverse SHT of the coefficients on the whole grid."""
+        set_seed(333)
+        grid = make_grid((nlat, nlon), grid_type)
+        tol = 1e-5
+
+        emb = SpectralPositionEmbedding(grid, num_chans=8, lmax=lmax, mmax=mmax).to(self.device)
+        with torch.no_grad():
+            emb.coeffs.normal_()
+        coeffs_full = emb.coeffs.detach().clone().requires_grad_(True)
+
+        # the serial reference, on the whole grid
+        isht = th.InverseRealSHT(grid, lmax=lmax, mmax=mmax).to(self.device)
+        out_full = isht(torch.view_as_complex((coeffs_full * emb.mask).contiguous()).unsqueeze(0))
+        ograd_full = torch.randn_like(out_full)
+        out_full.backward(ograd_full)
+
+        out_local = emb()
+        out_local.backward(self._split_helper(ograd_full))
+
+        with self.subTest(desc="output"):
+            self.assertTrue(
+                reduce_success(
+                    compare_tensors("output", self._gather_helper(out_local), out_full, tol, tol, verbose=verbose),
+                    self.device,
+                )
+            )
+
+        with self.subTest(desc="coefficient gradients"):
+            grad = self._sum_gradient(emb.coeffs.grad, "spatial")
+            self.assertTrue(
+                reduce_success(
+                    compare_tensors("coefficient gradients", grad, coeffs_full.grad, tol, tol, verbose=verbose),
+                    self.device,
+                )
+            )
 
 
 if __name__ == "__main__":
