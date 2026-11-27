@@ -18,7 +18,6 @@
 import torch
 from torch import nn
 
-
 # standard torch normalization module base classes whose affine parameters
 # (gain / shift) should be excluded from weight decay
 _NORM_MODULE_TYPES = (
@@ -39,38 +38,90 @@ def _is_norm_module(module: nn.Module) -> bool:
     return isinstance(module, _NORM_MODULE_TYPES) or ("norm" in type(module).__name__.lower())
 
 
+def get_no_weight_decay_parameters(model: nn.Module) -> dict:
+    """The parameters the layers of ``model`` declare not to be decayed, by their names in ``model``.
+
+    A module declares them through an optional method ``no_weight_decay()``, which returns the names of
+    parameters relative to the module, as its ``named_parameters()`` gives them: normally parameters it owns
+    directly, or those of a container without methods of its own, such as an ``nn.ParameterList``. A module
+    without the method declares none, and the weight-decay mode decides on its parameters, see
+    :func:`get_parameter_groups`.
+
+    Parameters
+    ----------
+    model : nn.Module
+        The model, whose modules are searched for declarations.
+
+    Returns
+    -------
+    dict of str to nn.Parameter
+        The declared parameters by their names in ``model``, each once, also when it is shared.
+
+    Raises
+    ------
+    ValueError
+        If a module declares a name that is not one of its parameters.
+    """
+    declared = {}
+    seen = set()
+    for prefix, module in model.named_modules():
+        method = getattr(module, "no_weight_decay", None)
+        if not callable(method):
+            continue
+        names = set(method() or ())
+        if not names:
+            continue
+        parameters = dict(module.named_parameters())
+        unknown = sorted(names - set(parameters))
+        if unknown:
+            raise ValueError(
+                f"{type(module).__name__} at '{prefix or '<model>'}' declares {unknown} not to be weight decayed, but "
+                f"has no such parameters"
+            )
+        for name in sorted(names):
+            p = parameters[name]
+            if id(p) not in seen:
+                seen.add(id(p))
+                declared[f"{prefix}.{name}" if prefix else name] = p
+    return declared
+
+
 def get_parameter_groups(model: nn.Module, weight_decay: float, mode: str = "full") -> list:
     """Build optimizer parameter groups according to the weight-decay mode.
 
-    - ``"full"``: a single group with ``weight_decay`` applied to every trainable
-      parameter (the historical behavior).
-    - ``"transformer"``: two groups -- ``weight_decay`` on the weight matrices and
-      ``weight_decay = 0`` on biases and normalization-layer affine parameters, the
-      standard modern-transformer convention. Biases are matched by name (robust to
-      expanded ``(1, C, 1, 1)`` bias shapes), norm affine params by their owning
-      module type, plus a 1-D safety net for any stray scale/gain.
+    A parameter is decayed unless its layer declares it not to be, see :func:`get_no_weight_decay_parameters`, or
+    the mode exempts it:
 
-    Any other ``mode`` raises ``ValueError``.
+    - ``"full"``: no exemptions, every other trainable parameter is decayed (the historical behavior).
+    - ``"transformer"``: biases and normalization-layer affine parameters are exempt as well, the standard
+      modern-transformer convention. Biases are matched by name (robust to expanded ``(1, C, 1, 1)`` bias shapes),
+      norm affine params by their owning module type, plus a 1-D safety net for any stray scale/gain.
+
+    A declaration only exempts: it never makes the mode decay a parameter it would exempt. Any other ``mode``
+    raises ``ValueError``.
+
+    Returns
+    -------
+    list of dict
+        A group with ``weight_decay`` and one with ``weight_decay = 0``, each only if it has parameters.
     """
-    trainable = [(name, p) for name, p in model.named_parameters() if p.requires_grad]
-
-    if mode == "full":
-        return [{"params": [p for _, p in trainable], "weight_decay": weight_decay}]
-
-    if mode != "transformer":
+    if mode not in ("full", "transformer"):
         raise ValueError(f"Unknown weight_decay_mode '{mode}', expected 'full' or 'transformer'.")
 
-    # parameters owned by normalization modules (their affine gain / shift)
-    norm_param_ids = set()
-    for module in model.modules():
-        if _is_norm_module(module):
-            for p in module.parameters(recurse=False):
-                norm_param_ids.add(id(p))
+    trainable = [(name, p) for name, p in model.named_parameters() if p.requires_grad]
+    exempt_ids = {id(p) for p in get_no_weight_decay_parameters(model).values()}
+
+    if mode == "transformer":
+        # parameters owned by normalization modules (their affine gain / shift)
+        for module in model.modules():
+            if _is_norm_module(module):
+                for p in module.parameters(recurse=False):
+                    exempt_ids.add(id(p))
 
     decay, no_decay = [], []
     for name, p in trainable:
         leaf = name.rsplit(".", 1)[-1]
-        if ("bias" in leaf) or (id(p) in norm_param_ids) or (p.ndim < 2):
+        if (id(p) in exempt_ids) or ((mode == "transformer") and (("bias" in leaf) or (p.ndim < 2))):
             no_decay.append(p)
         else:
             decay.append(p)

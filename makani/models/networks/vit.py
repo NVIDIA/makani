@@ -277,6 +277,18 @@ class VisionTransformer(nn.Module):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
 
+    def no_weight_decay(self):
+        r"""
+        Parameters that should be excluded from weight decay: the position embedding, which encodes location rather
+        than a learned transformation, see :func:`~makani.driver.helpers.get_no_weight_decay_parameters`.
+
+        Returns
+        -------
+        set of str
+            Names of the parameters to exclude, relative to the network.
+        """
+        return {"pos_embed"}
+
     def prepare_tokens(self, x):
         r"""
         Embed the input field into position-encoded tokens.

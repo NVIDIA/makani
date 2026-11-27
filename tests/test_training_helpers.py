@@ -19,7 +19,7 @@ import torch.nn as nn
 
 from makani.training.training_helpers import clip_grads, _compute_total_grad_norm, normalize_weights, NonFiniteLossCheck
 
-from makani.driver.helpers import get_parameter_groups
+from makani.driver.helpers import get_parameter_groups, get_no_weight_decay_parameters
 
 import sys
 import os
@@ -284,6 +284,111 @@ class TestParameterGroups(unittest.TestCase):
         for bad in ("selective", "Transformer", "none", ""):
             with self.assertRaises(ValueError):
                 get_parameter_groups(self.model, self.wd, bad)
+
+
+class _Embedding(nn.Module):
+    """A layer that declares its embedding, and leaves its weight to the mode."""
+
+    def __init__(self):
+        super().__init__()
+        self.embedding = nn.Parameter(torch.zeros(1, 4, 8, 1))
+        self.weight = nn.Parameter(torch.randn(4, 4))
+        self.bias = nn.Parameter(torch.zeros(4))
+
+    def no_weight_decay(self):
+        return {"embedding"}
+
+
+class _Coefficients(nn.Module):
+    """A layer whose declared parameters sit in a container without methods of its own."""
+
+    def __init__(self):
+        super().__init__()
+        self.coeffs = nn.ParameterList([nn.Parameter(torch.zeros(2, 3)), nn.Parameter(torch.zeros(2, 3))])
+
+    def no_weight_decay(self):
+        return {"coeffs.0", "coeffs.1"}
+
+
+class _DeclaringNet(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.block = nn.Sequential(_Embedding(), nn.Linear(4, 4))
+        self.spectral = _Coefficients()
+        self.plain = nn.Linear(4, 4)
+
+
+class TestWeightDecayDeclarations(unittest.TestCase):
+    """Layers declare the parameters not to decay through no_weight_decay(), by names relative to them."""
+
+    def setUp(self):
+        set_seed(0)
+        self.model = _DeclaringNet()
+        self.wd = 0.1
+
+    def _groups(self, mode):
+        groups = get_parameter_groups(self.model, self.wd, mode)
+        decay = next((g for g in groups if g["weight_decay"] == self.wd), {"params": []})
+        no_decay = next((g for g in groups if g["weight_decay"] == 0.0), {"params": []})
+        named = {id(p): name for name, p in self.model.named_parameters()}
+        return sorted(named[id(p)] for p in decay["params"]), sorted(named[id(p)] for p in no_decay["params"])
+
+    def test_declared_names_are_prefixed_with_their_layer(self):
+        declared = get_no_weight_decay_parameters(self.model)
+        self.assertEqual(sorted(declared), ["block.0.embedding", "spectral.coeffs.0", "spectral.coeffs.1"])
+        parameters = dict(self.model.named_parameters())
+        for name, param in declared.items():
+            self.assertIs(param, parameters[name])
+
+    def test_full_mode_decays_all_but_the_declared(self):
+        decay, no_decay = self._groups("full")
+        self.assertEqual(no_decay, ["block.0.embedding", "spectral.coeffs.0", "spectral.coeffs.1"])
+        self.assertEqual(
+            decay, ["block.0.bias", "block.0.weight", "block.1.bias", "block.1.weight", "plain.bias", "plain.weight"]
+        )
+
+    def test_transformer_mode_adds_the_declared_to_its_exemptions(self):
+        decay, no_decay = self._groups("transformer")
+        self.assertEqual(decay, ["block.0.weight", "block.1.weight", "plain.weight"])
+        self.assertEqual(
+            no_decay,
+            [
+                "block.0.bias",
+                "block.0.embedding",
+                "block.1.bias",
+                "plain.bias",
+                "spectral.coeffs.0",
+                "spectral.coeffs.1",
+            ],
+        )
+
+    def test_without_declarations_full_mode_is_one_group(self):
+        model = nn.Sequential(nn.Linear(4, 4), nn.Linear(4, 4))
+        groups = get_parameter_groups(model, self.wd, "full")
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0]["weight_decay"], self.wd)
+
+    def test_a_shared_parameter_counts_once(self):
+        """A parameter declared by a layer that is used twice is exempt once, and in no other group."""
+        embedding = _Embedding()
+        model = nn.Sequential(embedding, embedding)
+        declared = get_no_weight_decay_parameters(model)
+        self.assertEqual(list(declared), ["0.embedding"])
+        groups = get_parameter_groups(model, self.wd, "full")
+        counts = [len(g["params"]) for g in groups]
+        self.assertEqual(sum(counts), len(list(model.parameters())))
+
+    def test_an_unknown_name_raises(self):
+        class _Stale(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.pos_embed = nn.Parameter(torch.zeros(2, 2))
+
+            def no_weight_decay(self):
+                return {"pos_embed", "cls_token"}
+
+        with self.assertRaisesRegex(ValueError, "cls_token"):
+            get_parameter_groups(nn.Sequential(_Stale()), self.wd, "full")
 
 
 class TestNonFiniteLossCheck(unittest.TestCase):

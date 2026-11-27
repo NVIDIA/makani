@@ -927,17 +927,24 @@ class SphericalFourierNeuralOperatorNet(nn.Module):
         r"""
         Parameters that should be excluded from weight decay.
 
-        Position embeddings and class tokens encode absolute location and
-        identity rather than a learned transformation, so decaying them toward
-        zero degrades the model instead of regularizing it. Optimizer setup
-        calls this to build its no-decay parameter group.
+        The position embedding encodes absolute location rather than a learned
+        transformation, so decaying it toward zero degrades the model instead
+        of regularizing it. Optimizer setup calls this to build its no-decay
+        parameter group, see
+        :func:`~makani.driver.helpers.get_no_weight_decay_parameters`.
 
         Returns
         -------
         set of str
-            Names of the parameters to exclude.
+            Names of the parameters to exclude, relative to the network: those
+            of the position embedding, if there is one.
         """
-        return {"pos_embed", "cls_token"}
+        if not hasattr(self, "pos_embed"):
+            return set()
+        if isinstance(self.pos_embed, nn.Parameter):
+            return {"pos_embed"}
+        # the real and imaginary coefficients of the "frequency" embedding
+        return {f"pos_embed.{name}" for name, _ in self.pos_embed.named_parameters()}
 
     def _forward_features(self, x):
         for blk in self.blocks:
