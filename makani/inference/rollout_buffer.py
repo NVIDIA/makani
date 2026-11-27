@@ -90,6 +90,15 @@ def _as_numpy(tensor: torch.Tensor, ctype, nptype):
     return np.frombuffer(buff, dtype=nptype).reshape(*tensor.shape)
 
 
+def _writes_model_shard() -> bool:
+    r"""
+    Whether this rank writes its shard of the model output. The output is split over the spatial ranks only:
+    the ranks of a matmul group hold the same shard, so the first of them writes it and the others skip the
+    write, which would put the same values in the same place again.
+    """
+    return comm.get_rank("matmul") == 0
+
+
 class DataBuffer(object, metaclass=ABCMeta):
     r"""
     DataBuffer class used as base class for online data analysis
@@ -605,10 +614,11 @@ class RolloutBuffer(DataBuffer):
         lat_range = slice(self.local_offset[0], self.local_offset[0] + self.local_shape[0])
         lon_range = slice(self.local_offset[1], self.local_offset[1] + self.local_shape[1])
 
-        self.rollout_buffer_disk.write_direct(
-            slab_arr,
-            dest_sel=np.s_[ic_range, idt_range, ens_range, :, lat_range, lon_range],
-        )
+        if _writes_model_shard():
+            self.rollout_buffer_disk.write_direct(
+                slab_arr,
+                dest_sel=np.s_[ic_range, idt_range, ens_range, :, lat_range, lon_range],
+            )
 
         return
 
@@ -717,10 +727,11 @@ class RolloutBuffer(DataBuffer):
         tstamps = tstamps.detach().contiguous()
         predp_arr = self._np_view_for_write(predp)
 
-        self.rollout_buffer_disk.write_direct(
-            predp_arr,
-            dest_sel=np.s_[batch_range, idt, ens_range, :, lat_range, lon_range],
-        )
+        if _writes_model_shard():
+            self.rollout_buffer_disk.write_direct(
+                predp_arr,
+                dest_sel=np.s_[batch_range, idt, ens_range, :, lat_range, lon_range],
+            )
 
         # write timestamps once per IC (on the first leadtime), single-writer
         if (idt == 0) and (comm.get_rank("model") == 0) and (comm.get_rank("ensemble") == 0):
@@ -1017,7 +1028,7 @@ class TemporalAverageBuffer(MeanStdBuffer):
         lat_range = slice(self.local_offset[0], self.local_offset[0] + self.local_shape[0])
         lon_range = slice(self.local_offset[1], self.local_offset[1] + self.local_shape[1])
 
-        if comm.get_rank("data") == 0:
+        if (comm.get_rank("data") == 0) and _writes_model_shard():
             mean_data[..., lat_range, lon_range] = mean[...]
             std_data[..., lat_range, lon_range] = std[...]
 
@@ -1306,7 +1317,7 @@ class SpectrumAverageBuffer(MeanStdBuffer):
         else:
             ens_range = slice(0, self.ensemble_size + 1)
 
-        if (comm.get_rank("batch") == 0) and (comm.get_rank("w") == 0):
+        if (comm.get_rank("batch") == 0) and (comm.get_rank("w") == 0) and _writes_model_shard():
             mean_data[..., ens_range, l_range] = mean[...]
             std_data[..., ens_range, l_range] = std[...]
 
@@ -1545,7 +1556,7 @@ class ZonalSpectrumAverageBuffer(MeanStdBuffer):
         else:
             ens_range = slice(0, self.ensemble_size + 1)
 
-        if comm.get_rank("batch") == 0:
+        if (comm.get_rank("batch") == 0) and _writes_model_shard():
             mean_data[..., ens_range, lat_range, m_range] = mean[...]
             std_data[..., ens_range, lat_range, m_range] = std[...]
 

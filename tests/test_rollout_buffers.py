@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import unittest
+from unittest import mock
 from parameterized import parameterized, parameterized_class
 import tempfile
 import os
@@ -2155,6 +2156,131 @@ class TestRolloutBufferStreaming(unittest.TestCase):
             arr = buf._np_view_for_write(tensor.contiguous())
             self.assertEqual(arr.shape, (2, 3))
             self.assertEqual(arr.dtype, np.float32)
+
+
+class TestMatmulReplicaWrites(unittest.TestCase):
+    """
+    The ranks of a matmul group hold the same shard of the model output, so only the first of them writes it.
+    A buffer on another matmul rank leaves the data of its file alone, and still writes the coordinates, which
+    world rank 0 writes once for all.
+    """
+
+    H, W = 4, 8
+    channel_names = ["a", "b"]
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.output_file = os.path.join(self._tmpdir.name, "out.h5")
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def _lat_lon(self):
+        return np.linspace(90.0, -90.0, self.H).tolist(), np.linspace(0.0, 360.0, self.W, endpoint=False).tolist()
+
+    def _fields(self, *shape):
+        return 1.0 + torch.rand(*shape, len(self.channel_names), self.H, self.W)
+
+    def _rollout(self, streaming_mode):
+        buf = RolloutBuffer(
+            num_samples=2,
+            batch_size=2,
+            num_rollout_steps=1,
+            rollout_dt=6,
+            ensemble_size=1,
+            img_shape=(self.H, self.W),
+            local_shape=(self.H, self.W),
+            local_offset=(0, 0),
+            channel_names=self.channel_names,
+            lat_lon=self._lat_lon(),
+            device="cpu",
+            output_channels=self.channel_names,
+            output_file=self.output_file,
+            streaming_mode=streaming_mode,
+        )
+        for idt in range(2):
+            buf.update(self._fields(2, 1), torch.tensor([100.0, 200.0]), idt=idt)
+        buf.finalize()
+        return "fields", "lat"
+
+    def _temporal_average(self):
+        buf = TemporalAverageBuffer(
+            num_rollout_steps=1,
+            rollout_dt=6,
+            img_shape=(self.H, self.W),
+            local_shape=(self.H, self.W),
+            local_offset=(0, 0),
+            channel_names=self.channel_names,
+            lat_lon=self._lat_lon(),
+            device="cpu",
+            output_channels=self.channel_names,
+            output_file=self.output_file,
+        )
+        buf.update(self._fields(3), 0)
+        buf.finalize()
+        return "mean", "lead_time"
+
+    def _spectrum(self):
+        buf = SpectrumAverageBuffer(
+            num_rollout_steps=1,
+            rollout_dt=6,
+            grid=make_grid((self.H, self.W), "legendre-gauss"),
+            ensemble_size=1,
+            channel_names=self.channel_names,
+            device="cpu",
+            output_channels=self.channel_names,
+            output_file=self.output_file,
+        )
+        buf.update(self._fields(3, 1), self._fields(3, 1), 0)
+        buf.finalize()
+        return "mean", "lead_time"
+
+    def _zonal_spectrum(self):
+        buf = ZonalSpectrumAverageBuffer(
+            num_rollout_steps=1,
+            rollout_dt=6,
+            grid=make_grid((self.H, self.W), "equiangular"),
+            ensemble_size=1,
+            channel_names=self.channel_names,
+            lat_lon=self._lat_lon(),
+            device="cpu",
+            output_channels=self.channel_names,
+            output_file=self.output_file,
+        )
+        buf.update(self._fields(3, 1), self._fields(3, 1), 0)
+        buf.finalize()
+        return "mean", "lead_time"
+
+    @parameterized.expand(
+        [
+            ("rollout", lambda self: self._rollout(streaming_mode=False)),
+            ("rollout_streaming", lambda self: self._rollout(streaming_mode=True)),
+            ("temporal_average", lambda self: self._temporal_average()),
+            ("spectrum", lambda self: self._spectrum()),
+            ("zonal_spectrum", lambda self: self._zonal_spectrum()),
+        ]
+    )
+    def test_only_first_matmul_rank_writes(self, name, run):
+        for matmul_rank in (0, 1):
+
+            def get_rank(group, matmul_rank=matmul_rank):
+                return matmul_rank if group == "matmul" else 0
+
+            with mock.patch("makani.inference.rollout_buffer.comm.get_rank", side_effect=get_rank):
+                data_name, coordinate_name = run(self)
+
+            with h5.File(self.output_file, "r") as f:
+                data = f[data_name][...]
+                coordinate = f[coordinate_name][...]
+
+            with self.subTest(desc=f"data on matmul rank {matmul_rank}"):
+                # the fields and their spectra are positive, the unwritten file is zero
+                if matmul_rank == 0:
+                    self.assertTrue(np.all(data != 0.0))
+                else:
+                    self.assertTrue(np.all(data == 0.0))
+            with self.subTest(desc=f"coordinates on matmul rank {matmul_rank}"):
+                self.assertTrue(np.any(coordinate != 0.0))
 
 
 if __name__ == "__main__":
