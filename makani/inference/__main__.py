@@ -82,6 +82,12 @@ if __name__ == "__main__":
         help="If specified, zonal spectrum will be computed and saved to this file.",
     )
     parser.add_argument(
+        "--kinetic_energy_spectrum_file",
+        default=None,
+        type=str,
+        help="If specified, the kinetic energy spectrum of the wind pairs (u..., v...) among the output channels will be computed per degree, for the target and the prediction, and saved to this file.",
+    )
+    parser.add_argument(
         "--start_date",
         type=str,
         default=None,
@@ -186,6 +192,11 @@ if __name__ == "__main__":
         if args.zonal_spectrum_file is not None
         else None
     )
+    kinetic_energy_spectrum_file = (
+        os.path.join(params["experiment_dir"], "scores", args.kinetic_energy_spectrum_file)
+        if args.kinetic_energy_spectrum_file is not None
+        else None
+    )
     output_memory_buffer_size = args.output_memory_buffer_size
 
     if args.checkpoint_path is None:
@@ -256,6 +267,7 @@ if __name__ == "__main__":
                     bias_file=bias_file,
                     spectrum_file=spectrum_file,
                     zonal_spectrum_file=zonal_spectrum_file,
+                    kinetic_energy_spectrum_file=kinetic_energy_spectrum_file,
                     start_date=args.start_date,
                     end_date=args.end_date,
                     date_step=args.date_step,
@@ -277,6 +289,7 @@ if __name__ == "__main__":
                         bias_file=bias_file,
                         spectrum_file=spectrum_file,
                         zonal_spectrum_file=zonal_spectrum_file,
+                        kinetic_energy_spectrum_file=kinetic_energy_spectrum_file,
                         start_date=args.start_date,
                         end_date=args.end_date,
                         date_step=args.date_step,
@@ -295,6 +308,7 @@ if __name__ == "__main__":
             bias_file=bias_file,
             spectrum_file=spectrum_file,
             zonal_spectrum_file=zonal_spectrum_file,
+            kinetic_energy_spectrum_file=kinetic_energy_spectrum_file,
             start_date=args.start_date,
             end_date=args.end_date,
             date_step=args.date_step,

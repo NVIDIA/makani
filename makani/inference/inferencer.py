@@ -62,6 +62,7 @@ from makani.inference.rollout_buffer import (
     TemporalAverageBuffer,
     SpectrumAverageBuffer,
     ZonalSpectrumAverageBuffer,
+    KineticEnergySpectrumBuffer,
 )
 
 # checkpoint helpers
@@ -261,6 +262,7 @@ class Inferencer(Driver):
         bias_file: Optional[str] = None,
         spectrum_file: Optional[str] = None,
         zonal_spectrum_file: Optional[str] = None,
+        kinetic_energy_spectrum_file: Optional[str] = None,
         enable_odirect: bool = False,
         odirect_alignment: int = 0,
         enable_gds: bool = False,
@@ -294,6 +296,7 @@ class Inferencer(Driver):
             bias_file=bias_file,
             spectrum_file=spectrum_file,
             zonal_spectrum_file=zonal_spectrum_file,
+            kinetic_energy_spectrum_file=kinetic_energy_spectrum_file,
             enable_odirect=enable_odirect,
             odirect_alignment=odirect_alignment,
             enable_gds=enable_gds,
@@ -319,6 +322,7 @@ class Inferencer(Driver):
         bias_file: Optional[str] = None,
         spectrum_file: Optional[str] = None,
         zonal_spectrum_file: Optional[str] = None,
+        kinetic_energy_spectrum_file: Optional[str] = None,
         enable_odirect: bool = False,
         odirect_alignment: int = 0,
         enable_gds: bool = False,
@@ -342,6 +346,7 @@ class Inferencer(Driver):
             bias_file=bias_file,
             spectrum_file=spectrum_file,
             zonal_spectrum_file=zonal_spectrum_file,
+            kinetic_energy_spectrum_file=kinetic_energy_spectrum_file,
             enable_odirect=enable_odirect,
             odirect_alignment=odirect_alignment,
             enable_gds=enable_gds,
@@ -364,6 +369,7 @@ class Inferencer(Driver):
         bias_file: Optional[str] = None,
         spectrum_file: Optional[str] = None,
         zonal_spectrum_file: Optional[str] = None,
+        kinetic_energy_spectrum_file: Optional[str] = None,
         enable_odirect: bool = False,
         odirect_alignment: int = 0,
         enable_gds: bool = False,
@@ -499,6 +505,25 @@ class Inferencer(Driver):
         else:
             zonal_spectrum_buffer = None
 
+        if kinetic_energy_spectrum_file is not None:
+            # the wind pairs among the recorded channels, or among all of them
+            kinetic_energy_spectrum_channels = output_channels if output_channels else self.params.channel_names
+            kinetic_energy_spectrum_buffer = KineticEnergySpectrumBuffer(
+                num_rollout_steps=rollout_steps,
+                rollout_dt=self.params.dt * dhours,
+                grid=sht_grid(img_shape, self.params.get("model_grid_type", DEFAULT_GRID_TYPE)),
+                ensemble_size=self.params.local_ensemble_size,
+                channel_names=self.params.channel_names,
+                device=self.device,
+                scale=scale,
+                bias=bias,
+                output_channels=kinetic_energy_spectrum_channels,
+                output_file=kinetic_energy_spectrum_file,
+                spatial_distributed=True,
+            )
+        else:
+            kinetic_energy_spectrum_buffer = None
+
         logs = self._inference_indexlist(
             indices,
             rollout_steps,
@@ -508,6 +533,7 @@ class Inferencer(Driver):
             bias_buffer=bias_buffer,
             spectrum_buffer=spectrum_buffer,
             zonal_spectrum_buffer=zonal_spectrum_buffer,
+            kinetic_energy_spectrum_buffer=kinetic_energy_spectrum_buffer,
             profiler=profiler,
         )
 
@@ -528,6 +554,7 @@ class Inferencer(Driver):
         bias_buffer: Optional = None,
         spectrum_buffer: Optional = None,
         zonal_spectrum_buffer: Optional = None,
+        kinetic_energy_spectrum_buffer: Optional = None,
     ):
         """
         main routine that implements autoregressive inference over a number of indices
@@ -556,6 +583,9 @@ class Inferencer(Driver):
 
         if zonal_spectrum_buffer is not None:
             zonal_spectrum_buffer.zero_buffers()
+
+        if kinetic_energy_spectrum_buffer is not None:
+            kinetic_energy_spectrum_buffer.zero_buffers()
 
         # this is the biggest index we can produce
         num_samples = self.valid_dataset.n_samples_total
@@ -769,6 +799,15 @@ class Inferencer(Driver):
                         if torch.cuda.is_available():
                             torch.cuda.nvtx.range_pop()
 
+                    if kinetic_energy_spectrum_buffer is not None:
+                        if torch.cuda.is_available():
+                            torch.cuda.nvtx.range_push("Inferencer:kinetic_energy_spectrum_buffer")
+
+                        kinetic_energy_spectrum_buffer.update(pred, targ.unsqueeze(1), idte - 1)
+
+                        if torch.cuda.is_available():
+                            torch.cuda.nvtx.range_pop()
+
                 self.step_timer.end_step()
                 if torch.cuda.is_available():
                     torch.cuda.nvtx.range_pop()
@@ -814,6 +853,10 @@ class Inferencer(Driver):
         if zonal_spectrum_buffer is not None:
             zonal_spectrum_buffer.finalize()
 
+        # record kinetic energy spectrum
+        if kinetic_energy_spectrum_buffer is not None:
+            kinetic_energy_spectrum_buffer.finalize()
+
         # global sync is in order
         if dist.is_initialized():
             barrier(self.device)
@@ -856,6 +899,7 @@ class Inferencer(Driver):
         bias_file: Optional[str] = None,
         spectrum_file: Optional[str] = None,
         zonal_spectrum_file: Optional[str] = None,
+        kinetic_energy_spectrum_file: Optional[str] = None,
         start_date=None,
         end_date=None,
         date_step=1,
@@ -928,6 +972,7 @@ class Inferencer(Driver):
             bias_file=bias_file,
             spectrum_file=spectrum_file,
             zonal_spectrum_file=zonal_spectrum_file,
+            kinetic_energy_spectrum_file=kinetic_energy_spectrum_file,
             enable_odirect=enable_odirect,
             odirect_alignment=odirect_alignment,
             enable_gds=enable_gds,

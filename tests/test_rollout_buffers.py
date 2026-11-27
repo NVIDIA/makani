@@ -32,9 +32,12 @@ from makani.inference.rollout_buffer import (
     TemporalAverageBuffer,
     SpectrumAverageBuffer,
     ZonalSpectrumAverageBuffer,
+    KineticEnergySpectrumBuffer,
+    kinetic_energy_pairs,
 )
+from makani.metrics.geometric_metrics import GeometricKineticEnergyRatio, resolved_degree
 from makani.data.data_helpers import get_lat_lon_grid
-from makani.utils.grids import make_grid, sht_grid
+from makani.utils.grids import GridQuadrature, make_grid, sht_grid
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from .testutils import (
@@ -835,6 +838,190 @@ class TestSpectrumAverageBufferUnit(unittest.TestCase):
         # nothing to write, and the accumulated statistics stay as they are
         mean, _, _ = expected[0]
         self.assertTrue(compare_tensors("mean", buf.running_mean[0], mean, atol=1e-4, rtol=1e-4, verbose=verbose))
+
+
+class TestKineticEnergySpectrumBufferUnit(unittest.TestCase):
+    """
+    KineticEnergySpectrumBuffer accumulates the kinetic energy per degree of the wind pairs, for the target and
+    every ensemble member. The winds are synthesized from random coefficients of the inverse vector SHT on a
+    Legendre-Gauss grid, band-limited to half the degree the grid resolves, so that the quadrature integrates
+    |u|^2 exactly and the energy summed over the degrees is the mean of |u|^2 / 2 over the sphere (Parseval).
+    """
+
+    nlat, nlon = 16, 32
+    grid_type = "legendre-gauss"
+
+    def setUp(self):
+        self.grid = make_grid((self.nlat, self.nlon), self.grid_type)
+        self.lmax = resolved_degree(self.grid)
+        self.isht = th.InverseRealVectorSHT(self.grid, lmax=self.lmax, mmax=self.lmax).double()
+        self.generator = torch.Generator().manual_seed(1234)
+
+    def _make_buffer(self, num_rollout_steps, ensemble_size, channel_names, output_channels, **kwargs):
+        return KineticEnergySpectrumBuffer(
+            num_rollout_steps=num_rollout_steps,
+            rollout_dt=6,
+            grid=self.grid,
+            ensemble_size=ensemble_size,
+            channel_names=channel_names,
+            device="cpu",
+            output_channels=output_channels,
+            **kwargs,
+        )
+
+    def _random_wind(self, *shape, lmax=None, degree=None):
+        """A wind field (*shape, 2, nlat, nlon) band-limited to lmax, or of the single degree ``degree``."""
+        lmax = self.lmax // 2 if lmax is None else lmax
+        l = torch.arange(self.lmax).reshape(-1, 1)
+        m = torch.arange(self.lmax).reshape(1, -1)
+        keep = (m <= l) & (l >= 1) & (l < lmax)
+        if degree is not None:
+            keep = keep & (l == degree)
+        coeffs = torch.complex(
+            torch.randn(*shape, 2, self.lmax, self.lmax, generator=self.generator, dtype=torch.float64),
+            torch.randn(*shape, 2, self.lmax, self.lmax, generator=self.generator, dtype=torch.float64),
+        )
+        coeffs = coeffs * keep
+        coeffs[..., 0] = coeffs[..., 0].real.to(coeffs.dtype)
+        with torch.no_grad():
+            return self.isht(coeffs)
+
+    def test_energy_is_that_of_the_wind(self, verbose=False):
+        # one sample of the target and two members of two pairs: the spectrum sums to the mean of |u|^2 / 2
+        ensemble_size = 2
+        channel_names = ["u10m", "v10m", "u500", "v500"]
+        wind = self._random_wind(1, 1 + ensemble_size, 2).to(torch.float32)
+        fields = wind.reshape(1, 1 + ensemble_size, 4, self.nlat, self.nlon)
+
+        buf = self._make_buffer(1, ensemble_size, channel_names, channel_names)
+        buf.update(fields[:, 1:], fields[:, :1], 0)
+        spectrum = buf.running_mean[0]
+
+        with self.subTest(desc="shape"):
+            self.assertEqual(tuple(spectrum.shape), (2, 1 + ensemble_size, self.lmax))
+
+        quad = GridQuadrature(self.grid, normalize=True)
+        expected = 0.5 * quad(wind.square().sum(dim=-3)).reshape(1 + ensemble_size, 2).t()
+        with self.subTest(desc="Parseval"):
+            self.assertTrue(
+                compare_tensors("Parseval", spectrum.sum(dim=-1), expected, atol=0, rtol=1e-4, verbose=verbose)
+            )
+
+        # the bands of the kinetic energy ratio sum the same energy
+        bands = (0, 2, 5, self.lmax)
+        metric = GeometricKineticEnergyRatio(grid=self.grid, crop_shape=tuple(self.grid.shape), bands=bands)
+        band_energy = metric.band_energy(fields[0]).permute(1, 0, 2)
+        summed = torch.stack([spectrum[..., lo:hi].sum(dim=-1) for lo, hi in zip(bands[:-1], bands[1:])], dim=-1)
+        with self.subTest(desc="bands"):
+            self.assertTrue(compare_tensors("bands", summed, band_energy, atol=1e-6, rtol=1e-4, verbose=verbose))
+
+    def test_single_degree(self, verbose=False):
+        # a wind of degree 3 has all of its energy in degree 3
+        wind = self._random_wind(1, 2, degree=3).to(torch.float32)
+        buf = self._make_buffer(1, 1, ["u10m", "v10m"], ["u10m", "v10m"])
+        buf.update(wind[:, 1:], wind[:, :1], 0)
+        spectrum = buf.running_mean[0, 0]
+
+        total = spectrum.sum(dim=-1, keepdim=True)
+        expected = torch.zeros_like(spectrum)
+        expected[:, 3] = total[:, 0]
+        self.assertTrue(
+            compare_tensors("degree 3", spectrum, expected, atol=1e-5 * total.max().item(), rtol=0, verbose=verbose)
+        )
+
+    def test_pairs_scale_bias_and_statistics(self, verbose=False):
+        # the pairs of a reordered channel subset, from normalized inputs: the energies are those of the physical
+        # winds, and the statistics over the samples those of the Welford buffers
+        channel_names = ["t2m", "v10m", "u500", "u10m", "v500", "z500", "u850"]
+        output_channels = ["u10m", "v10m", "t2m", "u500", "v500", "u850"]
+        with self.subTest(desc="pairs"):
+            self.assertEqual(kinetic_energy_pairs(output_channels), [("u10m", "v10m"), ("u500", "v500")])
+
+        scale = 1.0 + torch.rand(len(channel_names), generator=self.generator)
+        bias = torch.randn(len(channel_names), generator=self.generator)
+        ensemble_size = 2
+        buf = self._make_buffer(
+            2,
+            ensemble_size,
+            channel_names,
+            output_channels,
+            scale=scale.reshape(1, -1, 1, 1),
+            bias=bias.reshape(1, -1, 1, 1),
+        )
+        with self.subTest(desc="channels"):
+            self.assertEqual(buf.output_channels, ["uv10m", "uv500"])
+
+        reference = self._make_buffer(
+            1, ensemble_size, ["u10m", "v10m", "u500", "v500"], ["u10m", "v10m", "u500", "v500"]
+        )
+        expected = {}
+        for idt, B in [(0, 3), (0, 2), (1, 4)]:
+            wind = self._random_wind(B, 1 + ensemble_size, 2).to(torch.float32)
+            physical = wind.reshape(B, 1 + ensemble_size, 4, self.nlat, self.nlon)
+            fields = _spectrum_buffer_inputs(
+                physical, channel_names, ["u10m", "v10m", "u500", "v500"], scale, bias, self.generator
+            )
+            buf.update(*fields, idt)
+
+            # the energies of the physical winds, per sample, in the layout of the buffer
+            per_sample = []
+            for b in range(B):
+                reference.zero_buffers()
+                reference.update(physical[b : b + 1, 1:], physical[b : b + 1, :1], 0)
+                per_sample.append(reference.running_mean[0].clone().unsqueeze(0))
+            expected.setdefault(idt, []).extend(per_sample)
+
+        for idt, samples in expected.items():
+            mean, m2, count = _welford_reference(samples)
+            with self.subTest(desc=f"mean step {idt}"):
+                self.assertTrue(
+                    compare_tensors(
+                        f"mean step {idt}", buf.running_mean[idt], mean, atol=1e-5, rtol=1e-4, verbose=verbose
+                    )
+                )
+            with self.subTest(desc=f"m2 step {idt}"):
+                self.assertTrue(
+                    compare_tensors(f"m2 step {idt}", buf.running_var[idt], m2, atol=1e-5, rtol=1e-3, verbose=verbose)
+                )
+            with self.subTest(desc=f"count step {idt}"):
+                self.assertEqual(buf.num_samples_tracked[idt].item(), count)
+
+    def test_needs_a_pair(self):
+        with self.assertRaises(ValueError):
+            self._make_buffer(1, 1, ["u10m", "v10m", "t2m"], ["u10m", "t2m"])
+
+    def test_finalize_writes_mean_and_std(self, verbose=False):
+        channel_names = ["u10m", "v10m"]
+        ensemble_size = 2
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_file = os.path.join(tmpdir, "kinetic_energy.h5")
+            buf = self._make_buffer(2, ensemble_size, channel_names, channel_names, output_file=output_file)
+            for idt, B in [(0, 3), (1, 2), (1, 2)]:
+                wind = self._random_wind(B, 1 + ensemble_size).to(torch.float32)
+                buf.update(wind[:, 1:], wind[:, :1], idt)
+            mean_ref = buf.running_mean.clone()
+            std_ref = torch.sqrt(buf.running_var / (buf.num_samples_tracked.to(torch.float32) - 1.0))
+            buf.finalize()
+
+            with h5.File(output_file, "r") as f:
+                mean = torch.from_numpy(f["mean"][...])
+                std = torch.from_numpy(f["std"][...])
+                lead_time = f["lead_time"][...]
+                channels = [c.decode() if isinstance(c, bytes) else str(c) for c in f["channel"][...]]
+                quantity = f.attrs["quantity"]
+
+        with self.subTest(desc="shape"):
+            self.assertEqual(tuple(mean.shape), (2, 1, ensemble_size + 1, self.lmax))
+        with self.subTest(desc="mean"):
+            self.assertTrue(compare_tensors("mean", mean, mean_ref.double(), atol=1e-6, rtol=1e-5, verbose=verbose))
+        with self.subTest(desc="std"):
+            self.assertTrue(compare_tensors("std", std, std_ref.double(), atol=1e-6, rtol=1e-5, verbose=verbose))
+        with self.subTest(desc="lead time"):
+            self.assertTrue(np.array_equal(lead_time, np.array([6.0, 12.0])))
+        with self.subTest(desc="channels"):
+            self.assertEqual(channels, ["uv10m"])
+        with self.subTest(desc="quantity"):
+            self.assertEqual(quantity, "kinetic energy spectrum")
 
 
 class TestZonalSpectrumAverageBufferUnit(unittest.TestCase):
@@ -2235,6 +2422,22 @@ class TestMatmulReplicaWrites(unittest.TestCase):
         buf.finalize()
         return "mean", "lead_time"
 
+    def _kinetic_energy_spectrum(self):
+        # the two channels as a wind pair
+        buf = KineticEnergySpectrumBuffer(
+            num_rollout_steps=1,
+            rollout_dt=6,
+            grid=make_grid((self.H, self.W), "legendre-gauss"),
+            ensemble_size=1,
+            channel_names=["u10m", "v10m"],
+            device="cpu",
+            output_channels=["u10m", "v10m"],
+            output_file=self.output_file,
+        )
+        buf.update(self._fields(3, 1), self._fields(3, 1), 0)
+        buf.finalize()
+        return "mean", "lead_time"
+
     def _zonal_spectrum(self):
         buf = ZonalSpectrumAverageBuffer(
             num_rollout_steps=1,
@@ -2258,6 +2461,7 @@ class TestMatmulReplicaWrites(unittest.TestCase):
             ("temporal_average", lambda self: self._temporal_average()),
             ("spectrum", lambda self: self._spectrum()),
             ("zonal_spectrum", lambda self: self._zonal_spectrum()),
+            ("kinetic_energy_spectrum", lambda self: self._kinetic_energy_spectrum()),
         ]
     )
     def test_only_first_matmul_rank_writes(self, name, run):
@@ -2274,9 +2478,9 @@ class TestMatmulReplicaWrites(unittest.TestCase):
                 coordinate = f[coordinate_name][...]
 
             with self.subTest(desc=f"data on matmul rank {matmul_rank}"):
-                # the fields and their spectra are positive, the unwritten file is zero
+                # the written data is not zero (the kinetic energy of degree 0 is), the unwritten file is
                 if matmul_rank == 0:
-                    self.assertTrue(np.all(data != 0.0))
+                    self.assertTrue(np.any(data != 0.0))
                 else:
                     self.assertTrue(np.all(data == 0.0))
             with self.subTest(desc=f"coordinates on matmul rank {matmul_rank}"):

@@ -31,6 +31,7 @@ from makani.models.common.distributed.fft import DistributedRealFFT1
 from torch_harmonics.distributed import compute_split_shapes, split_tensor_along_dim
 from makani.distributed.mappings import reduce_from_parallel_region
 from makani.distributed.helpers import barrier
+from makani.metrics.geometric_metrics import kinetic_energy_weights, resolved_degree
 
 # get torch_harmonics for spectra
 import torch_harmonics as th
@@ -875,18 +876,23 @@ class MeanStdBuffer(DataBuffer):
             num_rollout_steps, rollout_dt, channel_names, device, scale, bias, output_channels, output_file
         )
 
-        # rollout buffer on CPU has dimensions num_rollout_steps x num_channels x nlat x nlon
-        local_buffer_size = (self.num_rollout_steps, self.num_channels, *variable_shape)
-        self.running_mean = torch.zeros(local_buffer_size, dtype=torch.float32, device=self.device)
-        self.running_var = torch.zeros(local_buffer_size, dtype=torch.float32, device=self.device)
-
         # recall how many variable dims we have
+        self.variable_shape = tuple(variable_shape)
         self.variable_dims = len(variable_shape)
+        self._allocate_buffers()
 
         # number of samples seen
         self.num_samples_tracked = torch.zeros(
             (self.num_rollout_steps, 1, *(1 for _ in range(self.variable_dims))), dtype=torch.int64, device=self.device
         )
+
+    def _allocate_buffers(self):
+        """
+        allocate the running statistics of every recorded channel, of shape num_rollout_steps x num_channels x variable_shape
+        """
+        local_buffer_size = (self.num_rollout_steps, self.num_channels, *self.variable_shape)
+        self.running_mean = torch.zeros(local_buffer_size, dtype=torch.float32, device=self.device)
+        self.running_var = torch.zeros(local_buffer_size, dtype=torch.float32, device=self.device)
 
     def zero_buffers(self):
         """
@@ -1131,7 +1137,115 @@ def _real_order_weights(nlon: int, m_offset: int, m_local: int) -> torch.Tensor:
     return weights
 
 
-class SpectrumAverageBuffer(MeanStdBuffer):
+class DegreeSpectrumBuffer(MeanStdBuffer):
+    r"""
+    Base class of the buffers which record a spectrum over the spherical harmonic degree l, for the target and
+    every ensemble member. A subclass sets ``ensemble_size``, the exclusive degree ``lmax`` and the local block of
+    degrees ``lmax_offset, ..., lmax_offset + lmax_local - 1``, and accumulates statistics of shape
+    ``(ensemble_size [+ 1 on ensemble rank 0], lmax_local)`` per lead time and channel. The output file holds the
+    datasets ``mean`` and ``std`` of shape ``(lead_time, channel, ensemble index, l)``, where the ensemble index 0 is
+    the target and the indices from 1 on are the members, and the attribute ``quantity`` names what is recorded.
+    """
+
+    quantity = "power spectrum"
+
+    def finalize(self):
+
+        barrier(self.device)
+
+        # compute common mean
+        self._aggregate_stats("batch")
+
+        std = torch.sqrt(self.running_var / (self.num_samples_tracked.to(dtype=torch.float32) - 1.0))
+        mean = self.running_mean
+
+        # write out bias/var
+        if self.output_file is not None:
+            self._write_output_data(mean.cpu().numpy(), std.cpu().numpy())
+
+        barrier(self.device)
+
+        return
+
+    def _write_output_data(self, mean, std):
+
+        if self.mpi_comm is not None:
+            # initialize MPI. This call is collective!
+            file_handle = h5.File(self.output_file, "w", driver="mpio", comm=self.mpi_comm)
+        else:
+            file_handle = h5.File(self.output_file, "w")
+
+        # create hdf5 dataset and write the data
+        data_shape = (
+            self.num_rollout_steps,
+            self.num_channels,
+            self.ensemble_size * comm.get_size("ensemble") + 1,
+            self.lmax,
+        )
+        mean_data = file_handle.create_dataset("mean", data_shape, dtype=np.float64)
+        std_data = file_handle.create_dataset("std", data_shape, dtype=np.float64)
+
+        # l range
+        l_start = self.lmax_offset
+        l_end = l_start + self.lmax_local
+        l_range = slice(l_start, l_end)
+
+        # ensemble range
+        if comm.get_size("ensemble") > 1:
+            if comm.get_rank("ensemble") == 0:
+                ens_start = 0
+                ens_end = self.ensemble_size + 1
+            else:
+                ens_start = comm.get_rank("ensemble") * self.ensemble_size + 1
+                ens_end = ens_start + self.ensemble_size
+            ens_range = slice(ens_start, ens_end)
+        else:
+            ens_range = slice(0, self.ensemble_size + 1)
+
+        if (comm.get_rank("batch") == 0) and (comm.get_rank("w") == 0) and _writes_model_shard():
+            mean_data[..., ens_range, l_range] = mean[...]
+            std_data[..., ens_range, l_range] = std[...]
+
+        # create leadtimes
+        leadtime = file_handle.create_dataset("lead_time", self.num_rollout_steps, dtype=np.float64)
+        leadtime.make_scale("lead_time")
+        mean_data.dims[0].attach_scale(leadtime)
+        std_data.dims[0].attach_scale(leadtime)
+        dts = np.arange(
+            self.rollout_dt, (self.num_rollout_steps + 1) * self.rollout_dt, self.rollout_dt, dtype=np.float64
+        )
+        if comm.get_world_rank() == 0:
+            leadtime[:] = dts[:]
+
+        # create channel descriptors, no need to store the handle to that since we can populate right away:
+        chanlen = max([len(v) for v in self.output_channels])
+        chans = file_handle.create_dataset("channel", self.num_channels, dtype=h5.string_dtype(length=chanlen))
+        chans.make_scale("channel")
+        mean_data.dims[1].attach_scale(chans)
+        std_data.dims[1].attach_scale(chans)
+        if comm.get_world_rank() == 0:
+            chans[...] = self.output_channels
+
+        # label dimensions for more information
+        mean_data.dims[0].label = "Lead time"
+        std_data.dims[0].label = "Lead time"
+        mean_data.dims[1].label = "Channel name"
+        std_data.dims[1].label = "Channel name"
+        mean_data.dims[2].label = "Ensemble index"
+        std_data.dims[2].label = "Ensemble index"
+        mean_data.dims[3].label = "Spectral mode"
+        std_data.dims[3].label = "Spectral mode"
+        file_handle.attrs["quantity"] = self.quantity
+
+        # close file
+        file_handle.close()
+
+        barrier(self.device)
+
+        return
+
+
+class SpectrumAverageBuffer(DegreeSpectrumBuffer):
     r"""
     SpectrumAverageBuffer class handles the recording of spatial data during inference. Performs Welford reduction on the fly during inference
 
@@ -1264,97 +1378,178 @@ class SpectrumAverageBuffer(MeanStdBuffer):
 
         return
 
-    def finalize(self):
 
-        barrier(self.device)
+def kinetic_energy_pairs(channel_names: List[str]) -> List[Tuple[str, str]]:
+    r"""
+    The wind pairs ``(u, v)`` among ``channel_names``: every channel ``u...`` whose partner ``v...`` is there too,
+    in the order of the u components.
+    """
+    return [(c, "v" + c[1:]) for c in channel_names if c.startswith("u") and ("v" + c[1:]) in channel_names]
 
-        # compute common mean
-        self._aggregate_stats("batch")
 
-        std = torch.sqrt(self.running_var / (self.num_samples_tracked.to(dtype=torch.float32) - 1.0))
-        mean = self.running_mean
+class KineticEnergySpectrumBuffer(DegreeSpectrumBuffer):
+    r"""
+    Records the kinetic energy spectrum of wind pairs during inference, for the target and every ensemble member,
+    and averages it over the initial conditions with a Welford reduction, as :class:`SpectrumAverageBuffer` does
+    for the power spectra of single channels.
 
-        # write out bias/var
-        if self.output_file is not None:
-            self._write_output_data(mean.cpu().numpy(), std.cpu().numpy())
+    The vector SHT of a pair gives the coefficients of its velocity potential and streamfunction, and the kinetic
+    energy per unit mass in degree :math:`\ell`,
 
-        barrier(self.device)
+    .. math::
+        E(\ell) = \frac{\ell (\ell + 1)}{2} \sum_m w_m \left( |\chi_{\ell m}|^2 + |\psi_{\ell m}|^2 \right) / (4 \pi),
 
-        return
+    is the energy that :class:`makani.metrics.geometric_metrics.GeometricKineticEnergyRatio` sums over its bands
+    (see :func:`makani.metrics.geometric_metrics.kinetic_energy_weights`). It sums over the degrees to the mean of
+    :math:`|u|^2 / 2` over the sphere, in m^2 s^-2 for winds in m/s. The transform runs to the degree
+    :func:`makani.metrics.geometric_metrics.resolved_degree` of the grid.
 
-    def _write_output_data(self, mean, std):
+    A pair is recorded under the name ``uv`` followed by the suffix of its components, ``uv10m`` for ``u10m`` and
+    ``v10m``, as the kinetic energy ratio of the metrics reports it.
 
-        if self.mpi_comm is not None:
-            # initialize MPI. This call is collective!
-            file_handle = h5.File(self.output_file, "w", driver="mpio", comm=self.mpi_comm)
+    Parameters
+    ============
+    num_rollout_steps : int
+        Number of total rollout steps
+    rollout_dt : int
+        Lead time between the rollout steps, in hours
+    grid : torch_harmonics.RegularGridS2
+        the grid of the output, see :func:`makani.utils.grids.sht_grid`
+    ensemble_size : int
+        Local ensemble size
+    channel_names : List[str]
+        list of all the channel names in the output
+    device : Union[str, torch.device]
+        Device on which inference is performed
+    scale : torch.Tensor
+        Scale for output normalization
+    bias : torch.Tensor
+        Bias for output normalization
+    output_channels : List[str]
+        Channels to choose the wind pairs from, see :func:`kinetic_energy_pairs`. A pair needs both of its
+        components in the list.
+    output_file: str, optional
+        Outputfile to write to
+    """
+
+    quantity = "kinetic energy spectrum"
+
+    def __init__(
+        self,
+        num_rollout_steps: int,
+        rollout_dt: int,
+        grid,
+        ensemble_size: int,
+        channel_names: List[str],
+        device: Union[str, torch.device],
+        scale: Optional[torch.Tensor] = None,
+        bias: Optional[torch.Tensor] = None,
+        output_channels: List[str] = [],
+        output_file: Optional[str] = None,
+        spatial_distributed: Optional[bool] = False,
+    ):
+        pairs = kinetic_energy_pairs(output_channels)
+        if not pairs:
+            raise ValueError(
+                f"The kinetic energy spectrum needs at least one wind pair (u..., v...) in the channels, got {output_channels}"
+            )
+
+        # vector SHT up to the degree the grid resolves, and the local block of degrees and orders
+        self.lmax = resolved_degree(grid)
+        self.spatial_distributed = spatial_distributed
+        if self.spatial_distributed and (comm.get_size("spatial") > 1):
+            if not thd.is_initialized():
+                polar_group = None if (comm.get_size("h") == 1) else comm.get_group("h")
+                azimuth_group = None if (comm.get_size("w") == 1) else comm.get_group("w")
+                thd.init(polar_group, azimuth_group)
+            self.vsht = thd.DistributedRealVectorSHT(grid, lmax=self.lmax, mmax=self.lmax)
+            self.lmax_local = self.vsht.l_shapes[comm.get_rank("h")]
+            self.lmax_offset = sum(self.vsht.l_shapes[: comm.get_rank("h")])
+            self.mmax_local = self.vsht.m_shapes[comm.get_rank("w")]
+            self.mmax_offset = sum(self.vsht.m_shapes[: comm.get_rank("w")])
+            self.reduce_orders = comm.get_size("w") > 1
         else:
-            file_handle = h5.File(self.output_file, "w")
+            self.vsht = th.RealVectorSHT(grid, lmax=self.lmax, mmax=self.lmax)
+            self.lmax_local = self.lmax
+            self.lmax_offset = 0
+            self.mmax_local = self.lmax
+            self.mmax_offset = 0
+            self.reduce_orders = False
 
-        # create hdf5 dataset and write the data
-        data_shape = (
-            self.num_rollout_steps,
-            self.num_channels,
-            self.ensemble_size * comm.get_size("ensemble") + 1,
-            self.lmax,
+        # determine parameter size
+        self.ensemble_size = ensemble_size
+        enssize = self.ensemble_size
+        if comm.get_rank("ensemble") == 0:
+            enssize += 1
+        variable_shape = (enssize, self.lmax_local)
+
+        # read the components of the pairs, interleaved as (u_0, v_0, u_1, v_1, ...), with their normalization
+        super().__init__(
+            num_rollout_steps=num_rollout_steps,
+            rollout_dt=rollout_dt,
+            variable_shape=variable_shape,
+            channel_names=channel_names,
+            device=device,
+            scale=scale,
+            bias=bias,
+            output_channels=[c for pair in pairs for c in pair],
+            output_file=output_file,
         )
-        mean_data = file_handle.create_dataset("mean", data_shape, dtype=np.float64)
-        std_data = file_handle.create_dataset("std", data_shape, dtype=np.float64)
 
-        # l range
-        l_start = self.lmax_offset
-        l_end = l_start + self.lmax_local
-        l_range = slice(l_start, l_end)
+        # but record one channel per pair
+        self.output_channels = ["uv" + u[1:] for u, _ in pairs]
+        self.num_channels = len(pairs)
+        self._allocate_buffers()
 
-        # ensemble range
-        if comm.get_size("ensemble") > 1:
+        # move sht to device
+        self.vsht = self.vsht.to(self.device)
+
+        # energy per coefficient power of the local degrees and orders
+        self.lm_weights = kinetic_energy_weights(
+            self.lmax_offset, self.lmax_local, self.mmax_offset, self.mmax_local
+        ).to(device=self.device, dtype=torch.float32)
+
+        # reshape bias and scale
+        self.bias = self.bias.reshape(1, 1, -1, 1, 1)
+        self.scale = self.scale.reshape(1, 1, -1, 1, 1)
+
+    def update(self, data, targ, idt):
+        """update local buffers"""
+
+        with torch.no_grad():
             if comm.get_rank("ensemble") == 0:
-                ens_start = 0
-                ens_end = self.ensemble_size + 1
-            else:
-                ens_start = comm.get_rank("ensemble") * self.ensemble_size + 1
-                ens_end = ens_start + self.ensemble_size
-            ens_range = slice(ens_start, ens_end)
-        else:
-            ens_range = slice(0, self.ensemble_size + 1)
+                data = torch.cat([targ, data], dim=1)
 
-        if (comm.get_rank("batch") == 0) and (comm.get_rank("w") == 0) and _writes_model_shard():
-            mean_data[..., ens_range, l_range] = mean[...]
-            std_data[..., ens_range, l_range] = std[...]
+            # rescale data and project channels
+            datap = self.scale * data[..., self.channel_mask, :, :] + self.bias
 
-        # create leadtimes
-        leadtime = file_handle.create_dataset("lead_time", self.num_rollout_steps, dtype=np.float64)
-        leadtime.make_scale("lead_time")
-        mean_data.dims[0].attach_scale(leadtime)
-        std_data.dims[0].attach_scale(leadtime)
-        dts = np.arange(
-            self.rollout_dt, (self.num_rollout_steps + 1) * self.rollout_dt, self.rollout_dt, dtype=np.float64
-        )
-        if comm.get_world_rank() == 0:
-            leadtime[:] = dts[:]
+            # perform SHT in FP32 to be safe
+            dtype = datap.dtype
+            with amp.autocast(device_type=datap.device.type, enabled=False):
+                # (B, E, 2 * pairs, H, W) -> (B, E, pairs, 2, H, W)
+                datap = datap.to(torch.float32)
+                datap = datap.reshape(*datap.shape[:2], self.num_channels, 2, *datap.shape[-2:])
+                coeffs = self.vsht(datap)
 
-        # create channel descriptors, no need to store the handle to that since we can populate right away:
-        chanlen = max([len(v) for v in self.output_channels])
-        chans = file_handle.create_dataset("channel", self.num_channels, dtype=h5.string_dtype(length=chanlen))
-        chans.make_scale("channel")
-        mean_data.dims[1].attach_scale(chans)
-        std_data.dims[1].attach_scale(chans)
-        if comm.get_world_rank() == 0:
-            chans[...] = self.output_channels
+                # energy per degree: the power of both coefficients, weighted and summed over the local orders
+                power = torch.sum(torch.square(torch.abs(coeffs)), dim=-3)
+                spect = torch.sum(power * self.lm_weights, dim=-1)
 
-        # label dimensions for more information
-        mean_data.dims[0].label = "Lead time"
-        std_data.dims[0].label = "Lead time"
-        mean_data.dims[1].label = "Channel name"
-        std_data.dims[1].label = "Channel name"
-        mean_data.dims[2].label = "Ensemble index"
-        std_data.dims[2].label = "Ensemble index"
-        mean_data.dims[3].label = "Spectral mode"
-        std_data.dims[3].label = "Spectral mode"
+                # sum over the orders held by the other w ranks
+                if self.reduce_orders:
+                    spect = reduce_from_parallel_region(spect, "w")
 
-        # close file
-        file_handle.close()
+            # convert back precision
+            spect = spect.to(dtype=dtype)
 
-        barrier(self.device)
+            # swap E and C
+            spect = spect.permute(0, 2, 1, 3).contiguous()
+
+            # compute the local variance and mean over the local batch dimension
+            mean, m2, count = self._compute_stats(spect, dim=0)
+
+            # do distributed welford
+            self._welford_combine(mean, m2, count, idt)
 
         return
 

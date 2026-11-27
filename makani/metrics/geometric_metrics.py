@@ -465,6 +465,20 @@ def kinetic_energy_bands(lmax: int, edges: Optional[Sequence[int]] = None) -> Tu
     return edges
 
 
+def kinetic_energy_weights(l_offset: int, l_local: int, m_offset: int, m_local: int) -> torch.Tensor:
+    r"""
+    The kinetic energy per unit mass carried by unit power :math:`|\chi_{\ell m}|^2 + |\psi_{\ell m}|^2` of the
+    coefficients of the real vector SHT, for the degrees ``l_offset, ..., l_offset + l_local - 1`` and the orders
+    ``m_offset, ..., m_offset + m_local - 1``: :math:`\ell (\ell + 1) / 2`, times the multiplicity of the order
+    (1 for :math:`m = 0`, 2 otherwise, as the real transform keeps the orders :math:`m \geq 0` only), over
+    :math:`4 \pi` for the mean over the sphere. Returns ``(l_local, m_local)`` in float64.
+    """
+    ell = torch.arange(l_offset, l_offset + l_local, dtype=torch.float64)
+    m = torch.arange(m_offset, m_offset + m_local, dtype=torch.float64)
+    multiplicity = torch.where(m == 0, 1.0, 2.0)
+    return 0.5 * (ell * (ell + 1.0)).reshape(-1, 1) * multiplicity.reshape(1, -1) / (4.0 * math.pi)
+
+
 class GeometricKineticEnergyRatio(GeometricBaseMetric):
     r"""
     Kinetic energy of the forecast relative to that of the observation, in bands of spherical harmonic degree.
@@ -567,12 +581,10 @@ class GeometricKineticEnergyRatio(GeometricBaseMetric):
         self.reduce_degrees = self.spatial_distributed and (comm.get_size("h") > 1)
         self.reduce_orders = self.spatial_distributed and (comm.get_size("w") > 1)
 
-        # energy per coefficient power: l (l + 1) / 2, the multiplicity of the order, and 1 / (4 pi) for the mean
-        ell = torch.arange(l_offset, l_offset + l_local, dtype=torch.float64)
-        m = torch.arange(m_offset, m_offset + m_local, dtype=torch.float64)
-        multiplicity = torch.where(m == 0, 1.0, 2.0)
-        lm_weights = 0.5 * (ell * (ell + 1.0)).reshape(-1, 1) * multiplicity.reshape(1, -1) / (4.0 * math.pi)
+        # energy per coefficient power
+        lm_weights = kinetic_energy_weights(l_offset, l_local, m_offset, m_local)
         self.register_buffer("lm_weights", lm_weights.to(torch.float32), persistent=False)
+        ell = torch.arange(l_offset, l_offset + l_local, dtype=torch.float64)
 
         # band membership of the local degrees, (nbands, l_local)
         edges = torch.tensor(self.bands, dtype=torch.float64)
