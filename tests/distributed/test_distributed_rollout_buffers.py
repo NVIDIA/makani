@@ -23,7 +23,11 @@ import torch
 
 from makani.utils.grids import make_grid
 from makani.distributed import comm
-from makani.inference.rollout_buffer import SpectrumAverageBuffer, ZonalSpectrumAverageBuffer
+from makani.inference.rollout_buffer import (
+    KineticEnergySpectrumBuffer,
+    SpectrumAverageBuffer,
+    ZonalSpectrumAverageBuffer,
+)
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
@@ -38,6 +42,8 @@ _LOCAL_BATCH_SIZE = 2
 _LOCAL_ENSEMBLE_SIZE = 2
 # (rollout step, update) sequence: two updates of the first step, one of the second
 _ROLLOUT_STEPS = [0, 0, 1]
+# channels of as many wind pairs as azimuth ranks, and one that belongs to no pair
+_WIND_CHANNEL_NAMES = ["u10m", "t2m", "v10m", "u500", "v500"]
 
 
 class TestDistributedSpectrumBuffers(unittest.TestCase):
@@ -148,6 +154,34 @@ class TestDistributedSpectrumBuffers(unittest.TestCase):
                 scale=scale,
                 bias=bias,
                 output_channels=_OUTPUT_CHANNELS,
+                spatial_distributed=True,
+            )
+
+        buffer_serial, buffer_dist = self._run(make_buffer, nlat, nlon)
+
+        # the degrees are split over the polar ranks; the orders are summed over the azimuth ranks
+        l_range = slice(buffer_dist.lmax_offset, buffer_dist.lmax_offset + buffer_dist.lmax_local)
+        self._compare(buffer_serial, buffer_dist, (Ellipsis, self._ensemble_range(), l_range), tol, verbose=verbose)
+
+    @parameterized.expand(
+        [
+            [32, 64, "legendre-gauss", 1e-4],
+            [33, 64, "equiangular", 1e-4],
+        ],
+        skip_on_empty=True,
+    )
+    def test_distributed_kinetic_energy_spectrum_buffer(self, nlat, nlon, grid, tol, verbose=False):
+        def make_buffer(ensemble_size, scale, bias):
+            return KineticEnergySpectrumBuffer(
+                num_rollout_steps=2,
+                rollout_dt=6,
+                grid=make_grid((nlat, nlon), grid),
+                ensemble_size=ensemble_size,
+                channel_names=_WIND_CHANNEL_NAMES,
+                device=self.device,
+                scale=scale,
+                bias=bias,
+                output_channels=_WIND_CHANNEL_NAMES,
                 spatial_distributed=True,
             )
 
