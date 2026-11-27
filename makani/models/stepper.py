@@ -28,6 +28,8 @@ from makani.models.model_input import (
     takes_model_input,
 )
 from makani.models.preprocessor import Preprocessor2D
+from makani.models.constraints import SoftClip
+from makani.data.data_helpers import get_data_normalization
 from makani.models.noise.controller import NoiseController
 from makani.data.rollout import Rollout, RolloutStep
 
@@ -64,6 +66,37 @@ def _assert_checkpoint_safe(module: nn.Module, noise: NoiseController):
         )
 
 
+def make_input_clip(params) -> "SoftClip | None":
+    r"""
+    The :class:`~makani.models.constraints.SoftClip` of the model input from ``input_soft_clip``, or ``None``.
+
+    ``input_soft_clip`` takes the options of :class:`~makani.models.constraints.SoftClip`, e.g.::
+
+        input_soft_clip:
+          names_to_clip: ["q100"]
+          threshold: 8.0
+          order: 8
+
+    The clip acts on the state channels in the units of the normalized data, with the normalization statistics of
+    ``params`` to check those of the wind, see the warning of :class:`~makani.models.constraints.SoftClip`.
+    """
+    options = params.get("input_soft_clip", None)
+    if not options:
+        return None
+    options = dict(options)
+    if "names_to_clip" not in options:
+        raise ValueError("input_soft_clip needs names_to_clip, the channels to clip")
+
+    bias, scale = None, None
+    if (params.get("normalization", "none") != "none") and (params.get("in_channels", None) is not None):
+        bias, scale = get_data_normalization(params)
+        if (bias is not None) and (scale is not None):
+            bias = torch.as_tensor(bias)[:, params.in_channels, ...]
+            scale = torch.as_tensor(scale)[:, params.in_channels, ...]
+
+    return SoftClip(params.channel_names, bias=bias, scale=scale, **options)
+
+
 class StepWrapper(nn.Module):
     r"""
     Bind a network to its preprocessor and its input.
@@ -72,8 +105,9 @@ class StepWrapper(nn.Module):
     and get predictions back in the same space, without having to replicate
     the preprocessing pipeline at every call site. That is the data space: the
     fields normalized by the dataset statistics, which the dataloader already
-    applies and this wrapper never undoes. Each step performs: the history
-    normalization of the window, the assembly of the network input, a
+    applies and this wrapper never undoes. Each step performs: the soft clip of
+    the window if ``input_soft_clip`` is set (see :func:`make_input_clip`), the
+    history normalization of the window, the assembly of the network input, a
     :class:`~makani.models.model_input.ModelInput`, the model forward, bias
     correction, and the history denormalization of the output. A network that
     declares ``takes_model_input = True`` gets the
@@ -133,6 +167,8 @@ class StepWrapper(nn.Module):
     preprocessor : Preprocessor2D
         Normalizes the window, and holds the dynamic and static features and
         the bias correction.
+    input_clip : SoftClip or None
+        Clips the outliers of the window, see :func:`make_input_clip`.
     input_adapter : FlatInputAdapter
         Owns the input noise, and packs the input of a flat network.
     model : torch.nn.Module
@@ -147,6 +183,7 @@ class StepWrapper(nn.Module):
     def __init__(self, params, model_handle):
         super().__init__()
         self.preprocessor = Preprocessor2D(params)
+        self.input_clip = make_input_clip(params)
         # before the network: the input noise draws its parameters first, and they lead the parameters of the model
         self.input_adapter = FlatInputAdapter(params)
         self.model = model_handle()
@@ -199,6 +236,10 @@ class StepWrapper(nn.Module):
         # the input of the network for one window, with the history statistics its prediction is denormalized with
         pp = self.preprocessor
         pp.check_dynamic_features(dynamic_features, "StepWrapper")
+
+        # the outliers of the window clipped before anything else sees them, its history statistics included
+        if self.input_clip is not None:
+            inp = self.input_clip(inp)
 
         stats = pp.compute_history_stats(inp)
         return ModelInput(
