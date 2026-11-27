@@ -489,7 +489,10 @@ class StochasticInterpolantWrapper(StepWrapper):
         return s
 
     def _current_state(self, inp, stats):
-        # the latest step of the window, in the space the network predicts in: the start of the path
+        # the latest step of the window, in the space the network predicts in: the start of the path, clipped as the
+        # window is for the network
+        if self.input_clip is not None:
+            inp = self.input_clip(inp)
         return self.preprocessor.history_normalize(inp[:, -1:], stats, target=True).squeeze(1)
 
     # ------------------------------------------------------------------ step

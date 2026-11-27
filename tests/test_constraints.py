@@ -16,6 +16,7 @@
 import os
 import sys
 import unittest
+import warnings
 from parameterized import parameterized_class
 
 import numpy as np
@@ -28,10 +29,16 @@ import makani.models.constants as const
 from makani.utils.grids import make_grid
 from makani.losses.hydrostatic_loss import HydrostaticBalanceLoss
 from makani.models.parametrizations import ConstraintsWrapper
-from makani.models.constraints import NonNegativeConstraint, HydrostaticBalanceProjection, get_matching_channels_pl
+from makani.models.constraints import (
+    NonNegativeConstraint,
+    HydrostaticBalanceProjection,
+    SoftClip,
+    get_matching_channels_pl,
+)
+from makani.models.stepper import StepWrapper
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from .testutils import disable_tf32, set_seed, compare_tensors
+from .testutils import disable_tf32, set_seed, compare_tensors, get_default_parameters
 
 _devices = [(torch.device("cpu"),)]
 if torch.cuda.is_available():
@@ -1079,3 +1086,187 @@ class TestHydrostaticBalanceProjection(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _soft_clip_reference(x, s, p):
+    """The soft clip in float64, x (1 + (x/s)^p)^(-1/p), for a magnitude x."""
+    x = x.double()
+    return x * (1.0 + (x.abs() / s) ** p) ** (-1.0 / p)
+
+
+@parameterized_class(("device",), _devices)
+class TestSoftClip(unittest.TestCase):
+    """The soft clip of scalar channels and of wind vectors by their magnitude."""
+
+    channel_names = ["u10m", "v10m", "q100", "z500", "t500"]
+
+    def setUp(self):
+        set_seed(333)
+
+    def _field(self, *shape):
+        return torch.randn(*shape, len(self.channel_names), 8, 16, device=self.device)
+
+    def test_scalar_follows_the_formula(self):
+        """A scalar channel is x (1 + (x/s)^p)^(-1/p), the identity on the bulk and s for large values."""
+        clip = SoftClip(self.channel_names, ["q100"], threshold=5.0, order=8).to(self.device)
+        x = torch.linspace(-50.0, 50.0, 1001, device=self.device)
+        field = self._field(1).repeat(1001, 1, 1, 1)
+        field[:, 2] = x.reshape(-1, 1, 1)
+
+        out = clip(field)[:, 2, 0, 0]
+        self.assertTrue(compare_tensors("q100", out.double(), _soft_clip_reference(x, 5.0, 8), atol=1e-5, rtol=1e-5))
+        # the bulk is left alone, the outliers saturate below the threshold
+        bulk = x.abs() <= 2.0
+        self.assertLess((out[bulk] - x[bulk]).abs().max().item(), 1e-3)
+        # up to the rounding of float32
+        self.assertLessEqual(out.abs().max().item(), 5.0 * (1.0 + 2.0**-22))
+        self.assertGreater(out.abs().max().item(), 4.99)
+        # monotonic, up to the rounding of float32 where it saturates
+        self.assertTrue(torch.all(out[1:] >= out[:-1] - 5.0 * 2.0**-22).item())
+
+    def test_other_channels_pass_through(self):
+        """The channels that are not clipped are unchanged, bit for bit, with or without a time axis."""
+        clip = SoftClip(self.channel_names, ["q100", "u10m", "v10m"]).to(self.device)
+        for x in [self._field(2), self._field(2, 3)]:
+            x = 20.0 * x
+            out = clip(x)
+            self.assertTrue(torch.equal(out[..., 3:, :, :], x[..., 3:, :, :]))
+            self.assertFalse(torch.equal(out[..., :3, :, :], x[..., :3, :, :]))
+
+    def test_wind_is_clipped_by_its_magnitude(self):
+        """The wind keeps its direction, and its magnitude is clipped as a scalar would be."""
+        clip = SoftClip(self.channel_names, ["u10m", "v10m"], threshold=4.0).to(self.device)
+        x = 10.0 * self._field(2)
+        out = clip(x)
+
+        magnitude = torch.sqrt(x[:, 0] ** 2 + x[:, 1] ** 2)
+        clipped = torch.sqrt(out[:, 0] ** 2 + out[:, 1] ** 2)
+        self.assertTrue(
+            compare_tensors(
+                "magnitude", clipped.double(), _soft_clip_reference(magnitude, 4.0, 8), atol=1e-5, rtol=1e-5
+            )
+        )
+        # the same factor for both components: the direction is kept
+        self.assertTrue(compare_tensors("direction", out[:, 0] * x[:, 1], out[:, 1] * x[:, 0], atol=1e-4, rtol=1e-5))
+
+    def test_gradient_is_finite_at_calm_wind(self):
+        """At zero wind the clip is the identity with a finite gradient, as it needs no magnitude."""
+        clip = SoftClip(self.channel_names, ["u10m", "v10m"], threshold=4.0).to(self.device)
+        x = torch.zeros(1, len(self.channel_names), 2, 2, device=self.device, requires_grad=True)
+        clip(x).sum().backward()
+        self.assertTrue(torch.all(x.grad == 1.0).item())
+
+    def test_extreme_values_do_not_overflow(self):
+        """Values whose power of the order overflows float32 still clip to the threshold."""
+        clip = SoftClip(self.channel_names, ["q100", "u10m", "v10m"], threshold=8.0).to(self.device)
+        x = self._field(1)
+        x[:, :3] = 1e30
+        out = clip(x)
+        self.assertTrue(torch.isfinite(out).all().item())
+        self.assertTrue(torch.allclose(out[:, 2], torch.full_like(out[:, 2], 8.0)))
+        self.assertTrue(torch.allclose(out[:, 0], torch.full_like(out[:, 0], 8.0 / np.sqrt(2.0))))
+
+    def test_keeps_the_dtype(self):
+        clip = SoftClip(self.channel_names, ["q100"]).to(self.device)
+        x = (20.0 * self._field(1)).to(torch.bfloat16)
+        out = clip(x)
+        self.assertEqual(out.dtype, torch.bfloat16)
+        self.assertLessEqual(out[:, 2].float().abs().max().item(), 8.0)
+
+    def test_thresholds_per_channel(self):
+        clip = SoftClip(self.channel_names, ["q100", "t500"], threshold={"q100": 2.0, "t500": 6.0}).to(self.device)
+        x = 1e3 * torch.ones(1, len(self.channel_names), 1, 1, device=self.device)
+        out = clip(x)
+        self.assertAlmostEqual(out[0, 2].item(), 2.0, places=4)
+        self.assertAlmostEqual(out[0, 4].item(), 6.0, places=4)
+
+    def test_invalid_options_raise(self):
+        names = self.channel_names
+        cases = {
+            "unknown channel": dict(names_to_clip=["q50"]),
+            "wind without its partner": dict(names_to_clip=["u10m"]),
+            "partner without the wind": dict(names_to_clip=["v10m"]),
+            "wind with two thresholds": dict(names_to_clip=["u10m", "v10m"], threshold={"u10m": 4.0, "v10m": 5.0}),
+            "threshold without a channel": dict(names_to_clip=["q100"], threshold={"q100": 4.0, "t500": 4.0}),
+            "channel without a threshold": dict(names_to_clip=["q100", "t500"], threshold={"q100": 4.0}),
+            "odd order": dict(names_to_clip=["q100"], order=7),
+            "zero threshold": dict(names_to_clip=["q100"], threshold=0.0),
+        }
+        for desc, options in cases.items():
+            with self.subTest(desc=desc), self.assertRaises(ValueError):
+                SoftClip(names, **options)
+
+    def test_warns_unless_the_wind_has_vector_statistics(self):
+        """The clip of the wind warns when its components are not centered on zero with a shared scale."""
+        C = len(self.channel_names)
+        vector_bias, vector_scale = torch.zeros(1, C, 1, 1), torch.ones(1, C, 1, 1)
+        vector_bias[0, 2:] = 3.0
+        vector_scale[0, 2:] = 7.0
+
+        with self.subTest(desc="vector statistics"):
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+                SoftClip(self.channel_names, ["u10m", "v10m"], bias=vector_bias, scale=vector_scale)
+
+        magnitude_bias = vector_bias.clone()
+        magnitude_bias[0, 0] = 1.5
+        componentwise_scale = vector_scale.clone()
+        componentwise_scale[0, 1] = 2.0
+        for desc, bias, scale in [
+            ("magnitude statistics", magnitude_bias, vector_scale),
+            ("componentwise statistics", vector_bias, componentwise_scale),
+        ]:
+            with self.subTest(desc=desc), self.assertWarns(UserWarning):
+                SoftClip(self.channel_names, ["u10m", "v10m"], bias=bias, scale=scale)
+
+        with self.subTest(desc="scalars only"):
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+                SoftClip(self.channel_names, ["q100"], bias=magnitude_bias, scale=componentwise_scale)
+
+
+class _RecordingNet(torch.nn.Module):
+    """Returns its input's last step and keeps the input, to see what the network got."""
+
+    def __init__(self, num_channels):
+        super().__init__()
+        self.num_channels = num_channels
+        self.seen = None
+
+    def forward(self, x):
+        self.seen = x
+        return x[:, -self.num_channels :]
+
+
+class TestInputSoftClip(unittest.TestCase):
+    """The soft clip of the model input, from input_soft_clip."""
+
+    def _params(self, **overrides):
+        params = get_default_parameters()
+        params.channel_names = TestSoftClip.channel_names
+        for key, value in overrides.items():
+            setattr(params, key, value)
+        return params
+
+    def _wrapper(self, params):
+        return StepWrapper(params, lambda: _RecordingNet(params.N_in_channels))
+
+    def test_without_the_option_there_is_no_clip(self):
+        self.assertIsNone(self._wrapper(self._params()).input_clip)
+
+    def test_the_network_sees_the_clipped_input(self):
+        options = {"names_to_clip": ["q100", "u10m", "v10m"], "threshold": 3.0}
+        params = self._params(input_soft_clip=options)
+        wrapper = self._wrapper(params)
+        self.assertIsInstance(wrapper.input_clip, SoftClip)
+
+        set_seed(333)
+        x = 10.0 * torch.randn(1, 1, params.N_in_channels, params.img_shape_x, params.img_shape_y)
+        wrapper.predict(x, {})
+
+        expected = SoftClip(params.channel_names, **options)(x).flatten(1, 2)
+        self.assertTrue(torch.equal(wrapper.model.seen, expected))
+
+    def test_needs_the_channels(self):
+        with self.assertRaises(ValueError):
+            self._wrapper(self._params(input_soft_clip={"threshold": 3.0}))

@@ -15,6 +15,8 @@
 
 
 import math
+import warnings
+from typing import Dict, Optional, Sequence, Union
 
 import torch
 import torch.nn as nn
@@ -24,6 +26,7 @@ from torch import amp
 import makani.models.constants as const
 
 from makani.models.common.pointwise_conv import pointwise_conv2d
+from makani.data.features import get_wind_channels
 
 
 class NonNegativeConstraint(nn.Module):
@@ -129,6 +132,199 @@ class NonNegativeConstraint(nn.Module):
             w = torch.clamp(w, min=lo)
 
         return x.index_copy(-3, self.channel_indices, w.to(x.dtype))
+
+
+class SoftClip(nn.Module):
+    r"""Softly clip a named subset of channels (dim -3) to a threshold, the wind vectors by their magnitude.
+
+    Meant for the input of a model whose data has outliers, e.g. single grid points of specific humidity tens of
+    standard deviations off, which a forecast amplifies step by step. A scalar channel :math:`x` and a wind vector
+    :math:`w = (u, v)` become
+
+    .. math::
+
+        x' = x \, \left(1 + (x/s)^p\right)^{-1/p}, \qquad
+        w' = w \, \left(1 + (|w|/s)^p\right)^{-1/p},
+
+    with the threshold :math:`s` and the order :math:`p`, an even number. Both are monotonic in :math:`|x|` and
+    :math:`|w|`, saturate at :math:`s` and are smooth everywhere, also at :math:`w = 0`, since for an even :math:`p`
+    the factor is a function of :math:`u^2 + v^2`. Unlike :math:`s \tanh(x/s)`, whose error :math:`x^3/(3s^2)` already
+    shrinks a value of :math:`3` by 10% at :math:`s = 5`, the clip leaves the bulk of the data alone: at
+    :math:`p = 8` and :math:`s = 5`, a value of :math:`3` changes by 0.2%, one of :math:`2` by 0.01%. The wind is
+    clipped by its magnitude, with one threshold for both components, which keeps its direction and does not depend
+    on the frame of the components, which turns towards the poles; clipping the components on their own would turn
+    strong winds towards the diagonals.
+
+    The clip acts in the units of its input, for a model input those of the normalized data: a threshold of 8 is
+    8 standard deviations of a channel normalized with ``zscore``. It is the same in training and inference.
+
+    .. warning::
+
+        The clip of a wind vector keeps its direction only if both components share a scale and are centered on
+        zero, as the statistics of ``wind_stats="vector"`` give them, see
+        :func:`~makani.datasets.compute_stats.compute_stats`. With the statistics of ``"magnitude"``, the components are
+        centered on their means, and the clip acts on the deviation from the mean wind; with those of
+        ``"componentwise"``, the components have scales of their own as well. A warning is issued when ``bias`` and
+        ``scale`` show either.
+
+    Parameters
+    ----------
+    channel_names : list of str
+        The channels of the tensor, in order.
+    names_to_clip : list of str
+        The channels to clip. A wind component, a ``u...`` channel with a ``v...`` partner or the reverse, see
+        :func:`~makani.data.features.get_wind_channels`, has to come with its partner.
+    threshold : float or dict of str to float, optional
+        The threshold :math:`s`, by default 8. A dict gives one per channel and needs the same for both components
+        of a wind vector.
+    order : int, optional
+        The order :math:`p`, an even number, by default 8. The larger, the sharper the clip and the closer to the
+        identity below the threshold.
+    bias : torch.Tensor, optional
+        The normalization bias of the channels, shape ``(1, C, 1, 1)``, only to check the statistics of the wind.
+    scale : torch.Tensor, optional
+        The normalization scale of the channels, shape ``(1, C, 1, 1)``, only to check the statistics of the wind.
+
+    Raises
+    ------
+    ValueError
+        If a channel is not in ``channel_names``, a wind component comes without its partner, the components of a
+        wind vector have different thresholds, a threshold is not positive or the order not a positive even number.
+    """
+
+    def __init__(
+        self,
+        channel_names: Sequence[str],
+        names_to_clip: Sequence[str],
+        threshold: Union[float, Dict[str, float]] = 8.0,
+        order: int = 8,
+        bias: Optional[torch.Tensor] = None,
+        scale: Optional[torch.Tensor] = None,
+    ):
+        super().__init__()
+
+        channel_names = list(channel_names)
+        names_to_clip = list(dict.fromkeys(names_to_clip))
+        missing = [name for name in names_to_clip if name not in channel_names]
+        if missing:
+            raise ValueError(f"Channels {missing} to clip are not among the channels {channel_names}")
+        if (int(order) != order) or (order <= 0) or (order % 2 != 0):
+            raise ValueError(f"The order of the soft clip has to be a positive even number, got {order}")
+        self.order = int(order)
+
+        def threshold_of(name: str) -> float:
+            value = float(threshold[name] if isinstance(threshold, dict) else threshold)
+            if not value > 0.0:
+                raise ValueError(f"The threshold of the soft clip of {name} has to be positive, got {value}")
+            return value
+
+        if isinstance(threshold, dict):
+            unused = sorted(set(threshold) - set(names_to_clip))
+            if unused:
+                raise ValueError(f"Thresholds are given for {unused}, which are not clipped")
+            without = [name for name in names_to_clip if name not in threshold]
+            if without:
+                raise ValueError(f"No threshold is given for {without}")
+
+        # the wind vectors among the channels, as (u, v) pairs of channel indices
+        wind = get_wind_channels(channel_names)
+        pairs = [(wind[i], wind[i + 1]) for i in range(0, len(wind), 2)]
+
+        vectors = []
+        for u, v in pairs:
+            names = [channel_names[u], channel_names[v]]
+            chosen = [name in names_to_clip for name in names]
+            if any(chosen) and not all(chosen):
+                given, partner = (names[0], names[1]) if chosen[0] else (names[1], names[0])
+                raise ValueError(
+                    f"{given} is a component of the wind vector ({names[0]}, {names[1]}), which is clipped by its "
+                    f"magnitude: clip {partner} as well"
+                )
+            if all(chosen):
+                if threshold_of(names[0]) != threshold_of(names[1]):
+                    raise ValueError(
+                        f"The components of the wind vector ({names[0]}, {names[1]}) need the same threshold, got "
+                        f"{threshold_of(names[0])} and {threshold_of(names[1])}"
+                    )
+                vectors.append((u, v))
+        in_vectors = {c for pair in vectors for c in pair}
+        scalars = [channel_names.index(name) for name in names_to_clip if channel_names.index(name) not in in_vectors]
+
+        self.register_buffer("scalar_indices", torch.tensor(scalars, dtype=torch.long), persistent=False)
+        self.register_buffer(
+            "scalar_thresholds",
+            torch.tensor([threshold_of(channel_names[c]) for c in scalars], dtype=torch.float32).reshape(-1, 1, 1),
+            persistent=False,
+        )
+        self.register_buffer("u_indices", torch.tensor([u for u, _ in vectors], dtype=torch.long), persistent=False)
+        self.register_buffer("v_indices", torch.tensor([v for _, v in vectors], dtype=torch.long), persistent=False)
+        self.register_buffer(
+            "vector_thresholds",
+            torch.tensor([threshold_of(channel_names[u]) for u, _ in vectors], dtype=torch.float32).reshape(-1, 1, 1),
+            persistent=False,
+        )
+
+        if vectors and (bias is not None) and (scale is not None):
+            self._check_wind_statistics(channel_names, vectors, bias, scale)
+
+    @staticmethod
+    def _check_wind_statistics(channel_names, vectors, bias, scale):
+        bias = torch.as_tensor(bias).reshape(-1)
+        scale = torch.as_tensor(scale).reshape(-1)
+        off = []
+        for u, v in vectors:
+            centered = bool(bias[u] == 0) and bool(bias[v] == 0)
+            shared = torch.isclose(scale[u], scale[v], rtol=1e-6).item()
+            if not (centered and shared):
+                off.append(f"({channel_names[u]}, {channel_names[v]})")
+        if off:
+            warnings.warn(
+                f"The wind vectors {', '.join(off)} are clipped by their magnitude, but their components are not "
+                f"centered on zero with a shared scale, as with the statistics of wind_stats='vector': the clip acts "
+                f"on the deviation from the mean wind, or does not keep the direction, see SoftClip"
+            )
+
+    def _factor(self, components, threshold: torch.Tensor) -> torch.Tensor:
+        # (1 + (|w|/s)^p)^(-1/p) for the components of w, rewritten with c = max(|w_i|, s) and k = c/s >= 1 as
+        # (1/k) (k^-p + (|w|/c)^p)^(-1/p), which is the same for any c > 0: no square or power overflows, as
+        # (|w|/c)^2 <= len(components), and below the threshold c = s, so that the clip is smooth at w = 0
+        c = threshold.expand_as(components[0])
+        for w in components:
+            c = torch.maximum(c, w.abs())
+        a = sum((w / c).square() for w in components)
+        k = c / threshold
+        return (k.pow(-self.order) + a.pow(self.order // 2)).pow(-1.0 / self.order) / k
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        r"""
+        Clip the channels of ``x``.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Channels at dim -3, e.g. ``(B, C, H, W)`` or ``(B, T, C, H, W)``.
+
+        Returns
+        -------
+        torch.Tensor
+            ``x`` with the chosen channels clipped, in its dtype; the others pass through unchanged.
+        """
+        dtype = x.dtype
+        if self.scalar_indices.numel() > 0:
+            w = x.index_select(-3, self.scalar_indices).float()
+            w = w * self._factor([w], self.scalar_thresholds)
+            x = x.index_copy(-3, self.scalar_indices, w.to(dtype))
+        if self.u_indices.numel() > 0:
+            u = x.index_select(-3, self.u_indices).float()
+            v = x.index_select(-3, self.v_indices).float()
+            factor = self._factor([u, v], self.vector_thresholds)
+            x = x.index_copy(-3, self.u_indices, (u * factor).to(dtype))
+            x = x.index_copy(-3, self.v_indices, (v * factor).to(dtype))
+        return x
+
+    def extra_repr(self) -> str:
+        wind = list(zip(self.u_indices.tolist(), self.v_indices.tolist()))
+        return f"scalars={self.scalar_indices.tolist()}, wind={wind}, order={self.order}"
 
 
 class HydrostaticBalanceProjection(nn.Module):
