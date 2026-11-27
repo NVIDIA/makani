@@ -2349,7 +2349,8 @@ class TestMatmulReplicaWrites(unittest.TestCase):
     """
     The ranks of a matmul group hold the same shard of the model output, so only the first of them writes it.
     A buffer on another matmul rank leaves the data of its file alone, and still writes the coordinates, which
-    world rank 0 writes once for all.
+    world rank 0 writes once for all. Each case returns the data that has to be written in full, which leaves out
+    only what is zero by construction.
     """
 
     H, W = 4, 8
@@ -2388,7 +2389,7 @@ class TestMatmulReplicaWrites(unittest.TestCase):
         for idt in range(2):
             buf.update(self._fields(2, 1), torch.tensor([100.0, 200.0]), idt=idt)
         buf.finalize()
-        return "fields", "lat"
+        return "fields", "lat", np.s_[...]
 
     def _temporal_average(self):
         buf = TemporalAverageBuffer(
@@ -2405,7 +2406,7 @@ class TestMatmulReplicaWrites(unittest.TestCase):
         )
         buf.update(self._fields(3), 0)
         buf.finalize()
-        return "mean", "lead_time"
+        return "mean", "lead_time", np.s_[...]
 
     def _spectrum(self):
         buf = SpectrumAverageBuffer(
@@ -2420,7 +2421,7 @@ class TestMatmulReplicaWrites(unittest.TestCase):
         )
         buf.update(self._fields(3, 1), self._fields(3, 1), 0)
         buf.finalize()
-        return "mean", "lead_time"
+        return "mean", "lead_time", np.s_[...]
 
     def _kinetic_energy_spectrum(self):
         # the two channels as a wind pair
@@ -2436,7 +2437,8 @@ class TestMatmulReplicaWrites(unittest.TestCase):
         )
         buf.update(self._fields(3, 1), self._fields(3, 1), 0)
         buf.finalize()
-        return "mean", "lead_time"
+        # the degree 0 carries no kinetic energy
+        return "mean", "lead_time", np.s_[..., 1:]
 
     def _zonal_spectrum(self):
         buf = ZonalSpectrumAverageBuffer(
@@ -2452,7 +2454,7 @@ class TestMatmulReplicaWrites(unittest.TestCase):
         )
         buf.update(self._fields(3, 1), self._fields(3, 1), 0)
         buf.finalize()
-        return "mean", "lead_time"
+        return "mean", "lead_time", np.s_[...]
 
     @parameterized.expand(
         [
@@ -2471,16 +2473,16 @@ class TestMatmulReplicaWrites(unittest.TestCase):
                 return matmul_rank if group == "matmul" else 0
 
             with mock.patch("makani.inference.rollout_buffer.comm.get_rank", side_effect=get_rank):
-                data_name, coordinate_name = run(self)
+                data_name, coordinate_name, written = run(self)
 
             with h5.File(self.output_file, "r") as f:
-                data = f[data_name][...]
+                data = f[data_name][written]
                 coordinate = f[coordinate_name][...]
 
             with self.subTest(desc=f"data on matmul rank {matmul_rank}"):
-                # the written data is not zero (the kinetic energy of degree 0 is), the unwritten file is
+                # every written value is nonzero, the unwritten file is zero
                 if matmul_rank == 0:
-                    self.assertTrue(np.any(data != 0.0))
+                    self.assertTrue(np.all(data != 0.0))
                 else:
                     self.assertTrue(np.all(data == 0.0))
             with self.subTest(desc=f"coordinates on matmul rank {matmul_rank}"):
