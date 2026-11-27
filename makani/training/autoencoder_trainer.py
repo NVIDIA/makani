@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 import time
 from typing import Optional
 import numpy as np
@@ -52,7 +51,7 @@ from makani.distributed.helpers import count_parameters
 # checkpoint helpers
 
 # weight normalizing helper
-from makani.training.training_helpers import clip_grads, NonFiniteLossCheck
+from makani.training.training_helpers import clip_grads, NonFiniteLossCheck, save_as_best_checkpoint
 from makani.driver.helpers import get_memory_usage
 
 
@@ -290,9 +289,18 @@ class AutoencoderTrainer(Driver):
                 dataloader_state = self.get_train_dataloader_state()
                 # the noise generators of all ranks, so that a resumed run continues its noise
                 noise_rng_state = self.get_noise_rng_state()
+                # whether this epoch gives the best checkpoint, decided alike on all ranks: saving takes collectives
+                # over the model ranks, and the decision a broadcast over all of them
+                save_best = (not self.params.get("skip_validation", False)) and save_as_best_checkpoint(
+                    self.params.best_checkpoint_path,
+                    valid_logs["base"]["validation loss"],
+                    best_valid_loss,
+                    self.device,
+                )
             else:
                 dataloader_state = None
                 noise_rng_state = None
+                save_best = False
 
             # save out checkpoints
             if (
@@ -326,11 +334,7 @@ class AutoencoderTrainer(Driver):
                 )
 
                 # save best checkpoint
-                best_checkpoint_path = self.params.best_checkpoint_path.format(mp_rank=comm.get_rank("model"))
-                best_checkpoint_saved = os.path.isfile(best_checkpoint_path)
-                if (not self.params.get("skip_validation", False)) and (
-                    (not best_checkpoint_saved) or (valid_logs["base"]["validation loss"] <= best_valid_loss)
-                ):
+                if save_best:
                     self.save_checkpoint(
                         self.params.best_checkpoint_path,
                         self.model,

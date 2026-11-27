@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+
 import torch
 import wandb
 from torch import nn
@@ -159,6 +161,40 @@ class NonFiniteLossCheck(object):
                 f"consecutive step(s); the loss on this rank is {loss.detach().float().item()}. Stopping before "
                 f"the non-finite values reach the weights."
             )
+
+
+def save_as_best_checkpoint(best_checkpoint_path: str, valid_loss: float, best_valid_loss: float, device) -> bool:
+    """
+    Whether the checkpoint of this epoch is the best one so far, the same decision on every rank.
+
+    It is if no best checkpoint has been written yet, or if the validation loss is not above the best one. Saving a
+    checkpoint takes collectives over the model ranks in flexible mode, so every rank has to take the same decision:
+    world rank 0 takes it and broadcasts it. Whether a best checkpoint exists is checked for the file of model rank 0,
+    the one written in either checkpoint mode; a flexible checkpoint has no file for the other model ranks, and a file
+    system may show a new file to some nodes before others.
+
+    Parameters
+    ----------
+    best_checkpoint_path : str
+        Path of the best checkpoint, with ``{mp_rank}`` in place of the model rank.
+    valid_loss : float
+        Validation loss of this epoch.
+    best_valid_loss : float
+        Best validation loss so far.
+    device : torch.device
+        Device of the broadcast, that of the process group.
+
+    Returns
+    -------
+    bool
+        Whether to save the checkpoint of this epoch as the best one.
+    """
+    save = (not os.path.isfile(best_checkpoint_path.format(mp_rank=0))) or (valid_loss <= best_valid_loss)
+    if dist.is_initialized():
+        flag = torch.tensor([int(save)], dtype=torch.int32, device=device)
+        dist.broadcast(flag, src=0)
+        save = bool(flag.item())
+    return save
 
 
 def wandb_register_activations_monitor(model: nn.Module, step: int):

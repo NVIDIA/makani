@@ -13,7 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import unittest
+from unittest import mock
 
 import torch
 import torch.nn as nn
@@ -22,9 +24,16 @@ import torch.distributed as dist
 from makani.distributed import comm
 from makani.distributed.helpers import AVG, SUM, get_sharing, sync_params
 from makani.distributed.mappings import init_gradient_reduction_hooks
-from makani.training.training_helpers import normalize_weights
+from makani.training.training_helpers import normalize_weights, save_as_best_checkpoint
 
-from .distributed_helpers import _init_grid, reduce_success, sync_and_barrier, teardown_comms
+from .distributed_helpers import (
+    _init_grid,
+    make_shared_tmpdir,
+    reduce_success,
+    remove_shared_tmpdir,
+    sync_and_barrier,
+    teardown_comms,
+)
 
 _NUM_FEATURES = 6
 
@@ -214,6 +223,42 @@ class TestDistributedTrainingHelpers(unittest.TestCase):
 
     def test_gradient_reduction_mixed(self, verbose=False):
         self._test_gradient_reduction(all_shared=False, verbose=verbose)
+
+    def _decisions(self, *args):
+        # the decision of every rank
+        save = save_as_best_checkpoint(*args, self.device)
+        return self._all_gather(torch.tensor([int(save)], dtype=torch.int64, device=self.device)).flatten().tolist()
+
+    def test_best_checkpoint_decision_is_the_same_on_every_rank(self):
+        """
+        Saving the best checkpoint takes collectives over the model ranks, so every rank has to decide alike. A flexible
+        checkpoint is written as the file of model rank 0 only: a rank that looked for the file of its own model rank
+        would find none and save each epoch, while the others save only when the loss improves, and the ranks hang in
+        different collectives at the first epoch whose loss does not.
+        """
+        tmpdir = make_shared_tmpdir("makani_best_checkpoint_", self.device)
+        try:
+            path = os.path.join(tmpdir, "best_ckpt_mp{mp_rank}.tar")
+            world_size = dist.get_world_size() if dist.is_initialized() else 1
+
+            # no best checkpoint yet: save, whatever the loss
+            self.assertEqual(self._decisions(path, 2.0, 1.0), [1] * world_size)
+
+            # the best checkpoint as flexible mode writes it, the file of model rank 0 only
+            if self.world_rank == 0:
+                with open(path.format(mp_rank=0), "w") as f:
+                    f.write("checkpoint")
+            sync_and_barrier()
+            self.assertEqual(self._decisions(path, 2.0, 1.0), [0] * world_size, "a worse loss saves nothing")
+            self.assertEqual(self._decisions(path, 1.0, 1.0), [1] * world_size, "a loss as good saves everywhere")
+
+            # a file system that shows the file to some ranks only: they follow rank 0
+            with mock.patch("os.path.isfile", return_value=(self.world_rank == 0)):
+                self.assertEqual(self._decisions(path, 2.0, 1.0), [0] * world_size)
+            with mock.patch("os.path.isfile", return_value=(self.world_rank != 0)):
+                self.assertEqual(self._decisions(path, 2.0, 1.0), [1] * world_size)
+        finally:
+            remove_shared_tmpdir(tmpdir)
 
 
 if __name__ == "__main__":
